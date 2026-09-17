@@ -22,6 +22,7 @@ from secretary.board.completion_evidence import (
     research_report_refusal,
     review_required,
 )
+from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
 from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
@@ -6888,24 +6889,23 @@ class DispatcherRuntime:
         if not record.attempt_id or record.attempt_round < 1:
             return None
         context = self._outcome_round_context(reference, record)
-        worker_context = context.get("worker", {})
-        attempt_id = str(worker_context.get("attempt_id") or record.attempt_id or "")
-        attempt = worker_context.get("attempt", record.attempt_round)
-        generation = worker_context.get("report_generation", record.report_generation)
-        if (
-            not attempt_id
-            or not isinstance(attempt, int)
-            or attempt < 1
-            or not isinstance(generation, int)
-            or generation < 1
-        ):
-            return None
-        reviewed = bool(context.get("review")) or bool(record.review_run)
-        revision = context.get("report", {}).get(
-            "specification_revision", worker_context.get("specification_revision")
+        worker_context = context.get("worker")
+        attempt_id = (worker_context.attempt_id if worker_context is not None else record.attempt_id) or ""
+        attempt = worker_context.attempt if worker_context is not None else record.attempt_round
+        generation = (
+            worker_context.report_generation if worker_context is not None else record.report_generation
         )
-        if revision is not None and not isinstance(revision, str):
-            revision = None
+        if not attempt_id or attempt < 1 or generation < 1:
+            return None
+        reviewed = "review" in context or bool(record.review_run)
+        report_context = context.get("report")
+        revision = (
+            report_context.specification_revision
+            if report_context is not None
+            else worker_context.specification_revision
+            if worker_context is not None
+            else None
+        )
         # Select requiredness before source lookup. The dispatcher persists
         # this typed path when it accepts the report; it never consults the
         # handoff being validated, so a missing handoff remains incomplete.
@@ -6967,7 +6967,7 @@ class DispatcherRuntime:
         reference: str,
         *,
         revision: str | None,
-        context: dict[str, dict[str, Any]],
+        context: dict[str, OutcomeRoundContext],
         report_required: bool,
         verdict_required: bool,
         decision_required: bool,
@@ -6992,11 +6992,10 @@ class DispatcherRuntime:
         def one(name: str, phase: str, kind: str, marker: str) -> str:
             if canon is None:
                 return f"attempt_outcome_lineage_missing_{name}"
-            handoff = context.get(phase, {})
-            event_id = handoff.get("source_event_id")
-            if not isinstance(event_id, str) or not event_id:
+            handoff = context.get(phase)
+            if handoff is None or not handoff.source_event_id:
                 return f"attempt_outcome_lineage_missing_{name}"
-            event = events.get(event_id)
+            event = events.get(handoff.source_event_id)
             if event is None:
                 return f"attempt_outcome_lineage_dangling_{name}"
             data = event.data
@@ -7006,21 +7005,30 @@ class DispatcherRuntime:
                 return f"attempt_outcome_lineage_legacy_{name}"
             if data.get("specification_revision") != revision:
                 return f"attempt_outcome_lineage_incompatible_{name}"
-            if phase == "decision" and data.get("assessment_visit") != handoff.get("assessment_visit"):
+            if phase == "decision" and data.get("assessment_visit") != handoff.assessment_visit:
                 return f"attempt_outcome_lineage_incompatible_{name}"
             source[name] = event.event_id
             return ""
 
+        report_context = context.get("report")
+        verdict_context = context.get("verdict")
+        decision_context = context.get("decision")
         diagnostics = [
-            one("report", "report", "card.reported", str(context.get("report", {}).get("marker") or ""))
-            if report_required
-            else "",
-            one("verdict", "verdict", "card.verdict", str(context.get("verdict", {}).get("marker") or ""))
-            if verdict_required
-            else "",
-            one("decision", "decision", "card.decided", str(context.get("decision", {}).get("marker") or ""))
-            if decision_required
-            else "",
+            one(
+                "report", "report", "card.reported",
+                report_context.marker if report_context is not None else "",
+            )
+            if report_required else "",
+            one(
+                "verdict", "verdict", "card.verdict",
+                verdict_context.marker if verdict_context is not None else "",
+            )
+            if verdict_required else "",
+            one(
+                "decision", "decision", "card.decided",
+                decision_context.marker if decision_context is not None else "",
+            )
+            if decision_required else "",
         ]
         return source, next((diagnostic for diagnostic in diagnostics if diagnostic), "")
 
@@ -7052,8 +7060,8 @@ class DispatcherRuntime:
         if not reference or not record.attempt_id or record.attempt_round < 1 or record.report_generation < 1:
             return
         existing_context = self._outcome_round_context(reference, record)
-        worker = existing_context.get("worker", {})
-        round_id = str(worker.get("round_id") or "")
+        worker = existing_context.get("worker")
+        round_id = worker.round_id if worker is not None else ""
         if phase == "worker":
             context_request = self._outcome_round_context_request_id(record, reference, phase)
             round_id = context_request
@@ -7081,36 +7089,43 @@ class DispatcherRuntime:
                 return
         revision = source_revision if phase != "worker" else None
         if phase != "worker" and not freeze_source_revision and source_revision is None:
-            revision = worker.get("specification_revision") if worker else None
+            revision = worker.specification_revision if worker is not None else None
         if phase == "worker":
             revision = (
                 specification_revision(self.audit.events(reference), str(task.get("description") or ""))
                 or None
             )
+        try:
+            context = OutcomeRoundContext(
+                version=2,
+                phase=OutcomeRoundPhase(phase),
+                round_id=round_id,
+                attempt_id=(
+                    worker.attempt_id
+                    if phase != "worker" and worker is not None
+                    else record.attempt_id
+                ),
+                attempt=(
+                    worker.attempt
+                    if phase != "worker" and worker is not None
+                    else record.attempt_round
+                ),
+                report_generation=(
+                    worker.report_generation
+                    if phase != "worker" and worker is not None
+                    else record.report_generation
+                ),
+                request_ids=tuple(sorted(request_ids)),
+                assessment_visit=assessment_visit,
+                source_event_id=source_event_id,
+                specification_revision=revision,
+                marker=marker,
+            )
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
         self.writer.outcome_round_context(
-            role="dispatcher",
-            actor=self.owner,
-            reference=reference,
-            request_id=context_request,
-            data={
-                "version": 2,
-                "phase": phase,
-                "round_id": round_id,
-                "attempt_id": worker.get("attempt_id", record.attempt_id)
-                if phase != "worker"
-                else record.attempt_id,
-                "attempt": worker.get("attempt", record.attempt_round)
-                if phase != "worker"
-                else record.attempt_round,
-                "report_generation": worker.get("report_generation", record.report_generation)
-                if phase != "worker"
-                else record.report_generation,
-                "request_ids": sorted(request_ids),
-                "assessment_visit": assessment_visit,
-                "source_event_id": source_event_id,
-                "specification_revision": revision,
-                "marker": marker,
-            },
+            role="dispatcher", actor=self.owner, reference=reference,
+            request_id=context_request, data=context,
         )
 
     def _capture_outcome_source(
@@ -7132,10 +7147,10 @@ class DispatcherRuntime:
         """
         reference = str(task.get("ref") or "")
         context = self._outcome_round_context(reference, record)
-        owner = context.get("worker" if phase == "report" else "review", {})
-        request_ids = owner.get("request_ids") if isinstance(owner, dict) else None
-        if not isinstance(request_ids, list):
+        owner = context.get("worker" if phase == "report" else "review")
+        if owner is None:
             return
+        request_ids = owner.request_ids
         canon = self.writer.board_host.canon
         if canon is None:
             return
@@ -7164,63 +7179,56 @@ class DispatcherRuntime:
         except (OSError, TaskError, ValueError):
             return
 
-    def _outcome_round_context(self, reference: str, record: DispatcherRecord) -> dict[str, dict[str, Any]]:
+    def _outcome_round_context(
+        self, reference: str, record: DispatcherRecord
+    ) -> dict[str, OutcomeRoundContext]:
         """Find one unsettled durable handoff without re-estimating its identity.
 
-        The fast path keeps ordinary dispatch cheap.  Adoption can lose the
+        The fast path keeps ordinary dispatch cheap. Adoption can lose the
         process-local attempt id and report generation, so its fallback uses
         only durable handoffs and excludes rounds already sealed by a lifecycle
-        effect.  It never uses card comments, workspace text, event order or
+        effect. It never uses card comments, workspace text, event order or
         request-id grammar to choose a source.
         """
-        payloads: list[dict[str, Any]] = []
+        payloads: list[OutcomeRoundContext] = []
         for event in self.audit.events(reference, kind="outcome_round_context"):
             payload = (
                 event.get("data")
                 if event.get("record_type") == "board.protocol_event"
                 else event.get("payload")
             )
-            if (
-                isinstance(payload, dict)
-                and payload.get("version") == 2
-                and isinstance(payload.get("round_id"), str)
-            ):
-                payloads.append(payload)
-        workers = [payload for payload in payloads if payload.get("phase") == "worker"]
+            if not isinstance(payload, dict) or payload.get("version") != 2:
+                continue
+            try:
+                payloads.append(OutcomeRoundContext.from_data(payload))
+            except ValueError:
+                continue
+        workers = [payload for payload in payloads if payload.phase is OutcomeRoundPhase.WORKER]
         exact = [
-            payload
-            for payload in workers
-            if payload.get("attempt_id") == record.attempt_id
-            and payload.get("attempt") == record.attempt_round
-            and payload.get("report_generation") == record.report_generation
+            payload for payload in workers
+            if payload.attempt_id == record.attempt_id
+            and payload.attempt == record.attempt_round
+            and payload.report_generation == record.report_generation
         ]
         if len(exact) == 1:
             worker = exact[0]
         else:
             sealed = {
-                (
-                    data.get("attempt_id"),
-                    data.get("attempt"),
-                    data.get("report_generation"),
-                )
+                (data.get("attempt_id"), data.get("attempt"), data.get("report_generation"))
                 for event in self.writer.board_host.canon.events(ref=reference)
                 if isinstance((data := event.data.get("attempt_outcome_owed")), dict)
             }
             unsettled = [
-                payload
-                for payload in workers
-                if (payload.get("attempt_id"), payload.get("attempt"), payload.get("report_generation"))
-                not in sealed
+                payload for payload in workers
+                if (payload.attempt_id, payload.attempt, payload.report_generation) not in sealed
             ]
             if len(unsettled) != 1:
                 return {}
             worker = unsettled[0]
-        round_id = worker["round_id"]
         context = {"worker": worker}
         for payload in payloads:
-            phase = payload.get("phase")
-            if phase in {"review", "report", "verdict", "decision"} and payload.get("round_id") == round_id:
-                context[str(phase)] = payload
+            if payload.phase is not OutcomeRoundPhase.WORKER and payload.round_id == worker.round_id:
+                context[payload.phase.value] = payload
         return context
 
     def _outcome_usage_source(
