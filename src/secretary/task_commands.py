@@ -16,6 +16,7 @@ from secretary.board.task_routing import (
     FamilyPreference,
     TaskComplexity,
     TaskDecision,
+    TaskReview,
     TaskType,
 )
 from secretary.cli_output import print_json
@@ -131,6 +132,19 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
+    task_create.add_argument(
+        "--review",
+        choices=("", *(value.value for value in TaskReview)),
+        default="",
+        help="whether the card is reviewed; default required for code, skipped for research and infra "
+        "(an explicit --review-head without --review means required)",
+    )
+    task_create.add_argument(
+        "--live-impact",
+        action="store_true",
+        help="research only: the card touches live systems; its description must declare "
+        "'## Impact bounds' with '### Allowed', '### Forbidden' and '### Cleanup'",
+    )
     task_create.add_argument("--slug", default="")
     task_create.add_argument(
         "--base-branch",
@@ -371,6 +385,8 @@ def run_task_create(args: argparse.Namespace) -> int:
             budget_event=args.budget_event,
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
+            review=args.review,
+            live_impact=args.live_impact,
             request_id=args.request_id,
         )
 

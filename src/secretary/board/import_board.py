@@ -104,7 +104,9 @@ from secretary.board.sprint_read import (
 from secretary.board.task_routing import (
     FAMILY_PREFERENCE_VALUES,
     TASK_COMPLEXITY_VALUES,
+    TASK_REVIEW_VALUES,
     TASK_TYPE_VALUES,
+    live_impact_flag,
 )
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
@@ -1608,6 +1610,9 @@ def _plan_tasks(
         # Nullable since 0003 (§8.6): a card the board never gave a type is stored with NULL,
         # not with a type this importer chose for it.
         task_type = _null_if_empty(row.meta.get("task_type"))
+        # A card written before the review choice was stored has none, and the column stays NULL.
+        review = _null_if_empty(row.meta.get("review"))
+        live_impact = live_impact_flag(row.meta.get("live_impact"))
         column = source.pipeline_columns.get(_positive_int(row.raw.get("column_id")) or -1, "")
         refusal = None
         if not ref:
@@ -1618,6 +1623,10 @@ def _plan_tasks(
             refusal = f"project {project_id!r} has no projects row"
         elif task_type is not None and task_type not in TASK_TYPE_VALUES:
             refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(TASK_TYPE_VALUES)}"
+        elif review is not None and review not in TASK_REVIEW_VALUES:
+            refusal = f"review {review!r} is outside the CHECK vocabulary {sorted(TASK_REVIEW_VALUES)}"
+        elif live_impact and task_type != "research":
+            refusal = f"live_impact is set on a {task_type or 'typeless'} card, and only research may carry it"
         elif column not in _STATE_BY_COLUMN:
             refusal = f"the row sits in column {column!r}, which _STATE_BY_COLUMN does not map to a state"
         elif not _text(row.raw.get("title")):
@@ -1688,6 +1697,8 @@ def _plan_tasks(
             "title": _text(row.raw.get("title")),
             "description": _text(row.raw.get("description")),
             "task_type": task_type,
+            "review": review,
+            "live_impact": live_impact,
             "state": _STATE_BY_COLUMN[column],
             "archived": row.archived,
             "position": _nonnegative_int(row.raw.get("position")),

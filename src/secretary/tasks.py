@@ -68,7 +68,10 @@ from secretary.board.task_routing import (
     TaskComplexity,
     TaskDecision,
     TaskMetadata,
+    TaskReview,
     TaskType,
+    default_review,
+    impact_bounds_refusal,
 )
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
@@ -1694,6 +1697,8 @@ class TaskWriter:
         budget_event: str = "",
         sprint_override: bool = False,
         sprint_override_reason: str = "",
+        review: str = "",
+        live_impact: bool = False,
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
@@ -1722,6 +1727,8 @@ class TaskWriter:
             budget_event=budget_event,
             sprint_override=sprint_override,
             sprint_override_reason=sprint_override_reason,
+            review=review,
+            live_impact=live_impact,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1753,6 +1760,8 @@ class TaskWriter:
         budget_event: str = "",
         sprint_override: bool = False,
         sprint_override_reason: str = "",
+        review: str = "",
+        live_impact: bool = False,
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
@@ -1791,6 +1800,32 @@ class TaskWriter:
             known = ", ".join(sorted(TASK_TYPE_VALUES))
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2) from None
         task_type = task_type_value.value
+        review = review.strip()
+        explicit_review_head = review_head
+        if review:
+            try:
+                review_value = TaskReview(review)
+            except ValueError:
+                known = ", ".join(sorted(member.value for member in TaskReview))
+                raise TaskError("validation", f"review must be one of: {known}", 2) from None
+        elif explicit_review_head:
+            # Naming a reviewer is asking for a review; it is not silently dropped by a kind default.
+            review_value = TaskReview.REQUIRED
+        else:
+            review_value = default_review(task_type_value)
+        review = review_value.value
+        if review_value is TaskReview.SKIPPED and explicit_review_head:
+            raise TaskError(
+                "validation",
+                f"--review-head {explicit_review_head!r} names a reviewer for a card whose review is skipped",
+                2,
+            )
+        if live_impact and task_type_value is not TaskType.RESEARCH:
+            raise TaskError(
+                "validation", f"--live-impact is a research attribute; a {task_type} card cannot carry it", 2
+            )
+        if live_impact and (bounds_refusal := impact_bounds_refusal(description)):
+            raise TaskError("validation", bounds_refusal, 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
         if target not in {"ready", "issues", "in_progress"}:
@@ -1912,6 +1947,8 @@ class TaskWriter:
             "codex_launch_mode": codex_launch_mode or None,
             "sprint": sprint or None,
             "budget_event": budget_event or None,
+            "review": review,
+            **({"live_impact": True} if live_impact else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -1996,6 +2033,8 @@ class TaskWriter:
                     family_preference=family_preference,
                     codex_launch_mode=codex_launch_mode,
                     sprint=sprint,
+                    review=review,
+                    live_impact=live_impact,
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -2069,6 +2108,8 @@ class TaskWriter:
         family_preference: str,
         codex_launch_mode: str,
         sprint: str,
+        review: str,
+        live_impact: bool,
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
@@ -2124,7 +2165,10 @@ class TaskWriter:
                     "project": project,
                     "complexity": complexity,
                     "family_preference": family_preference,
+                    "review": review,
                 }
+                if live_impact:
+                    values["live_impact"] = "1"
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:
@@ -3285,6 +3329,19 @@ class TaskWriter:
         if title is None and description is None and head is None and review_head is None:
             raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
         current = self.reader.show(reference)
+        # The bounds are what makes a live-impact card admissible; an edit cannot remove them.
+        if (
+            description is not None
+            and current.get("live_impact")
+            and (bounds_refusal := impact_bounds_refusal(description))
+        ):
+            raise TaskError("validation", bounds_refusal, 2)
+        if review_head and review_head.strip() and current.get("review") == TaskReview.SKIPPED.value:
+            raise TaskError(
+                "validation",
+                f"--review-head {review_head.strip()!r} names a reviewer for a card whose review is skipped",
+                2,
+            )
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -4811,6 +4868,11 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         "complexity": _text(payload.get("complexity")) or "standard",
         "family_preference": _text(payload.get("family_preference")) or "auto",
     }
+    # A create recorded before the review choice was stored names none, and repairs it as none.
+    if review := _text(payload.get("review")):
+        values["review"] = review
+    if payload.get("live_impact") is True:
+        values["live_impact"] = "1"
     for payload_key, metadata_key in (
         ("blocked_by", "blocked_by"),
         ("head", "head"),

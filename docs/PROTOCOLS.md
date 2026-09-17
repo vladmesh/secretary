@@ -58,6 +58,47 @@ re-check) resolve in Validate and never pass through Assessment. The steward may
 Assessment to Blocked with a reason; workers and reviewers move nothing. A card left in Assessment
 past the steward's stale threshold is reported like any other stuck card.
 
+### Card kinds, live impact and the review choice
+
+`task create --type` takes one of three kinds:
+
+- `code`: a change to a repository, delivered as a candidate branch.
+- `research`: an investigation or experiment; hypotheses and budget live in the description.
+- `infra`: work on hosts or services rather than a repository.
+
+Kind, live-impact flag and review choice are set at create and shown by `task show` and `task list`
+as `type`, `live_impact` and `review`. None of them is editable afterwards.
+
+**Live impact** (`--live-impact`, research only; refused for `code` and `infra`) marks a research
+card that touches live systems. Such a card is refused at create unless its description declares
+bounds, and `task edit` cannot replace the description with one that lacks them:
+
+```markdown
+## Impact bounds
+
+### Allowed
+What may be touched.
+
+### Forbidden
+What must not be touched.
+
+### Cleanup
+How to undo what the card changed.
+```
+
+All three subsections must be present and non-empty inside the `## Impact bounds` section; the
+refusal names what is missing or empty.
+
+**Review choice** is stored on the card as `review: required|skipped`. The default is `required`
+for `code` and `skipped` for `research` and `infra`; `--review required|skipped` overrides it in
+either direction. `--review-head <head>` without `--review` means `required`. A reviewer head
+together with `skipped` is refused, at create and at `task edit --review-head`. A card written
+before the choice was stored reads as `required`. The store keeps the value in `tasks.review` and
+`tasks.live_impact`, and export/restore carries both.
+
+The dispatcher does not yet act on the kind or the review choice; completion evidence per kind and
+admission outside a sprint are defined later.
+
 ## Codex provider-internal fan-out policy
 
 Codex fan-out is a best-effort operational preference, not a lifecycle or security boundary. Every

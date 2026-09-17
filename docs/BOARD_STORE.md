@@ -320,7 +320,10 @@ CREATE TABLE tasks (
     title          text NOT NULL CHECK (title <> ''),
     description    text NOT NULL DEFAULT '',
     task_type      text CONSTRAINT task_type_is_a_known_type_or_nothing
-                     CHECK (task_type IS NULL OR task_type IN ('code','research')),
+                     CHECK (task_type IS NULL OR task_type IN ('code','research','infra')),
+    review         text CONSTRAINT task_review_is_a_known_choice_or_nothing
+                     CHECK (review IS NULL OR review IN ('required','skipped')),  -- NULL reads as required
+    live_impact    boolean NOT NULL DEFAULT false,    -- research only (task_live_impact_is_research_only)
     state          text NOT NULL CHECK (state IN
                      ('issues','ready','in_progress','validate','assessment','blocked','done')),
     archived       boolean NOT NULL DEFAULT false,
@@ -655,7 +658,8 @@ an Alembic revision shipped with the code that emits the new value.
 | `issues.close_reason` | `resolved`, `invalid`, `duplicate`, `wont_do` | `product_issues.ISSUE_CLOSE_REASONS` |
 | `sprints.status` | `open`, `closed`, `stopped` | `SprintState` |
 | `tasks.state` | the seven card states | `CardState` |
-| `tasks.task_type` | `code`, `research`, or NULL | `board.task_routing.TaskType` |
+| `tasks.task_type` | `code`, `research`, `infra`, or NULL | `board.task_routing.TaskType` |
+| `tasks.review` | `required`, `skipped`, or NULL (legacy, read as `required`) | `board.task_routing.TaskReview` |
 | `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `board.task_routing.TaskComplexity` |
 | `tasks.family_preference` | `auto`, `claude`, `codex` | `board.task_routing.FamilyPreference` |
 | `tasks.codex_launch_mode` | `tui` | `tasks._CODEX_LAUNCH_MODES` ← `head/command.py:CODEX_LAUNCH_MODES` |
@@ -702,7 +706,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0007_card_transport_key` | `tasks.board_key` from `card_board_key_seq` |
 | `0008_po_sessions` | PO head `po_sessions`, `po_turns` (one running turn per session), `po_feed` |
 | `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made |
-| `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) (head) |
+| `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) |
+| `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -710,9 +715,11 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 
 `0008` and `0009` only add tables, and `0010` two nullable columns and one `CHECK` that every existing
 (open) row satisfies; their use is in [Operations](OPERATIONS.md#po-head-sessions-and-turns).
+`0011` leaves every existing card with `review` NULL and `live_impact` false, which both constraints
+admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 28 tables, 48 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
+(including `alembic_version`): 28 tables, 50 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1036,7 +1043,8 @@ and `sprints.py`, not restated.
 
 | Kanboard source | Becomes |
 |---|---|
-| task metadata `project`, `task_type`, `slug`, `base_branch`, `seed_ref`, `complexity`, `family_preference`, `routing_reason`, `codex_launch_mode` | `tasks` columns |
+| task metadata `project`, `task_type`, `slug`, `base_branch`, `seed_ref`, `complexity`, `family_preference`, `routing_reason`, `codex_launch_mode`, `review` | `tasks` columns |
+| `live_impact` (`"1"` or absent) | boolean `tasks.live_impact` |
 | `claim` | `tasks.claim_worker`; `claimed_at` NULL (§8.6) |
 | `head`, `review_head`, `resolved_head`, `resolved_review_head` | `head_override`, `review_head_override`, `resolved_worker_head`, `resolved_review_head` |
 | `retry_same`, `retry_switch` | integer columns |

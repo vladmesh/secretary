@@ -43,6 +43,7 @@ from secretary.board.backend import card_transport_key, record_key_kind
 from secretary.board.sql_product_issues import ProductIssueRecords
 from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.board.store import BoardStoreCredentials
+from secretary.board.task_routing import live_impact_flag
 from secretary.tasks import TaskError
 
 #: The seven columns of the Pipeline board, in board order.  Their ids are this module's, not
@@ -94,7 +95,11 @@ _METADATA_COLUMNS = {
     "routing_reason": "routing_reason",
     "codex_launch_mode": "codex_launch_mode",
     "sprint_ref": "sprint_ref",
+    "review": "review",
 }
+
+#: `live_impact` is a boolean column and `"1"` or absence on the board.
+_METADATA_FLAG = ("live_impact", "live_impact")
 
 #: The two counters, which are integers in the store and decimal strings on the board.
 _METADATA_COUNTERS = {"retry_same": "retry_same", "retry_switch": "retry_switch"}
@@ -620,7 +625,8 @@ class SqlCardClient:
             "SELECT project_id, task_type, claim_worker, slug, base_branch, seed_ref, complexity, "
             "family_preference, head_override, review_head_override, resolved_worker_head, "
             "resolved_review_head, routing_reason, codex_launch_mode, sprint_ref, retry_same, "
-            "retry_switch, quota_snapshot_at, extensions FROM tasks WHERE task_ref = %s",
+            "retry_switch, quota_snapshot_at, extensions, review, live_impact FROM tasks "
+            "WHERE task_ref = %s",
             (ref,),
         )
         values = rows[0]
@@ -650,6 +656,10 @@ class SqlCardClient:
                 meta[name] = str(value)
         if values[17] is not None:
             meta["quota_snapshot_at"] = _rfc3339(values[17])
+        if values[19] is not None:
+            meta["review"] = _text(values[19])
+        if values[20]:
+            meta["live_impact"] = "1"
         heads = [row[0] for row in self._query(
             "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", (ref,)
         )]
@@ -701,6 +711,10 @@ class SqlCardClient:
                     bag_removals.append(key)
                 else:
                     bag_updates[key] = ""
+            elif key == _METADATA_FLAG[0]:
+                assignments.append(f"{_METADATA_FLAG[1]} = %s")
+                params.append(live_impact_flag(text))
+                bag_removals.append(key)
             elif key in _METADATA_COUNTERS:
                 assignments.append(f"{_METADATA_COUNTERS[key]} = %s")
                 params.append(int(text) if text.isdigit() else 0)

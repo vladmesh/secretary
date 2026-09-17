@@ -7,6 +7,7 @@ before the rest of the product consumes it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -19,6 +20,65 @@ from secretary.board.models import CardState
 class TaskType(StrEnum):
     CODE = "code"
     RESEARCH = "research"
+    INFRA = "infra"
+
+
+class TaskReview(StrEnum):
+    """Whether a card's candidate is reviewed: stored on the card, never derived at read time."""
+
+    REQUIRED = "required"
+    SKIPPED = "skipped"
+
+
+def default_review(task_type: TaskType) -> TaskReview:
+    """The review choice a card of this kind gets when its creator names none."""
+    return TaskReview.REQUIRED if task_type is TaskType.CODE else TaskReview.SKIPPED
+
+
+#: The one section a live-impact research card's description must carry, and its three parts.
+IMPACT_BOUNDS_SECTION = "Impact bounds"
+IMPACT_BOUNDS_PARTS = ("Allowed", "Forbidden", "Cleanup")
+
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
+
+
+def impact_bounds_refusal(description: str) -> str:
+    """Why a description does not declare impact bounds, or `""` when it does.
+
+    The bounds are a `## Impact bounds` section holding three non-empty `### Allowed`,
+    `### Forbidden` and `### Cleanup` subsections. The section ends at the next heading of level
+    two or higher; a subsection ends at the next heading of level three or higher.
+    """
+    section: list[str] | None = None
+    for line in description.splitlines():
+        match = _HEADING_RE.match(line.strip())
+        if section is None:
+            if match and len(match.group(1)) == 2 and match.group(2).strip() == IMPACT_BOUNDS_SECTION:
+                section = []
+            continue
+        if match and len(match.group(1)) <= 2:
+            break
+        section.append(line)
+    if section is None:
+        return f"a live-impact research card needs a '## {IMPACT_BOUNDS_SECTION}' section in its description"
+    parts: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in section:
+        match = _HEADING_RE.match(line.strip())
+        if match and len(match.group(1)) <= 3:
+            name = match.group(2).strip()
+            current = parts.setdefault(name, []) if len(match.group(1)) == 3 else None
+            continue
+        if current is not None:
+            current.append(line)
+    missing = [f"'### {name}'" for name in IMPACT_BOUNDS_PARTS if name not in parts]
+    empty = [f"'### {name}'" for name in IMPACT_BOUNDS_PARTS if name in parts and not "".join(parts[name]).strip()]
+    problems = ([f"is missing {', '.join(missing)}"] if missing else []) + (
+        [f"has empty {', '.join(empty)}"] if empty else []
+    )
+    if problems:
+        return f"the '## {IMPACT_BOUNDS_SECTION}' section " + " and ".join(problems)
+    return ""
 
 
 class TaskComplexity(StrEnum):
@@ -52,6 +112,7 @@ class TaskDecision(StrEnum):
 
 
 TASK_TYPE_VALUES: frozenset[str] = frozenset(member.value for member in TaskType)
+TASK_REVIEW_VALUES: frozenset[str] = frozenset(member.value for member in TaskReview)
 TASK_COMPLEXITY_VALUES: frozenset[str] = frozenset(member.value for member in TaskComplexity)
 FAMILY_PREFERENCE_VALUES: frozenset[str] = frozenset(member.value for member in FamilyPreference)
 ROUTING_PHASE_VALUES: frozenset[str] = frozenset(member.value for member in RoutingPhase)
@@ -83,6 +144,19 @@ def _family_preference(value: Any) -> FamilyPreference:
         return FamilyPreference(text(value))
     except ValueError:
         return FamilyPreference.AUTO
+
+
+def _review(value: Any) -> TaskReview:
+    # Every card written before the choice was stored was reviewed, so silence reads as required.
+    try:
+        return TaskReview(text(value))
+    except ValueError:
+        return TaskReview.REQUIRED
+
+
+def live_impact_flag(value: Any) -> bool:
+    """The board spells the flag `"1"` and its absence as nothing."""
+    return text(value).strip().lower() in {"1", "true"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +227,8 @@ class TaskMetadata:
     retry_heads: tuple[str, ...]
     sprint_ref: str | None
     record_type: str | None
+    review: TaskReview
+    live_impact: bool
 
     @classmethod
     def from_legacy(cls, meta: Mapping[str, Any], *, codex_modes: Collection[str]) -> TaskMetadata:
@@ -177,6 +253,8 @@ class TaskMetadata:
             retry_heads=tuple(split_heads(meta.get("retry_heads"))),
             sprint_ref=null_if_empty(meta.get("sprint_ref")),
             record_type=null_if_empty(meta.get("record_type")),
+            review=_review(meta.get("review")),
+            live_impact=live_impact_flag(meta.get("live_impact")),
         )
 
     @property
@@ -203,6 +281,8 @@ class TaskMetadata:
             },
             "sprint": self.sprint_ref,
             "record_type": self.record_type,
+            "review": self.review.value,
+            "live_impact": self.live_impact,
         }
 
 
@@ -214,8 +294,11 @@ __all__ = [
     "DECISION_VALUES",
     "EDITABLE_STATES",
     "FAMILY_PREFERENCE_VALUES",
+    "IMPACT_BOUNDS_PARTS",
+    "IMPACT_BOUNDS_SECTION",
     "ROUTING_PHASE_VALUES",
     "TASK_COMPLEXITY_VALUES",
+    "TASK_REVIEW_VALUES",
     "TASK_TYPE_VALUES",
     "UNDECIDED_EXITS",
     "BlockClassification",
@@ -224,6 +307,10 @@ __all__ = [
     "TaskComplexity",
     "TaskDecision",
     "TaskMetadata",
+    "TaskReview",
     "TaskRouting",
     "TaskType",
+    "default_review",
+    "impact_bounds_refusal",
+    "live_impact_flag",
 ]

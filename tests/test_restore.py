@@ -1532,6 +1532,51 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
         self.assertEqual(exported["routing"]["codex_launch_mode"], live["routing"]["codex_launch_mode"])
 
 
+class RestoredCardKindParityTests(unittest.TestCase):
+    """secretary-1638: the restore parity comparison checks the review choice and live-impact flag."""
+
+    @staticmethod
+    def _export(**metadata: str) -> dict[str, object]:
+        return {
+            "reference": "secretary-1",
+            "title": "t",
+            "description": "d",
+            "column": "Ready",
+            "fields": {},
+            "metadata": {"project": "secretary", "task_type": "research", **metadata},
+        }
+
+    @staticmethod
+    def _live(**fields: object) -> dict[str, object]:
+        return {
+            "ref": "secretary-1",
+            "title": "t",
+            "description": "d",
+            "state": "ready",
+            "project": "secretary",
+            "type": "research",
+            "routing": {"complexity": "standard", "family_preference": "auto"},
+            **fields,
+        }
+
+    @staticmethod
+    def _kind(core: dict[str, object]) -> tuple[object, object]:
+        return core["review"], core["live_impact"]
+
+    def test_a_legacy_export_and_its_restored_card_agree_on_required(self) -> None:
+        exported = restore_module._core_from_export(self._export())
+        live = restore_module._core_from_live(self._live(review="required", live_impact=False))
+        self.assertEqual(self._kind(exported), ("required", False))
+        self.assertEqual(self._kind(exported), self._kind(live))
+
+    def test_a_lost_review_choice_or_flag_is_a_parity_mismatch(self) -> None:
+        exported = self._kind(restore_module._core_from_export(self._export(review="skipped", live_impact="1")))
+        self.assertEqual(exported, ("skipped", True))
+        for review, live_impact in (("required", True), ("skipped", False)):
+            live = restore_module._core_from_live(self._live(review=review, live_impact=live_impact))
+            self.assertNotEqual(exported, self._kind(live))
+
+
 class RestoredOrderParityTests(unittest.TestCase):
     """Паритет расположения сверяет порядок, а не абсолютные номера позиций.
 

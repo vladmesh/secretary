@@ -336,6 +336,11 @@ class Task(Base):
     # board's silence is stored as NULL rather than as an invented type (§8.6).
     task_type = sa.Column(sa.Text)
     state = sa.Column(sa.Text, nullable=False)
+    # Since 0011: whether the card is reviewed, as its creator chose. NULL is a card written before
+    # the choice was stored, and every such card was reviewed, so readers take NULL as `required`.
+    review = sa.Column(sa.Text)
+    # Since 0011: a research card that touches live systems within the bounds its description declares.
+    live_impact = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     archived = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     position = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     sprint_ref = sa.Column(
@@ -371,8 +376,16 @@ class Task(Base):
     __table_args__ = (
         sa.CheckConstraint("title <> ''"),
         sa.CheckConstraint(
-            "task_type IS NULL OR task_type IN ('code','research')",
+            "task_type IS NULL OR task_type IN ('code','research','infra')",
             name="task_type_is_a_known_type_or_nothing",
+        ),
+        sa.CheckConstraint(
+            "review IS NULL OR review IN ('required','skipped')",
+            name="task_review_is_a_known_choice_or_nothing",
+        ),
+        sa.CheckConstraint(
+            "NOT live_impact OR task_type IS NOT DISTINCT FROM 'research'",
+            name="task_live_impact_is_research_only",
         ),
         sa.CheckConstraint(
             "state IN ('issues','ready','in_progress','validate','assessment','blocked','done')"
