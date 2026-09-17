@@ -6,7 +6,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -260,6 +260,7 @@ from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
+    CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
     OutcomeTerminalPath,
@@ -390,6 +391,7 @@ from secretary.routing_journal import (
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.state_repo import StateRepoError
 from secretary.tasks import (
+    SprintReservationUnverifiable,
     TaskAudit,
     TaskError,
     TaskReader,
@@ -489,6 +491,32 @@ def _headless_worker(record: DispatcherRecord) -> bool:
         or continuation.delivery_confirmed
         or continuation.red_transition_pending
     )
+
+
+#: The action token of a card refused at admission because an open sprint reserves its project.
+SPRINT_RESERVATION_BLOCKED_ACTION = "sprint-reservation-blocked"
+#: A `code` card outside every sprint, on a project an open sprint reserves.
+SPRINT_RESERVATION_RESERVED = "sprint_reserved"
+#: A `code` card outside every sprint, whose project's reservations could not be verified.
+SPRINT_RESERVATION_UNVERIFIABLE = "sprint_reservation_unverifiable"
+
+
+@dataclass(frozen=True)
+class SprintAdmissionRefusal:
+    """Why a card linked to no sprint is not admitted on its project."""
+
+    code: str
+    project: str
+    sprints: tuple[str, ...]
+    detail: str
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "refusal": self.code,
+            "project": self.project,
+            "sprints": list(self.sprints),
+            "detail": self.detail,
+        }
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -971,6 +999,85 @@ class DispatcherRuntime:
             detail=detail,
         )
 
+    def _sprint_admission_refusal(self, task: dict[str, Any]) -> SprintAdmissionRefusal | None:
+        """Why a card outside every sprint may not run on its project now, or None to admit it.
+
+        The single admission question about sprint reservations (secretary-1641). The write guard
+        lets the PO cut a card of any kind outside a sprint; this is where that card's running is
+        decided. A card linked to a sprint is that sprint's work and is not asked about. A card with
+        no candidate (`research`, `infra`) touches no branch a sprint owns and is always admitted,
+        so the board is not read for it. A `code` card is asked about through the same verified
+        reservation index the write guard reads, and an index that cannot be verified refuses it
+        rather than letting it race a sprint nobody could see.
+        """
+        if str(task.get("sprint") or "") or not has_candidate(task):
+            return None
+        project = str(task.get("project") or "")
+        try:
+            held = self.writer.open_sprints_reserving(project)
+        except SprintReservationUnverifiable as exc:
+            return SprintAdmissionRefusal(
+                SPRINT_RESERVATION_UNVERIFIABLE,
+                project,
+                (exc.sprint_ref,) if exc.sprint_ref else (),
+                f"the open sprints reserving project {project!r} could not be verified "
+                f"({exc.cause.code}: {exc.cause.message}), so a code card outside a sprint is not "
+                "admitted there until they can be",
+            )
+        if not held:
+            return None
+        sprints = ", ".join(held)
+        return SprintAdmissionRefusal(
+            SPRINT_RESERVATION_RESERVED,
+            project,
+            tuple(held),
+            f"project {project!r} is reserved by open sprint {sprints}; this code card is linked "
+            f"to no sprint, so it may run inside {sprints} (as a card of that sprint) or after "
+            "that sprint closes, when it can be moved back to Ready",
+        )
+
+    def _sprint_admission_blocked(
+        self,
+        task: dict[str, Any],
+        ref: str,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        attempt_id: str,
+        head: str,
+        review_head: str,
+        refusal: SprintAdmissionRefusal,
+    ) -> dict[str, Any]:
+        """Write the sprint admission refusal decided before the claim, immediately after it."""
+        failure = self._unclaimed_preflight_failure(
+            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=refusal.detail
+        )
+        reason = (
+            "the card was not given to a worker: it was refused at admission, so no workspace and "
+            f"no head were created. [sprint admission: refusal={refusal.code}, "
+            f"project={refusal.project}, sprint={', '.join(refusal.sprints) or '(unknown)'}] "
+            f"{refusal.detail}\n{failure.clause()}"
+        )
+        self._write_claim_preflight_block(
+            task,
+            ref,
+            records,
+            payload,
+            attempt_id=attempt_id,
+            action=SPRINT_RESERVATION_BLOCKED_ACTION,
+            failure=failure,
+            reason=reason,
+        )
+        return {
+            "status": "blocked",
+            "step": "sprint-reservation-refused",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "code card outside a sprint refused on a reserved project",
+            "sprint_reservation": refusal.evidence(),
+            **failure.outcome_fields(reason),
+        }
+
     def _project_git_access(self, task: dict[str, Any]) -> ProjectGitAccess:
         """The registered project's remote Git access, asked before anything is claimed."""
         try:
@@ -1151,11 +1258,30 @@ class DispatcherRuntime:
             return dict(collapse, pilot_ref=ref)
         head = worker_choice.head
         review_head = review_choice.head or review_choice.preferred
-        contract_verdict = self._broad_check_contract_verdict(task)
+        # Sprint admission is asked first: a card that may not run on its project now is refused for
+        # that, and the registry and the host are not asked about it.
+        sprint_refusal = self._sprint_admission_refusal(task)
+        if sprint_refusal is not None and sprint_refusal.code == SPRINT_RESERVATION_UNVERIFIABLE:
+            # Refused, but not blocked: the dispatcher's own Blocked move meets the same index at the
+            # write guard and would fail closed on it after the claim. The card stays in Ready and
+            # is asked again on the next tick, when the index can answer.
+            return {
+                "status": "skipped",
+                "step": "sprint-admission",
+                "action": CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
+                "pilot_ref": ref,
+                "sprint_reservation": sprint_refusal.evidence(),
+                "reason": sprint_refusal.detail,
+            }
+        contract_verdict = None if sprint_refusal is not None else self._broad_check_contract_verdict(task)
         # Project Git access is a separate preflight at the same boundary. It is asked only when the
         # contract does not already refuse the card, so that refusal stays what it was: decided off
         # the registry with the host untouched. An unanswered probe leaves the card in Ready.
-        git_access = None if contract_verdict.state == CONTRACT_REFUSED else self._project_git_access(task)
+        git_access = (
+            None
+            if contract_verdict is None or contract_verdict.state == CONTRACT_REFUSED
+            else self._project_git_access(task)
+        )
         if git_access is not None and git_access.state == "unreachable":
             return {
                 "status": "skipped",
@@ -1201,6 +1327,12 @@ class DispatcherRuntime:
                 "stale-done-rework-blocked",
             )
         )
+        # A card refused at admission never had a workspace, so coming back to Ready is a fresh
+        # attempt that creates one rather than a retry that expects the last one's checkout.
+        refused_at_admission = any(
+            self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
+            for action in _blocked_actions_and_their_infrastructure_twins(SPRINT_RESERVATION_BLOCKED_ACTION)
+        )
         if requeued and active is not None:
             # The preempted head can still be in the workspace the next round claims, and it is
             # stopped through the workspace, not the handle: an adopted head has no handle on record.
@@ -1222,19 +1354,23 @@ class DispatcherRuntime:
                 unconfirmed = self._stop_worker_confirmed(active, ref, step="claim", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
-        if retry_after_block or requeued:
+        if retry_after_block or requeued or refused_at_admission:
             attempt_id = _new_attempt_id()
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         worker_id = _worker_id(task)
         # Claim is the only board transition that can record a Ready refusal.
-        contract_outcome = self._contract_preflight_decision(
-            task,
-            contract_verdict,
-            attempt_id=attempt_id,
-            head=head,
-            review_head=review_head,
+        contract_outcome = (
+            None
+            if contract_verdict is None
+            else self._contract_preflight_decision(
+                task,
+                contract_verdict,
+                attempt_id=attempt_id,
+                head=head,
+                review_head=review_head,
+            )
         )
         git_access_outcome = (
             self._git_access_preflight_outcome(
@@ -1254,6 +1390,17 @@ class DispatcherRuntime:
             base_branch=task.get("workspace", {}).get("base_branch") or "",
             request_id=claim_request_id,
         )
+        if sprint_refusal is not None:
+            return self._sprint_admission_blocked(
+                task,
+                ref,
+                records,
+                payload,
+                attempt_id=attempt_id,
+                head=head,
+                review_head=review_head,
+                refusal=sprint_refusal,
+            )
         if contract_outcome is not None:
             failure, blocked_reason, refusal = contract_outcome
             return self._contract_preflight_blocked(

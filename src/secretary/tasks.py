@@ -127,6 +127,15 @@ class ArtifactOwnershipTaskError(TaskError):
         super().__init__("artifact_ownership_violation", violation.message, 3)
 
 
+class SprintReservationUnverifiable(Exception):
+    """The open sprints reserving a project could not be read; `sprint_ref` names the failed read."""
+
+    def __init__(self, sprint_ref: str, cause: TaskError) -> None:
+        super().__init__(cause.message)
+        self.sprint_ref = sprint_ref
+        self.cause = cause
+
+
 class _CommittedWriteError(Exception):
     """A later step failed after a Kanboard mutation was committed."""
 
@@ -1928,7 +1937,8 @@ class TaskWriter:
             reference=reference,
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
-        if target == "ready" and not sprint and not restoring and not override_payload:
+        # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
+        if target == "ready" and not sprint and not restoring and not override_payload and role != "po":
             raise TaskError("validation", "task creation requires an open sprint", 2)
         payload: dict[str, Any] = {
             "project": project,
@@ -3534,6 +3544,49 @@ class TaskWriter:
                 3,
             ) from None
 
+    def open_sprints_reserving(
+        self, project: str, *, linked_sprint: dict[str, Any] | None = None
+    ) -> list[str]:
+        """The open sprints that reserve `project`, each verified against the sprint board.
+
+        One answer for the write guard and the dispatcher's admission. The local index says which
+        sprints to ask about and is seeded from the board when it has never been written; every
+        sprint it names is then read live, and the index follows what was read. Anything that
+        cannot be read raises `SprintReservationUnverifiable` naming the sprint (`""` for the
+        seeding read): both callers fail closed on it, each in its own words.
+        """
+        from secretary.sprints import (
+            SprintReader,
+            active_sprint_projects,
+            refresh_active_sprint_projects,
+            sprint_guard_index_initialized,
+            update_active_sprint_projects,
+        )
+
+        if not sprint_guard_index_initialized(self.data_dir):
+            try:
+                refresh_active_sprint_projects(self.data_dir, SprintReader(self.client))
+            except TaskError as exc:
+                raise SprintReservationUnverifiable("", exc) from exc
+
+        refs = set(active_sprint_projects(self.data_dir).get(project, []))
+        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
+            refs.add(str(linked_sprint["ref"]))
+        held: list[str] = []
+        for sprint_ref in sorted(refs):
+            try:
+                sprint = (
+                    linked_sprint
+                    if linked_sprint and sprint_ref == linked_sprint.get("ref")
+                    else SprintReader(self.client).show(sprint_ref, include_cards=False)
+                )
+            except TaskError as exc:
+                raise SprintReservationUnverifiable(sprint_ref, exc) from exc
+            update_active_sprint_projects(self.data_dir, sprint)
+            if sprint.get("status") == "open" and project in sprint.get("reservations", []):
+                held.append(sprint_ref)
+        return held
+
     def _guard_sprint_write(
         self,
         *,
@@ -3551,7 +3604,9 @@ class TaskWriter:
 
         Two questions, in this order. Who is writing: a caller of role `observer` names the sprint it
         was launched for, and a write about any other sprint's card is refused as the identity failure
-        it is. Then what is being written: which open sprint reserves the card's project.
+        it is. Then what is being written: which open sprint reserves the card's project. A PO write
+        of a card linked to no sprint is not the holding sprint's and passes once the index is
+        verified; the dispatcher's admission decides whether such a card runs.
 
         The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
         the observer of, and an unprovable caller is refused rather than admitted.
@@ -3564,56 +3619,25 @@ class TaskWriter:
             request_id=request_id,
             reference=reference,
         )
-        from secretary.sprints import (
-            SprintReader,
-            active_sprint_projects,
-            refresh_active_sprint_projects,
-            sprint_guard_index_initialized,
-            update_active_sprint_projects,
-        )
-
-        if not sprint_guard_index_initialized(self.data_dir):
-            try:
-                refresh_active_sprint_projects(self.data_dir, SprintReader(self.client))
-            except TaskError as exc:
-                self._deny_sprint_write(
-                    code="sprint_guard_unavailable",
-                    message=f"cannot verify open sprints for project {project}; write it through the sprint entity",
-                    role=role,
-                    actor=actor,
-                    project=project,
-                    sprint="",
-                    request_id=request_id,
-                    reference=reference,
-                )
-                raise AssertionError("unreachable") from exc
-
-        refs = set(active_sprint_projects(self.data_dir).get(project, []))
-        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
-            refs.add(str(linked_sprint["ref"]))
-        held: list[str] = []
-        for sprint_ref in sorted(refs):
-            try:
-                sprint = (
-                    linked_sprint
-                    if linked_sprint and sprint_ref == linked_sprint.get("ref")
-                    else SprintReader(self.client).show(sprint_ref, include_cards=False)
-                )
-            except TaskError as exc:
-                self._deny_sprint_write(
-                    code="sprint_guard_unavailable",
-                    message=f"cannot verify sprint {sprint_ref} reserving project {project}; write it through the sprint entity",
-                    role=role,
-                    actor=actor,
-                    project=project,
-                    sprint=sprint_ref,
-                    request_id=request_id,
-                    reference=reference,
-                )
-                raise AssertionError("unreachable") from exc
-            update_active_sprint_projects(self.data_dir, sprint)
-            if sprint.get("status") == "open" and project in sprint.get("reservations", []):
-                held.append(sprint_ref)
+        try:
+            held = self.open_sprints_reserving(project, linked_sprint=linked_sprint)
+        except SprintReservationUnverifiable as exc:
+            message = (
+                f"cannot verify sprint {exc.sprint_ref} reserving project {project}; write it through the sprint entity"
+                if exc.sprint_ref
+                else f"cannot verify open sprints for project {project}; write it through the sprint entity"
+            )
+            self._deny_sprint_write(
+                code="sprint_guard_unavailable",
+                message=message,
+                role=role,
+                actor=actor,
+                project=project,
+                sprint=exc.sprint_ref,
+                request_id=request_id,
+                reference=reference,
+            )
+            raise AssertionError("unreachable") from exc
         if not held:
             return {}
         sprint_ref = card_sprint if card_sprint in held else held[0]
@@ -3640,6 +3664,12 @@ class TaskWriter:
                 reference=reference,
             )
             return {"sprint_override_reason": sprint_override_reason}
+        # A PO card linked to no sprint is not the holding sprint's work, whatever its kind: whether
+        # it runs on a reserved project is the dispatcher's admission (`open_sprints_reserving`
+        # asked before the claim), not this guard. A card linked to a sprint, and a create that
+        # links one, keep the override rule above.
+        if role == "po" and not card_sprint and linked_sprint is None:
+            return {}
         # The caller was already proven to be this card's sprint's observer above; what is left is
         # that the sprint holding the project is the one the card is linked to.
         if role == "observer" and card_sprint in held:

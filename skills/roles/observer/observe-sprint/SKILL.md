@@ -43,8 +43,11 @@ an explicit `--sprint-override` with a reason.
 
 ## Boundaries
 
-- Do not create or move cards outside your sprint's repositories. While the sprint runs there are no
-  cards outside it: anything urgent is added to this sprint through an entry on its entity.
+- Do not create or move cards outside your sprint's repositories, and cut no card outside your sprint:
+  anything urgent for the sprint is added to it through an entry on its entity. The PO may put a card
+  linked to no sprint on your projects; that card is not yours to move. The dispatcher admits it only as
+  `research` or `infra` and blocks a `code` one at admission (`sprint-reservation-blocked`); it may run
+  after the sprint closes.
 - Do not change the goal, Definition of Done, out of scope or stop conditions. They are a contract, not
   a plan.
 - Do not promote existing Issues to Ready. A card is always fresh, cut from current understanding.
