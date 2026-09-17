@@ -1,0 +1,156 @@
+name: Astra plan refresh
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: ${{ github.head_ref == 'astra_audit' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Refresh audit plan
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('astra_audit.md')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          changed = set()
+
+          for i, line in enumerate(lines):
+              if line.startswith('- ◐ **A12 partially completed across PR #450, PR #451, and PR #452:**'):
+                  lines[i] = (
+                      '- ✅ **A12 completed across PR #450, PR #451, PR #452, and PR #457:** '
+                      '#450 introduced immutable typed payload values for the three control-plane Card marker events '
+                      '(`card.reported`, `card.verdict`, `card.decided`); #451 typed `attempt.usage`; #452 typed '
+                      '`attempt.outcome`; #457 completed the remaining durable outcome-round handoff with immutable '
+                      '`OutcomeRoundContext` / `OutcomeRoundPhase`, moving dispatcher production, recovery selection, '
+                      'terminal-obligation reads, and lineage checks off nested raw dictionaries while preserving the '
+                      'released v1/v2 journal wire contract. A12 is now complete; genuinely opaque/legacy `Event.data` '
+                      'remains an intentional boundary escape hatch rather than a target for blanket modeling.'
+                  )
+                  changed.add('progress-a12')
+              elif line.startswith('PR #434, PR #435, PR #436,'):
+                  if 'PR #457 passed typecheck' not in line:
+                      lines[i] = line + (
+                          ' PR #457 passed typecheck, all seven test shards, and the aggregate exact-SHA '
+                          'evidence/coverage gate on exact head SHA `140b9e07811a4cdca4e60b58a06db79422e21a57`, '
+                          'then squash-merged as `b7b5686e69cfed175969b2029e3680628b4d514f`.'
+                      )
+                  changed.add('ci-a12')
+              elif line.startswith('| A12 |'):
+                  lines[i] = (
+                      '| A12 | ✅ Replace closed event payload dictionaries with typed payload objects — '
+                      '**completed across #450, #451, #452, and #457** | **4** |'
+                  )
+                  changed.add('table-a12')
+              elif line.startswith('### A12. Replace closed event payload dicts with typed payload objects'):
+                  lines[i] = '### A12. Replace closed event payload dicts with typed payload objects — complexity 4 — completed'
+                  changed.add('heading-a12')
+              elif line.startswith('**Remaining A12:**'):
+                  lines[i] = (
+                      '**Implemented in PR #457 (final bounded slice):** added immutable `OutcomeRoundContext` and '
+                      '`OutcomeRoundPhase` for the released v1/v2 outcome-round handoff. Dispatcher production now '
+                      'constructs the typed value before persistence; recovery selection, terminal-outcome obligation '
+                      'reads, and lineage-source checks consume typed fields; `TaskWriter.outcome_round_context()` '
+                      'normalizes legacy mapping callers once and projects the exact historical dictionary only at '
+                      'the audit/journal boundary. Field sets, validation semantics, request identity, lifecycle behavior, '
+                      'and journal spellings remain unchanged. `secretary.board.outcome_round_context` is in the '
+                      'incremental mypy gate. Full PR CI passed on exact head SHA '
+                      '`140b9e07811a4cdca4e60b58a06db79422e21a57`, then the PR squash-merged as '
+                      '`b7b5686e69cfed175969b2029e3680628b4d514f`. A12 is complete.'
+                  )
+                  changed.add('detail-a12')
+              elif line == '- `gate_workflow_dispatch`;':
+                  lines[i] = (
+                      '- gate receipts / publication identity (`gate_attestation`, `gate_pr_authorship`, '
+                      '`gate_published_ref`);'
+                  )
+                  changed.add('a13-stale-field')
+              elif line == '- `gate_attestation`;':
+                  lines[i] = '- `worker_head_run` / `review_head_run`;'
+                  changed.add('a13-head-runs')
+              elif line == '- `gate_pr_authorship`;':
+                  lines[i] = '- `worker_run` / `review_run`;'
+                  changed.add('a13-routing-runs')
+              elif line == '- `gate_published_ref`;':
+                  lines[i] = '- `launch_intent`;'
+                  changed.add('a13-launch')
+              elif line == '- `worker_head_run` / `review_head_run`;':
+                  lines[i] = '- delivery evidence (`worker_delivery_evidence` / `review_delivery_evidence`);'
+                  changed.add('a13-delivery')
+              elif line == '- `worker_run` / `review_run`;':
+                  lines[i] = '- headless recovery state (`worker_headless`).'
+                  changed.add('a13-headless')
+              elif line == '- `launch_intent`;':
+                  lines[i] = ''
+                  changed.add('a13-old-launch')
+              elif line == '- delivery evidence and headless-state documents.':
+                  lines[i] = ''
+                  changed.add('a13-old-tail')
+              elif line.startswith('**Fix:** deserialize JSON into typed sub-values in `DispatcherRecord.from_json()`'):
+                  lines[i] = (
+                      '**Fix:** deserialize JSON into typed sub-values in `DispatcherRecord.from_json()` and serialize '
+                      'only in `to_json()`. Start with `worker_head_run` / `review_head_run`, because canonical runtime '
+                      '`HeadRun` parsing already exists and this removes a high-value dict seam without changing the '
+                      'durable document. Then take `worker_run` / `review_run`, gate receipt/publication identity, and '
+                      'delivery/launch/headless documents as separate bounded A13 slices rather than one large rewrite. '
+                      'The previously audited `gate_workflow_dispatch` bag is already gone from current `main` and is '
+                      'therefore removed from the remaining A13 inventory.'
+                  )
+                  changed.add('a13-fix')
+              elif line.startswith('A10 is complete via PR #441.') and 'continue A12 one closed payload family at a time' in line:
+                  lines[i] = line.replace(
+                      'The first three bounded A12 slices landed in PR #450 for Card report/verdict/decision marker payloads, PR #451 for `attempt.usage`, and PR #452 for `attempt.outcome`; continue A12 one closed payload family at a time.',
+                      'A12 is complete across PR #450, PR #451, PR #452, and PR #457; the next bounded work is durable `DispatcherRecord` state under A13.'
+                  )
+                  changed.add('phase2')
+              elif line == 'A12, A13, A14, A15.':
+                  lines[i] = 'A12 is complete; continue with A13, then A14 and A15.'
+                  changed.add('phase3-list')
+              elif line.startswith('A12 is in progress: marker payloads, `attempt.usage`, and `attempt.outcome` are typed'):
+                  lines[i] = (
+                      'A12 is complete after PR #457. Begin A13 with the existing runtime `HeadRun` boundary for '
+                      '`worker_head_run` / `review_head_run`, then migrate the remaining durable state families in '
+                      'separate PRs. Keep A14/A15 behind those state boundaries so package extraction does not simply '
+                      'move raw dictionaries into new modules.'
+                  )
+                  changed.add('phase3-status')
+              elif line.startswith('With A01–A11 and A16 complete and the marker, `attempt.usage`, and `attempt.outcome` A12 slices merged,'):
+                  lines[i] = (
+                      'With A01–A12 and A16 complete, the highest-value near-term sequence is: '
+                      '**A13 `worker_head_run` / `review_head_run` → remaining A13 state families → A14/A15**, '
+                      'keeping each migration to one durable domain shape at a time. A17/A19/A20 should still be '
+                      'planned as explicit deprecation projects rather than mixed into ordinary refactors.'
+                  )
+                  changed.add('near-term')
+
+          required = {
+              'progress-a12', 'ci-a12', 'table-a12', 'heading-a12', 'detail-a12',
+              'a13-stale-field', 'a13-head-runs', 'a13-routing-runs', 'a13-launch',
+              'a13-delivery', 'a13-headless', 'a13-old-launch', 'a13-old-tail',
+              'a13-fix', 'phase2', 'phase3-list', 'phase3-status', 'near-term',
+          }
+          missing = required - changed
+          if missing:
+              raise SystemExit(f'plan refresh anchors missing: {sorted(missing)}')
+
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          rm .github/workflows/astra-plan-refresh.yml
+      - name: Push refreshed plan
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          git add astra_audit.md .github/workflows/astra-plan-refresh.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "docs: mark A12 complete and refresh A13 plan"
+          git push origin "HEAD:${HEAD_BRANCH}"
