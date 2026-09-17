@@ -3422,7 +3422,7 @@ def _executor_lines(sprint: dict[str, Any]) -> list[str]:
     lines.append(
         "- review: whether a card is reviewed at all is its `review` choice, not the reviewer head. "
         "It defaults to required for `code` and skipped for `research` and `infra`; "
-        "`task create --review skipped` or `--review required` overrides the default. A skipped "
+        "`--review skipped` or `--review required` on the card overrides the default. A skipped "
         "card launches no reviewer; a skipped code card still runs the gate and merges on release."
     )
     return lines
