@@ -71,6 +71,8 @@ files = [
     "src/secretary/board/host.py",
     "src/secretary/board/backend.py",
     "src/secretary/dispatch/runtime_provenance.py",
+    "src/secretary/routing_journal.py",
+    "src/secretary/dispatcher_state.py",
     "src/secretary/dispatcher_pause.py",
     "src/secretary/po/models.py",
 ]

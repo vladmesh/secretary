@@ -185,27 +185,23 @@ head_run_from_profile = routing_head_snapshot_from_profile
 
 
 def routing_head_snapshot_from_launch(
-    run: RoutingHeadSnapshot, *, lifecycle_run: LifecycleHeadRun
+    run: RoutingHeadSnapshot | dict[str, Any],
+    *,
+    lifecycle_run: LifecycleHeadRun | dict[str, Any] | None = None,
 ) -> RoutingHeadSnapshot:
-    """Bind resolved routing facts to the typed lifecycle run that was actually launched.
+    """Bind resolved routing facts to the lifecycle run that was actually launched.
 
-    This is the canonical A10 boundary: routing decisions arrive as a ``RoutingHeadSnapshot`` and
-    lifecycle evidence arrives as the real runtime ``HeadRun``. Serialization is kept outside that
-    boundary so the two domain concepts cannot be accidentally substituted for one another.
-    """
-    return _enrich_routing_head_snapshot(run.to_json(), lifecycle_run.to_json())
-
-
-def launched_head_run_snapshot(
-    run: RoutingHeadSnapshot | dict[str, Any], *, lifecycle_run: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Compatibility wrapper for the historical dict-based dispatcher boundary.
-
-    The persisted dispatcher shape is intentionally unchanged here; A13 owns converting those
-    durable dict fields. New typed code should call :func:`routing_head_snapshot_from_launch`.
+    The dispatcher now keeps this value typed in memory. Mapping inputs remain accepted at this
+    boundary for restart/adoption compatibility with records written before A13; callers always
+    receive the canonical RoutingHeadSnapshot and persistence projects it back to JSON later.
     """
     snapshot = run.to_json() if isinstance(run, RoutingHeadSnapshot) else dict(run)
-    return _enrich_routing_head_snapshot(snapshot, dict(lifecycle_run or {})).to_json()
+    lifecycle = (
+        lifecycle_run.to_json()
+        if isinstance(lifecycle_run, LifecycleHeadRun)
+        else dict(lifecycle_run or {})
+    )
+    return _enrich_routing_head_snapshot(snapshot, lifecycle)
 
 
 def _enrich_routing_head_snapshot(

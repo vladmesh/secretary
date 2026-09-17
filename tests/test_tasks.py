@@ -34,7 +34,7 @@ from secretary.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
-    launched_head_run_snapshot,
+    routing_head_snapshot_from_launch,
     routing_payload,
 )
 from secretary.sprints import refresh_active_sprint_projects
@@ -5260,12 +5260,13 @@ class RoutingJournalTests(unittest.TestCase):
             )
             document.write_text("later rework instruction\n", encoding="utf-8")
 
-            snapshot = launched_head_run_snapshot(
-                self._run("worker", "codex"), lifecycle_run=lifecycle.to_json()
+            snapshot = routing_head_snapshot_from_launch(
+                self._run("worker", "codex").to_json(), lifecycle_run=lifecycle.to_json()
             )
 
-        self.assertEqual(snapshot["prompt_path"], str(document))
-        self.assertEqual(snapshot["prompt_version"], "sha256:" + hashlib.sha256(original).hexdigest())
+        self.assertIsInstance(snapshot, HeadRun)
+        self.assertEqual(snapshot.prompt_path, str(document))
+        self.assertEqual(snapshot.prompt_version, "sha256:" + hashlib.sha256(original).hexdigest())
 
 
 class ReportDurabilityGateTests(unittest.TestCase):

@@ -40,7 +40,7 @@ from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_state import DispatcherRecord, PersistedRoutingHeadSnapshot
 from secretary.dispatcher_tui import (
     TuiDeliveryError,
     claude_project_dir_name,
@@ -61,7 +61,7 @@ from secretary.projects.contract import (
     ModuleContract,
 )
 from secretary.projects.integration_base import resolve_integration_base
-from secretary.routing_journal import attempts as routing_attempts
+from secretary.routing_journal import RoutingHeadSnapshot, attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
@@ -133,6 +133,66 @@ def _document_report_id(workspace: str) -> str:
     document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
     line = next(line for line in document.splitlines() if "--kind done" in line)
     return line.split("--request-id ", 1)[1].split()[0]
+
+
+class DispatcherRoutingSnapshotStateTests(unittest.TestCase):
+    """A13: routing telemetry is typed in memory without rewriting durable state."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_partial_routing_mapping_round_trips_exactly(self) -> None:
+        payload = {
+            "role": "worker",
+            "head": "codex",
+            "head_source": "role_default",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "model_source": "profile",
+            "effort": "high",
+        }
+        record = self.record(worker_run=payload)
+
+        self.assertIsInstance(record.worker_run, PersistedRoutingHeadSnapshot)
+        self.assertIsNotNone(record.worker_run.snapshot)
+        self.assertEqual(record.worker_run.snapshot.head, "codex")
+        self.assertEqual(record.to_json()["worker_run"], payload)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
+        self.assertEqual(restarted.worker_run.to_json(), payload)
+        self.assertEqual(restarted.worker_run.snapshot.head, "codex")
+
+    def test_typed_routing_assignment_projects_json_and_empty_clears_it(self) -> None:
+        snapshot = RoutingHeadSnapshot(
+            role="reviewer",
+            head="claude-opus",
+            adapter="claude",
+            model="opus",
+            model_source="profile",
+            effort="high",
+        )
+        record = self.record(review_run=snapshot)
+
+        self.assertIs(record.review_run.snapshot, snapshot)
+        self.assertEqual(record.to_json()["review_run"], snapshot.to_json())
+
+        record.review_run = {}
+        self.assertIsNone(record.review_run.snapshot)
+        self.assertEqual(record.to_json()["review_run"], {})
 
 
 class LaunchIntentTests(unittest.TestCase):

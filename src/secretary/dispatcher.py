@@ -381,7 +381,7 @@ from secretary.routing_journal import (
     attempts as _routing_attempts,
 )
 from secretary.routing_journal import (
-    launched_head_run_snapshot as _launched_head_run_snapshot,
+    routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
 )
 from secretary.routing_journal import (
     routing_payload as _routing_payload,
@@ -6743,16 +6743,14 @@ class DispatcherRuntime:
         head: str = "",
         workspace: str = "",
         failover: bool = False,
-    ) -> dict[str, Any]:
-        """The launch snapshot for a head the runtime has no launcher record of, or a marked
-        minimal one when its profile can no longer be read.
-        """
+    ) -> HeadRun:
+        """The typed launch snapshot for a head with no launcher record, or a marked minimal one."""
         try:
             return self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
-            ).to_json()
+            )
         except (HostError, AttributeError, KeyError, TypeError):
-            return HeadRun(role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN).to_json()
+            return HeadRun(role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN)
 
     def _journal_round(self, ref: str) -> int:
         """The last worker round the journal holds for this card. Survives a lost dispatcher record,
@@ -6768,7 +6766,10 @@ class DispatcherRuntime:
         record.review_run = {}
 
     def record_worker_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        run: HeadRun | dict[str, Any] | None = None,
     ) -> None:
         """Record the worker head this bring-up just put up, as launched."""
         ref = task["ref"]
@@ -6781,14 +6782,17 @@ class DispatcherRuntime:
             workspace=record.workspace,
             failover=bool(record.preferred_head),
         )
-        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.worker_head_run)
+        snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.worker_head_run)
         if record.worker_run and _run_key(record.worker_run) == _run_key(snapshot):
-            snapshot = record.worker_run
+            snapshot = record.worker_run.snapshot or snapshot
         record.worker_run = snapshot
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
     def record_review_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        run: HeadRun | dict[str, Any] | None = None,
     ) -> None:
         """Record the reviewer head this bring-up just put up, as launched."""
         ref = task["ref"]
@@ -6801,9 +6805,9 @@ class DispatcherRuntime:
             workspace=record.workspace,
             failover=bool(record.preferred_review_head),
         )
-        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.review_head_run)
+        snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.review_head_run)
         if record.review_run and _run_key(record.review_run) == _run_key(snapshot):
-            snapshot = record.review_run
+            snapshot = record.review_run.snapshot or snapshot
         record.review_run = snapshot
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
@@ -6839,10 +6843,14 @@ class DispatcherRuntime:
                     str(head.get("role") or ""): head for head in recorded_heads if isinstance(head, dict)
                 }
                 for head in heads:
-                    recorded = by_role.get(str(head.get("role") or ""))
-                    if recorded is not None:
-                        head.clear()
-                        head.update(recorded)
+                    role = str(head.get("role") or "")
+                    recorded = by_role.get(role)
+                    if recorded is None:
+                        continue
+                    if role == WORKER:
+                        record.worker_run = recorded
+                    elif role == REVIEWER:
+                        record.review_run = recorded
             return
         self.writer.routing(
             role="dispatcher",
@@ -7480,12 +7488,11 @@ class DispatcherRuntime:
             # today's `heads.toml` for a head launched hours ago would not.
             snapshot = _usage_fallback_snapshot(journal_role, record, lifecycle, role=role)
         try:
-            snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=lifecycle)
+            run = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=lifecycle)
         except ValueError:
-            # An incomplete launch attestation is not a reason to drop the occurrence: the run
-            # below still reports its own adapter, model and whatever session identity it holds.
-            pass
-        run = HeadRun.from_json(snapshot)
+            # An incomplete launch attestation is not a reason to drop the occurrence: the routing
+            # snapshot still reports its adapter, model and whatever session identity it already held.
+            run = HeadRun.from_json(snapshot)
         # One order, for every provider and every lifecycle path. Projection integrity and causal
         # identity first, because neither depends on what a provider journal says and a phase slot
         # owned by another attempt may not be written whatever that journal would have said.
