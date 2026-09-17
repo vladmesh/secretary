@@ -1,18 +1,19 @@
 """Rendering the front's configuration, hash included, out of the installation's secret store.
 
-The shape is deliberately one site block with one guard on it. `basicauth *` covers every path
-there is, which is what makes "a route somebody adds tomorrow is protected" a property of the
-configuration rather than a list somebody has to remember to extend. The alternative -- a matcher
-per route -- would put the whole route table into this file and make forgetting one possible, which
-is exactly the failure this card exists to rule out.
+The whole site has one authentication boundary. A valid persistent session cookie reaches the
+loopback transport directly; otherwise Caddy's basic auth checks the owner's password and the
+successful response mints that cookie. Both paths are rendered from the same bcrypt hash, so a
+password rotation changes the cookie value too and invalidates every existing browser session.
 
-Nothing about a credential is stored here. `render` is given the bcrypt hash by its caller, which
-reads it from the secret store; the module holds the secret *ids*, which are open metadata, and the
-file it produces is written under the data directory, never into the repository.
+Nothing about a plaintext credential is stored here. `render` is given the bcrypt hash by its
+caller, which reads it from the secret store; the module holds the secret *ids*, which are open
+metadata, and the file it produces is written under the data directory, never into the repository.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,14 @@ USERNAME = "owner"
 #: Catalog ids. Open metadata: `secret list` prints these and never the values behind them.
 PASSWORD_SECRET_ID = "web-front-password"
 HASH_SECRET_ID = "web-front-password-hash"
+
+#: The browser session is a bearer derived from the bcrypt hash, never the password. The `__Host-`
+#: prefix makes supporting browsers require Secure, Path=/ and no Domain attribute, which is exactly
+#: the shape rendered below. A password rotation produces a new bcrypt hash and therefore a new
+#: cookie value without another secret or migration.
+SESSION_COOKIE_NAME = "__Host-secretary_front"
+SESSION_COOKIE_MAX_AGE = 30 * 24 * 3600
+_SESSION_COOKIE_CONTEXT = b"secretary web front session cookie v1"
 
 #: What the owner's browser is told to send the password to. A rendered file names these verbatim.
 DEFAULT_SITES: tuple[str, ...] = ()
@@ -63,11 +72,22 @@ class FrontConfigError(ValueError):
     """The configuration asked for cannot be rendered, and no file was written."""
 
 
+def session_cookie_value(password_hash: str) -> str:
+    """The persistent browser bearer for one rendered password hash.
+
+    The browser never receives the hash. HMAC gives Caddy a fixed value it can match while keeping
+    the hash itself on the host, and tying the value to the hash makes `set-password` revoke every
+    previously issued browser cookie on the next render/restart.
+    """
+    return hmac.new(password_hash.encode("utf-8"), _SESSION_COOKIE_CONTEXT, hashlib.sha256).hexdigest()
+
+
 def render(config: FrontConfig) -> str:
     """The Caddyfile this installation runs, as text."""
     _check(config)
+    session = session_cookie_value(config.password_hash)
     lines: list[str] = [HEADER.rstrip("\n"), "", "{"]
-    lines.append("\t# No admin API: the front is a proxy with a password, not a control plane.")
+    lines.append("\t# No admin API: the front is a proxy with authentication, not a control plane.")
     lines.append("\tadmin off")
     lines.append(
         "\t# The internal CA's root is published for the owner to trust deliberately; a service"
@@ -90,15 +110,25 @@ def render(config: FrontConfig) -> str:
     lines.append("\t# internal CA is the honest option, and OPERATIONS.md says what a browser shows.")
     lines.append("\ttls internal")
     lines.append("")
-    lines.append("\t# The whole site, every path, guarded by one ready-made implementation. `*` is")
-    lines.append("\t# what makes a route added later protected without anybody remembering to.")
-    lines.append("\tbasicauth * {")
-    lines.append(f"\t\t{config.username} {config.password_hash}")
+    lines.append("\t# A browser that authenticated before can present the 30-day bearer. Its value is")
+    lines.append("\t# derived from this password hash, so password rotation invalidates it automatically.")
+    lines.append(f"\t@owner_session header Cookie *{SESSION_COOKIE_NAME}={session}*")
+    lines.append("\thandle @owner_session {")
+    lines.append(f"\t\treverse_proxy {_upstream(config)}")
     lines.append("\t}")
     lines.append("")
-    lines.append("\t# The application behind this is the loopback transport, which refuses to bind")
-    lines.append("\t# anywhere else, so this proxy is the only path into it from off the host.")
-    lines.append(f"\treverse_proxy {_upstream(config)}")
+    lines.append("\t# Without that cookie, keep the existing HTTP Basic challenge. A successful")
+    lines.append("\t# password check adds the persistent cookie without replacing application cookies.")
+    lines.append("\thandle {")
+    lines.append("\t\tbasicauth {")
+    lines.append(f"\t\t\t{config.username} {config.password_hash}")
+    lines.append("\t\t}")
+    lines.append(
+        f'\t\theader +Set-Cookie "{SESSION_COOKIE_NAME}={session}; Path=/; '
+        f'Max-Age={SESSION_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"'
+    )
+    lines.append(f"\t\treverse_proxy {_upstream(config)}")
+    lines.append("\t}")
     lines.append("}")
     return "\n".join(lines) + "\n"
 
