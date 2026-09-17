@@ -6,7 +6,7 @@ route, and a test that lists the protected paths by hand is a list that goes sta
 the route table grows. So the question is asked the other way round: parse the configuration, and
 for every route the transport publishes -- read from `secretary.web.app.ROUTES`, the same table
 `docs/PROTOCOLS.md` documents -- decide whether a request for it reaches something that answers
-before either the password or the derived persistent session bearer was checked.
+before either the password or the persistent session bearer was checked.
 
 The parser is small and deliberately not a general Caddyfile implementation. It understands the
 grammar this project generates and the grammar somebody would plausibly hand-edit it into: site
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from secretary.webfront.caddyfile import SESSION_COOKIE_NAME, session_cookie_value
+from secretary.webfront.caddyfile import SESSION_COOKIE_NAME
 
 #: Directives that check the password. Caddy renamed the directive in 2.8 and kept the old spelling
 #: working; the archive build this installation runs is 2.6 and spells it `basicauth`.
@@ -44,6 +44,7 @@ TERMINAL_DIRECTIVES = frozenset(
 
 #: Directives that carry their own block of directives, scoped to their matcher.
 NESTING_DIRECTIVES = frozenset({"handle", "handle_path", "route"})
+_SESSION_HEX = frozenset("0123456789abcdef")
 
 
 class CaddyfileSyntaxError(ValueError):
@@ -65,7 +66,7 @@ class Site:
     directives: tuple[Directive, ...] = ()
     #: Matchers the block named, by their `@name`.
     matchers: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: Header matchers that prove possession of the bearer derived from this site's basic-auth hash.
+    #: Header matchers requiring the exact shape of the generated high-entropy session bearer.
     auth_matchers: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -124,18 +125,13 @@ def _named_matchers(directives: tuple[Directive, ...]) -> dict[str, tuple[str, .
 
 
 def _auth_matchers(directives: tuple[Directive, ...]) -> frozenset[str]:
-    """Named cookie matchers carrying the bearer derived from a basic-auth hash in this site.
+    """Named Cookie matchers that require one concrete generated session bearer.
 
-    Merely seeing a Cookie header is not authentication. The exact value must be the HMAC the
-    renderer derives from one of this site's bcrypt hashes; a hand edit such as
-    `*__Host-secretary_front=*` therefore fails closed instead of teaching the checker a new guard.
+    A Cookie header existing at all is not authentication, and neither is a wildcard bearer. The
+    renderer emits an HMAC-SHA256 bearer as 64 lowercase hex characters; only that exact structural
+    shape is accepted here. As with a hand-edited basic-auth hash, this checker proves that a secret
+    is required before content is answered; secret strength and provenance belong to the renderer.
     """
-    expected = {
-        f"*{SESSION_COOKIE_NAME}={session_cookie_value(password_hash)}*"
-        for password_hash in _basic_auth_hashes(directives)
-    }
-    if not expected:
-        return frozenset()
     found: set[str] = set()
     for directive in directives:
         if not directive.name.startswith("@"):
@@ -148,24 +144,18 @@ def _auth_matchers(directives: tuple[Directive, ...]) -> frozenset[str]:
                 len(clause) >= 3
                 and clause[0] == "header"
                 and clause[1].lower() == "cookie"
-                and any(value in expected for value in clause[2:])
+                and any(_is_session_cookie_pattern(value) for value in clause[2:])
             ):
                 found.add(directive.name)
     return frozenset(found)
 
 
-def _basic_auth_hashes(directives: tuple[Directive, ...]) -> tuple[str, ...]:
-    """Every password hash named by a basic-auth block, including one nested in a handle."""
-    found: list[str] = []
-
-    def walk(items: tuple[Directive, ...]) -> None:
-        for directive in items:
-            if directive.name in GUARD_DIRECTIVES:
-                found.extend(credential.args[0] for credential in directive.block if credential.args)
-            walk(directive.block)
-
-    walk(directives)
-    return tuple(found)
+def _is_session_cookie_pattern(value: str) -> bool:
+    prefix = f"*{SESSION_COOKIE_NAME}="
+    if not value.startswith(prefix) or not value.endswith("*"):
+        return False
+    bearer = value[len(prefix) : -1]
+    return len(bearer) == 64 and all(character in _SESSION_HEX for character in bearer)
 
 
 def unguarded_routes(text: str, routes) -> tuple[str, ...]:
