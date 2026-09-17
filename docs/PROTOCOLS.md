@@ -168,12 +168,41 @@ reason `completion evidence missing` naming the absent marker, and its workspace
 
   If the transfer is refused or fails, the card goes to Blocked with the reason `research report
   transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
-  `source_empty`, `special_file` (a symlink, a special file or a `.git` entry), `secret`, `size_cap` or
-  `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  `source_empty`, `special_file` (a symlink, a special file or an entry whose name starts with
+  `.git`), `secret`, `size_cap` or `write_failed` (a filesystem or git error). No link is written, nothing is committed under
   `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
   still the only check before Done.
 
-Admission outside a sprint is defined later.
+### Cards outside a sprint
+
+The PO may create a card of any kind (`code`, `research`, `infra`) with no `--sprint`, in Ready, on
+any project, including one an open sprint reserves, and may move and edit it without
+`--sprint-override` (see [The sprint guard](#the-sprint-guard)). Other roles keep their rules: the
+observer creates only cards of its own sprint, the steward's execution card needs an open sprint, and
+worker, reviewer and retro create only proposals.
+
+Whether such a card runs is decided once, at admission, before the claim. The dispatcher asks the same
+reserved-project index the write guard reads (seeded from the sprints board when it was never written,
+each sprint it names re-read live):
+
+- a card linked to a sprint is that sprint's work and is not asked about;
+- `research` and `infra` are admitted on any project, reserved or not;
+- `code` on a project no open sprint reserves is admitted;
+- `code` on a project an open sprint reserves is refused. It is blocked through the pre-claim refusal
+  of [Bring-up outcomes](#bring-up-outcomes), like `contract-preflight-blocked`: no workspace, head or
+  round exists, the transition carries action token `sprint-reservation-blocked` (class
+  `infrastructure`, so no budget is charged), and the tick outcome has step `sprint-reservation-refused`
+  and a `sprint_reservation` object (`refusal`, `project`, `sprints`, `detail`). The Blocked reason
+  shown by `task show` names `refusal=sprint_reserved`, the project and the reserving sprint, and says
+  the card may run inside that sprint or after it closes. The refusal is not retried; a card the PO
+  moves back to Ready is asked again under a fresh attempt, and after the sprint closes it is admitted;
+- `code` whose project's reservations cannot be verified (the index cannot be seeded or a sprint it
+  names cannot be read) is refused as the claim-skip `sprint-reservation-unverifiable`, refusal
+  `sprint_reservation_unverifiable`. Nothing is written: the Blocked move would meet the same unverifiable
+  index at the write guard. The card stays in Ready and is asked again on the next tick. An unverifiable
+  index never refuses `research` or `infra`.
+
+A card already in progress when a sprint opens is not moved or blocked by this rule.
 
 ## Codex provider-internal fan-out policy
 
@@ -628,7 +657,7 @@ Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
 dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
 are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this (its move is the
-escape hatch; on a sprint-reserved project it carries `--sprint-override` and a reason).
+escape hatch; on a card of a sprint that holds its project it carries `--sprint-override` and a reason).
 `assessment -> blocked` takes no decision from anyone (steward escalation and dispatcher failures).
 The observer takes no exit out of Assessment at all, even with a matching decision; its authority is
 `task decide`.
@@ -652,13 +681,14 @@ python3 -P -m secretary task archive --role po --ref PROJECT-N \
 python3 -P -m secretary task edit --role po --ref PROJECT-N \
   --body-file SPEC.md --head codex-terra --review-head claude-opus
 python3 -P -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
-  --sprint-override --sprint-override-reason-file REASON.md
+  --sprint sprint:ID --sprint-override --sprint-override-reason-file REASON.md
 ```
 
-`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields. A
-new execution task requires `--sprint`: the sprint must be open and the project one of its
-reservations (a closed sprint and an unreserved project are separate errors, both before any backend
-write). `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
+`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
+With `--sprint`, the sprint must be open and the project one of its reservations (a closed sprint and
+an unreserved project are separate errors, both before any backend write). Without it, only the PO
+creates an execution task (see [Cards outside a sprint](#cards-outside-a-sprint)); for other roles it
+requires `--sprint`. `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
 roles create only proposals in Issues, which a PO triages to Ready.
 
 Without `--ref`, `task create` allocates `PROJECT-N` from the project's board-wide high-water mark
@@ -1142,12 +1172,19 @@ expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` der
 card metadata. New links are refused after a sprint is closed. `current-task` requires that the card
 already carries this sprint reference.
 
-An open sprint holds every project in its `reservations`: only its observer may create a card there,
-and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards.
-The PO may create, move or edit only with `--sprint-override` plus a non-empty
-`--sprint-override-reason-file` (the reason is stored as its own audit field). Without it the PO gets
-`sprint_write_forbidden`, as do retro, steward and every other role; the refusal names the holding
-sprint.
+An open sprint holds every project in its `reservations`: only its observer may create a card of the
+sprint there, and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit
+linked cards. The PO may create a card linked to the holding sprint, and move or edit a card linked to
+it, only with `--sprint-override` plus a non-empty `--sprint-override-reason-file` (the reason is stored
+as its own audit field). Without it the PO gets `sprint_write_forbidden`, as do retro, steward and
+every other role; the refusal names the holding sprint.
+
+A PO create, move or edit of a card linked to no sprint (and a create that links none) is not refused
+because its project is reserved, for every kind and without an override; running it is decided at
+[admission](#cards-outside-a-sprint). This narrowing is inside the one guard every `create`, `move`
+(including a replayed generic move) and `edit` passes, after the index is verified, so an index that
+cannot be verified still refuses the write as `sprint_guard_unavailable`. An override passed anyway is
+granted and audited as before.
 
 Both guard answers are audited once per request id: a refusal as `sprint_guard_denied`; a granted
 override as `sprint_guard_override` carrying project, holding sprint, override reason and the request id
@@ -3088,9 +3125,16 @@ python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
-special file or `.git` entry anywhere in it; a text file (UTF-8 without NUL bytes) that contains a
-secret; a total size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned.
-Empty subdirectories are not kept. If the commit fails the previous directory is put back.
+special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
+`.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
+size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
+subdirectories are not kept. If the commit fails the previous directory is put back.
+
+The swap is staged outside `state/knowledge`, in `state/.knowledge-swap/` on the same filesystem: the
+new contents are written there, the previous directory is moved beside them, and a file names the
+target. A crash mid-swap therefore leaves nothing under `state/knowledge` for a knowledge commit to
+pick up. Every knowledge write (`--file` or `--dir`) first recovers interrupted swaps under the state
+repository lock: a previous directory whose target is gone is moved back, and the rest is removed.
 
 ## Secrets
 

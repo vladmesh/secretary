@@ -49,6 +49,12 @@ class KnowledgeValidationError(KnowledgeError):
 # data behind it, not a dataset; anything larger belongs outside the instance repository.
 KNOWLEDGE_DIRECTORY_CAP_BYTES = 20 * 1024 * 1024
 
+# Where a directory write stages the new contents and parks the previous ones. It is beside
+# `state/knowledge`, on the same filesystem so the swap is a rename, and outside every commit
+# pathspec, so a crash mid-swap leaves nothing a knowledge commit can pick up.
+KNOWLEDGE_SWAP_RELATIVE = Path("state") / ".knowledge-swap"
+_SWAP_TARGET = "target"
+
 
 @dataclass(frozen=True)
 class KnowledgeDocument:
@@ -121,6 +127,7 @@ def write_knowledge_document(
     instance_dir = checked.instance_dir
     target = state_repo.knowledge_dir(instance_dir) / relative
     with state_repo.state_repo_lock(instance_dir):
+        _recover_interrupted_swaps(instance_dir)
         try:
             _write_text_atomic(target, body)
         except RuntimeError as exc:
@@ -211,7 +218,9 @@ def write_knowledge_directory(
             raise KnowledgeValidationError(
                 f"state/knowledge/{checked.directory} exists and is not a directory", "path"
             )
-        previous = _replace_directory(target, checked.files)
+        _recover_interrupted_swaps(instance_dir)
+        swap = _replace_directory(instance_dir, target, checked.files)
+        previous = swap / "old"
         try:
             commit = state_repo.commit(
                 instance_dir,
@@ -219,13 +228,14 @@ def write_knowledge_directory(
                 message or _commit_message(f"{checked.directory}/", checked.actor),
             )
         except BaseException:
-            _restore_directory(target, previous)
+            _restore_directory(target, previous if previous.is_dir() else None)
+            if not os.path.lexists(previous):
+                shutil.rmtree(swap, ignore_errors=True)
             # The original failure is the one to report; the index is only put back when git answers.
             with contextlib.suppress(Exception):
                 state_repo.git(instance_dir, ["add", "--", *pathspec], label="restore staged state")
             raise
-        if previous is not None:
-            shutil.rmtree(previous, ignore_errors=True)
+        shutil.rmtree(swap, ignore_errors=True)
         if commit is None:
             return KnowledgeWriteResult(
                 document=f"{checked.directory}/",
@@ -312,7 +322,9 @@ def _directory_files(source: Path) -> tuple[tuple[PurePosixPath, bytes], ...]:
         for name in sorted([*dirnames, *filenames]):
             path = Path(root) / name
             relative = PurePosixPath(path.relative_to(source).as_posix())
-            if name == ".git":
+            # `.gitignore`, `.gitattributes` and `.gitmodules` change what a later commit of the
+            # instance repository records, so every `.git*` name is refused, not only `.git` itself.
+            if name.startswith(".git"):
                 raise KnowledgeValidationError(f"source holds a .git entry: {relative}", "special_file")
             try:
                 entry = path.lstat()
@@ -358,30 +370,41 @@ def _text_or_none(data: bytes) -> str | None:
         return None
 
 
-def _replace_directory(target: Path, files: tuple[tuple[PurePosixPath, bytes], ...]) -> Path | None:
-    """Swap `target` for a directory holding `files`; the previous directory is returned, moved aside."""
+def _replace_directory(instance_dir: Path, target: Path, files: tuple[tuple[PurePosixPath, bytes], ...]) -> Path:
+    """Swap `target` for a directory holding `files`; the swap directory is returned, with the previous
+    `target` moved aside as its `old` when there was one.
+
+    Staging happens in one swap directory under `KNOWLEDGE_SWAP_RELATIVE`: `new` is written there, the
+    previous `target` is moved to `old` beside it, and `target` names the knowledge path both belong to,
+    written first so :func:`_recover_interrupted_swaps` can put `old` back after a crash.
+    """
+    swap_root = Path(instance_dir) / KNOWLEDGE_SWAP_RELATIVE
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", suffix=".new", dir=target.parent))
-    except OSError as exc:
+        swap_root.mkdir(parents=True, exist_ok=True)
+        swap = Path(tempfile.mkdtemp(prefix="swap.", dir=swap_root))
+        (swap / _SWAP_TARGET).write_text(str(target.relative_to(instance_dir)), encoding="utf-8")
+    except (OSError, ValueError) as exc:
         raise KnowledgeError(f"could not write {target}: {exc}") from None
+    staging = swap / "new"
     previous: Path | None = None
     try:
         for name, data in files:
             path = staging / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+        staging.mkdir(exist_ok=True)
         if target.exists():
-            previous = Path(tempfile.mkdtemp(prefix=f".{target.name}.", suffix=".old", dir=target.parent))
-            os.rmdir(previous)
+            previous = swap / "old"
             os.replace(target, previous)
         os.replace(staging, target)
     except OSError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
         if previous is not None and not target.exists():
             _restore_directory(target, previous)
+        if previous is None or not os.path.lexists(previous):
+            shutil.rmtree(swap, ignore_errors=True)
         raise KnowledgeError(f"could not write {target}: {exc}") from None
-    return previous
+    return swap
 
 
 def _restore_directory(target: Path, previous: Path | None) -> None:
@@ -389,6 +412,40 @@ def _restore_directory(target: Path, previous: Path | None) -> None:
     if previous is not None:
         with contextlib.suppress(OSError):
             os.replace(previous, target)
+
+
+def _recover_interrupted_swaps(instance_dir: Path) -> None:
+    """Finish every swap a crashed directory write left behind, before anything is committed.
+
+    Called under `state_repo_lock`, so no swap is in flight. A swap whose previous directory was moved
+    aside and whose target is gone has that directory put back; everything else in the swap root is
+    staging nobody will use and is removed.
+    """
+    swap_root = Path(instance_dir) / KNOWLEDGE_SWAP_RELATIVE
+    if not swap_root.is_dir() or swap_root.is_symlink():
+        return
+    knowledge = state_repo.knowledge_dir(instance_dir)
+    for swap in sorted(swap_root.iterdir()):
+        previous = swap / "old"
+        try:
+            relative = (swap / _SWAP_TARGET).read_text(encoding="utf-8").strip()
+        except OSError:
+            relative = ""
+        target = Path(instance_dir) / relative if relative else None
+        if (
+            target is not None
+            and previous.is_dir()
+            and not previous.is_symlink()
+            and target.parent.resolve().is_relative_to(knowledge)
+            and not os.path.lexists(target)
+        ):
+            with contextlib.suppress(OSError):
+                os.replace(previous, target)
+        if swap.is_dir() and not swap.is_symlink():
+            shutil.rmtree(swap, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                swap.unlink()
 
 
 def _document_text(*, text: str | None, source_file: Path | None) -> str:

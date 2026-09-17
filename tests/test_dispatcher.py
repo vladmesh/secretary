@@ -6936,6 +6936,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 _budget_event_type(event)
                 for event in self.audit_events()
                 if _budget_event_type(event) is not None
+                # The production tick also refuses the neighbour, a code card linked to no sprint on
+                # the project sprint:1031 reserves (secretary-1641); that block is its own card's.
+                and str(event.get("ref") or "").endswith("secretary-510-pilot")
             ],
             [BUDGET_UNCHARGED_INFRASTRUCTURE],
             # secretary-1457: the escalation is still the one budget event of this episode — the

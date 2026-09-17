@@ -916,9 +916,12 @@ project slot. Observer fence and declared-observer contracts are in
 [Protocols](PROTOCOLS.md#the-observer-fence) and
 [Protocols](PROTOCOLS.md#the-declared-observer); vitality policy is in [Head vitality](HEAD_VITALITY.md).
 
-While a sprint is open its observer is the only product writer for its reserved projects. To intervene,
-the PO passes `--sprint-override` and a non-empty `--sprint-override-reason-file` to `secretary task
-create`, `move` or `edit`; the reason goes to the audit. Refusals: `sprint_write_forbidden` (names the
+While a sprint is open its observer is the only writer of the sprint's cards on its reserved projects. To
+intervene on such a card, the PO passes `--sprint-override` and a non-empty `--sprint-override-reason-file`
+to `secretary task create`, `move` or `edit`; the reason goes to the audit. A PO card linked to no sprint
+needs no override; on a reserved project the dispatcher admits it only as `research` or `infra`, and
+blocks a `code` card at admission with `sprint-reservation-blocked` naming the reserving sprint
+([Protocols](PROTOCOLS.md#cards-outside-a-sprint)). Refusals: `sprint_write_forbidden` (names the
 sprint), `sprint_guard_unavailable` (the sprint store could not be checked), `observer_sprint_mismatch`,
 `observer_identity_unbound`. A running observer without a sprint binding (`bound: false` in
 `status --json`) is stopped by the tick with `observer head predates the sprint binding` and relaunched

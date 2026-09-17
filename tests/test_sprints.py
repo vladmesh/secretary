@@ -2735,10 +2735,11 @@ class SprintTests(SprintFixture):
 
         # An unlinked card in a project the sprint reserves is answered by the reservation
         # guard, not by the admission rule; the admission rule is what a project outside every
-        # reservation still meets.
+        # reservation still meets. Both are asked of the steward: since secretary-1641 the PO may
+        # cut a card outside every sprint, and whether it runs is the dispatcher's admission.
         for kwargs, code in (
-            ({"project": "other"}, "validation"),
-            ({}, "sprint_write_forbidden"),
+            ({"project": "other", "role": "steward", "actor": "steward"}, "validation"),
+            ({"role": "steward", "actor": "steward"}, "sprint_write_forbidden"),
             ({"sprint": ref, "project": "other"}, "sprint_project_unreserved"),
             ({"sprint": ref, "priority": "P1"}, "validation"),
         ):
@@ -4174,13 +4175,18 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
     def test_close_releases_every_repository_and_unheld_projects_skip_sprint_board(self) -> None:
         """A project no open sprint holds is never looked up on the sprint board.
 
-        Such a card is still refused, but by the admission rule (every Ready card needs its own
-        open sprint), not by another sprint's hold — and that is what changes on close.
+        A steward's card there is still refused, but by the admission rule (every Ready card of a
+        role other than the PO needs its own open sprint), not by another sprint's hold — and that
+        is what changes on close. The PO's card outside every sprint is created (secretary-1641).
         """
         self.client.calls.clear()
         with self.assertRaises(TaskError) as unheld:
-            self.tasks.create(role="po", actor="operator", project="unheld", task_type="code", title="normal")
+            self.tasks.create(
+                role="steward", actor="steward", project="unheld", task_type="code", title="normal"
+            )
         self.assertEqual(unheld.exception.code, "validation")
+        created = self.tasks.create(role="po", actor="operator", project="unheld", task_type="code", title="normal")
+        self.assertEqual(created["task"]["state"], "ready")
         self.assertFalse(
             any(
                 method == "getProjectByName" and params.get("name") == "Secretary sprints"
@@ -4190,7 +4196,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
 
         with self.assertRaises(TaskError) as held:
             self.tasks.create(
-                role="po", actor="operator", project="other", task_type="code", title="cross repo"
+                role="steward", actor="steward", project="other", task_type="code", title="cross repo"
             )
         self.assertEqual(held.exception.code, "sprint_write_forbidden")
 
@@ -4198,7 +4204,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
 
         with self.assertRaises(TaskError) as released:
             self.tasks.create(
-                role="po", actor="operator", project="other", task_type="code", title="released"
+                role="steward", actor="steward", project="other", task_type="code", title="released"
             )
         self.assertEqual(released.exception.code, "validation")
 
@@ -4221,7 +4227,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         (Path(self.tmp.name) / "sprints" / "active-repositories.json").unlink()
         with self.assertRaisesRegex(TaskError, self.ref) as denied:
             self.tasks.create(
-                role="po", actor="operator", project="secretary", task_type="code", title="blocked"
+                role="steward", actor="steward", project="secretary", task_type="code", title="blocked"
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
@@ -4264,8 +4270,8 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "sprint:recovered") as denied:
             self.tasks.create(
-                role="po",
-                actor="operator",
+                role="steward",
+                actor="steward",
                 project="recovered",
                 task_type="code",
                 title="blocked",

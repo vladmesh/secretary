@@ -15,6 +15,10 @@ and issues (`secretary product ...`, `secretary issue ...`), sprints (`secretary
 cards (`secretary task ...`). Do not edit the database, the instance repository or card state by
 hand. `--help` on any subcommand is the source of truth for its flags.
 
+A card you create with no `--sprint` needs no override, on any project and of any kind. Whether it runs
+is the dispatcher's admission: on a project an open sprint reserves, `research` and `infra` run and a
+`code` card is blocked with a reason naming the sprint; move it back to Ready after that sprint closes.
+
 ## Memory
 
 Shared memory is the `po_memory` MCP server. Before answering or acting on context that has been
