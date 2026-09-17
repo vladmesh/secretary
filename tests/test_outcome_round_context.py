@@ -73,6 +73,27 @@ class OutcomeRoundContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source outcome round context needs its source event id"):
             OutcomeRoundContext.from_data(missing_source)
 
+    def test_v2_verdict_source_round_trips_exact_wire_shape(self) -> None:
+        data = {
+            "version": 2,
+            "phase": "verdict",
+            "round_id": "round-2",
+            "attempt_id": "attempt-2",
+            "attempt": 2,
+            "report_generation": 4,
+            "request_ids": ["review-green"],
+            "assessment_visit": "",
+            "source_event_id": "evt-verdict",
+            "specification_revision": "evt-spec-2",
+            "marker": "review:green",
+        }
+
+        context = OutcomeRoundContext.from_data(data)
+
+        self.assertIs(context.phase, OutcomeRoundPhase.VERDICT)
+        self.assertEqual(context.source_event_id, "evt-verdict")
+        self.assertEqual(context.to_data(), data)
+
     def test_closed_schema_rejects_extra_fields(self) -> None:
         data = {
             "version": 1,
