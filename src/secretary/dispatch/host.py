@@ -20,7 +20,13 @@ import yaml
 
 from secretary import state_repo
 from secretary._fsutil import write_text_atomic
-from secretary.board.completion_evidence import has_candidate, no_candidate_report_contract
+from secretary.board.completion_evidence import (
+    RESEARCH_REPORT_DIR,
+    RESEARCH_REPORT_FILE,
+    has_candidate,
+    no_candidate_report_contract,
+    research_report_path,
+)
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     ProtocolArtifact,
@@ -4322,13 +4328,19 @@ class CommandHostRuntime:
             "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
             "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
-            # Deliberately duplicates the gate's own deterministic preflight: a check that only
-            # ever runs in one place has no second opinion.
-            "Read the commit messages on this branch, not only the diff. AI co-authorship is",
-            "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
-            "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
-            "found; do not rewrite history yourself.",
-            "",
+            *(
+                [
+                    # Deliberately duplicates the gate's own deterministic preflight: a check that only
+                    # ever runs in one place has no second opinion.
+                    "Read the commit messages on this branch, not only the diff. AI co-authorship is",
+                    "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
+                    "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
+                    "found; do not rewrite history yourself.",
+                    "",
+                ]
+                if has_candidate(task)
+                else _no_candidate_review_subject(task)
+            ),
             "When a change depends on how an external backend behaves, a passing fixture is not",
             "evidence: it can encode the same wrong assumption as the code under review. Say which",
             "real behaviour you verified and how. If no end-to-end check against the real backend",
@@ -4340,6 +4352,17 @@ class CommandHostRuntime:
             verdict_commands["red"],
             "",
         ]
+        if not has_candidate(task):
+            # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
+            if record and record.previous_blockers:
+                sections[4:4] = [
+                    "## Re-review packet",
+                    "",
+                    "Previous blockers (close or explicitly retain these stable IDs):",
+                    _safe_one_line(record.previous_blockers, limit=2000),
+                    "",
+                ]
+            return "\n".join(sections)
         if attestation:
             sections[4:4] = [
                 "## Mechanical gate attestation",
@@ -4641,6 +4664,24 @@ def _body_file_path(kind: str, reference: str, review_round: int) -> str:
     """
     root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
     return f"{root}/secretary-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
+
+
+def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
+    """What a reviewer of a research/infra card reviews, in place of a branch and its commits."""
+    if str(task.get("type") or "") == "research":
+        return [
+            "This research card has no candidate: there is no branch, diff or pull request to review.",
+            f"Review the report directory: `{RESEARCH_REPORT_DIR}/` in the worker's workspace (the",
+            f"report is `{RESEARCH_REPORT_DIR}/{RESEARCH_REPORT_FILE}`, with its artifacts beside it). Once",
+            f"transferred it lives in the instance repository at `{research_report_path(str(task['ref']))}`.",
+            "",
+        ]
+    return [
+        "This infra card has no candidate: there is no branch, diff or pull request to review.",
+        "Review the worker's `report:done` body on the card: its `## What was done` section and its",
+        "`## How to verify` section, a command or observation you can repeat.",
+        "",
+    ]
 
 
 def _body_file_instructions(body_file: str) -> list[str]:

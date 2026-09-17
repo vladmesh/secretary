@@ -421,7 +421,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             first = exclude.read_text(encoding="utf-8")
             host._prepare_workspace_environment(str(workspace))
 
-            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n")
+            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n/.secretary-report/\n")
             self.assertEqual(exclude.read_text(encoding="utf-8"), first)
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:

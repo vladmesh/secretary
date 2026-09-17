@@ -5352,12 +5352,24 @@ class ReportDurabilityGateTests(unittest.TestCase):
 
     def test_a_research_or_infra_done_report_does_not_require_a_committed_workspace(self) -> None:
         """No candidate is published for these kinds; report artifacts may sit uncommitted."""
-        (self.workspace / "report.md").write_text("findings\n", encoding="utf-8")
+        (self.workspace / ".secretary-report").mkdir()
+        (self.workspace / ".secretary-report" / "report.md").write_text("findings\n", encoding="utf-8")
         infra = "## What was done\nRotated the key.\n\n## How to verify\n`ssh host true`\n"
         for kind, body in (("research", "findings"), ("infra", infra)):
             with self.subTest(kind=kind):
                 self.client.metadata[12]["task_type"] = kind
                 self.assertEqual(self._report("done", body)["action"], "reported")
+
+    def test_a_research_done_report_without_its_report_file_is_refused_without_touching_the_board(self) -> None:
+        self.client.metadata[12]["task_type"] = "research"
+        (self.workspace / "report.md").write_text("findings at the wrong place\n", encoding="utf-8")
+        with self.assertRaises(TaskError) as caught:
+            self._report("done", "findings")
+        self.assertEqual(caught.exception.code, "validation")
+        self.assertIn("`.secretary-report/report.md`", caught.exception.message)
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
 
     def test_an_infra_done_report_without_both_sections_is_refused(self) -> None:
         self.client.metadata[12]["task_type"] = "infra"

@@ -228,7 +228,9 @@ mechanical trivial change; it still runs the gate and merges on release.
 
 A `research` or `infra` card publishes no branch, pull request or CI run. An infra worker's done report
 carries `## What was done` and `## How to verify`, which become the card's completion record. A research
-card reaches Done only with its report link, whose producer is defined later.
+worker leaves its report in `.secretary-report/report.md` of its workspace; before the card parks in
+Assessment the dispatcher commits that directory to `state/knowledge/reports/<card ref>/` and links it,
+so read the report there when you decide.
 
 A card that pulls changes beyond its own repository is cut into a chain with `--blocked-by`.
 

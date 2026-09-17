@@ -21,7 +21,7 @@ from typing import Any
 
 from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.completion_evidence import has_candidate, infra_report_fields
+from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
@@ -2224,6 +2224,15 @@ class TaskWriter:
             identity=payload,
         )
 
+    def _research_report_refusal(self) -> str:
+        """The research report directory check, over the checkout the worker reports from."""
+        if self.workspace is not None:
+            return research_report_refusal(self.workspace)
+        try:
+            return research_report_refusal(Path.cwd())
+        except OSError:
+            return ""
+
     def _require_committed_workspace(self) -> None:
         """Refuse a done report from a dirty checkout.
 
@@ -2309,6 +2318,10 @@ class TaskWriter:
                     # A research/infra card has no candidate, so its checkout may hold uncommitted
                     # artifacts; an infra report carries its completion record instead.
                     _fields, refusal = infra_report_fields(body)
+                    if refusal:
+                        raise TaskError("validation", refusal, 2)
+                elif current.get("type") == "research":
+                    refusal = self._research_report_refusal()
                     if refusal:
                         raise TaskError("validation", refusal, 2)
             revision = specification_revision(self.audit.events(reference), current["description"])
