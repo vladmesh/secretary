@@ -92,7 +92,9 @@ refusal names what is missing or empty.
 **Review choice** is stored on the card as `review: required|skipped`. The default is `required`
 for `code` and `skipped` for `research` and `infra`; `--review required|skipped` overrides it in
 either direction. `--review-head <head>` without `--review` means `required`. A reviewer head
-together with `skipped` is refused, at create and at `task edit --review-head`. A card written
+together with `skipped` is refused, at create and at `task edit --review-head`. A sprint's reviewer
+pin applies only to reviewed cards: a `skipped` card stores no reviewer head, and `task edit
+--review-head ""` does not write the pin back; the worker pin applies to every kind. A card written
 before the choice was stored reads as `required`. The store keeps the value in `tasks.review` and
 `tasks.live_impact`, and export/restore carries both.
 

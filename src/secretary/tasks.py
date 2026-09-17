@@ -1908,6 +1908,7 @@ class TaskWriter:
                     head=head,
                     review_head=review_head,
                     sprint=linked_sprint,
+                    review_skipped=review_value is TaskReview.SKIPPED,
                 )
                 head, review_head = pinned_head or "", pinned_review or ""
         if budget_event not in {"", "recreated_task", "hotfix"}:
@@ -3366,6 +3367,7 @@ class TaskWriter:
             sprint_ref=str(current.get("sprint") or ""),
             head=head,
             review_head=review_head,
+            review_skipped=current.get("review") == TaskReview.SKIPPED.value,
         )
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
@@ -3425,6 +3427,7 @@ class TaskWriter:
         head: str | None,
         review_head: str | None,
         sprint: dict[str, Any] | None = None,
+        review_skipped: bool = False,
     ) -> tuple[str | None, str | None]:
         """The single place a card's worker and reviewer profile is held to its sprint's pins.
 
@@ -3440,6 +3443,10 @@ class TaskWriter:
         than something a default resolves later — the card carries the profiles it runs on exactly
         as it always has. A different profile is refused by name.
 
+        A reviewer pin binds only a reviewed card: with `review_skipped` the reviewer field is
+        returned as asked, so a skipped card stores no reviewer head. The callers refuse a
+        non-empty reviewer head on a skipped card before they get here.
+
         A role the sprint pins nothing on is untouched, which is every sprint opened until now. A
         field that is there but unreadable is corruption, and a card is not written under a
         constraint nobody can read.
@@ -3453,7 +3460,7 @@ class TaskWriter:
         states = entity.get("executors") or {}
         for role in EXECUTOR_FIELDS:
             asked = requested[role]
-            if asked is None:
+            if asked is None or (role == "reviewer" and review_skipped):
                 continue
             state = states.get(role) or {"state": EXECUTOR_UNSET}
             if state.get("state") == EXECUTOR_UNSET:

@@ -2560,6 +2560,79 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
+    @contextlib.contextmanager
+    def pinned_sprint(self):
+        """The open sprint with both executors pinned, as `sprint:1446` itself is."""
+        from secretary.sprint_observer import executor_pinned
+
+        with self.open_sprint() as ref:
+            sprint = {
+                "ref": ref,
+                "status": "open",
+                "repositories": ["secretary"],
+                "reservations": ["secretary"],
+                "executors": {"worker": executor_pinned("codex-worker"), "reviewer": executor_pinned("claude-review")},
+            }
+            with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
+                yield ref
+
+    def create_in_pinned_sprint(self, reference: str, task_type: str, **fields: object) -> dict:
+        with self.pinned_sprint() as sprint:
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type=task_type,
+                title=f"{task_type} card",
+                reference=reference,
+                request_id=f"create-{reference}",
+                sprint=sprint,
+                **fields,
+            )
+        card = self.card(reference)
+        return {
+            "review": card["review"],
+            "head": card["routing"]["head_override"],
+            "review_head": card["routing"]["review_head_override"],
+        }
+
+    def test_a_sprint_reviewer_pin_binds_only_reviewed_cards(self) -> None:
+        """secretary-1638 rework: a skipped card stores no reviewer head; the worker pin still applies."""
+        for reference, task_type, fields, expected in (
+            ("secretary-560", "research", {}, ("skipped", "codex-worker", None)),
+            ("secretary-561", "infra", {}, ("skipped", "codex-worker", None)),
+            ("secretary-562", "code", {}, ("required", "codex-worker", "claude-review")),
+            ("secretary-563", "research", {"review": "required"}, ("required", "codex-worker", "claude-review")),
+            ("secretary-564", "code", {"review": "skipped"}, ("skipped", "codex-worker", None)),
+        ):
+            with self.subTest(reference=reference):
+                stored = self.create_in_pinned_sprint(reference, task_type, **fields)
+                self.assertEqual(
+                    (stored["review"], stored["head"], stored["review_head"] or None), expected
+                )
+
+        before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+            self.create_in_pinned_sprint("secretary-565", "research", review="skipped", review_head="claude-review")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    def test_edit_does_not_write_a_pinned_reviewer_back_onto_a_skipped_card(self) -> None:
+        self.create_in_pinned_sprint("secretary-566", "infra")
+        self.create_in_pinned_sprint("secretary-567", "code")
+        with self.pinned_sprint():
+            self.writer.edit(role="observer", actor="observer", reference="secretary-566", review_head="")
+            self.writer.edit(role="observer", actor="observer", reference="secretary-567", review_head="")
+        self.assertIsNone(self.card("secretary-566")["routing"]["review_head_override"] or None)
+        self.assertEqual(self.card("secretary-566")["routing"]["head_override"], "codex-worker")
+        self.assertEqual(self.card("secretary-567")["routing"]["review_head_override"], "claude-review")
+
+        before = self.board_snapshot()
+        with self.pinned_sprint(), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+            self.writer.edit(role="observer", actor="observer", reference="secretary-566", review_head="claude-review")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
     def test_auto_reference_uses_board_wide_project_high_water_mark(self) -> None:
         # The new Kanboard row will be 14, which is already a historical reference.
         self.client.tasks[0]["reference"] = "secretary-14"
