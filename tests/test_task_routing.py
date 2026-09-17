@@ -22,14 +22,17 @@ from secretary.board.task_routing import (
     TaskComplexity,
     TaskDecision,
     TaskMetadata,
+    TaskReview,
     TaskRouting,
     TaskType,
+    default_review,
+    impact_bounds_refusal,
 )
 
 
 class TaskRoutingVocabularyTests(unittest.TestCase):
     def test_closed_vocabularies_keep_the_released_spellings(self) -> None:
-        self.assertEqual(TASK_TYPE_VALUES, {"code", "research"})
+        self.assertEqual(TASK_TYPE_VALUES, {"code", "research", "infra"})
         self.assertEqual(TASK_COMPLEXITY_VALUES, {"cheap", "standard", "hard", "frontier"})
         self.assertEqual(FAMILY_PREFERENCE_VALUES, {"auto", "claude", "codex"})
         self.assertEqual(ROUTING_PHASE_VALUES, {"worker", "review", "verdict"})
@@ -134,6 +137,35 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
         self.assertIsNone(metadata.task_type)
         self.assertEqual(metadata.task_type_raw, "old-kind")
         self.assertEqual(metadata.to_document_fields()["type"], "old-kind")
+
+    def test_review_and_live_impact_are_typed_and_legacy_silence_reads_as_required(self) -> None:
+        legacy = TaskMetadata.from_legacy({"task_type": "research"}, codex_modes={"tui"})
+        self.assertIs(legacy.review, TaskReview.REQUIRED)
+        self.assertFalse(legacy.live_impact)
+        stored = TaskMetadata.from_legacy(
+            {"task_type": "research", "review": "skipped", "live_impact": "1"}, codex_modes={"tui"}
+        )
+        document = stored.to_document_fields()
+        self.assertEqual((document["type"], document["review"], document["live_impact"]), ("research", "skipped", True))
+        self.assertIs(TaskMetadata.from_legacy({"task_type": "infra"}, codex_modes={"tui"}).task_type, TaskType.INFRA)
+        self.assertEqual(
+            [default_review(kind) for kind in (TaskType.CODE, TaskType.RESEARCH, TaskType.INFRA)],
+            [TaskReview.REQUIRED, TaskReview.SKIPPED, TaskReview.SKIPPED],
+        )
+
+    def test_impact_bounds_need_three_non_empty_subsections_under_the_section(self) -> None:
+        complete = "## Impact bounds\n### Allowed\na\n### Forbidden\nb\n### Cleanup\nc\n"
+        self.assertEqual(impact_bounds_refusal("# Title\n\n" + complete + "## Later\nx"), "")
+        self.assertIn("needs a '## Impact bounds' section", impact_bounds_refusal("### Allowed\na"))
+        self.assertIn(
+            "missing '### Forbidden', '### Cleanup' and has empty '### Allowed'",
+            impact_bounds_refusal("## Impact bounds\n### Allowed\n   \n"),
+        )
+        # A subsection after the section has ended does not count.
+        self.assertIn(
+            "missing '### Cleanup'",
+            impact_bounds_refusal("## Impact bounds\n### Allowed\na\n### Forbidden\nb\n## Else\n### Cleanup\nc"),
+        )
 
     def test_tasks_no_longer_owns_duplicate_routing_registries(self) -> None:
         for name in (

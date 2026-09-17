@@ -44,6 +44,7 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_a
 # cases a second time here, once more on the backend they already run on in test_tasks.py.
 from tests import test_tasks as kanboard_cases
 from tests.fakes.tasks import FakeKanboard, WriteKanboard
+from tests.restore_fixtures import _EmptyWriteKanboard
 from tests.sql_backend_fixtures import PostgresBoard, seed_client
 
 
@@ -992,6 +993,10 @@ KANBOARD_ONLY = {
         "the same, for a steward report: nothing survives the failure to recover from, so the "
         "retry creates rather than replays"
     ),
+    "test_pending_create_replay_restores_review_and_live_impact": (
+        "a metadata write refused after the create committed.  One transaction rolls both back, so "
+        "there is no pending create to repair"
+    ),
     "test_sigint_before_atomic_create_does_not_adopt_same_identity_later_reference": (
         "a SIGINT inside the create.  The interrupt rolls the transaction back, leaving no "
         "staged record for a later card to be wrongly adopted into"
@@ -1084,6 +1089,22 @@ class SqlTaskWriterParityTests(KanboardFixtureCase, kanboard_cases.TaskWriterTes
             kanboard_cases.open_sprint(ref, project) as sprint,
         ):
             yield sprint
+
+    def restore_destination(self):
+        """A fresh migrated store holding only the project and sprint the restored cards name."""
+        destination = seed_client(self.board.fresh_database(), _EmptyWriteKanboard(), Path(self.tmpdir.name))
+        self.addCleanup(destination.close)
+        now = datetime.now(UTC)
+        with destination.transaction():
+            destination._execute(
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES ('secretary', true, true)"
+            )
+            destination._execute(
+                "INSERT INTO sprints (ref, board_key, goal, definition_of_done, status, created_at, "
+                "updated_at) VALUES (%s, %s, 'a goal', 'a definition', 'open', %s, %s)",
+                ("sprint:test", backend.record_key("sprint", "sprint:test"), now, now),
+            )
+        return destination
 
     def remove_card(self, reference: str) -> None:
         """The one fixture verb the card protocol does not carry (see `BoardFixture`)."""

@@ -353,11 +353,12 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        self.assertEqual(len(checks), 48, "§3.13 counts 48 CHECK constraints at the head revision")
+        self.assertEqual(len(checks), 50, "§3.13 counts 50 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
-            "task_type IN ('code','research')",
+            "task_type IN ('code','research','infra')",
+            "review IN ('required','skipped')",
             "status IN ('staged','committed','discarded')",
         ):
             self.assertTrue(
@@ -453,6 +454,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0011_card_kinds",
                 "0010_po_session_close",
                 "0009_po_requests",
                 "0008_po_sessions",

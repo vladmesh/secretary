@@ -68,8 +68,9 @@ SELECT
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`. `0008` adds
 #: the three PO tables: six `CHECK`, two foreign keys, three primary keys, one partial unique index.
 #: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key. `0010` adds one `CHECK`
-#: on `po_sessions` (closed exactly when audited).
-DOCUMENTED_COUNTS = (28, 48, 44, 28, 17, 5)
+#: on `po_sessions` (closed exactly when audited). `0011` restates the `task_type` CHECK (one for one)
+#: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
+DOCUMENTED_COUNTS = (28, 50, 44, 28, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -83,6 +84,7 @@ REVISIONS = (
     "0008_po_sessions",
     "0009_po_requests",
     "0010_po_session_close",
+    "0011_card_kinds",
 )
 
 
@@ -447,7 +449,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests", "0010_po_session_close"),
+            (
+                "0007_card_transport_key",
+                "0008_po_sessions",
+                "0009_po_requests",
+                "0010_po_session_close",
+                "0011_card_kinds",
+            ),
         )
         rows = connection.exec_driver_sql(
             "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
@@ -670,6 +678,51 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaises(sa.exc.IntegrityError):
             self.card(connection, "secretary-584", task_type="chore")
         connection.rollback()
+
+    def test_0011_keeps_existing_cards_and_admits_the_new_kind_and_fields(self) -> None:
+        """secretary-1638: `code`, `research` and typeless rows survive; `infra` and the two fields land."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords), "0010_po_session_close"
+        )
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        self.card(connection, "secretary-1", task_type="code")
+        self.card(connection, "secretary-2", task_type="research")
+        self.card(connection, "secretary-3", task_type=None)
+        connection.commit()
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.card(connection, "secretary-4", task_type="infra")
+        connection.rollback()
+
+        self.assertEqual(self.run_migrations(connection), ("0011_card_kinds",))
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT task_ref, task_type, review, live_impact FROM tasks ORDER BY task_ref"
+            ).fetchall(),
+            [
+                ("secretary-1", "code", None, False),
+                ("secretary-2", "research", None, False),
+                ("secretary-3", None, None, False),
+            ],
+        )
+        self.card(connection, "secretary-4", task_type="infra")
+        connection.exec_driver_sql(
+            "UPDATE tasks SET review = 'skipped', live_impact = true WHERE task_ref = 'secretary-2'"
+        )
+        connection.commit()
+        for statement in (
+            "UPDATE tasks SET review = 'sometimes' WHERE task_ref = 'secretary-1'",
+            "UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-4'",
+            "UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-3'",
+        ):
+            with self.subTest(statement=statement), self.assertRaises(sa.exc.IntegrityError):
+                connection.exec_driver_sql(statement)
+            connection.rollback()
 
     def test_a_dependency_on_a_card_the_board_does_not_hold_is_kept(self) -> None:
         """AC 5: nine `blocked_by` values name cards that are not on this board."""

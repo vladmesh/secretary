@@ -1063,6 +1063,12 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
 def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
     fields = _restore_fields(card)
     metadata = card["metadata"]
+    # Not a restore field: a card exported without a stored choice is restored without one, and
+    # both read as the same value.
+    kind = TaskMetadata.from_legacy(
+        {"review": metadata.get("review"), "live_impact": metadata.get("live_impact")},
+        codex_modes=CODEX_LAUNCH_MODES,
+    )
     return {
         "ref": card["reference"],
         "title": card["title"],
@@ -1071,6 +1077,8 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
         "closed": bool(card.get("closed", False)),
         "project": fields["project"],
         "type": fields["task_type"],
+        "review": kind.review.value,
+        "live_impact": kind.live_impact,
         "blocked_by": fields["blocked_by"] or None,
         "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
         "routing": {
@@ -1105,6 +1113,8 @@ def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
         "closed": bool(card.get("closed", False)),
         "project": card.get("project"),
         "type": card.get("type"),
+        "review": card.get("review"),
+        "live_impact": card.get("live_impact"),
         "blocked_by": card.get("blocked_by"),
         "claim": card.get("claim"),
         "routing": {
