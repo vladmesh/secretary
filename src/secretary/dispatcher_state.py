@@ -175,6 +175,7 @@ class PersistedRoutingHeadSnapshot(dict[str, Any]):
         """Project the exact released dispatcher-state object."""
         return dict(self)
 
+
 @dataclass
 class DispatcherRecord:
     worker: str
