@@ -168,8 +168,8 @@ reason `completion evidence missing` naming the absent marker, and its workspace
 
   If the transfer is refused or fails, the card goes to Blocked with the reason `research report
   transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
-  `source_empty`, `special_file` (a symlink, a special file or a `.git` entry), `secret`, `size_cap` or
-  `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  `source_empty`, `special_file` (a symlink, a special file or an entry whose name starts with
+  `.git`), `secret`, `size_cap` or `write_failed` (a filesystem or git error). No link is written, nothing is committed under
   `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
   still the only check before Done.
 
@@ -3125,9 +3125,16 @@ python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
-special file or `.git` entry anywhere in it; a text file (UTF-8 without NUL bytes) that contains a
-secret; a total size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned.
-Empty subdirectories are not kept. If the commit fails the previous directory is put back.
+special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
+`.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
+size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
+subdirectories are not kept. If the commit fails the previous directory is put back.
+
+The swap is staged outside `state/knowledge`, in `state/.knowledge-swap/` on the same filesystem: the
+new contents are written there, the previous directory is moved beside them, and a file names the
+target. A crash mid-swap therefore leaves nothing under `state/knowledge` for a knowledge commit to
+pick up. Every knowledge write (`--file` or `--dir`) first recovers interrupted swaps under the state
+repository lock: a previous directory whose target is gone is moved back, and the rest is removed.
 
 ## Secrets
 
