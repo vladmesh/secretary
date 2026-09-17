@@ -31,6 +31,7 @@ from secretary.webfront.caddyfile import (
     PASSWORD_SECRET_ID,
     SESSION_COOKIE_MAX_AGE,
     SESSION_COOKIE_NAME,
+    SESSION_SECRET_ID,
     FrontConfig,
     FrontConfigError,
     render,
@@ -42,12 +43,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: A bcrypt hash of no password anybody holds: the shape `basicauth` checks, and nothing more.
 SAMPLE_HASH = "$2a$14$" + "x" * 53
+#: A fixture with more entropy-shaped text than the renderer's minimum; never a production secret.
+SAMPLE_SESSION_SECRET = "fixture-session-secret-" + "x" * 32
 
 SITES = ("https://front.example", "https://198.51.100.7")
 
 
 def rendered(**overrides) -> str:
-    fields = {"sites": SITES, "password_hash": SAMPLE_HASH}
+    fields = {
+        "sites": SITES,
+        "password_hash": SAMPLE_HASH,
+        "session_secret": SAMPLE_SESSION_SECRET,
+    }
     fields.update(overrides)
     return render(FrontConfig(**fields))
 
@@ -83,13 +90,13 @@ class GuardCoverageTests(unittest.TestCase):
         site = parse(rendered())[0]
         self.assertEqual(site.auth_matchers, frozenset({"@owner_session"}))
 
-    def test_a_forged_cookie_value_is_not_treated_as_a_guard(self) -> None:
-        expected = session_cookie_value(SAMPLE_HASH)
-        forged = rendered().replace(expected, "0" * 64)
+    def test_a_wildcard_cookie_value_is_not_treated_as_a_guard(self) -> None:
+        expected = session_cookie_value(SAMPLE_SESSION_SECRET)
+        forged = rendered().replace(expected, "*")
         self.assertEqual(len(unguarded_routes(forged, ROUTES)), len(ROUTES))
 
     def test_a_cookie_guard_does_not_hide_an_unguarded_no_cookie_fallback(self) -> None:
-        session = session_cookie_value(SAMPLE_HASH)
+        session = session_cookie_value(SAMPLE_SESSION_SECRET)
         leaky = f"""
 https://front.example {{
 	tls internal
@@ -201,8 +208,13 @@ class RenderedConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(FrontConfigError):
                 rendered(password_hash=value)
 
+    def test_a_front_with_no_real_session_secret_is_refused(self) -> None:
+        for value in ("", "short", "contains whitespace and is long enough to otherwise pass"):
+            with self.subTest(value=value), self.assertRaises(FrontConfigError):
+                rendered(session_secret=value)
+
     def test_successful_basic_auth_mints_a_30_day_host_cookie(self) -> None:
-        session = session_cookie_value(SAMPLE_HASH)
+        session = session_cookie_value(SAMPLE_SESSION_SECRET)
         text = rendered()
         self.assertIn(f"@owner_session header Cookie *{SESSION_COOKIE_NAME}={session}*", text)
         self.assertIn("handle @owner_session", text)
@@ -213,9 +225,11 @@ class RenderedConfigTests(unittest.TestCase):
             text,
         )
 
-    def test_password_rotation_changes_the_browser_session_value(self) -> None:
-        other_hash = "$2a$14$" + "y" * 53
-        self.assertNotEqual(session_cookie_value(SAMPLE_HASH), session_cookie_value(other_hash))
+    def test_session_secret_rotation_changes_the_browser_session_value(self) -> None:
+        other_secret = "fixture-session-secret-" + "y" * 32
+        self.assertNotEqual(
+            session_cookie_value(SAMPLE_SESSION_SECRET), session_cookie_value(other_secret)
+        )
 
     def test_no_credential_and_no_admin_surface_is_rendered(self) -> None:
         text = rendered()
@@ -229,7 +243,7 @@ class RenderedConfigTests(unittest.TestCase):
         self.assertIn("\tbind 127.0.0.1", rendered(bind=("127.0.0.1",)))
 
     def test_the_repository_holds_no_password_and_no_hash(self) -> None:
-        """Criterion 6: the hash reaches the file at render time and lives in the store."""
+        """Criterion 6: auth values reach the file at render time and live in the store."""
         for path in sorted((REPO_ROOT / "src" / "secretary" / "webfront").rglob("*.py")):
             body = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
@@ -237,6 +251,7 @@ class RenderedConfigTests(unittest.TestCase):
                 self.assertNotIn("$2b$", body)
         self.assertEqual(PASSWORD_SECRET_ID, "web-front-password")
         self.assertEqual(HASH_SECRET_ID, "web-front-password-hash")
+        self.assertEqual(SESSION_SECRET_ID, "web-front-session-secret")
 
 
 class ShippedUnitTests(unittest.TestCase):
