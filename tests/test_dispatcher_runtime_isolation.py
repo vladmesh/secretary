@@ -118,7 +118,6 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             host.catalog = SimpleNamespace(integration_base=lambda project, override: "main")
             with (
                 mock.patch("secretary.dispatch.host._validation_ci", return_value="github"),
-                mock.patch.object(host, "_no_diff_research_delivery_is_complete", return_value=False),
                 mock.patch.object(
                     host, "_merge_github_pr", side_effect=lambda *args: host.effects.append("merge")
                 ),

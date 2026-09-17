@@ -219,8 +219,16 @@ The reviewer comes from a different family than the worker:
 
 If the other family is temporarily unavailable, wait or take another of its profiles. If that blocks the
 sprint for long, an independent reviewer from the same family on a different profile is acceptable;
-record the exception in a resume entry. Do not use `--review-head none` automatically, except for a fully
-mechanical trivial change.
+record the exception in a resume entry.
+
+The reviewer head says who reviews, not whether review runs. That is the card's `review` choice: the
+kind default is `required` for `code` and `skipped` for `research` and `infra`, and `--review skipped`
+or `--review required` at `task create` overrides it. Skip review on a code card only for a fully
+mechanical trivial change; it still runs the gate and merges on release.
+
+A `research` or `infra` card publishes no branch, pull request or CI run. An infra worker's done report
+carries `## What was done` and `## How to verify`, which become the card's completion record. A research
+card reaches Done only with its report link, whose producer is defined later.
 
 A card that pulls changes beyond its own repository is cut into a chain with `--blocked-by`.
 

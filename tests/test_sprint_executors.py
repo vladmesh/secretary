@@ -224,6 +224,12 @@ class ObserverPromptExecutorTests(unittest.TestCase):
             # What the section must never license: a sprint whose cards run without that role.
             self.assertIn(f"not a sprint that runs without a {role}", document)
 
+    def test_whether_review_runs_is_the_card_s_review_choice_not_a_reviewer_head(self) -> None:
+        document = render_observer_prompt({"ref": "sprint:1", "executors": UNSET_BOTH, "comments": []})
+        self.assertIn("`task create --review skipped`", document)
+        self.assertIn("skipped for `research` and `infra`", document)
+        self.assertNotIn("--review-head none", document)
+
     def test_a_pinned_role_names_the_profile_every_card_runs_on(self) -> None:
         document = render_observer_prompt(
             {

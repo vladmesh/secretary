@@ -21,6 +21,7 @@ from typing import Any
 
 from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
+from secretary.board.completion_evidence import has_candidate, infra_report_fields
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
@@ -2296,13 +2297,20 @@ class TaskWriter:
                 raise
         marker_data = owned.data if owned is not None else {}
         if owned is None and not legacy_owned:
-            if kind == "done":
-                self._require_committed_workspace()
             # This is the writer boundary for a worker report.  Bind the
             # report to the specification it actually answered now, rather
             # than asking a later terminal projection to guess from a mutable
             # card description.
             current = self.reader.show(reference)
+            if kind == "done":
+                if has_candidate(current):
+                    self._require_committed_workspace()
+                elif current.get("type") == "infra":
+                    # A research/infra card has no candidate, so its checkout may hold uncommitted
+                    # artifacts; an infra report carries its completion record instead.
+                    _fields, refusal = infra_report_fields(body)
+                    if refusal:
+                        raise TaskError("validation", refusal, 2)
             revision = specification_revision(self.audit.events(reference), current["description"])
             specification_data = {
                 "description_sha256": _digest(current["description"]),

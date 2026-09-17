@@ -3418,6 +3418,13 @@ def _executor_lines(sprint: dict[str, Any]) -> list[str]:
             else f"- {role}: not pinned. The owner fixed no {role} profile for this sprint, so you "
             f"choose one per card under the current rules — not a sprint that runs without a {role}."
         )
+    # The reviewer head says who reviews, never whether: that is the card's stored review choice.
+    lines.append(
+        "- review: whether a card is reviewed at all is its `review` choice, not the reviewer head. "
+        "It defaults to required for `code` and skipped for `research` and `infra`; "
+        "`task create --review skipped` or `--review required` overrides the default. A skipped "
+        "card launches no reviewer; a skipped code card still runs the gate and merges on release."
+    )
     return lines
 
 
