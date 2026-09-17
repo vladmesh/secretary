@@ -203,6 +203,7 @@ def routing_head_snapshot_from_launch(
     )
     return _enrich_routing_head_snapshot(snapshot, lifecycle)
 
+
 def _enrich_routing_head_snapshot(
     snapshot: dict[str, Any], lifecycle: dict[str, Any]
 ) -> RoutingHeadSnapshot:
