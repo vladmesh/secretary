@@ -9,9 +9,10 @@ cannot be bound anywhere a second way could reach.
 
 The application still implements no authentication. Caddy bootstraps a browser with `basicauth`
 against the bcrypt hash from the installation's secret store, then accepts a 30-day secure bearer
-cookie derived from that same hash. Rotating the password changes the hash and invalidates every
-issued bearer on the next render. The repository holds neither a plaintext credential nor a bearer;
-the rendered file is machine state under the data directory.
+cookie derived from an independent random session secret. `set-password` rotates that secret, so a
+password change revokes every issued bearer without turning the bcrypt verifier itself into a
+credential. The repository holds neither a plaintext password nor a session secret; the rendered
+file is private machine state under the data directory.
 
 Two modules, two jobs:
 
@@ -30,6 +31,7 @@ from secretary.webfront.caddyfile import (
     DEFAULT_UPSTREAM_PORT,
     HASH_SECRET_ID,
     PASSWORD_SECRET_ID,
+    SESSION_SECRET_ID,
     USERNAME,
     FrontConfig,
     render,
@@ -41,6 +43,7 @@ __all__ = [
     "DEFAULT_UPSTREAM_PORT",
     "HASH_SECRET_ID",
     "PASSWORD_SECRET_ID",
+    "SESSION_SECRET_ID",
     "USERNAME",
     "CaddyfileSyntaxError",
     "FrontConfig",
