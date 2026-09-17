@@ -117,17 +117,20 @@ def render(config: FrontConfig) -> str:
     lines.append(f"\t\treverse_proxy {_upstream(config)}")
     lines.append("\t}")
     lines.append("")
-    lines.append("\t# Without that cookie, keep the existing HTTP Basic challenge. A successful")
-    lines.append("\t# password check adds the persistent cookie without replacing application cookies.")
+    lines.append("\t# Without that cookie, keep the existing HTTP Basic challenge. `route` is")
+    lines.append("\t# intentional: Caddy normally reorders directives, while the cookie must only be")
+    lines.append("\t# minted after Basic Auth has admitted the request, never on its 401 challenge.")
     lines.append("\thandle {")
-    lines.append("\t\tbasicauth {")
-    lines.append(f"\t\t\t{config.username} {config.password_hash}")
-    lines.append("\t\t}")
+    lines.append("\t\troute {")
+    lines.append("\t\t\tbasicauth {")
+    lines.append(f"\t\t\t\t{config.username} {config.password_hash}")
+    lines.append("\t\t\t}")
     lines.append(
-        f'\t\theader +Set-Cookie "{SESSION_COOKIE_NAME}={session}; Path=/; '
+        f'\t\t\theader +Set-Cookie "{SESSION_COOKIE_NAME}={session}; Path=/; '
         f'Max-Age={SESSION_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"'
     )
-    lines.append(f"\t\treverse_proxy {_upstream(config)}")
+    lines.append(f"\t\t\treverse_proxy {_upstream(config)}")
+    lines.append("\t\t}")
     lines.append("\t}")
     lines.append("}")
     return "\n".join(lines) + "\n"
