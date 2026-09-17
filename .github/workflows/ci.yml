@@ -13,6 +13,31 @@ env:
   TA_SECRETARY_REPO: ${{ github.workspace }}
 
 jobs:
+  a12_source_patch:
+    name: A12 source transform
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - run: python3 scripts/a12_patch_sources.py
+      - name: Commit transformed sources once
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          git add src/secretary/tasks.py src/secretary/dispatcher.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "A12: type outcome round context end to end"
+          git push origin "HEAD:${HEAD_BRANCH}"
+
   test_suites:
     name: test / ${{ matrix.suite }}
     runs-on: ubuntu-latest
