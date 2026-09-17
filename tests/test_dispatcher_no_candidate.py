@@ -18,6 +18,7 @@ from secretary.board.completion_evidence import (
     render_research_completion_link,
     review_required,
 )
+from secretary.dispatcher_observer import render_observer_prompt
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeKanboard
@@ -290,6 +291,14 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         records = self._comments("[completion:infra]")
         self.assertEqual(len(records), 2)
         self.assertIn("prints ok", records[-1])
+
+
+class ObserverReviewChoiceWordingTests(unittest.TestCase):
+    def test_whether_review_runs_is_the_card_s_review_choice_not_a_reviewer_head(self) -> None:
+        document = render_observer_prompt({"ref": "sprint:1", "comments": []})
+        self.assertIn("`task create --review skipped`", document)
+        self.assertIn("skipped for `research` and `infra`", document)
+        self.assertNotIn("--review-head none", document)
 
 
 class CompletionEvidenceParsingTests(unittest.TestCase):

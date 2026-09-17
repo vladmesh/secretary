@@ -700,7 +700,6 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
     def test_a_bounced_done_report_arms_the_signal_and_an_accepted_one_disarms_it(self) -> None:
         from tests.fakes.dispatcher import GateResult
 
-        self.board.metadata[12]["task_type"] = "research"
         self.start_dispatcher()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self._run_worker_to_validate()
