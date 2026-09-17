@@ -7488,12 +7488,11 @@ class DispatcherRuntime:
             # today's `heads.toml` for a head launched hours ago would not.
             snapshot = _usage_fallback_snapshot(journal_role, record, lifecycle, role=role)
         try:
-            snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=lifecycle)
+            run = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=lifecycle)
         except ValueError:
-            # An incomplete launch attestation is not a reason to drop the occurrence: the run
-            # below still reports its own adapter, model and whatever session identity it holds.
-            pass
-        run = HeadRun.from_json(snapshot)
+            # An incomplete launch attestation is not a reason to drop the occurrence: the routing
+            # snapshot still reports its adapter, model and whatever session identity it already held.
+            run = HeadRun.from_json(snapshot)
         # One order, for every provider and every lifecycle path. Projection integrity and causal
         # identity first, because neither depends on what a provider journal says and a phase slot
         # owned by another attempt may not be written whatever that journal would have said.
