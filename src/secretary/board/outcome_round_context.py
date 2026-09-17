@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Self, cast
 
 
 class OutcomeRoundPhase(StrEnum):
@@ -123,7 +123,7 @@ class OutcomeRoundContext:
         expected = _V2_FIELDS if version_value == 2 else _V1_FIELDS
         if set(data) != expected or version_value not in {1, 2}:
             raise ValueError("outcome round context has an unsupported field set")
-        version = int(version_value)
+        version = cast(int, version_value)
 
         phase_value = data.get("phase")
         try:
