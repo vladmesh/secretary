@@ -362,7 +362,7 @@ Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #4
 
 ~~A07~~, ~~A08~~, ~~A09~~, ~~A10~~, ~~A11~~.
 
-Phase 2 is complete: A07–A11 now have typed domain boundaries while preserving the released compatibility/storage projections. The next cleanup tier starts with bounded A12 event-payload work rather than reopening Sprint migration.
+Phase 2 is complete: A07–A11 now have typed domain boundaries while preserving the released compatibility/storage projections. A12 has also completed its bounded payload/handoff migrations; the active cleanup tier is now durable dispatcher state under A13.
 
 A10 is complete via PR #441. A07 is complete across PR #443 and PR #444: product board roles now have one canonical typed vocabulary from the normalized Actor through TaskWriter, CLI choices, transitions, and importer boundaries; the separate legacy runtime registry stays with A19. A08 is complete via PR #445. A09 is complete across PR #442 and PR #446: both task and sprint cross-feature private-normalizer imports are gone. A11 is complete across PR #446, PR #447, PR #448, and PR #449: read normalization, admission/guard state, non-close writes, and the close transaction now each have typed domain boundaries while released persistence/public projections remain compatible. A12 is complete across PR #450, PR #451, PR #452, and PR #457; the next bounded work is durable `DispatcherRecord` state under A13.
 
