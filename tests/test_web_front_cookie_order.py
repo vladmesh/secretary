@@ -84,7 +84,8 @@ class WebFrontSessionSecretTests(unittest.TestCase):
             caddy="caddy",
             actor="operator",
         )
-        self.assertEqual(commands.run_set_password(args), 0)
+        with patch.object(commands, "_front_dir", return_value=Path("/data/webfront")):
+            self.assertEqual(commands.run_set_password(args), 0)
         ids = [item.kwargs["secret_id"] for item in set_secret.call_args_list]
         self.assertEqual(ids, [SESSION_SECRET_ID, PASSWORD_SECRET_ID, HASH_SECRET_ID])
         self.assertEqual(
