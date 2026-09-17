@@ -137,7 +137,7 @@ def add_task_subcommands(subparsers) -> None:
         choices=("", *(value.value for value in TaskReview)),
         default="",
         help="whether the card is reviewed; default required for code, skipped for research and infra "
-        "(an explicit --review-head without --review means required)",
+        "(a --review-head the sprint does not pin is refused with skipped)",
     )
     task_create.add_argument(
         "--live-impact",

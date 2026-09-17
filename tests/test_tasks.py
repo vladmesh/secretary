@@ -2440,19 +2440,27 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             ["skipped", "required", "required"],
         )
 
-    def test_an_explicit_reviewer_head_decides_the_review_and_contradicts_skipped(self) -> None:
-        self.create_kind("secretary-543", "research", review_head="claude-opus")
+    def test_an_explicit_reviewer_head_does_not_decide_the_review(self) -> None:
+        """Whether review runs is `--review` or the kind default; a reviewer head never changes it."""
+        self.create_kind("secretary-543", "code", review_head="claude-opus")
         card = self.card("secretary-543")
         self.assertEqual((card["review"], card["routing"]["review_head_override"]), ("required", "claude-opus"))
+        self.create_kind("secretary-544", "research", review="required", review_head="claude-opus")
+        self.assertEqual(self.card("secretary-544")["review"], "required")
 
         before = self.board_snapshot()
-        with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.create_kind("secretary-544", "code", review="skipped", review_head="claude-opus")
-        self.assertEqual(raised.exception.code, "validation")
+        for task_type, fields in (
+            ("code", {"review": "skipped"}),
+            # No `--review`: research defaults to skipped, and a head the sprint does not pin contradicts it.
+            ("research", {}),
+        ):
+            with self.subTest(task_type=task_type), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+                self.create_kind("secretary-545", task_type, review_head="claude-opus", **fields)
+            self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
         with self.assertRaisesRegex(TaskError, "review must be one of") as raised:
-            self.create_kind("secretary-544", "code", review="sometimes")
+            self.create_kind("secretary-545", "code", review="sometimes")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
@@ -2555,8 +2563,9 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
     def test_edit_refuses_a_reviewer_head_on_a_skipped_card(self) -> None:
         self.create_kind("secretary-549", "infra")
         before = self.board_snapshot()
-        with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.writer.edit(role="po", actor="operator", reference="secretary-549", review_head="claude-opus")
+        # The sprint pins no reviewer, so any head the caller names contradicts `skipped`.
+        with self.open_sprint(), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+            self.writer.edit(role="observer", actor="observer", reference="secretary-549", review_head="claude-opus")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
@@ -2576,61 +2585,72 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
                 yield ref
 
-    def create_in_pinned_sprint(self, reference: str, task_type: str, **fields: object) -> dict:
-        with self.pinned_sprint() as sprint:
+    def create_in(self, sprint_context, reference: str, task_type: str, **fields: object) -> dict:
+        role = str(fields.pop("role", "observer"))
+        with sprint_context as sprint:
             self.writer.create(
-                role="observer",
-                actor="observer",
+                role=role,
+                actor=role,
                 project="secretary",
                 task_type=task_type,
                 title=f"{task_type} card",
                 reference=reference,
                 request_id=f"create-{reference}",
-                sprint=sprint,
+                sprint=sprint or "",
                 **fields,
             )
         card = self.card(reference)
-        return {
-            "review": card["review"],
-            "head": card["routing"]["head_override"],
-            "review_head": card["routing"]["review_head_override"],
-        }
+        return (card["review"], card["routing"]["head_override"] or None, card["routing"]["review_head_override"] or None)
 
-    def test_a_sprint_reviewer_pin_binds_only_reviewed_cards(self) -> None:
-        """secretary-1638 rework: a skipped card stores no reviewer head; the worker pin still applies."""
+    def test_a_sprint_reviewer_pin_decides_who_reviews_whatever_the_review_choice(self) -> None:
+        """secretary-1638 round 3: the pin is applied as on base; `skipped` refuses only an unpinned head."""
+        pinned = ("codex-worker", "claude-review")
         for reference, task_type, fields, expected in (
-            ("secretary-560", "research", {}, ("skipped", "codex-worker", None)),
-            ("secretary-561", "infra", {}, ("skipped", "codex-worker", None)),
-            ("secretary-562", "code", {}, ("required", "codex-worker", "claude-review")),
-            ("secretary-563", "research", {"review": "required"}, ("required", "codex-worker", "claude-review")),
-            ("secretary-564", "code", {"review": "skipped"}, ("skipped", "codex-worker", None)),
+            ("secretary-560", "research", {}, ("skipped", *pinned)),
+            ("secretary-561", "infra", {}, ("skipped", *pinned)),
+            ("secretary-562", "code", {}, ("required", *pinned)),
+            ("secretary-563", "research", {"review": "required"}, ("required", *pinned)),
+            ("secretary-564", "research", {"review": "skipped", "review_head": "claude-review"}, ("skipped", *pinned)),
+            ("secretary-565", "research", {"review_head": "claude-review"}, ("skipped", *pinned)),
         ):
             with self.subTest(reference=reference):
-                stored = self.create_in_pinned_sprint(reference, task_type, **fields)
-                self.assertEqual(
-                    (stored["review"], stored["head"], stored["review_head"] or None), expected
-                )
+                self.assertEqual(self.create_in(self.pinned_sprint(), reference, task_type, **fields), expected)
 
         before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
+            self.create_in(self.pinned_sprint(), "secretary-566", "research", review="skipped", review_head="other")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
+        self.assertBoardUnchanged(before)
+
+    def test_without_a_sprint_skipped_refuses_any_explicit_reviewer_head(self) -> None:
+        # A proposal in Issues is the create that names no sprint.
+        no_sprint = contextlib.nullcontext(None)
+        self.assertEqual(self.create_in(no_sprint, "secretary-567", "research", target="issues", role="retro"), ("skipped", None, None))
+        self.assertEqual(self.create_in(no_sprint, "secretary-568", "code", target="issues", role="retro"), ("required", None, None))
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.create_in_pinned_sprint("secretary-565", "research", review="skipped", review_head="claude-review")
+            self.create_in(no_sprint, "secretary-569", "research", target="issues", role="retro", review_head="claude-review")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
-    def test_edit_does_not_write_a_pinned_reviewer_back_onto_a_skipped_card(self) -> None:
-        self.create_in_pinned_sprint("secretary-566", "infra")
-        self.create_in_pinned_sprint("secretary-567", "code")
+    def test_edit_of_a_skipped_card_in_a_pinned_sprint_keeps_the_pin(self) -> None:
+        self.create_in(self.pinned_sprint(), "secretary-570", "infra")
+        self.create_in(self.pinned_sprint(), "secretary-571", "code")
+        self.set_card_metadata("secretary-570", review_head="")
         with self.pinned_sprint():
-            self.writer.edit(role="observer", actor="observer", reference="secretary-566", review_head="")
-            self.writer.edit(role="observer", actor="observer", reference="secretary-567", review_head="")
-        self.assertIsNone(self.card("secretary-566")["routing"]["review_head_override"] or None)
-        self.assertEqual(self.card("secretary-566")["routing"]["head_override"], "codex-worker")
-        self.assertEqual(self.card("secretary-567")["routing"]["review_head_override"], "claude-review")
+            # Empty head: the pin is written, exactly as on base.
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="")
+            self.assertEqual(self.card("secretary-570")["routing"]["review_head_override"], "claude-review")
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="claude-review")
+            self.assertEqual(self.card("secretary-570")["review"], "skipped")
+            # A required card is untouched by the review choice.
+            self.writer.edit(role="observer", actor="observer", reference="secretary-571", review_head="")
+            self.assertEqual(self.card("secretary-571")["routing"]["review_head_override"], "claude-review")
 
         before = self.board_snapshot()
-        with self.pinned_sprint(), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.writer.edit(role="observer", actor="observer", reference="secretary-566", review_head="claude-review")
-        self.assertEqual(raised.exception.code, "validation")
+        with self.pinned_sprint(), self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="other")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
         self.assertBoardUnchanged(before)
 
     def test_auto_reference_uses_board_wide_project_high_water_mark(self) -> None:

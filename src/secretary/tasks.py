@@ -1800,6 +1800,8 @@ class TaskWriter:
             known = ", ".join(sorted(TASK_TYPE_VALUES))
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2) from None
         task_type = task_type_value.value
+        # Whether review runs is the review choice; who reviews is the reviewer head and the sprint
+        # pin. The two are resolved independently, and only a caller contradicting itself is refused.
         review = review.strip()
         explicit_review_head = review_head
         if review:
@@ -1808,18 +1810,9 @@ class TaskWriter:
             except ValueError:
                 known = ", ".join(sorted(member.value for member in TaskReview))
                 raise TaskError("validation", f"review must be one of: {known}", 2) from None
-        elif explicit_review_head:
-            # Naming a reviewer is asking for a review; it is not silently dropped by a kind default.
-            review_value = TaskReview.REQUIRED
         else:
             review_value = default_review(task_type_value)
         review = review_value.value
-        if review_value is TaskReview.SKIPPED and explicit_review_head:
-            raise TaskError(
-                "validation",
-                f"--review-head {explicit_review_head!r} names a reviewer for a card whose review is skipped",
-                2,
-            )
         if live_impact and task_type_value is not TaskType.RESEARCH:
             raise TaskError(
                 "validation", f"--live-impact is a research attribute; a {task_type} card cannot carry it", 2
@@ -1908,9 +1901,14 @@ class TaskWriter:
                     head=head,
                     review_head=review_head,
                     sprint=linked_sprint,
-                    review_skipped=review_value is TaskReview.SKIPPED,
                 )
                 head, review_head = pinned_head or "", pinned_review or ""
+            if review_value is TaskReview.SKIPPED:
+                self._refuse_unpinned_reviewer_on_skipped(
+                    sprint_ref=sprint, review_head=explicit_review_head, sprint=linked_sprint
+                )
+        elif review_value is TaskReview.SKIPPED:
+            self._refuse_unpinned_reviewer_on_skipped(sprint_ref="", review_head=explicit_review_head)
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -3337,12 +3335,6 @@ class TaskWriter:
             and (bounds_refusal := impact_bounds_refusal(description))
         ):
             raise TaskError("validation", bounds_refusal, 2)
-        if review_head and review_head.strip() and current.get("review") == TaskReview.SKIPPED.value:
-            raise TaskError(
-                "validation",
-                f"--review-head {review_head.strip()!r} names a reviewer for a card whose review is skipped",
-                2,
-            )
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -3367,8 +3359,12 @@ class TaskWriter:
             sprint_ref=str(current.get("sprint") or ""),
             head=head,
             review_head=review_head,
-            review_skipped=current.get("review") == TaskReview.SKIPPED.value,
         )
+        # A legacy card with no stored choice reads as required and is never refused here.
+        if review_head is not None and current.get("review") == TaskReview.SKIPPED.value:
+            self._refuse_unpinned_reviewer_on_skipped(
+                sprint_ref=str(current.get("sprint") or ""), review_head=review_head.strip()
+            )
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
             "title_sha256_was": _digest(current["title"]) if title is not None else None,
@@ -3427,7 +3423,6 @@ class TaskWriter:
         head: str | None,
         review_head: str | None,
         sprint: dict[str, Any] | None = None,
-        review_skipped: bool = False,
     ) -> tuple[str | None, str | None]:
         """The single place a card's worker and reviewer profile is held to its sprint's pins.
 
@@ -3443,10 +3438,6 @@ class TaskWriter:
         than something a default resolves later — the card carries the profiles it runs on exactly
         as it always has. A different profile is refused by name.
 
-        A reviewer pin binds only a reviewed card: with `review_skipped` the reviewer field is
-        returned as asked, so a skipped card stores no reviewer head. The callers refuse a
-        non-empty reviewer head on a skipped card before they get here.
-
         A role the sprint pins nothing on is untouched, which is every sprint opened until now. A
         field that is there but unreadable is corruption, and a card is not written under a
         constraint nobody can read.
@@ -3460,7 +3451,7 @@ class TaskWriter:
         states = entity.get("executors") or {}
         for role in EXECUTOR_FIELDS:
             asked = requested[role]
-            if asked is None or (role == "reviewer" and review_skipped):
+            if asked is None:
                 continue
             state = states.get(role) or {"state": EXECUTOR_UNSET}
             if state.get("state") == EXECUTOR_UNSET:
@@ -3482,6 +3473,28 @@ class TaskWriter:
                 )
             requested[role] = profile
         return requested["worker"], requested["reviewer"]
+
+    def _refuse_unpinned_reviewer_on_skipped(
+        self, *, sprint_ref: str, review_head: str, sprint: dict[str, Any] | None = None
+    ) -> None:
+        """Refuse a caller-named reviewer on a card whose review is skipped, unless the sprint pins it.
+
+        The review choice decides whether review runs and the sprint pin decides who reviews, so a
+        skipped card may carry the pinned reviewer, applied by the pin or named explicitly. Only a
+        reviewer the caller chose on its own contradicts `skipped`. The pin is read through
+        `_sprint_executor_pins`, the one door for it.
+        """
+        if not review_head:
+            return
+        _, pinned = self._sprint_executor_pins(
+            sprint_ref=sprint_ref, head=None, review_head="", sprint=sprint
+        )
+        if review_head != (pinned or ""):
+            raise TaskError(
+                "validation",
+                f"--review-head {review_head!r} names a reviewer for a card whose review is skipped",
+                2,
+            )
 
     def _sprint_entity(self, reference: str) -> dict[str, Any]:
         """The sprint a card names, read here only to answer what it pins.
