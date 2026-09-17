@@ -7,11 +7,18 @@ import unittest
 from secretary.webfront.caddyfile import FrontConfig, render
 
 SAMPLE_HASH = "$2a$14$" + "x" * 53
+SAMPLE_SESSION_SECRET = "fixture-session-secret-" + "x" * 32
 
 
 class WebFrontCookieOrderTests(unittest.TestCase):
     def test_basic_auth_runs_before_cookie_minting_and_proxy(self) -> None:
-        text = render(FrontConfig(sites=("https://front.example",), password_hash=SAMPLE_HASH))
+        text = render(
+            FrontConfig(
+                sites=("https://front.example",),
+                password_hash=SAMPLE_HASH,
+                session_secret=SAMPLE_SESSION_SECRET,
+            )
+        )
         fallback = text.split("\thandle {\n", 1)[1]
 
         # Caddy normally sorts `header` before `basicauth`; only a route block preserves the
