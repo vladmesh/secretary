@@ -5261,7 +5261,7 @@ class RoutingJournalTests(unittest.TestCase):
             document.write_text("later rework instruction\n", encoding="utf-8")
 
             snapshot = routing_head_snapshot_from_launch(
-                self._run("worker", "codex"), lifecycle_run=lifecycle.to_json()
+                self._run("worker", "codex").to_json(), lifecycle_run=lifecycle.to_json()
             )
 
         self.assertIsInstance(snapshot, HeadRun)
