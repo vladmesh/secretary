@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from triggered_agents.runtime.head import HeadRun
 
 from secretary.dispatcher_types import DispatcherError
+from secretary.routing_journal import RoutingHeadSnapshot
 from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationLiveness,
@@ -128,6 +129,51 @@ class PersistedHeadRun(dict[str, Any]):
         """Project the exact released dispatcher-state object."""
         return dict(self)
 
+
+class PersistedRoutingHeadSnapshot(dict[str, Any]):
+    """One durable routing snapshot with an exact compatibility projection.
+
+    The task journal already has the canonical immutable RoutingHeadSnapshot, but dispatcher state
+    historically stored worker_run/review_run as raw dictionaries. This boundary parses a typed
+    snapshot once while retaining the exact released mapping for restart and status callers.
+
+    Empty values still mean "no routing snapshot". Historical partial mappings remain readable;
+    their typed view is normalized by RoutingHeadSnapshot.from_json while to_json() preserves the
+    exact persisted keys that were loaded.
+    """
+
+    __slots__ = ("_snapshot",)
+
+    def __init__(self, value: Any = None) -> None:
+        typed: RoutingHeadSnapshot | None = value if isinstance(value, RoutingHeadSnapshot) else None
+        if typed is not None:
+            payload = typed.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            try:
+                typed = RoutingHeadSnapshot.from_json(payload)
+            except (KeyError, TypeError, ValueError):
+                typed = None
+        self._snapshot = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedRoutingHeadSnapshot:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def snapshot(self) -> RoutingHeadSnapshot | None:
+        """The canonical routing value when this record carries a snapshot."""
+        return self._snapshot
+
+    def to_json(self) -> dict[str, Any]:
+        """Project the exact released dispatcher-state object."""
+        return dict(self)
 
 @dataclass
 class DispatcherRecord:
@@ -300,8 +346,8 @@ class DispatcherRecord:
     # reviewer's respawn, a pipeline freeze, launch recovery, reconciliation — and until it had a
     # run of its own, none of those left a record of who was ending it.
     review_head_run: PersistedHeadRun = field(default_factory=PersistedHeadRun)
-    worker_run: dict[str, Any] = field(default_factory=dict)
-    review_run: dict[str, Any] = field(default_factory=dict)
+    worker_run: PersistedRoutingHeadSnapshot = field(default_factory=PersistedRoutingHeadSnapshot)
+    review_run: PersistedRoutingHeadSnapshot = field(default_factory=PersistedRoutingHeadSnapshot)
     # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
     # over a pane that was not ready for its prompt. The same shape the observer's record carries
     # (`launch_attempts`), without its retry deadline: a worker or reviewer launch is retried by the
@@ -349,11 +395,13 @@ class DispatcherRecord:
     worker_headless: dict[str, Any] = field(default_factory=dict)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # All producers, including legacy host code that still assigns a JSON dict, cross this one
-        # normalization point.  That keeps the in-memory record typed without forcing a broad
-        # dispatcher/host rewrite into this first A13 slice.
+        # All producers, including legacy host/dispatcher code that still assigns JSON dictionaries,
+        # cross this normalization point. The durable mapping surface remains compatible while the
+        # in-memory lifecycle and routing values gain canonical typed views.
         if name in {"worker_head_run", "review_head_run"}:
             value = PersistedHeadRun.from_value(value)
+        elif name in {"worker_run", "review_run"}:
+            value = PersistedRoutingHeadSnapshot.from_value(value)
         super().__setattr__(name, value)
 
     def owns_head(self, role: str | None = None) -> bool:
@@ -438,8 +486,8 @@ class DispatcherRecord:
             "worker_started_at": self.worker_started_at,
             "worker_head_run": self.worker_head_run.to_json(),
             "review_head_run": self.review_head_run.to_json(),
-            "worker_run": self.worker_run,
-            "review_run": self.review_run,
+            "worker_run": self.worker_run.to_json(),
+            "review_run": self.review_run.to_json(),
             "worker_launch_attempts": self.worker_launch_attempts,
             "review_launch_attempts": self.review_launch_attempts,
             "review_launch_aborts": self.review_launch_aborts,
@@ -490,8 +538,8 @@ class DispatcherRecord:
             attempt_round=int(payload.get("attempt_round") or 0),
             worker_head_run=PersistedHeadRun.from_value(payload.get("worker_head_run")),
             review_head_run=PersistedHeadRun.from_value(payload.get("review_head_run")),
-            worker_run=_run_snapshot(payload.get("worker_run")),
-            review_run=_run_snapshot(payload.get("review_run")),
+            worker_run=PersistedRoutingHeadSnapshot.from_value(payload.get("worker_run")),
+            review_run=PersistedRoutingHeadSnapshot.from_value(payload.get("review_run")),
             launch_intent=_run_snapshot(payload.get("launch_intent")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
