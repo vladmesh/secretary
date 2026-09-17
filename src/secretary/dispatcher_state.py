@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from triggered_agents.runtime.head import HeadRun
+
 from secretary.dispatcher_types import DispatcherError
 from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
@@ -77,6 +79,54 @@ def outcome_terminal_path(value: Any, *, state: str) -> OutcomeTerminalPath:
 def is_claim_skip(outcome: dict[str, Any]) -> bool:
     """Whether a claim outcome is "not this card, next card" rather than the pass's answer."""
     return str(outcome.get("action") or "") in CLAIM_SKIP_ACTIONS
+
+
+class PersistedHeadRun(dict[str, Any]):
+    """One durable lifecycle HeadRun with an exact compatibility projection.
+
+    The released dispatcher state stores the lifecycle run as a JSON object and a large amount of
+    existing recovery/status code still treats that object as a mapping.  A13 starts the migration
+    without rewriting that wire contract: the value keeps the exact mapping for those callers while
+    also parsing a canonical typed ``HeadRun`` once at the record boundary.
+
+    Historical/minimal records that predate the complete HeadRun schema remain byte-for-byte
+    readable.  They deliberately expose ``run is None`` instead of being silently upgraded into a
+    typed run whose missing identity fields would be invented.  Current complete records carry the
+    canonical value in ``run``.
+    """
+
+    __slots__ = ("_run",)
+
+    def __init__(self, value: Any = None) -> None:
+        typed: HeadRun | None = value if isinstance(value, HeadRun) else None
+        if typed is not None:
+            payload = typed.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            try:
+                typed = HeadRun.from_json(payload)
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                typed = None
+        self._run = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedHeadRun:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def run(self) -> HeadRun | None:
+        """The canonical lifecycle value when this record has the complete modern schema."""
+        return self._run
+
+    def to_json(self) -> dict[str, Any]:
+        """Project the exact released dispatcher-state object."""
+        return dict(self)
 
 
 @dataclass
@@ -244,12 +294,12 @@ class DispatcherRecord:
     # for the same reason the pane identity is: the process that spawned a head is not necessarily
     # the process that ends it, and a restarted dispatcher must still be able to say who was
     # ending this one.
-    worker_head_run: dict[str, Any] = field(default_factory=dict)
+    worker_head_run: PersistedHeadRun = field(default_factory=PersistedHeadRun)
     # The reviewer's own run, kept for exactly the same reasons (secretary-1414). The reviewer is
     # the head this dispatcher stops most often and from the most places — a red verdict, a stalled
     # reviewer's respawn, a pipeline freeze, launch recovery, reconciliation — and until it had a
     # run of its own, none of those left a record of who was ending it.
-    review_head_run: dict[str, Any] = field(default_factory=dict)
+    review_head_run: PersistedHeadRun = field(default_factory=PersistedHeadRun)
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
     # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
@@ -297,6 +347,14 @@ class DispatcherRecord:
     # decision still leaves the degradation on the record instead of an empty handle that reads
     # as work in progress.  Cleared by the replacement launch that ends the episode.
     worker_headless: dict[str, Any] = field(default_factory=dict)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # All producers, including legacy host code that still assigns a JSON dict, cross this one
+        # normalization point.  That keeps the in-memory record typed without forcing a broad
+        # dispatcher/host rewrite into this first A13 slice.
+        if name in {"worker_head_run", "review_head_run"}:
+            value = PersistedHeadRun.from_value(value)
+        super().__setattr__(name, value)
 
     def owns_head(self, role: str | None = None) -> bool:
         """Whether this record still carries an identity that must be settled before replacement."""
@@ -378,8 +436,8 @@ class DispatcherRecord:
             ),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
-            "worker_head_run": dict(self.worker_head_run),
-            "review_head_run": dict(self.review_head_run),
+            "worker_head_run": self.worker_head_run.to_json(),
+            "review_head_run": self.review_head_run.to_json(),
             "worker_run": self.worker_run,
             "review_run": self.review_run,
             "worker_launch_attempts": self.worker_launch_attempts,
@@ -430,8 +488,8 @@ class DispatcherRecord:
             preferred_review_head=str(payload.get("preferred_review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
             attempt_round=int(payload.get("attempt_round") or 0),
-            worker_head_run=_run_snapshot(payload.get("worker_head_run")),
-            review_head_run=_run_snapshot(payload.get("review_head_run")),
+            worker_head_run=PersistedHeadRun.from_value(payload.get("worker_head_run")),
+            review_head_run=PersistedHeadRun.from_value(payload.get("review_head_run")),
             worker_run=_run_snapshot(payload.get("worker_run")),
             review_run=_run_snapshot(payload.get("review_run")),
             launch_intent=_run_snapshot(payload.get("launch_intent")),
