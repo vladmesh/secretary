@@ -122,6 +122,8 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
+    GatePrAuthorship,
+    GatePublishedRef,
 )
 from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
@@ -2410,15 +2412,19 @@ class CommandHostRuntime:
         if self.commit_state is not None:
             self.commit_state()
 
-    def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+    def commit_gate_pr_authorship(
+        self, record: DispatcherRecord, entry: GatePrAuthorship | dict[str, Any]
+    ) -> None:
         """Write down that the github gate wrote a known text on a known pull request."""
-        record.gate_pr_authorship = dict(entry)
+        record.gate_pr_authorship = entry
         if self.commit_state is not None:
             self.commit_state()
 
-    def commit_gate_published_ref(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+    def commit_gate_published_ref(
+        self, record: DispatcherRecord, entry: GatePublishedRef | dict[str, Any]
+    ) -> None:
         """Persist the branch and object id the gate just published, as the next push's lease."""
-        record.gate_published_ref = dict(entry)
+        record.gate_published_ref = entry
         if self.commit_state is not None:
             self.commit_state()
 
@@ -4582,7 +4588,12 @@ def _gate_attestation_for_prompt(
     A record carrying only the old boolean ``gate_state`` is unavailable evidence rather than an
     invented SHA: the exact binding is the safety property.
     """
-    source = candidate if isinstance(candidate, dict) else getattr(record, "gate_attestation", {})
+    if isinstance(candidate, dict):
+        return _accepted_gate_receipt(candidate, current_sha)
+    source = getattr(record, "gate_attestation", {})
+    receipt = getattr(source, "receipt", None)
+    if receipt is not None:
+        return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
 
 
