@@ -322,8 +322,6 @@ class DispatcherGateDeliveryStateTests(unittest.TestCase):
         self.assertIsNone(record.review_delivery_evidence.evidence)
 
 
-
-
 class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
     """A13: launch intent and headless recovery are typed without rewriting durable JSON."""
 
@@ -469,8 +467,6 @@ class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
         record.worker_headless = {}
         self.assertIsNone(record.launch_intent.intent)
         self.assertIsNone(record.worker_headless.episode)
-
-
 
 class LaunchIntentTests(unittest.TestCase):
     def setUp(self) -> None:
