@@ -15,7 +15,7 @@ from secretary.board.backend import SPRINT, board_client, card_backend_status
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
-from secretary.dispatcher_observer import observer_snapshot
+from secretary.dispatch.observer import observer_snapshot
 from secretary.dispatch.pause import ProductionPause
 from secretary.dispatcher_review import command_terminal_status
 from secretary.dispatcher_state import DispatcherRecord

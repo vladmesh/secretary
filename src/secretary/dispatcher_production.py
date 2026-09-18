@@ -26,12 +26,12 @@ from secretary.dispatcher_launch import (
     launch_intent,
     stop_launch_intent,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_snapshot,
     reconcile_observers,
     retry_pending_observer_stops,
 )
-from secretary.dispatcher_observer_fence import fenced_task, observer_fence
+from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
