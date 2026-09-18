@@ -110,19 +110,19 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _same_repo,
     _watchdog_kind,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     _fingerprint as _gate_fingerprint,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     AcceptedGreenGate,
 )
 from secretary.dispatcher_helpers import (
