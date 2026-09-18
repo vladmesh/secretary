@@ -20,11 +20,11 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher_pause_ops
+from secretary.dispatch import pause_ops as dispatcher_pause_ops
 from secretary.config import validate
-from secretary.dispatcher_pause_ops import PauseCommandCompleted
-from secretary.dispatcher_pause_ops import pause as dispatcher_pause
-from secretary.dispatcher_pause_ops import resume as dispatcher_resume
+from secretary.dispatch.pause_ops import PauseCommandCompleted
+from secretary.dispatch.pause_ops import pause as dispatcher_pause
+from secretary.dispatch.pause_ops import resume as dispatcher_resume
 from secretary.dispatcher_types import DispatcherError
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
@@ -870,7 +870,7 @@ class CommandClientTests(PauseProtocolFixture):
 class CompletedCommandTests(PauseProtocolFixture):
     """Criterion 6 where it is hardest: the command did something, and the pipeline cannot be read.
 
-    `dispatcher_pause_ops.pause` and `resume` write the flag and then render the status through
+    `dispatch.pause_ops.pause` and `resume` write the flag and then render the status through
     `pause_status`, which converts every dispatcher record. A production state that no longer
     converts therefore refuses *after* the pause has taken, and the operator most likely to see it
     is the one reaching for a drain because something is already wrong with the pipeline. Reported
@@ -966,7 +966,7 @@ class CompletedCommandTests(PauseProtocolFixture):
         self.tracked_head()
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         with mock.patch(
-            "secretary.dispatcher_pause_ops.pause_status",
+            "secretary.dispatch.pause_ops.pause_status",
             side_effect=DispatcherError("unsupported_legacy_record", "the records do not convert", 1),
         ):
             document = self.pause_ops().pause_resume(actor="operator")
@@ -1117,7 +1117,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         out; this fails the moment the assignment leaves the locked span.
         """
         tree = ast.parse(
-            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatcher_pause_ops.py").read_text(
+            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatch" / "pause_ops.py").read_text(
                 encoding="utf-8"
             )
         )
@@ -1184,7 +1184,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         """
         refused = DispatcherError("unsupported_legacy_record", "the records do not convert", 1)
         with (
-            mock.patch("secretary.dispatcher_pause_ops.pause_status", side_effect=refused),
+            mock.patch("secretary.dispatch.pause_ops.pause_status", side_effect=refused),
             self.assertRaises(PauseCommandCompleted) as completed,
         ):
             dispatcher_pause(self.runtime, mode="drain", actor="operator", reason="host maintenance")
