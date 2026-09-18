@@ -11,14 +11,14 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatcher import DispatcherRuntime
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     ObserverRecord,
     load_observers,
     observer_alive,
     observer_decision,
     put_observers,
 )
-from secretary.dispatcher_observer_fence import (
+from secretary.dispatch.observer_fence import (
     REASON_DEAD,
     REASON_NO_RECORD,
     REASON_NOT_ADOPTED,
@@ -531,7 +531,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.tasks[0]["column_id"] = 3
 
         with mock.patch(
-            "secretary.dispatcher_observer_fence.stage_event",
+            "secretary.dispatch.observer_fence.stage_event",
             side_effect=OSError("disk full"),
         ):
             result = self.runtime.production_tick()
