@@ -11,7 +11,7 @@ from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatcher_state import OutcomeTerminalPath
-from secretary.dispatcher_gate import GateResult
+from secretary.dispatch.gate import GateResult
 from secretary.dispatcher_types import HostError
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture

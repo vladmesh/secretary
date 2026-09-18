@@ -36,7 +36,7 @@ from secretary.candidate_history import (
     parse_shas,
     repair_message,
 )
-from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
+from secretary.dispatch.gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_state import GatePrAuthorship, GatePublishedRef
 from secretary.dispatcher_helpers import (
     _last_marker_body,

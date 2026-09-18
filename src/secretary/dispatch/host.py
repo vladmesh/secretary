@@ -40,25 +40,25 @@ from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
 )
 from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GateResult,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     gate_check as _gate_check,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     rerun_failed_ci as _rerun_failed_ci,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     accepted_receipt as _accepted_gate_receipt,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     is_exact_sha as _is_exact_sha,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity

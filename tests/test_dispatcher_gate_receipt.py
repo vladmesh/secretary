@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     AcceptedGreenGate,
     GateReceipt,
     mint_gate_receipt,
