@@ -4638,7 +4638,8 @@ def _record_worker_delivery_evidence(
     if not evidence:
         return
     record.worker_delivery_evidence = evidence
-    if failure and _delivery_readiness_state(evidence) != READINESS_BUSY:
+    typed = record.worker_delivery_evidence.evidence
+    if failure and typed is not None and _delivery_readiness_state(typed) != READINESS_BUSY:
         record.worker_delivery_failures += 1
 
 
