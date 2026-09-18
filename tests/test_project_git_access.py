@@ -26,7 +26,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import cli, dispatcher_gate, secret_store, state_repo
+from secretary import cli, secret_store, state_repo
+from secretary.dispatch import gate as dispatcher_gate
 from secretary.cli import main
 from secretary.config import validate_instance
 from secretary.dispatch.host import CommandHostRuntime
