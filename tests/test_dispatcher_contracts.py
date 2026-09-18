@@ -35,7 +35,6 @@ from unittest import mock
 from secretary import dispatcher as dispatcher_module
 from secretary import (
     dispatcher_launcher,
-    dispatcher_observer,
     dispatcher_production,
     dispatcher_review,
     upgrade,
@@ -46,6 +45,7 @@ from secretary import (
 )
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatch.gate import GateResult
 from secretary.dispatcher_state import DispatcherRecord

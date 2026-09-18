@@ -1302,7 +1302,7 @@ class CommentFixture(SprintProtocolFixture):
         """
         from types import SimpleNamespace
 
-        from secretary.dispatcher_observer import ObserverRecord, _observer_event_state
+        from secretary.dispatch.observer import ObserverRecord, _observer_event_state
         from secretary.sprints import SprintReader
         from secretary.tasks import TaskAudit
 
@@ -2703,7 +2703,7 @@ class ClosedSprintObserverTests(CloseFixture):
         self.close()
 
         # The observer of a closed sprint is ended by the production tick reconciling against the
-        # sprint board -- `secretary.dispatcher_observer`, "closed or gone sprint -> stop the head
+        # sprint board -- `secretary.dispatch.observer`, "closed or gone sprint -> stop the head
         # and drop the record". The close adds no second teardown, so the dispatcher's own state is
         # byte for byte what it was: no stop, no launch, no cursor moved.
         self.assertEqual(self.production_bytes(), production)

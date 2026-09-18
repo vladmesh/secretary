@@ -23,7 +23,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_launch import infrastructure_action
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
@@ -48,7 +48,7 @@ from secretary.dispatcher_observer import (
     render_observer_prompt,
     stop_observer_head,
 )
-from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
+from secretary.dispatch.observer_fence import EVENT_CLEARED, EVENT_FENCED
 from secretary.dispatcher_production import (
     _budget_event_type,
     _production_claim_ready,
