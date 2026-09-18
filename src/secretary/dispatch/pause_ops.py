@@ -47,7 +47,7 @@ from secretary.dispatcher_observer import (
     observer_snapshot,
     resume_observers,
 )
-from secretary.dispatcher_pause import (
+from secretary.dispatch.pause import (
     PAUSE_MODES,
     auto_resume_status,
     clear_legacy_mirror,

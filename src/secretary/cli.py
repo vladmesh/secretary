@@ -36,7 +36,7 @@ from secretary.dispatch.commands import (
     add_pause_commands,
 )
 from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
-from secretary.dispatcher_pause import ProductionPause
+from secretary.dispatch.pause import ProductionPause
 from secretary.gate import run_gate
 from secretary.head_health import (
     PROBE_BROKEN,

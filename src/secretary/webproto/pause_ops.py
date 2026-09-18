@@ -14,7 +14,7 @@ the caller's back. That refusal is preserved here rather than smoothed over: it 
 as `owner_conflict`, which is what a well-formed request refused on the state of the world is in
 this layer.
 
-**Every rule stays in `secretary.dispatcher_pause_ops`.** The tick lock, the idempotent-in-the-same-
+**Every rule stays in `secretary.dispatch.pause_ops`.** The tick lock, the idempotent-in-the-same-
 mode no-op, the conflict, the legacy mirror, the head stop and relaunch, the watchdog windows and
 the auto-resume TTL are all its, and these operations call it and re-decide none of them. There is
 no second flag, no second lock, no second store and no request index of this layer's own: the pause
@@ -63,9 +63,9 @@ from pathlib import Path
 from typing import Any
 
 from secretary.dispatch.bootstrap import runtime_from_args
-from secretary.dispatcher_pause_ops import PauseCommandCompleted
-from secretary.dispatcher_pause_ops import pause as _pause
-from secretary.dispatcher_pause_ops import resume as _resume
+from secretary.dispatch.pause_ops import PauseCommandCompleted
+from secretary.dispatch.pause_ops import pause as _pause
+from secretary.dispatch.pause_ops import resume as _resume
 from secretary.dispatcher_types import DispatcherError, HostError
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
@@ -251,7 +251,7 @@ class PauseOperationLayer(ProtocolBoundary):
         command exists for.
 
         So the dispatcher hands the failure over with the decision it made under the tick lock
-        attached (:class:`~secretary.dispatcher_pause_ops.PauseCommandCompleted`), and this reports
+        attached (:class:`~secretary.dispatch.pause_ops.PauseCommandCompleted`), and this reports
         that decision. There is nothing to establish here and nothing is read to establish it: the
         action is `paused`, `noop` or `resumed` as the code that performed it decided, and what a
         flag holds now is somebody else's command as much as it is this one's.

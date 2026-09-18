@@ -73,7 +73,7 @@ files = [
     "src/secretary/dispatch/runtime_provenance.py",
     "src/secretary/routing_journal.py",
     "src/secretary/dispatcher_state.py",
-    "src/secretary/dispatcher_pause.py",
+    "src/secretary/dispatch/pause.py",
     "src/secretary/po/models.py",
 ]
 follow_imports = "silent"

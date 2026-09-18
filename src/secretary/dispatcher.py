@@ -221,14 +221,14 @@ from secretary.dispatcher_launch import (
 from secretary.dispatcher_launch import (
     write_launch_intent as _write_launch_intent,
 )
-from secretary.dispatcher_pause import ProductionPause
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause import ProductionPause
+from secretary.dispatch.pause_ops import (
     pause as _pause_pipeline,
 )
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause_ops import (
     pause_status as _pause_status,
 )
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause_ops import (
     resume as _resume_pipeline,
 )
 from secretary.dispatcher_production import (
