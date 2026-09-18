@@ -45,10 +45,15 @@ from secretary.dispatcher_state import (
     DispatcherRecord,
     GatePrAuthorship,
     GatePublishedRef,
+    HeadlessRecoveryEpisode,
+    LaunchDelivery,
+    LaunchIntent,
     PersistedDeliveryEvidence,
     PersistedGatePrAuthorship,
     PersistedGatePublishedRef,
     PersistedGateReceipt,
+    PersistedHeadlessRecoveryEpisode,
+    PersistedLaunchIntent,
     PersistedRoutingHeadSnapshot,
 )
 from secretary.dispatcher_tui import (
@@ -317,6 +322,151 @@ class DispatcherGateDeliveryStateTests(unittest.TestCase):
         self.assertIsNone(record.review_delivery_evidence.evidence)
 
 
+class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
+    """A13: launch intent and headless recovery are typed without rewriting durable JSON."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_launch_and_headless_mappings_round_trip_exactly(self) -> None:
+        launch = {
+            "role": "worker",
+            "action": "claim",
+            "run_id": "legacy-run",
+            "delivery": {
+                "state": "busy",
+                "attempts": 2,
+                "next_at": 123.5,
+                "legacy": "keep",
+            },
+            "legacy": "keep",
+        }
+        headless = {
+            "since": 100.25,
+            "comment_baseline": 7,
+            "record_state": "adopted",
+            "handle_known": False,
+            "heartbeat": "absent",
+            "workspace": "/tmp/card",
+            "branch": "pipeline/card",
+            "expected_branch": "pipeline/card",
+            "dirty": False,
+            "candidate_sha": "a" * 40,
+            "report_generation": 3,
+            "recovery_error": "round_already_answered",
+            "legacy": "keep",
+        }
+        record = self.record(launch_intent=launch, worker_headless=headless)
+
+        self.assertIsInstance(record.launch_intent, PersistedLaunchIntent)
+        self.assertEqual(record.launch_intent.intent.role, "worker")
+        self.assertEqual(record.launch_intent.intent.delivery.attempts, 2)
+        self.assertIsInstance(record.worker_headless, PersistedHeadlessRecoveryEpisode)
+        self.assertEqual(record.worker_headless.episode.candidate_sha, "a" * 40)
+        self.assertEqual(record.worker_headless.episode.recovery_error, "round_already_answered")
+
+        durable = record.to_json()
+        self.assertEqual(durable["launch_intent"], launch)
+        self.assertEqual(durable["worker_headless"], headless)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(durable)))
+        self.assertEqual(restarted.launch_intent.to_json(), launch)
+        self.assertEqual(restarted.worker_headless.to_json(), headless)
+        self.assertEqual(restarted.launch_intent.intent.action, "claim")
+        self.assertEqual(restarted.worker_headless.episode.comment_baseline, 7)
+
+    def test_typed_launch_and_headless_assignments_project_released_json(self) -> None:
+        evidence = DeliveryEvidence(
+            handle="pane-1",
+            subject="worker-prompt",
+            stage="acknowledged",
+            turn_confirmed=True,
+        )
+        routing = RoutingHeadSnapshot(
+            role="worker",
+            head="codex",
+            adapter="codex",
+            model="gpt-5.6-terra",
+            model_source="profile",
+            effort="high",
+        )
+        head_run = accepted_transport_run(
+            "codex",
+            role="worker",
+            workspace="/tmp/card",
+            task_ref=head_ops.TaskRef.card("secretary-1", document="/tmp/card/TASK.md"),
+            pid_file="/tmp/card.pid",
+            run_id="run-1",
+        )
+        intent = LaunchIntent(
+            role="worker",
+            action="claim",
+            head="codex",
+            workspace="/tmp/card",
+            pid_file="/tmp/card.pid",
+            run_id="run-1",
+            task="card:secretary-1",
+            attempt_id="attempt-1",
+            round_number=1,
+            opens_round=True,
+            respawns=0,
+            at=123.0,
+            routing_run=routing,
+            head_run=head_run,
+            delivery=LaunchDelivery(
+                state="confirmed",
+                receipt="accepted",
+                evidence=evidence,
+            ),
+            launched=True,
+        )
+        episode = HeadlessRecoveryEpisode(
+            since=456.0,
+            comment_baseline=4,
+            record_state="adopted",
+            heartbeat="absent",
+            workspace="/tmp/card",
+            branch="pipeline/card",
+            expected_branch="pipeline/card",
+            dirty=False,
+            candidate_sha="b" * 40,
+            report_generation=2,
+        )
+        record = self.record(launch_intent=intent, worker_headless=episode)
+
+        self.assertEqual(record.launch_intent.intent.role, "worker")
+        self.assertEqual(record.launch_intent.intent.routing_run, routing)
+        self.assertTrue(record.launch_intent.intent.head_run.same_run(head_run))
+        self.assertEqual(record.launch_intent.intent.delivery.evidence.subject, "worker-prompt")
+        self.assertEqual(record.worker_headless.episode, episode)
+        self.assertEqual(record.to_json()["launch_intent"], intent.to_json())
+        self.assertEqual(record.to_json()["worker_headless"], episode.to_json())
+
+        # Legacy call sites still mutate these mapping-compatible wrappers in place. The typed
+        # view must track those writes until the last compatibility mutation is removed.
+        record.launch_intent["action"] = "worker-respawn"
+        record.worker_headless["recovery_error"] = "candidate_unknown"
+        self.assertEqual(record.launch_intent.intent.action, "worker-respawn")
+        self.assertEqual(record.worker_headless.episode.recovery_error, "candidate_unknown")
+
+        record.launch_intent = {}
+        record.worker_headless = {}
+        self.assertIsNone(record.launch_intent.intent)
+        self.assertIsNone(record.worker_headless.episode)
 
 class LaunchIntentTests(unittest.TestCase):
     def setUp(self) -> None:

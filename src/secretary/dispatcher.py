@@ -264,6 +264,7 @@ from secretary.dispatcher_state import (
     CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
+    HeadlessRecoveryEpisode,
     OutcomeTerminalPath,
     now_rfc3339,
 )
@@ -467,9 +468,9 @@ def _headless_episode_token(record: DispatcherRecord) -> str:
     comment count cannot: a refusal writes its own move and reason onto the card, so the next
     episode is stamped strictly higher whatever the clock says.
     """
-    episode = record.worker_headless or {}
-    since = float(episode.get("since") or 0.0)
-    comments = int(episode.get("comment_baseline") or 0)
+    episode = record.worker_headless.episode
+    since = episode.since if episode is not None else 0.0
+    comments = episode.comment_baseline if episode is not None else 0
     return f"episode-{since:.6f}-c{comments}" if since else "episode-unstamped"
 
 
@@ -2246,24 +2247,27 @@ class DispatcherRuntime:
         # beside it and never signal it.
         live = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
         state = self.host.retained_workspace_state(task, record)
-        record.worker_headless = {
-            "since": float(record.worker_headless.get("since") or 0.0) or time.time(),
+        prior_headless = record.worker_headless.episode
+        record.worker_headless = HeadlessRecoveryEpisode(
+            since=(prior_headless.since if prior_headless is not None else 0.0) or time.time(),
             # Where the card stood when this episode opened. Read once and carried, so it is the
             # episode's own discriminator rather than whatever the board says on a later tick.
-            "comment_baseline": int(
-                record.worker_headless.get("comment_baseline") or len(task.get("comments") or [])
+            comment_baseline=(
+                prior_headless.comment_baseline
+                if prior_headless is not None and prior_headless.comment_baseline
+                else len(task.get("comments") or [])
             ),
-            "record_state": record.state,
-            "handle_known": False,
-            "heartbeat": str(live.get("state") or "") or "absent",
-            "workspace": state.get("workspace") or "",
-            "branch": state.get("branch") or "",
-            "expected_branch": state.get("expected_branch") or "",
-            "dirty": state.get("dirty"),
-            "candidate_sha": state.get("sha") or "",
-            "report_generation": record.report_generation,
-            "recovery_error": "",
-        }
+            record_state=record.state,
+            handle_known=False,
+            heartbeat=str(live.get("state") or "") or "absent",
+            workspace=str(state.get("workspace") or ""),
+            branch=str(state.get("branch") or ""),
+            expected_branch=str(state.get("expected_branch") or ""),
+            dirty=state.get("dirty") if isinstance(state.get("dirty"), bool) else None,
+            candidate_sha=str(state.get("sha") or ""),
+            report_generation=record.report_generation,
+            recovery_error="",
+        )
         if live.get("known") and live.get("alive"):
             record.worker_headless["recovery_error"] = "orphan_heartbeat_unbound"
             records[ref] = record
