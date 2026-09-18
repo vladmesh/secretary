@@ -31,6 +31,7 @@ from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
     VitalityEpisode,
@@ -50,7 +51,6 @@ from secretary.dispatcher import (
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
     _report_nudge_prompt,
-    default_data_dir,
 )
 from secretary.dispatcher_gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
