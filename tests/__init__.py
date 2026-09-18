@@ -50,7 +50,7 @@ branch instead of the lifecycle branch it was written for. The same binding
 also had the suite appending its own ``runs.jsonl`` records to that live
 directory. ``TA_PIPELINE_STATE_DIR`` is the single seam both readers go
 through (``shared_state.resolve_pipeline_state_dir``, and
-``dispatcher_pause.legacy_mirror_path`` for the mirror), so the suite claims
+``dispatch.pause.legacy_mirror_path`` for the mirror), so the suite claims
 one throwaway state dir of its own for the whole run, before any test module
 is imported (secretary-1403). ``tests/test_hermetic_pipeline_state.py``
 proves it.
