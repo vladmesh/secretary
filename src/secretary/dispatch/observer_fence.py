@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     ObserverRecord,
     commit_event,
     load_observers,

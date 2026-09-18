@@ -30,7 +30,7 @@ from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
 from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
 from secretary.dispatcher import DispatcherRuntime
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
     put_observers,

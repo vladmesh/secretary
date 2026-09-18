@@ -18,7 +18,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.data import export_board, init_layout, normalize_sprint_entity
-from secretary.dispatcher_observer import render_observer_prompt
+from secretary.dispatch.observer import render_observer_prompt
 from secretary.restore import RestoreError, import_normalized_board
 from secretary.sprint_observer import (
     REVIEWER_FIELD,

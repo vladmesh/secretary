@@ -53,7 +53,7 @@ refusal instead of a `TaskError` with an exit status, and a request id that owns
 **"Start" is not a verb here, and that is deliberate.** There is no operation that launches a
 sprint observer, because there is no such action in this product: the production tick reconciles
 open sprints against the observer records it holds and raises one head per sprint that lacks one
-(`secretary.dispatcher_observer`). So opening a sprint *with* an observer is the whole of starting
+(`secretary.dispatch.observer`). So opening a sprint *with* an observer is the whole of starting
 it, and a scheduler of this layer's own would be a second thing racing the tick for the same head.
 What this module does instead is tell the caller where the sprint is: the document it returns
 carries the launch state :mod:`secretary.webproto.sprint_reads` reads off the dispatcher's own

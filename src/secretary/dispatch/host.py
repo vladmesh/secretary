@@ -101,19 +101,19 @@ from secretary.dispatcher_launcher import (
 from secretary.dispatcher_launcher import (
     role_launch_env as _role_launch_env,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_launch_prompt as _observer_launch_prompt,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_pid_file as _observer_pid_file,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
 from secretary.dispatcher_review import (

@@ -322,7 +322,7 @@ class RecoveryInventoryTests(unittest.TestCase):
                 mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
                 mock.patch("secretary.dispatch.host.CommandHostRuntime.prepare_worker") as worker,
                 mock.patch("secretary.dispatch.host.CommandHostRuntime.start_review") as reviewer,
-                mock.patch("secretary.dispatcher_observer._launch_observer") as observer,
+                mock.patch("secretary.dispatch.observer._launch_observer") as observer,
                 mock.patch("builtins.print"),
             ):
                 before_env = dict(os.environ)

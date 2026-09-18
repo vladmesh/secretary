@@ -1,6 +1,6 @@
 """Durable launch intent for the dispatcher-launched worker and reviewer heads.
 
-Same contour as the observer's (`dispatcher_observer`) and for the same reason: a head is a real
+Same contour as the observer's (`dispatch.observer`) and for the same reason: a head is a real
 process from the moment the host is asked for one, but `DispatcherRecord` only learns its
 workspace, pane and routing from the `save_records` at the end of the launch path.
 

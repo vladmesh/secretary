@@ -42,7 +42,7 @@ from secretary.dispatcher_launch import (
     stop_launch_intent,
     write_launch_intent,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     freeze_observers,
     observer_snapshot,
     resume_observers,

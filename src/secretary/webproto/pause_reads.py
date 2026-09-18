@@ -64,7 +64,7 @@ from typing import Any
 
 from secretary.board.backend import SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
-from secretary.dispatcher_observer import observer_snapshot
+from secretary.dispatch.observer import observer_snapshot
 from secretary.dispatch.pause import (
     ProductionPause,
     auto_resume_status,

@@ -22,7 +22,7 @@ from secretary.board.completion_evidence import (
     review_required,
 )
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatcher_observer import render_observer_prompt
+from secretary.dispatch.observer import render_observer_prompt
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeCatalog, FakeKanboard
