@@ -19,7 +19,7 @@ LEGACY_FLAT_MODULES = frozenset(
     codex_provider_events.py config.py data.py dispatcher.py
     dispatcher_gate.py dispatcher_gate_receipt.py dispatcher_heartbeat.py dispatcher_helpers.py
     dispatcher_launch.py dispatcher_launcher.py dispatcher_observer.py
-    dispatcher_observer_fence.py dispatcher_pause.py dispatcher_pause_ops.py
+    dispatcher_observer_fence.py
     dispatcher_production.py dispatcher_review.py dispatcher_state.py dispatcher_tui.py
     dispatcher_types.py dispatcher_watchdog.py dispatcher_worker_lifecycle.py gate.py
     head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
