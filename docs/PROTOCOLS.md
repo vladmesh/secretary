@@ -1927,7 +1927,7 @@ due-push coordination. Runbooks: [Operations](OPERATIONS.md#pause-or-breakage).
 
 The same pause through the transport-independent layer (`secretary.webproto.pause_ops`,
 `secretary.webproto.pause_reads`): two operations and two reads. Every rule stays in
-`secretary.dispatcher_pause_ops`; the layer adds no rule, flag, lock or store.
+`secretary.dispatch.pause_ops`; the layer adds no rule, flag, lock or store.
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
@@ -1973,7 +1973,7 @@ keeps the original actor and reason. A `pause_resume` of an unpaused pipeline an
 `noop` or `resumed`, `changed` its boolean, and a refusal never reaches a document.
 
 **A command that did something says so even when the state cannot be rendered afterwards.**
-`dispatcher_pause_ops.pause` and `resume` write the flag and then render status through `pause_status`,
+`dispatch.pause_ops.pause` and `resume` write the flag and then render status through `pause_status`,
 which converts every dispatcher record; a semantically corrupt `production-state.json` can make that
 render refuse after the pause took effect. The caller then gets the ordinary `pause_command` document:
 its `action` and `changed`, the render refusal under `warnings`, and the embedded `state` with the
@@ -1981,7 +1981,7 @@ failing source marked unavailable.
 
 That action is the one `dispatcher_pause_ops` decided inside the production tick lock, in the code that
 performed the command, and it travels out with the render failure on
-`dispatcher_pause_ops.PauseCommandCompleted`. It is never inferred from observing the flag: a flag
+`dispatch.pause_ops.PauseCommandCompleted`. It is never inferred from observing the flag: a flag
 observed before and after an unlocked command is not evidence of which command set it (a concurrent
 `resume` and re-drain look identical to a noop). Rendering stays outside the lock.
 
