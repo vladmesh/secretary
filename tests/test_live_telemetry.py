@@ -24,11 +24,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-import secretary.dispatcher as dispatcher_module
+import secretary.dispatch.bootstrap as dispatcher_bootstrap
 from secretary import host
 from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
-from secretary.dispatcher import DispatcherRuntime, default_data_dir, runtime_from_args
+from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
+from secretary.dispatcher import DispatcherRuntime
 from secretary.dispatcher_observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
@@ -828,7 +829,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         with (
             mock.patch("secretary.tasks.KanboardClient"),
             mock.patch(
-                "secretary.dispatcher.board_client", wraps=dispatcher_module.board_client
+                "secretary.dispatch.bootstrap.board_client", wraps=dispatcher_bootstrap.board_client
             ) as selected,
         ):
             runtime = runtime_from_args(

@@ -30,12 +30,12 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
-from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
-from secretary.dispatcher_commands import (
+from secretary.dispatch.commands import (
     add_dispatcher_subcommands,
     add_head_status_command,
     add_pause_commands,
 )
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatcher_pause import ProductionPause
 from secretary.gate import run_gate
 from secretary.head_health import (

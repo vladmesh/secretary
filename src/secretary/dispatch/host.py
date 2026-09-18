@@ -802,7 +802,7 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
         # as the dispatcher rather than depending on a live record or wall-clock ordering. The
-        # dispatcher hands its own backend-selected audit in (`dispatcher.runtime_from_args`), which
+        # dispatcher hands its own backend-selected audit in (`dispatch.bootstrap.runtime_from_args`), which
         # is the only production construction of this host; built here from the data dir alone it
         # would be the file journal, which on the PostgreSQL backend nobody writes, so the default is
         # a host standing on its own — what a test builds — and is named as such in

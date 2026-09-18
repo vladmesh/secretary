@@ -16,10 +16,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
+from secretary.dispatch import bootstrap as dispatcher_bootstrap
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatcher import runtime_from_args
+from secretary.dispatch.bootstrap import runtime_from_args
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, task_audit_for
 from tests.fakes.dispatcher import FakeKanboard
@@ -83,7 +83,7 @@ class RuntimeAuditSelectionTests(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def _runtime(self, client):
-        with mock.patch.object(dispatcher_module, "board_client", return_value=client):
+        with mock.patch.object(dispatcher_bootstrap, "board_client", return_value=client):
             return runtime_from_args(str(self.instance), None, host_mode="noop", owner="secretary-production")
 
     def test_on_postgres_every_reader_and_the_host_share_the_sql_audit(self) -> None:
