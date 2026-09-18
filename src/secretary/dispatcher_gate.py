@@ -37,6 +37,7 @@ from secretary.candidate_history import (
     repair_message,
 )
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
+from secretary.dispatcher_state import GatePrAuthorship, GatePublishedRef
 from secretary.dispatcher_helpers import (
     _last_marker_body,
     _legacy_worker_branch,
@@ -435,16 +436,15 @@ _LEASE_REFUSED_RE = re.compile(
 )
 
 
-def _published_ref_entry(record, branch: str) -> dict:
-    """What the dispatcher last published to `branch`, or {} when it has published nothing.
-
-    Keyed on the branch name so a record carrying an observation for another ref — a legacy
-    worker branch the card was renamed away from — is no lease at all rather than a wrong one.
-    """
+def _published_ref_entry(record, branch: str) -> GatePublishedRef | None:
+    """What the dispatcher last published to `branch`, or None when it published nothing there."""
     entry = getattr(record, "gate_published_ref", None)
-    if not isinstance(entry, dict) or entry.get("branch") != branch:
-        return {}
-    return entry
+    published = getattr(entry, "published_ref", None)
+    if published is None:
+        published = GatePublishedRef.from_json(entry)
+    if published is None or published.branch != branch:
+        return None
+    return published
 
 
 def _remember_published_ref(host, record, branch: str, sha: str) -> None:
@@ -454,13 +454,13 @@ def _remember_published_ref(host, record, branch: str, sha: str) -> None:
     than a read taken at push time on purpose: a read taken now authorises whatever a foreign
     push already landed, which is precisely the thing the fence exists to refuse.
     """
-    entry = {"branch": branch, "sha": sha}
+    entry = GatePublishedRef(branch=branch, sha=sha)
     commit = getattr(host, "commit_gate_published_ref", None)
     if callable(commit):
         commit(record, entry)
     else:
         # Focused gate hosts own no dispatcher state file, but need the same tick-to-tick identity.
-        record.gate_published_ref = dict(entry)
+        record.gate_published_ref = entry.to_json()
 
 
 def _remote_branch_sha(host, workspace: str, branch: str, project: str) -> str:
@@ -533,7 +533,8 @@ def _publish_branch(host, record, workspace: str, branch: str, sha: str, project
     still means a determinate failure that is not about where the branch points, and its
     `ProjectGitAccessError` form names a refused credential before or instead of a push.
     """
-    expected = str(_published_ref_entry(record, branch).get("sha") or "")
+    published = _published_ref_entry(record, branch)
+    expected = published.sha if published is not None else ""
     leased = bool(expected)
     if not leased:
         expected = _remote_branch_sha(host, workspace, branch, project)
@@ -864,15 +865,11 @@ def _pr_body(task: dict, branch: str, base: str) -> str:
     return "\n".join(parts)
 
 
-def _pr_authorship(record) -> dict:
-    """What the gate durably recorded about the last pull request it wrote for this card.
-
-    `{"number": <pr>, "digest": <sha256 over the title and body it sent>}`, or empty. Empty is the
-    safe answer and always means "not the gate's": the gate can only claim a text it can show it
-    wrote.
-    """
+def _pr_authorship(record) -> GatePrAuthorship | None:
+    """What the gate durably recorded about the last pull request it wrote for this card."""
     entry = getattr(record, "gate_pr_authorship", None)
-    return entry if isinstance(entry, dict) else {}
+    authorship = getattr(entry, "authorship", None)
+    return authorship if authorship is not None else GatePrAuthorship.from_json(entry)
 
 
 def _remember_pr(host, workspace: str, record, number: int, title: str, body: str) -> None:
@@ -894,11 +891,11 @@ def _remember_pr(host, workspace: str, record, number: int, title: str, body: st
         return
     host.commit_gate_pr_authorship(
         record,
-        {
-            "number": int(number),
-            "digest": _pr_digest(str(stored.get("title") or ""), str(stored.get("body") or "")),
-            "sent": _pr_digest(title, body),
-        },
+        GatePrAuthorship(
+            number=int(number),
+            digest=_pr_digest(str(stored.get("title") or ""), str(stored.get("body") or "")),
+            sent=_pr_digest(title, body),
+        ),
     )
 
 
@@ -915,10 +912,9 @@ def _gate_owns_pr(record, number: int, title: str, body: str) -> bool:
     reader some context; overwriting a person's text costs them their words.
     """
     entry = _pr_authorship(record)
-    digest = str(entry.get("digest") or "")
-    if not digest or int(entry.get("number") or 0) != int(number):
+    if entry is None or entry.number != int(number):
         return False
-    return digest == _pr_digest(title, body)
+    return entry.digest == _pr_digest(title, body)
 
 
 def _pr_view(host, workspace: str, number: int) -> dict | None:
@@ -961,10 +957,9 @@ def _refresh_pr(host, workspace: str, record, number: int, title: str, body: str
     never opens means the `pull_request` CI never runs.
     """
     entry = _pr_authorship(record)
-    recorded = str(entry.get("digest") or "")
-    if not recorded or int(entry.get("number") or 0) != int(number):
+    if entry is None or entry.number != int(number):
         return
-    if _pr_digest(title, body) == str(entry.get("sent") or ""):
+    if _pr_digest(title, body) == entry.sent:
         return
     current = _pr_view(host, workspace, number)
     if current is None:

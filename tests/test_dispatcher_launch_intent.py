@@ -37,11 +37,22 @@ from secretary.dispatcher import (
     LaunchedHead,
 )
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_gate_receipt import GateReceipt, TerminalCheck
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
-from secretary.dispatcher_state import DispatcherRecord, PersistedRoutingHeadSnapshot
+from secretary.dispatcher_state import (
+    DispatcherRecord,
+    GatePrAuthorship,
+    GatePublishedRef,
+    PersistedDeliveryEvidence,
+    PersistedGatePrAuthorship,
+    PersistedGatePublishedRef,
+    PersistedGateReceipt,
+    PersistedRoutingHeadSnapshot,
+)
 from secretary.dispatcher_tui import (
+    DeliveryEvidence,
     TuiDeliveryError,
     claude_project_dir_name,
     provider_progress_for_run,
@@ -193,6 +204,118 @@ class DispatcherRoutingSnapshotStateTests(unittest.TestCase):
         record.review_run = {}
         self.assertIsNone(record.review_run.snapshot)
         self.assertEqual(record.to_json()["review_run"], {})
+
+
+class DispatcherGateDeliveryStateTests(unittest.TestCase):
+    """A13: gate identity and delivery evidence are typed without rewriting durable JSON."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_gate_and_delivery_mappings_round_trip_exactly(self) -> None:
+        attestation = {"validated_sha": "short", "base_sha": "legacy", "legacy": "keep"}
+        authorship = {"number": 17, "digest": "d" * 64, "sent": "s" * 64, "legacy": "keep"}
+        published = {"branch": "pipeline/card", "sha": "a" * 40, "legacy": "keep"}
+        delivery = {
+            "subject": "worker-prompt",
+            "stage": "payload_written",
+            "turn_confirmed": False,
+            "reason": "historical",
+            "legacy": "keep",
+        }
+        record = self.record(
+            gate_attestation=attestation,
+            gate_pr_authorship=authorship,
+            gate_published_ref=published,
+            worker_delivery_evidence=delivery,
+            review_delivery_evidence=delivery,
+        )
+
+        self.assertIsInstance(record.gate_attestation, PersistedGateReceipt)
+        self.assertIsNone(record.gate_attestation.receipt)
+        self.assertIsInstance(record.gate_pr_authorship, PersistedGatePrAuthorship)
+        self.assertEqual(record.gate_pr_authorship.authorship.number, 17)
+        self.assertIsInstance(record.gate_published_ref, PersistedGatePublishedRef)
+        self.assertEqual(record.gate_published_ref.published_ref.branch, "pipeline/card")
+        self.assertIsInstance(record.worker_delivery_evidence, PersistedDeliveryEvidence)
+        self.assertEqual(record.worker_delivery_evidence.evidence.reason, "historical")
+
+        durable = record.to_json()
+        self.assertEqual(durable["gate_attestation"], attestation)
+        self.assertEqual(durable["gate_pr_authorship"], authorship)
+        self.assertEqual(durable["gate_published_ref"], published)
+        self.assertEqual(durable["worker_delivery_evidence"], delivery)
+        self.assertEqual(durable["review_delivery_evidence"], delivery)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(durable)))
+        self.assertEqual(restarted.gate_attestation.to_json(), attestation)
+        self.assertEqual(restarted.gate_pr_authorship.to_json(), authorship)
+        self.assertEqual(restarted.gate_published_ref.to_json(), published)
+        self.assertEqual(restarted.worker_delivery_evidence.to_json(), delivery)
+        self.assertEqual(restarted.review_delivery_evidence.to_json(), delivery)
+
+    def test_typed_gate_and_delivery_assignments_project_released_json(self) -> None:
+        receipt = GateReceipt(
+            validated_sha="a" * 40,
+            base_sha="b" * 40,
+            gate_mode="local",
+            required_checks=(TerminalCheck("unit", "SUCCESS"),),
+            completed_at="2026-09-18T00:00:00+00:00",
+            command_or_check_set_digest="c" * 64,
+        )
+        authorship = GatePrAuthorship(number=19, digest="d" * 64, sent="e" * 64)
+        published = GatePublishedRef(branch="pipeline/card", sha="f" * 40)
+        delivery = DeliveryEvidence(
+            handle="pane-1",
+            subject="worker-prompt",
+            stage="acknowledged",
+            turn_confirmed=True,
+            reason="",
+        )
+        record = self.record(
+            gate_attestation=receipt,
+            gate_pr_authorship=authorship,
+            gate_published_ref=published,
+            worker_delivery_evidence=delivery,
+            review_delivery_evidence=delivery,
+        )
+
+        self.assertIs(record.gate_attestation.receipt, receipt)
+        self.assertIs(record.gate_pr_authorship.authorship, authorship)
+        self.assertIs(record.gate_published_ref.published_ref, published)
+        self.assertIs(record.worker_delivery_evidence.evidence, delivery)
+        self.assertIs(record.review_delivery_evidence.evidence, delivery)
+        self.assertEqual(record.to_json()["gate_attestation"], receipt.as_dict())
+        self.assertEqual(record.to_json()["gate_pr_authorship"], authorship.to_json())
+        self.assertEqual(record.to_json()["gate_published_ref"], published.to_json())
+        self.assertEqual(record.to_json()["worker_delivery_evidence"], delivery.to_json())
+        self.assertEqual(record.to_json()["review_delivery_evidence"], delivery.to_json())
+
+        record.gate_attestation = {}
+        record.gate_pr_authorship = {}
+        record.gate_published_ref = {}
+        record.worker_delivery_evidence = {}
+        record.review_delivery_evidence = {}
+        self.assertIsNone(record.gate_attestation.receipt)
+        self.assertIsNone(record.gate_pr_authorship.authorship)
+        self.assertIsNone(record.gate_published_ref.published_ref)
+        self.assertIsNone(record.worker_delivery_evidence.evidence)
+        self.assertIsNone(record.review_delivery_evidence.evidence)
+
 
 
 class LaunchIntentTests(unittest.TestCase):

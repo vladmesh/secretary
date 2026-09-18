@@ -84,9 +84,9 @@ from triggered_agents.runtime.pane_host import (
 
 
 def candidate_sha(record: DispatcherRecord) -> str:
-    """The checkout the green gate attested, as the receipt itself recorded it."""
-    attestation = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
-    return str(attestation.get("validated_sha") or "")
+    """The checkout the green gate attested, as the typed receipt itself recorded it."""
+    receipt = record.gate_attestation.receipt
+    return receipt.validated_sha if receipt is not None else ""
 
 
 def review_infrastructure_retry(
@@ -817,8 +817,9 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     if not isinstance(evidence, dict) or not evidence:
         return
     record.review_delivery_evidence = dict(evidence)
+    typed = record.review_delivery_evidence.evidence
     # Preserve a successful receipt when a later reviewer-launch step aborts.
-    if not bool(evidence.get("turn_confirmed")) and delivery_readiness_state(evidence) != READINESS_BUSY:
+    if typed is not None and not typed.turn_confirmed and delivery_readiness_state(typed) != READINESS_BUSY:
         record.review_delivery_failures += 1
 
 
