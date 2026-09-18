@@ -206,7 +206,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
             "board/kanboard.py",
             "sprints.py",
             "data.py",
-            "dispatcher.py",
+            "dispatch/bootstrap.py",
             "product_issues.py",
         ):
             source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")
