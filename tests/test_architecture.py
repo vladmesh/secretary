@@ -16,7 +16,7 @@ LEGACY_FLAT_MODULES = frozenset(
     __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
     backup_policy.py backup_retention.py backup_verify.py board_transport.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
-    codex_provider_events.py config.py data.py dispatcher.py dispatcher_commands.py
+    codex_provider_events.py config.py data.py dispatcher.py
     dispatcher_gate.py dispatcher_gate_receipt.py dispatcher_heartbeat.py dispatcher_helpers.py
     dispatcher_launch.py dispatcher_launcher.py dispatcher_observer.py
     dispatcher_observer_fence.py dispatcher_pause.py dispatcher_pause_ops.py
@@ -44,6 +44,12 @@ LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
 )
 
 
+# The monolith remains the state-machine implementation for now. Only the narrow construction
+# boundary may import it from production code; every other caller must depend on feature modules.
+# This set should become empty when DispatcherRuntime itself moves.
+DISPATCHER_FACADE_IMPORTS = frozenset({("dispatch/bootstrap.py", "secretary.dispatcher")})
+
+
 class SourceLayoutTests(unittest.TestCase):
     def test_test_support_never_imports_a_test_module(self) -> None:
         """Shared fakes are a one-way dependency, not bridges between test modules."""
@@ -59,6 +65,29 @@ class SourceLayoutTests(unittest.TestCase):
     def test_new_secretary_modules_do_not_widen_the_flat_root(self) -> None:
         current = {path.name for path in (ROOT / "src" / "secretary").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
+
+    def test_dispatcher_facade_adds_no_new_product_consumers(self) -> None:
+        package = ROOT / "src" / "secretary"
+        imports: set[tuple[str, str]] = set()
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                module = ""
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "secretary.dispatcher":
+                            imports.add((path.relative_to(package).as_posix(), alias.name))
+                    continue
+                if isinstance(node, ast.ImportFrom):
+                    if node.module == "secretary.dispatcher":
+                        module = node.module
+                    elif node.module == "secretary" and any(
+                        alias.name == "dispatcher" for alias in node.names
+                    ):
+                        module = "secretary.dispatcher"
+                if module:
+                    imports.add((path.relative_to(package).as_posix(), module))
+        self.assertEqual(imports, DISPATCHER_FACADE_IMPORTS)
 
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"

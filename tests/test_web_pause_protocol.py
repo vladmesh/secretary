@@ -765,7 +765,7 @@ class CommandClientTests(PauseProtocolFixture):
         return Namespace(**{**defaults, **kwargs})
 
     def _run(self, handler, **kwargs) -> tuple[int, dict]:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations", return_value=self.pause_ops()),

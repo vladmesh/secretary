@@ -62,7 +62,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher import runtime_from_args
+from secretary.dispatch.bootstrap import runtime_from_args
 from secretary.dispatcher_pause_ops import PauseCommandCompleted
 from secretary.dispatcher_pause_ops import pause as _pause
 from secretary.dispatcher_pause_ops import resume as _resume

@@ -10,7 +10,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
     has_candidate,
@@ -33,7 +32,6 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
-from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
@@ -401,7 +399,6 @@ from secretary.tasks import (
     _event_payload,
     assessment_resolution,
     specification_revision,
-    task_audit_for,
 )
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
@@ -519,17 +516,6 @@ class SprintAdmissionRefusal:
             "sprints": list(self.sprints),
             "detail": self.detail,
         }
-
-
-def default_data_dir(instance_path: Path) -> Path:
-    try:
-        return instance_data_dir(_instance_file(instance_path))
-    except DataDirError as exc:
-        raise DispatcherError("invalid_instance", f"invalid instance: {exc}", 2) from None
-
-
-def _instance_file(path: Path) -> Path:
-    return path / "instance.yaml" if path.is_dir() else path
 
 
 def _usage_fallback_snapshot(
@@ -7668,32 +7654,6 @@ class DispatcherRuntime:
         if task.get("state") != "validate":
             return False
         return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
-
-
-def runtime_from_args(
-    instance: str, data_dir: str | None, *, host_mode: str, owner: str
-) -> DispatcherRuntime:
-    instance_path = Path(instance)
-    data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
-    # DispatcherRuntime also constructs a SprintReader from this client.
-    # built by the switch (board/backend.py) rather than by naming one backend here.
-    client = board_client(instance_path, serves=(CARD, SPRINT))
-    catalog = InstanceCatalog(instance_path)
-    # The audit follows the client: the same `requests`/`board_events` tables the writer commits
-    # to on PostgreSQL, the file journal on Kanboard. The command host reads the same one, so the
-    # TASK.md feedback selector and the report/verdict waits never disagree about what happened.
-    audit = task_audit_for(client, data)
-    return DispatcherRuntime(
-        TaskReader(client),
-        TaskWriter(client, data_dir=data),
-        audit,
-        data,
-        catalog,
-        CommandHostRuntime(catalog, data, mode=host_mode, audit=audit),
-        owner=owner,
-        checkpoint=CheckpointWriter(data, catalog.instance_dir),
-        checkpoint_push=CheckpointPusher(catalog.instance_dir),
-    )
 
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
