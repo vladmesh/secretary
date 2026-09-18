@@ -10,6 +10,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from triggered_agents.runtime.head import HeadRun
+from triggered_agents.runtime.tui_delivery import DeliveryEvidence
 
 from secretary.dispatcher_types import DispatcherError
 from secretary.routing_journal import RoutingHeadSnapshot
@@ -26,6 +27,7 @@ from secretary.dispatcher_worker_lifecycle import (
 
 if TYPE_CHECKING:
     from secretary.dispatch.head_vitality_episode import VitalityEpisode
+    from secretary.dispatcher_gate_receipt import GateReceipt
 
     # Registry of claim skips: Ready records these and continues scanning.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
@@ -80,6 +82,187 @@ def outcome_terminal_path(value: Any, *, state: str) -> OutcomeTerminalPath:
 def is_claim_skip(outcome: dict[str, Any]) -> bool:
     """Whether a claim outcome is "not this card, next card" rather than the pass's answer."""
     return str(outcome.get("action") or "") in CLAIM_SKIP_ACTIONS
+
+
+@dataclass(frozen=True)
+class GatePrAuthorship:
+    """The exact pull-request text identity the gate is allowed to refresh."""
+
+    number: int
+    digest: str
+    sent: str = ""
+
+    @classmethod
+    def from_json(cls, payload: Any) -> GatePrAuthorship | None:
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict):
+            return None
+        try:
+            number = int(payload.get("number") or 0)
+        except (TypeError, ValueError):
+            return None
+        digest = str(payload.get("digest") or "")
+        if number <= 0 or not digest:
+            return None
+        return cls(number=number, digest=digest, sent=str(payload.get("sent") or ""))
+
+    def to_json(self) -> dict[str, Any]:
+        return {"number": self.number, "digest": self.digest, "sent": self.sent}
+
+
+@dataclass(frozen=True)
+class GatePublishedRef:
+    """The remote branch/object pair last published by the gate itself."""
+
+    branch: str
+    sha: str
+
+    @classmethod
+    def from_json(cls, payload: Any) -> GatePublishedRef | None:
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict):
+            return None
+        branch = str(payload.get("branch") or "")
+        if not branch:
+            return None
+        return cls(branch=branch, sha=str(payload.get("sha") or ""))
+
+    def to_json(self) -> dict[str, Any]:
+        return {"branch": self.branch, "sha": self.sha}
+
+
+class PersistedGateReceipt(dict[str, Any]):
+    """One durable exact-SHA gate receipt with an exact compatibility projection."""
+
+    __slots__ = ("_receipt",)
+
+    def __init__(self, value: Any = None) -> None:
+        # Lazy to avoid dispatcher_state -> gate_receipt -> dispatcher_helpers -> dispatcher_state
+        # at module import time. By the time a record is instantiated the modules are fully loaded.
+        from secretary.dispatcher_gate_receipt import GateReceipt
+
+        typed: GateReceipt | None = value if isinstance(value, GateReceipt) else None
+        if typed is not None:
+            payload = typed.as_dict()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            typed = GateReceipt.accept(payload, current_sha=str(payload.get("validated_sha") or ""))
+        self._receipt = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedGateReceipt:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def receipt(self) -> GateReceipt | None:
+        return self._receipt
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
+class PersistedGatePrAuthorship(dict[str, Any]):
+    """Durable PR authorship with a canonical typed view and unchanged JSON."""
+
+    __slots__ = ("_authorship",)
+
+    def __init__(self, value: Any = None) -> None:
+        typed: GatePrAuthorship | None = value if isinstance(value, GatePrAuthorship) else None
+        if typed is not None:
+            payload = typed.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            typed = GatePrAuthorship.from_json(payload)
+        self._authorship = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedGatePrAuthorship:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def authorship(self) -> GatePrAuthorship | None:
+        return self._authorship
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
+class PersistedGatePublishedRef(dict[str, Any]):
+    """Durable publication lease with a canonical typed view and unchanged JSON."""
+
+    __slots__ = ("_published_ref",)
+
+    def __init__(self, value: Any = None) -> None:
+        typed: GatePublishedRef | None = value if isinstance(value, GatePublishedRef) else None
+        if typed is not None:
+            payload = typed.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            typed = GatePublishedRef.from_json(payload)
+        self._published_ref = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedGatePublishedRef:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def published_ref(self) -> GatePublishedRef | None:
+        return self._published_ref
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
+class PersistedDeliveryEvidence(dict[str, Any]):
+    """Durable prompt-delivery evidence with a typed view and exact historical mapping."""
+
+    __slots__ = ("_evidence",)
+
+    def __init__(self, value: Any = None) -> None:
+        typed: DeliveryEvidence | None = value if isinstance(value, DeliveryEvidence) else None
+        if typed is not None:
+            payload = typed.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+        if typed is None and payload:
+            typed = DeliveryEvidence.from_json(payload)
+        self._evidence = typed
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedDeliveryEvidence:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def evidence(self) -> DeliveryEvidence | None:
+        return self._evidence
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
 
 
 class PersistedHeadRun(dict[str, Any]):
@@ -222,7 +405,7 @@ class DispatcherRecord:
     gate_pending_since: float = 0.0
     # SHA-bound result of the last green mechanical gate.  It is an evidence receipt, not a
     # cache key: release still re-runs the gate immediately before merge.
-    gate_attestation: dict[str, Any] = field(default_factory=dict)
+    gate_attestation: PersistedGateReceipt = field(default_factory=PersistedGateReceipt)
     # Consecutive times the gate backend failed to answer at all (secretary-1164), and the last
     # such failure. A transport failure decides nothing about the card, so it is counted here and
     # retried on the next tick; only the exhausted count blocks the card, naming the transport.
@@ -242,12 +425,12 @@ class DispatcherRecord:
     gate_infrastructure_rerun_run_id: str = ""
     gate_infrastructure_rerun_reason: str = ""
     # Gate-authored PR identity lives outside editable PR text; absence forbids refresh.
-    gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
+    gate_pr_authorship: PersistedGatePrAuthorship = field(default_factory=PersistedGatePrAuthorship)
     # The card branch and object id the gate last published (secretary-1540).  A held worker
     # rebases, so publication is a rewrite of the ref the dispatcher itself wrote; this durable
     # observation is the lease that rewrite is fenced against, and a remote sitting anywhere else
     # is a foreign push the gate refuses instead of clobbering.
-    gate_published_ref: dict[str, Any] = field(default_factory=dict)
+    gate_published_ref: PersistedGatePublishedRef = field(default_factory=PersistedGatePublishedRef)
     # Last checkout rejected by a mechanical gate or red review in this attempt.  The class and
     # reason come from the gate's structured result, before any card comment is made.  A same-SHA
     # report after an infrastructure red may retry that gate; every other same-SHA report is still
@@ -381,12 +564,12 @@ class DispatcherRecord:
     # received its prompt must still read that way afterwards, which is the whole point of keeping
     # delivery evidence rather than delivery state. Payload size and hash only, never prompt text.
     review_delivery_failures: int = 0
-    review_delivery_evidence: dict[str, Any] = field(default_factory=dict)
+    review_delivery_evidence: PersistedDeliveryEvidence = field(default_factory=PersistedDeliveryEvidence)
     # Same bounded evidence for worker launch, rework and one-turn continuation delivery.  It is
     # retained across recovery so an attempted body/submit pair is never mistaken for an absent
     # prompt when the next tick chooses whether a head may be replaced.
     worker_delivery_failures: int = 0
-    worker_delivery_evidence: dict[str, Any] = field(default_factory=dict)
+    worker_delivery_evidence: PersistedDeliveryEvidence = field(default_factory=PersistedDeliveryEvidence)
     # Launch intent is persisted before host creation and cleared after its answer.
     launch_intent: dict[str, Any] = field(default_factory=dict)
     # A card standing in an active execution state with no worker identity and no launch debt
@@ -403,6 +586,14 @@ class DispatcherRecord:
             value = PersistedHeadRun.from_value(value)
         elif name in {"worker_run", "review_run"}:
             value = PersistedRoutingHeadSnapshot.from_value(value)
+        elif name == "gate_attestation":
+            value = PersistedGateReceipt.from_value(value)
+        elif name == "gate_pr_authorship":
+            value = PersistedGatePrAuthorship.from_value(value)
+        elif name == "gate_published_ref":
+            value = PersistedGatePublishedRef.from_value(value)
+        elif name in {"worker_delivery_evidence", "review_delivery_evidence"}:
+            value = PersistedDeliveryEvidence.from_value(value)
         super().__setattr__(name, value)
 
     def owns_head(self, role: str | None = None) -> bool:
@@ -425,7 +616,7 @@ class DispatcherRecord:
             "comment_baseline": self.comment_baseline,
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
-            "gate_attestation": dict(self.gate_attestation),
+            "gate_attestation": self.gate_attestation.to_json(),
             "gate_transport_failures": self.gate_transport_failures,
             "gate_transport_error": self.gate_transport_error,
             "gate_rerun_transport_failures": self.gate_rerun_transport_failures,
@@ -434,8 +625,8 @@ class DispatcherRecord:
             "gate_infrastructure_reruns": self.gate_infrastructure_reruns,
             "gate_infrastructure_rerun_run_id": self.gate_infrastructure_rerun_run_id,
             "gate_infrastructure_rerun_reason": self.gate_infrastructure_rerun_reason,
-            "gate_pr_authorship": dict(self.gate_pr_authorship),
-            "gate_published_ref": dict(self.gate_published_ref),
+            "gate_pr_authorship": self.gate_pr_authorship.to_json(),
+            "gate_published_ref": self.gate_published_ref.to_json(),
             "handle": self.handle,
             "head": self.head,
             "preferred_head": self.preferred_head,
@@ -495,9 +686,9 @@ class DispatcherRecord:
             "review_infra_failures": self.review_infra_failures,
             "review_infra_error": self.review_infra_error,
             "review_delivery_failures": self.review_delivery_failures,
-            "review_delivery_evidence": dict(self.review_delivery_evidence),
+            "review_delivery_evidence": self.review_delivery_evidence.to_json(),
             "worker_delivery_failures": self.worker_delivery_failures,
-            "worker_delivery_evidence": dict(self.worker_delivery_evidence),
+            "worker_delivery_evidence": self.worker_delivery_evidence.to_json(),
             "worker_headless": dict(self.worker_headless),
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
@@ -560,7 +751,7 @@ class DispatcherRecord:
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
-            gate_attestation=_run_snapshot(payload.get("gate_attestation")),
+            gate_attestation=PersistedGateReceipt.from_value(payload.get("gate_attestation")),
             gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
             gate_rerun_transport_failures=int(payload.get("gate_rerun_transport_failures") or 0),
@@ -569,8 +760,8 @@ class DispatcherRecord:
             gate_infrastructure_reruns=int(payload.get("gate_infrastructure_reruns") or 0),
             gate_infrastructure_rerun_run_id=str(payload.get("gate_infrastructure_rerun_run_id") or ""),
             gate_infrastructure_rerun_reason=str(payload.get("gate_infrastructure_rerun_reason") or ""),
-            gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
-            gate_published_ref=_run_snapshot(payload.get("gate_published_ref")),
+            gate_pr_authorship=PersistedGatePrAuthorship.from_value(payload.get("gate_pr_authorship")),
+            gate_published_ref=PersistedGatePublishedRef.from_value(payload.get("gate_published_ref")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),
             rejected_failure_reason=str(payload.get("rejected_failure_reason") or ""),
@@ -590,16 +781,12 @@ class DispatcherRecord:
             review_infra_failures=int(payload.get("review_infra_failures") or 0),
             review_infra_error=str(payload.get("review_infra_error") or ""),
             review_delivery_failures=int(payload.get("review_delivery_failures") or 0),
-            review_delivery_evidence=(
-                dict(payload["review_delivery_evidence"])
-                if isinstance(payload.get("review_delivery_evidence"), dict)
-                else {}
+            review_delivery_evidence=PersistedDeliveryEvidence.from_value(
+                payload.get("review_delivery_evidence")
             ),
             worker_delivery_failures=int(payload.get("worker_delivery_failures") or 0),
-            worker_delivery_evidence=(
-                dict(payload["worker_delivery_evidence"])
-                if isinstance(payload.get("worker_delivery_evidence"), dict)
-                else {}
+            worker_delivery_evidence=PersistedDeliveryEvidence.from_value(
+                payload.get("worker_delivery_evidence")
             ),
             worker_headless=(
                 dict(payload["worker_headless"]) if isinstance(payload.get("worker_headless"), dict) else {}
