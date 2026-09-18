@@ -47,7 +47,7 @@ from secretary import (
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
-from secretary.dispatcher_gate import GateResult
+from secretary.dispatch.gate import GateResult
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.head_registry import (
     canonical_heads,
