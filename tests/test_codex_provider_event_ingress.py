@@ -14,7 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import dispatcher_launch, dispatcher_observer, dispatcher_review
+from secretary import dispatcher_launch, dispatcher_review
+from secretary.dispatch import observer as dispatcher_observer
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
