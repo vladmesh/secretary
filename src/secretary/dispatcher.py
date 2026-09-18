@@ -4436,7 +4436,7 @@ class DispatcherRuntime:
         record.gate_state = "green"
         record.gate_pending_since = 0.0
         self._reset_infrastructure_reruns(record)
-        record.gate_attestation = accepted.persisted_payload()
+        record.gate_attestation = accepted.receipt if accepted.receipt is not None else {}
         records[ref] = record
         self.save_records(payload, records)
         if accepted.receipt is not None and stage in {"assessment", "release"}:
