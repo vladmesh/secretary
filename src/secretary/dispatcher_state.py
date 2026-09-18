@@ -265,6 +265,300 @@ class PersistedDeliveryEvidence(dict[str, Any]):
         return dict(self)
 
 
+
+@dataclass(frozen=True)
+class LaunchDelivery:
+    """Typed view of the retry/delivery receipt nested inside one launch intent."""
+
+    state: str = ""
+    receipt: str = ""
+    attempts: int = 0
+    next_at: float = 0.0
+    evidence: DeliveryEvidence | None = None
+
+    @classmethod
+    def from_json(cls, payload: Any) -> LaunchDelivery | None:
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict) or not payload:
+            return None
+        try:
+            attempts = int(payload.get("attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        try:
+            next_at = float(payload.get("next_at") or 0.0)
+        except (TypeError, ValueError):
+            next_at = 0.0
+        evidence_payload = payload.get("evidence")
+        evidence = (
+            DeliveryEvidence.from_json(evidence_payload)
+            if isinstance(evidence_payload, dict)
+            else None
+        )
+        return cls(
+            state=str(payload.get("state") or ""),
+            receipt=str(payload.get("receipt") or ""),
+            attempts=attempts,
+            next_at=next_at,
+            evidence=evidence,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.state:
+            payload["state"] = self.state
+        if self.receipt:
+            payload["receipt"] = self.receipt
+        if self.attempts:
+            payload["attempts"] = self.attempts
+        if self.next_at:
+            payload["next_at"] = self.next_at
+        if self.evidence is not None:
+            payload["evidence"] = self.evidence.to_json()
+        return payload
+
+
+@dataclass(frozen=True)
+class LaunchIntent:
+    """Canonical in-memory value for one crash-recoverable worker/reviewer launch."""
+
+    role: str
+    action: str = ""
+    head: str = ""
+    workspace: str = ""
+    pid_file: str = ""
+    run_id: str = ""
+    task: str = ""
+    attempt_id: str = ""
+    round_number: int = 0
+    opens_round: bool = False
+    respawns: int = 0
+    at: float = 0.0
+    handle: str = ""
+    leaf: str = ""
+    routing_run: RoutingHeadSnapshot | None = None
+    head_run: HeadRun | None = None
+    delivery: LaunchDelivery | None = None
+    launched: bool = False
+    aborted: bool = False
+
+    @classmethod
+    def from_json(cls, payload: Any) -> LaunchIntent | None:
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict):
+            return None
+        role = str(payload.get("role") or "")
+        if not role:
+            return None
+        try:
+            round_number = int(payload.get("round") or 0)
+        except (TypeError, ValueError):
+            round_number = 0
+        try:
+            respawns = int(payload.get("respawns") or 0)
+        except (TypeError, ValueError):
+            respawns = 0
+        try:
+            launched_at = float(payload.get("at") or 0.0)
+        except (TypeError, ValueError):
+            launched_at = 0.0
+
+        routing_run: RoutingHeadSnapshot | None = None
+        raw_run = payload.get("run")
+        if isinstance(raw_run, dict) and raw_run:
+            try:
+                routing_run = RoutingHeadSnapshot.from_json(raw_run)
+            except (KeyError, TypeError, ValueError):
+                routing_run = None
+
+        head_run: HeadRun | None = None
+        raw_head_run = payload.get("head_run")
+        if isinstance(raw_head_run, dict) and raw_head_run:
+            try:
+                head_run = HeadRun.from_json(raw_head_run)
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                head_run = None
+
+        return cls(
+            role=role,
+            action=str(payload.get("action") or ""),
+            head=str(payload.get("head") or ""),
+            workspace=str(payload.get("workspace") or ""),
+            pid_file=str(payload.get("pid_file") or ""),
+            run_id=str(payload.get("run_id") or ""),
+            task=str(payload.get("task") or ""),
+            attempt_id=str(payload.get("attempt_id") or ""),
+            round_number=round_number,
+            opens_round=bool(payload.get("opens_round", False)),
+            respawns=respawns,
+            at=launched_at,
+            handle=str(payload.get("handle") or ""),
+            leaf=str(payload.get("leaf") or ""),
+            routing_run=routing_run,
+            head_run=head_run,
+            delivery=LaunchDelivery.from_json(payload.get("delivery")),
+            launched=bool(payload.get("launched", False)),
+            aborted=bool(payload.get("aborted", False)),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "role": self.role,
+            "action": self.action,
+            "head": self.head,
+            "workspace": self.workspace,
+            "pid_file": self.pid_file,
+            "run_id": self.run_id,
+            "task": self.task,
+            "attempt_id": self.attempt_id,
+            "round": self.round_number,
+            "opens_round": self.opens_round,
+            "respawns": self.respawns,
+            "at": self.at,
+        }
+        if self.handle:
+            payload["handle"] = self.handle
+        if self.leaf:
+            payload["leaf"] = self.leaf
+        if self.routing_run is not None:
+            payload["run"] = self.routing_run.to_json()
+        if self.head_run is not None:
+            payload["head_run"] = self.head_run.to_json()
+        if self.delivery is not None:
+            payload["delivery"] = self.delivery.to_json()
+        if self.launched:
+            payload["launched"] = True
+        if self.aborted:
+            payload["aborted"] = True
+        return payload
+
+
+class PersistedLaunchIntent(dict[str, Any]):
+    """Durable launch intent with a typed view and exact historical JSON projection."""
+
+    def __init__(self, value: Any = None) -> None:
+        if isinstance(value, LaunchIntent):
+            payload = value.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedLaunchIntent:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def intent(self) -> LaunchIntent | None:
+        # Launch recovery still has legacy in-place mapping writes. Parse the current mapping on
+        # access so the typed view cannot go stale while those call sites are migrated.
+        return LaunchIntent.from_json(self)
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
+@dataclass(frozen=True)
+class HeadlessRecoveryEpisode:
+    """One durable episode where an active card has no worker identity to recover from."""
+
+    since: float = 0.0
+    comment_baseline: int = 0
+    record_state: str = ""
+    handle_known: bool = False
+    heartbeat: str = ""
+    workspace: str = ""
+    branch: str = ""
+    expected_branch: str = ""
+    dirty: bool | None = None
+    candidate_sha: str = ""
+    report_generation: int = 0
+    recovery_error: str = ""
+
+    @classmethod
+    def from_json(cls, payload: Any) -> HeadlessRecoveryEpisode | None:
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, dict) or not payload:
+            return None
+        try:
+            since = float(payload.get("since") or 0.0)
+        except (TypeError, ValueError):
+            since = 0.0
+        try:
+            comment_baseline = int(payload.get("comment_baseline") or 0)
+        except (TypeError, ValueError):
+            comment_baseline = 0
+        try:
+            report_generation = int(payload.get("report_generation") or 0)
+        except (TypeError, ValueError):
+            report_generation = 0
+        dirty_value = payload.get("dirty")
+        dirty = dirty_value if isinstance(dirty_value, bool) else None
+        return cls(
+            since=since,
+            comment_baseline=comment_baseline,
+            record_state=str(payload.get("record_state") or ""),
+            handle_known=bool(payload.get("handle_known", False)),
+            heartbeat=str(payload.get("heartbeat") or ""),
+            workspace=str(payload.get("workspace") or ""),
+            branch=str(payload.get("branch") or ""),
+            expected_branch=str(payload.get("expected_branch") or ""),
+            dirty=dirty,
+            candidate_sha=str(payload.get("candidate_sha") or ""),
+            report_generation=report_generation,
+            recovery_error=str(payload.get("recovery_error") or ""),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "since": self.since,
+            "comment_baseline": self.comment_baseline,
+            "record_state": self.record_state,
+            "handle_known": self.handle_known,
+            "heartbeat": self.heartbeat,
+            "workspace": self.workspace,
+            "branch": self.branch,
+            "expected_branch": self.expected_branch,
+            "dirty": self.dirty,
+            "candidate_sha": self.candidate_sha,
+            "report_generation": self.report_generation,
+            "recovery_error": self.recovery_error,
+        }
+
+
+class PersistedHeadlessRecoveryEpisode(dict[str, Any]):
+    """Durable headless recovery state with a canonical typed view."""
+
+    def __init__(self, value: Any = None) -> None:
+        if isinstance(value, HeadlessRecoveryEpisode):
+            payload = value.to_json()
+        elif isinstance(value, dict):
+            payload = dict(value)
+        else:
+            payload = {}
+        dict.__init__(self, payload)
+
+    @classmethod
+    def from_value(cls, value: Any) -> PersistedHeadlessRecoveryEpisode:
+        if isinstance(value, cls):
+            return value
+        return cls(value)
+
+    @property
+    def episode(self) -> HeadlessRecoveryEpisode | None:
+        # Recovery annotates the episode in place with its final refusal. Keep the typed view live.
+        return HeadlessRecoveryEpisode.from_json(self)
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
 class PersistedHeadRun(dict[str, Any]):
     """One durable lifecycle HeadRun with an exact compatibility projection.
 
@@ -571,12 +865,12 @@ class DispatcherRecord:
     worker_delivery_failures: int = 0
     worker_delivery_evidence: PersistedDeliveryEvidence = field(default_factory=PersistedDeliveryEvidence)
     # Launch intent is persisted before host creation and cleared after its answer.
-    launch_intent: dict[str, Any] = field(default_factory=dict)
+    launch_intent: PersistedLaunchIntent = field(default_factory=PersistedLaunchIntent)
     # A card standing in an active execution state with no worker identity and no launch debt
     # (secretary-1544).  Written before the recovery decides, so a tick that cannot finish the
     # decision still leaves the degradation on the record instead of an empty handle that reads
     # as work in progress.  Cleared by the replacement launch that ends the episode.
-    worker_headless: dict[str, Any] = field(default_factory=dict)
+    worker_headless: PersistedHeadlessRecoveryEpisode = field(default_factory=PersistedHeadlessRecoveryEpisode)
 
     def __setattr__(self, name: str, value: Any) -> None:
         # All producers, including legacy host/dispatcher code that still assigns JSON dictionaries,
@@ -594,6 +888,10 @@ class DispatcherRecord:
             value = PersistedGatePublishedRef.from_value(value)
         elif name in {"worker_delivery_evidence", "review_delivery_evidence"}:
             value = PersistedDeliveryEvidence.from_value(value)
+        elif name == "launch_intent":
+            value = PersistedLaunchIntent.from_value(value)
+        elif name == "worker_headless":
+            value = PersistedHeadlessRecoveryEpisode.from_value(value)
         super().__setattr__(name, value)
 
     def owns_head(self, role: str | None = None) -> bool:
@@ -689,8 +987,8 @@ class DispatcherRecord:
             "review_delivery_evidence": self.review_delivery_evidence.to_json(),
             "worker_delivery_failures": self.worker_delivery_failures,
             "worker_delivery_evidence": self.worker_delivery_evidence.to_json(),
-            "worker_headless": dict(self.worker_headless),
-            "launch_intent": dict(self.launch_intent),
+            "worker_headless": self.worker_headless.to_json(),
+            "launch_intent": self.launch_intent.to_json(),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
             "workspace_settled": self.workspace_settled,
@@ -732,7 +1030,7 @@ class DispatcherRecord:
             review_head_run=PersistedHeadRun.from_value(payload.get("review_head_run")),
             worker_run=PersistedRoutingHeadSnapshot.from_value(payload.get("worker_run")),
             review_run=PersistedRoutingHeadSnapshot.from_value(payload.get("review_run")),
-            launch_intent=_run_snapshot(payload.get("launch_intent")),
+            launch_intent=PersistedLaunchIntent.from_value(payload.get("launch_intent")),
             comment_baseline=int(payload.get("comment_baseline") or 0),
             review_baseline=int(payload.get("review_baseline") or 0),
             # A record written before the generation existed carries its round key in
@@ -788,9 +1086,7 @@ class DispatcherRecord:
             worker_delivery_evidence=PersistedDeliveryEvidence.from_value(
                 payload.get("worker_delivery_evidence")
             ),
-            worker_headless=(
-                dict(payload["worker_headless"]) if isinstance(payload.get("worker_headless"), dict) else {}
-            ),
+            worker_headless=PersistedHeadlessRecoveryEpisode.from_value(payload.get("worker_headless")),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
