@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher_observer_fence
+from secretary.dispatch import observer_fence as dispatcher_observer_fence
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     CommandHostRuntime,
