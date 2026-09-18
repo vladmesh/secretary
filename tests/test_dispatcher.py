@@ -52,7 +52,7 @@ from secretary.dispatcher import (
     _legacy_worker_branch,
     _report_nudge_prompt,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
     PR_BODY_SECTION_CHARS,
     GateResult,
@@ -13923,7 +13923,7 @@ class DispatcherGateTests(unittest.TestCase):
         """`_backend_answered` has to keep these apart with the lease in play: the refusal below is
         git 2.43.0's own text for a push whose lease was stale, and the remote produced it. A
         transport failure on the same command is still no answer at all."""
-        from secretary.dispatcher_gate import _backend_answered
+        from secretary.dispatch.gate import _backend_answered
 
         push = ["git", "-C", "/ws", "push", "--force-with-lease=refs/heads/x:" + "a" * 40, "origin", "x:x"]
         refused = (
@@ -15296,7 +15296,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertIn("optional-suite", result.summary)
 
     def test_github_rollup_honours_the_required_set(self) -> None:
-        from secretary.dispatcher_gate import _rollup
+        from secretary.dispatch.gate import _rollup
 
         items = [
             {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
@@ -15313,7 +15313,7 @@ class DispatcherGateTests(unittest.TestCase):
         )
 
     def test_github_rollup_classification(self) -> None:
-        from secretary.dispatcher_gate import _rollup
+        from secretary.dispatch.gate import _rollup
 
         self.assertEqual(_rollup([])[0], "NONE")
         self.assertEqual(_rollup([{"status": "COMPLETED", "conclusion": "SUCCESS"}])[0], "SUCCESS")
