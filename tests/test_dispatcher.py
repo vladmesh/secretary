@@ -14530,7 +14530,7 @@ class DispatcherGateTests(unittest.TestCase):
 
     def _spy_backend_calls(self):
         """Record the label of every question that goes through the single backend call point."""
-        from secretary import dispatcher_gate as gate_module
+        from secretary.dispatch import gate as gate_module
 
         seen: list[str] = []
         real = gate_module._backend_call
