@@ -2416,7 +2416,7 @@ class CommandHostRuntime:
         self, record: DispatcherRecord, entry: GatePrAuthorship | dict[str, Any]
     ) -> None:
         """Write down that the github gate wrote a known text on a known pull request."""
-        record.gate_pr_authorship = entry
+        record.gate_pr_authorship = entry.to_json() if isinstance(entry, GatePrAuthorship) else dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
@@ -2424,7 +2424,7 @@ class CommandHostRuntime:
         self, record: DispatcherRecord, entry: GatePublishedRef | dict[str, Any]
     ) -> None:
         """Persist the branch and object id the gate just published, as the next push's lease."""
-        record.gate_published_ref = entry
+        record.gate_published_ref = entry.to_json() if isinstance(entry, GatePublishedRef) else dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
