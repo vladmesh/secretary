@@ -32,7 +32,7 @@ from secretary.dispatcher_observer import (
     retry_pending_observer_stops,
 )
 from secretary.dispatcher_observer_fence import fenced_task, observer_fence
-from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
+from secretary.dispatch.pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
     close_divergence,
