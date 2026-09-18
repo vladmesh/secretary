@@ -27,7 +27,7 @@ from secretary.dispatcher_worker_lifecycle import (
 
 if TYPE_CHECKING:
     from secretary.dispatch.head_vitality_episode import VitalityEpisode
-    from secretary.dispatcher_gate_receipt import GateReceipt
+    from secretary.dispatch.gate_receipt import GateReceipt
 
     # Registry of claim skips: Ready records these and continues scanning.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
@@ -141,7 +141,7 @@ class PersistedGateReceipt(dict[str, Any]):
     def __init__(self, value: Any = None) -> None:
         # Lazy to avoid dispatcher_state -> gate_receipt -> dispatcher_helpers -> dispatcher_state
         # at module import time. By the time a record is instantiated the modules are fully loaded.
-        from secretary.dispatcher_gate_receipt import GateReceipt
+        from secretary.dispatch.gate_receipt import GateReceipt
 
         typed: GateReceipt | None = value if isinstance(value, GateReceipt) else None
         if typed is not None:
