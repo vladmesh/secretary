@@ -780,7 +780,7 @@ class CommandClientTests(PauseProtocolFixture):
         return status, json.loads(written) if written else {}
 
     def test_pause_drain_resume_and_the_two_reads_are_clients_of_the_operations(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
         self.assertEqual(status, 0)
@@ -805,7 +805,7 @@ class CommandClientTests(PauseProtocolFixture):
         The exit status is what a script branches on, so a pause that took must not answer with the
         status of a pause that did not.
         """
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         self.tracked_head(worker_retained_at=1)
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -814,7 +814,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(self.pause_payload()["mode"], DRAIN)
 
     def test_the_conflict_keeps_the_exit_status_it_always_answered_with(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -822,7 +822,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(document["error"]["code"], "owner_conflict")
 
     def test_a_pause_without_a_reason_keeps_its_usage_status(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain", reason=None)
         self.assertEqual(status, 2)
@@ -837,7 +837,7 @@ class CommandClientTests(PauseProtocolFixture):
         does not validate is `validation` and not `backend_unavailable`. No layer is substituted
         here: these run the real handlers over a real broken installation.
         """
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         broken = self.tmp / "broken-instance"
         broken.mkdir()
@@ -856,7 +856,7 @@ class CommandClientTests(PauseProtocolFixture):
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations") as operations,
