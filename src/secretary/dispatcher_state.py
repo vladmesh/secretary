@@ -264,8 +264,6 @@ class PersistedDeliveryEvidence(dict[str, Any]):
     def to_json(self) -> dict[str, Any]:
         return dict(self)
 
-
-
 @dataclass(frozen=True)
 class LaunchDelivery:
     """Typed view of the retry/delivery receipt nested inside one launch intent."""
@@ -870,7 +868,9 @@ class DispatcherRecord:
     # (secretary-1544).  Written before the recovery decides, so a tick that cannot finish the
     # decision still leaves the degradation on the record instead of an empty handle that reads
     # as work in progress.  Cleared by the replacement launch that ends the episode.
-    worker_headless: PersistedHeadlessRecoveryEpisode = field(default_factory=PersistedHeadlessRecoveryEpisode)
+    worker_headless: PersistedHeadlessRecoveryEpisode = field(
+        default_factory=PersistedHeadlessRecoveryEpisode
+    )
 
     def __setattr__(self, name: str, value: Any) -> None:
         # All producers, including legacy host/dispatcher code that still assigns JSON dictionaries,
