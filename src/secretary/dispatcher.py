@@ -6,15 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from secretary.board.completion_evidence import (
-    RESEARCH_REPORT_DIR,
-    has_candidate,
-    missing_completion_evidence,
-    render_research_completion_link,
-    research_report_path,
-    research_report_refusal,
-    review_required,
-)
+from secretary.board.completion_evidence import has_candidate, review_required
 from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
@@ -55,14 +47,7 @@ from secretary.dispatch.claim import (
 from secretary.dispatch.claim import (
     resolve_head as _resolve_claim_head,
 )
-from secretary.dispatch.gate_lifecycle import (
-    accept_green_gate as _accept_green_gate,
-    block_gate_transport as _block_gate_transport,
-    gate_answered as _gate_answered,
-    gate_pending as _gate_pending,
-    gate_transport_retry as _gate_transport_retry,
-    run_gate as _run_gate,
-)
+from secretary.dispatch.gate_lifecycle import run_gate as _run_gate
 from secretary.dispatch.helpers import (
     _last_marker,
     _report_adoption_baseline,
@@ -166,7 +151,6 @@ from secretary.dispatch.review import (
 )
 from secretary.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
-    merge_readiness as _merge_readiness,
     park_green_verdict as _park_green_verdict,
 )
 from secretary.dispatch.state import (
@@ -194,7 +178,6 @@ from secretary.dispatch.types import (
     STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REVIEW_VERDICT,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
-    GateTransportError,
     HostError,
 )
 from secretary.dispatch.types import DispatcherError as DispatcherError
@@ -231,7 +214,6 @@ from secretary.head_health import (
     HeadHealth,
     HeadReadiness,
 )
-from secretary.knowledge_write import KnowledgeError, KnowledgeValidationError, write_knowledge_directory
 from secretary.routing_journal import (
     MODEL_UNKNOWN,
     REVIEWER,
@@ -251,7 +233,6 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.sprints import SprintReader, budget_thresholds
-from secretary.state_repo import StateRepoError
 from secretary.tasks import (
     TaskAudit,
     TaskError,
@@ -691,79 +672,6 @@ class DispatcherRuntime:
             "action": "waiting-worker-report",
         }
 
-    def _transfer_research_report(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        step: str,
-    ) -> dict[str, Any] | None:
-        """Move a research card's report directory into knowledge and link it; None when done.
-
-        `<workspace>/.secretary-report/` replaces `state/knowledge/reports/<ref>/` through the knowledge
-        directory writer, then one `[completion:research]` comment keyed on the report generation is
-        written, so a replayed tick commits nothing new and writes no second link. A refused or failed
-        transfer Blocks the card with the cause named, keeps the workspace and writes no link. Any
-        other kind answers None at once.
-        """
-        if task.get("type") != "research":
-            return None
-        ref = task["ref"]
-        generation = str(record.report_generation)
-        source = Path(record.workspace) / RESEARCH_REPORT_DIR
-        refusal, message = "", ""
-        if research_report_refusal(Path(record.workspace)):
-            refusal = "report_missing"
-            message = f"the workspace holds no non-empty {RESEARCH_REPORT_DIR}/report.md"
-        else:
-            try:
-                write_knowledge_directory(
-                    Path(self.catalog.instance_dir),
-                    directory=research_report_path(ref),
-                    actor="dispatcher",
-                    source_dir=source,
-                    message=(
-                        f"knowledge: research report of {ref}, report generation {generation}\n\n"
-                        f"Principal: dispatcher\nDocument: {research_report_path(ref)}\n"
-                    ),
-                )
-            except KnowledgeValidationError as exc:
-                refusal, message = exc.reason or "refused", str(exc)
-            except (KnowledgeError, StateRepoError, OSError) as exc:
-                refusal, message = "write_failed", str(exc)
-        if refusal:
-            outcome = self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="research-report-transfer-refused",
-                reason=(
-                    f"research report transfer refused ({refusal}): {scrub_host_output(message)}. "
-                    f"Nothing was linked and the card cannot be Done; the workspace and its "
-                    f'`{RESEARCH_REPORT_DIR}/` are kept. See docs/PROTOCOLS.md, "Card kinds, live impact '
-                    'and the review choice".'
-                ),
-                step=step,
-                outcome="research report transfer refused",
-            )
-            outcome["transfer_refusal"] = refusal
-            return outcome
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=render_research_completion_link(ref),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "completion-research", ref, generation
-            ),
-        )
-        return None
-
     def _advance_review(
         self,
         task: dict[str, Any],
@@ -953,276 +861,6 @@ class DispatcherRuntime:
 
 
 
-
-    def _block_merge_path(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        action: str,
-        reason: str,
-        step: str,
-        outcome: str,
-        decision: str = "",
-    ) -> dict[str, Any]:
-        """A merge path that cannot finish leaves the card Blocked with its heads down."""
-        ref = task["ref"]
-        self.host.stop(record)
-        self.terminal_effect(
-            task,
-            record,
-            target="blocked",
-            reason=reason,
-            decision=decision,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
-            terminal_state="blocked",
-            disposition="blocked",
-            verdict=record.worker_continuation.verdict_outcome
-            if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
-            else "missing",
-            blocked_reason=_merge_terminal_reason(action),
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
-
-    def _release_parked(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Perform a release decision: re-check the mechanical state, then merge."""
-        ref = task["ref"]
-        if not has_candidate(task):
-            # Nothing to re-check or merge: the release goes to the completion evidence check. A
-            # research card parked by a red verdict reaches here without a transfer, and one parked
-            # green has already made it, which this repeats as a no-op.
-            refused = self._transfer_research_report(
-                task, record, records, payload, attempt_id, step="assessment"
-            )
-            if refused is not None:
-                return refused
-            return self._release_effect(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="assessment",
-                move_reason=f"Observer decision: release. {reason}".strip(),
-                decision="release",
-                verdict=_released_verdict(record),
-            )
-        kind, result, detail = _merge_readiness(self, task, record)
-        if kind == "transport":
-            # A release that could not ask the gate is not a release that was refused.
-            retry = _gate_transport_retry(self, 
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                GateTransportError(detail),
-                step="assessment",
-            )
-            if retry is not None:
-                return retry
-            return _block_gate_transport(self, 
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="assessment",
-                action="release-gate-transport-blocked",
-                prefix="Observer decision: release. ",
-            )
-        if kind != "drift":
-            # `drift` is decided before the gate is asked; only an answer clears the budget.
-            _gate_answered(self, ref, record, records, payload)
-        if kind == "pending":
-            if result is None:
-                return self._block_merge_path(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    action="release-gate-result-blocked",
-                    reason="merge gate returned pending without a result payload",
-                    step="assessment",
-                    outcome="merge gate result unavailable",
-                )
-            return _gate_pending(self, 
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                result,
-                step="assessment",
-                action="merge-gate-pending",
-            )
-        if kind != "green":
-            summary = {
-                "drift": f"the release cannot land: {detail}",
-                "failed": f"the merge gate could not be read: {detail}",
-            }.get(kind, "the mechanical gate is no longer green for the checkout this release was decided on")
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action=f"release-{kind}-blocked",
-                reason=f"Observer decision: release. {summary}",
-                step="assessment",
-                outcome=f"release {kind}",
-            )
-        if result is None:
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="release-gate-result-blocked",
-                reason="merge gate returned green without a result payload",
-                step="assessment",
-                outcome="merge gate result unavailable",
-            )
-        blocked = _accept_green_gate(self, task, record, records, payload, attempt_id, result, stage="release")
-        if blocked is not None:
-            return blocked
-        return self._release_effect(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            step="assessment",
-            move_reason=f"Observer decision: release. {reason}".strip(),
-            decision="release",
-            verdict=_released_verdict(record),
-        )
-
-    def _release_effect(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        step: str,
-        move_reason: str,
-        decision: str = "",
-        verdict: str = "green",
-    ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done.
-
-        This is the only way a card reaches Done, so the completion evidence check sits here: every
-        release, automatic or decided, first taken or replayed after a lost tick, goes through it.
-        """
-        ref = task["ref"]
-        if has_candidate(task):
-            try:
-                self.host.complete_green(task, record)
-            except HostError as exc:
-                # A rejected merge must land the card in Blocked rather than escape the tick: an
-                # escaping error leaves the verdict standing and every later tick retries the merge.
-                return self._block_merge_path(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    action="merge-blocked",
-                    reason=f"merge failed: {scrub_host_output(str(exc))}",
-                    step=step,
-                    outcome="merge failed",
-                )
-        blocked = self._require_completion_evidence(task, record, records, payload, attempt_id, step=step)
-        if blocked is not None:
-            return blocked
-        try:
-            self.host.teardown(record)
-        except HostError as exc:
-            # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
-            # prevents Done so the next tick cannot repeatedly run an already-failed release path.
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="cleanup-provenance-blocked",
-                reason=f"release cleanup refused: {scrub_host_output(str(exc))}",
-                step=step,
-                outcome="release cleanup refused",
-                decision=decision,
-            )
-        self.terminal_effect(
-            task,
-            record,
-            target="done",
-            reason=move_reason,
-            decision=decision,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
-            terminal_state="done",
-            disposition="release",
-            verdict=verdict,
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
-
-    def _require_completion_evidence(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        step: str,
-    ) -> dict[str, Any] | None:
-        """Completion evidence for kind: the one check between a release and Done.
-
-        A code card's evidence is the merge `complete_green` has just made. A research or infra card
-        is read fresh from the board, because its evidence is a marked comment written since the
-        tick's snapshot; without it the card is Blocked, naming the missing marker, and not torn down.
-        """
-        if has_candidate(task):
-            return None
-        missing = missing_completion_evidence(self.reader.show(task["ref"]))
-        if not missing:
-            return None
-        outcome = self._block_merge_path(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            action="completion-evidence-missing",
-            reason=(
-                f"completion evidence missing: this {task.get('type')} card has no `[{missing}]` "
-                "record, so it cannot be Done. The workspace is kept; see docs/PROTOCOLS.md, "
-                '"Card kinds, live impact and the review choice".'
-            ),
-            step=step,
-            outcome="completion evidence missing",
-        )
-        outcome["missing_evidence"] = missing
-        return outcome
 
     def head_run_snapshot(
         self,
@@ -2158,22 +1796,4 @@ class DispatcherRuntime:
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
-
-def _released_verdict(record: DispatcherRecord) -> str:
-    """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
-    return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
-
-
-def _merge_terminal_reason(action: str) -> str:
-    """Classify the terminal cause a merge path actually reached.
-
-    A failed release/merge and a gate that cannot supply a usable result still
-    charge as their own terminal work.  Only a classified head bring-up is the
-    distinct uncharged infrastructure family.
-    """
-    if action == "red-review-ceiling":
-        return "review"
-    if "gate" in action:
-        return "gate"
-    return "implementation"
 
