@@ -1,0 +1,230 @@
+name: worker-report-refactor
+
+on:
+  push:
+    branches: [refactor/worker-report-lifecycle]
+    paths: [.github/workflows/worker-report-refactor.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/refactor/worker-report-lifecycle'
+    runs-on: ubuntu-latest
+    env:
+      TA_SECRETARY_REPO: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/worker-report-lifecycle
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Extract the bounded report lifecycle
+        run: |
+          python3 - <<'PY'
+          import ast
+          import copy
+          import re
+          import subprocess
+          import textwrap
+          from pathlib import Path
+
+          path = Path('src/secretary/dispatcher.py')
+          source = path.read_text()
+          assert subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip() == '83d855fad2ae1b13a6dd46538e5d673a8eb31781', 'unexpected dispatcher baseline'
+          tree = ast.parse(source)
+          runtime = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'DispatcherRuntime')
+          methods = {n.name: n for n in runtime.body if isinstance(n, ast.FunctionDef)}
+          lines = source.splitlines(keepends=True)
+          def method(name):
+              node = methods[name]
+              return ''.join(lines[node.lineno - 1:node.end_lineno])
+          moved_names = ('_record_infra_completion', '_accept_stale_infrastructure_done', '_block_repeated_infrastructure_done', '_reject_stale_done', '_prompt_worker_report')
+          def relocate(text):
+              text = textwrap.dedent(text)
+              text = re.sub(r'\bself\b', 'runtime', text)
+              text = text.replace('    runtime,\n', '    runtime: Any,\n', 1)
+              for name in moved_names:
+                  text = text.replace('runtime.' + name + '(', name + '(runtime, ')
+              return text
+          advance = method('_advance_worker')
+          selection_start = advance.index('        # The round the dispatcher is holding')
+          selection_end = advance.index('        continuation = record.worker_continuation\n', selection_start)
+          selection = advance[selection_start:selection_end]
+          report_start = advance.index('        if marker == "report:done":\n', selection_end)
+          report_end = advance.index('        # Before any wait:', report_start)
+          handling = advance[report_start:report_end]
+          signature = '''    runtime: Any,
+              task: dict[str, Any],
+              record: DispatcherRecord,
+              records: dict[str, DispatcherRecord],
+              payload: dict[str, Any],
+              attempt_id: str,
+          '''
+          # These bodies retain their original ordering and request identities. Selection must stay
+          # before continuation recovery; handling must stay after it.
+          selection_function = (
+              'def worker_report_marker(\n' + signature + ') -> str | None:\n'
+              + '    """Find this round\'s report and durably bind its terminal path before recovery."""\n'
+              + '    ref = task["ref"]\n'
+              + re.sub(r'\bself\b', 'runtime', textwrap.dedent(selection.replace('        ', '    ', 1)))
+          )
+          # Remove exactly one indentation level, preserving every nested suite and comment.
+          def lower_body(text):
+              return ''.join(line[4:] if line.startswith('    ') else line for line in text.splitlines(keepends=True))
+          selection_function = (
+              'def worker_report_marker(\n' + signature + ') -> str | None:\n'
+              + '    """Find this round\'s report and durably bind its terminal path before recovery."""\n'
+              + '    ref = task["ref"]\n'
+              + re.sub(r'\bself\b', 'runtime', lower_body(selection))
+              + '    return marker\n'
+          )
+          handling_function = (
+              'def handle_worker_report(\n' + signature + '    *,\n    marker: str | None,\n'
+              + ') -> dict[str, Any] | None:\n'
+              + '    """Consume a done/blocked report after continuation recovery, or leave the wait open."""\n'
+              + '    ref = task["ref"]\n    continuation = record.worker_continuation\n'
+              + re.sub(r'\bself\b', 'runtime', lower_body(handling))
+              + '    return None\n'
+          )
+          for name in moved_names:
+              handling_function = handling_function.replace('runtime.' + name + '(', name + '(runtime, ')
+          functions = [selection_function, handling_function]
+          for name in moved_names:
+              text = relocate(method(name))
+              if name == '_prompt_worker_report':
+                  text = text.replace('def _prompt_worker_report(', 'def prompt_worker_report(', 1)
+              functions.append(text)
+          body = '\n\n'.join(functions)
+          used = {node.id for node in ast.walk(ast.parse(body)) if isinstance(node, ast.Name)}
+          imports = []
+          for node in tree.body:
+              if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                  continue
+              if isinstance(node, ast.ImportFrom) and node.module == '__future__':
+                  continue
+              chosen = [alias for alias in node.names if (alias.asname or alias.name.split('.')[0]) in used]
+              if chosen:
+                  selected = copy.deepcopy(node)
+                  selected.names = chosen
+                  imports.append(ast.unparse(selected))
+          header = '''"""Worker report acceptance, stale-result handling and one-shot report prompting.
+
+          Claim/launch, retained continuation, shared wait/vitality policy, and the gate/review/merge
+          state machines keep their existing owners. The runtime is a collaborator, as in worker_launch;
+          board documents and tick results remain compatibility boundaries. This module never imports
+          the dispatcher facade, and the durable save/effect ordering is unchanged.
+          """
+
+          from __future__ import annotations
+
+          '''
+          new_path = Path('src/secretary/dispatch/worker_report.py')
+          assert not new_path.exists()
+          new_path.write_text(header + '\n'.join(imports) + '\n\n\n' + body)
+          updated_advance = (
+              advance[:selection_start]
+              + '        marker = _worker_report_marker(self, task, record, records, payload, attempt_id)\n'
+              + advance[selection_end:report_start]
+              + '        reported = _handle_worker_report(\n'
+              + '            self, task, record, records, payload, attempt_id, marker=marker\n'
+              + '        )\n        if reported is not None:\n            return reported\n'
+              + advance[report_end:]
+          )
+          for name in moved_names:
+              original = method(name)
+              assert source.count(original) == 1
+              source = source.replace(original + '\n', '', 1)
+          assert source.count(advance) == 1
+          source = source.replace(advance, updated_advance, 1)
+          source = source.replace('self._prompt_worker_report(', '_prompt_worker_report(self, ')
+          seam = '''from secretary.dispatch.worker_report import (
+              handle_worker_report as _handle_worker_report,
+              prompt_worker_report as _prompt_worker_report,
+              worker_report_marker as _worker_report_marker,
+          )
+          '''
+          anchor = 'from secretary.dispatch.worker_lifecycle import ('
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, seam + anchor, 1)
+          path.write_text(source)
+          config_path = Path('pyproject.toml')
+          config = config_path.read_text()
+          anchor = '    "src/secretary/dispatch/worker_launch.py",\n'
+          assert config.count(anchor) == 1
+          config_path.write_text(config.replace(anchor, anchor + '    "src/secretary/dispatch/worker_report.py",\n', 1))
+          contracts_path = Path('tests/test_dispatcher_contracts.py')
+          contracts = contracts_path.read_text()
+          anchor = 'from secretary.dispatch import worker_launch as dispatcher_worker_launch\n'
+          assert contracts.count(anchor) == 1
+          contracts = contracts.replace(anchor, anchor + 'from secretary.dispatch import worker_report as dispatcher_worker_report\n', 1)
+          anchor = '    dispatcher_worker_launch,\n'
+          assert contracts.count(anchor) == 1
+          contracts = contracts.replace(anchor, anchor + '    dispatcher_worker_report,\n', 1)
+          contracts_path.write_text(contracts)
+          arch_path = Path('tests/test_architecture.py')
+          arch = arch_path.read_text()
+          anchor = '    def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:\n'
+          assert arch.count(anchor) == 1
+          ratchet = '''    def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
+                  dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+                  report_source = (ROOT / "src" / "secretary" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
+                  for helper in (
+                      "_record_infra_completion", "_accept_stale_infrastructure_done",
+                      "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
+                  ):
+                      self.assertNotIn(f"\\n    def {helper}(", dispatcher_source)
+                      self.assertNotIn(f"self.{helper}(", dispatcher_source)
+                      self.assertNotIn(f"runtime.{helper}(", report_source)
+                  runtime_tree = ast.parse(dispatcher_source)
+                  advance = next(node for node in ast.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
+                  advance_source = ast.get_source_segment(dispatcher_source, advance)
+                  self.assertIn("_worker_report_marker(", advance_source)
+                  self.assertIn("_handle_worker_report(", advance_source)
+                  self.assertNotIn("verify_worker_result(", advance_source)
+                  for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
+                      self.assertIn(f"def {entry}(", report_source)
+                  self.assertNotIn("from secretary.dispatcher import", report_source)
+
+          '''
+          arch_path.write_text(arch.replace(anchor, ratchet + anchor, 1))
+          for changed in (path, new_path, contracts_path, arch_path):
+              ast.parse(changed.read_text(), filename=str(changed))
+          for candidate in Path('tests').rglob('*.py'):
+              text = candidate.read_text()
+              for name in moved_names:
+                  if name in text:
+                      print('REVIEW_REFERENCE', candidate, name)
+          print('DISPATCHER_LINES', len(source.splitlines()))
+          print('REPORT_LINES', len(new_path.read_text().splitlines()))
+          PY
+      - name: Install pinned development checks
+        run: python3 -m pip install -e '.[dev,typecheck]'
+      - name: Clean only extraction-owned imports
+        run: |
+          python3 -m ruff check --select I001 --fix src/secretary/dispatch/worker_report.py
+          python3 -m ruff check --select F401 --fix src/secretary/dispatcher.py
+          git diff --check
+      - name: Publish only the refactor files to its branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/secretary/dispatcher.py src/secretary/dispatch/worker_report.py pyproject.toml tests/test_architecture.py tests/test_dispatcher_contracts.py
+          git diff --cached --stat
+          git commit -m 'refactor: extract worker report lifecycle into dispatch package'
+          git push origin HEAD:refactor/worker-report-lifecycle
+      - name: Typecheck
+        run: python3 -m mypy
+      - name: Focused dispatcher regressions
+        run: python3 -m unittest tests.test_architecture tests.test_dispatcher_contracts tests.test_dispatcher tests.test_attempt_outcome
+      - name: Export the reviewed checkout
+        if: always()
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/worker-report-repo.tar"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-report-checkout
+          path: ${{ runner.temp }}/worker-report-repo.tar
+          retention-days: 2
