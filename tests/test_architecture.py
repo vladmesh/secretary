@@ -85,6 +85,16 @@ class SourceLayoutTests(unittest.TestCase):
                     imports.add((path.relative_to(package).as_posix(), module))
         self.assertEqual(imports, DISPATCHER_FACADE_IMPORTS)
 
+    def test_dispatcher_claim_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+            encoding="utf-8"
+        )
+        production_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "production.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("\n    def _claim(", dispatcher_source)
+        self.assertNotIn("runtime._claim(", production_source)
+
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
         imports: set[tuple[str, str]] = set()
