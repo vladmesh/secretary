@@ -16,6 +16,7 @@ from unittest import mock
 
 from secretary.dispatch import launch as dispatcher_launch
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch.worker_launch import bring_up_worker_head
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
@@ -1519,7 +1520,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             "record",
             new=self._fail_recorder,
         ):
-            launched, failure = runtime._bring_up_worker_head(
+            launched, failure = bring_up_worker_head(
+                runtime,
                 task,
                 record,
                 records,
