@@ -740,7 +740,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
 
     def test_the_service_launcher_and_the_dispatcher_run_one_preflight(self) -> None:
         """Not two implementations that agree today: the same function object."""
-        from secretary import dispatcher_launcher
+        from secretary.dispatch import launch as dispatcher_launcher
 
         self.assertIs(dispatch.preflight_codex_launch, codex_preflight.preflight_codex_launch)
         self.assertIs(
