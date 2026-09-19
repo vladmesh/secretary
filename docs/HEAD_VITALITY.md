@@ -189,8 +189,8 @@ live process is an observation failure that waits.
 | `Retained` | `wait` only; the role's wait clock is renewed. |
 | `Suspended` | Recovery policy: one identity-fenced SIGCONT per suspension span, a response window, then operator escalation. Never a stop. |
 | `SuspectedStall` | At most one idempotent report nudge per round generation, then visible degradation (`{kind}-stall-suspected`). Never destructive. |
-| `ConfirmedStall` | One report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. |
-| `Dead` | Reclaim via `_trigger_wait_watchdog`. |
+| `ConfirmedStall` | One report prompt if the round has not spent it, else `dispatch.wait_vitality._trigger_wait_watchdog` → respawn once → escalate to Blocked. |
+| `Dead` | Reclaim via `dispatch.wait_vitality._trigger_wait_watchdog`. |
 | No episode / `Unverifiable`, ceiling elapsed | Operator escalation, head untouched (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap and a degraded `{kind}-unobserved-wait-escalated` outcome. Before that, an authoritative deterministic refusal seen `deterministic_refusal_limit` times escalates without waiting for the ceiling. |
 
 ### The guard
@@ -212,9 +212,9 @@ on the wait cycle and refusal class. The body says only what that key names; liv
 dark sources, next deadline) stay on the episode and are read with `secretary head-status`.
 
 Guarded entry point: `DispatcherRuntime._trigger_wait_watchdog`, which fences both arms
-(`_respawn_wait`, `_escalate_wait`) through `_guard_or_wait`. The no-episode fallback's evidence
+(`dispatch.wait_vitality._respawn_wait`, `dispatch.wait_vitality._escalate_wait`) through `dispatch.wait_vitality._guard_or_wait`. The no-episode fallback's evidence
 branches (`no output since launch`, `no terminal progress`) keep their triggers but act only under
-`_trigger_wait_watchdog`; its pure clock branch escalates without destroying. `_stop_worker_confirmed`
+`dispatch.wait_vitality._trigger_wait_watchdog`; its pure clock branch escalates without destroying. `_stop_worker_confirmed`
 and `_end_review_pane_confirmed` run only beneath a guarded entry.
 
 Not guarded, because they do not act on vitality:

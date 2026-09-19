@@ -382,7 +382,7 @@ class ContinuationOwnershipTests(unittest.TestCase):
             "_worker_report_marker(",
             "_recover_worker_continuation(",
             "_handle_worker_report(",
-            "self._wait_watchdog(",
+            "_wait_watchdog(self, ",
         ]
         positions = [advance_source.index(name) for name in names]
         self.assertEqual(positions, sorted(positions))

@@ -49,9 +49,16 @@ retained/red continuation: durable rework intent, replayable board move, deliver
 provider-progress recovery, and the confirmed-stop handoff to `dispatch.worker_launch`. Durable
 models stay in `dispatch.worker_lifecycle`. In `_advance_worker`, red-transition replay runs before
 report lookup; delivery recovery runs after `worker_report_marker` but before `handle_worker_report`.
-This ordering lets a report prove a prior delivery without resending its prompt. Gate/review decisions,
-Assessment parking, and shared wait/watchdog/vitality policy are outside this boundary. There are no
-implementation callbacks into the dispatcher for the extracted continuation methods.
+This ordering lets a report prove a prior delivery without resending its prompt. Gate/review decisions
+and Assessment parking stay outside this boundary. There are no implementation callbacks into the
+dispatcher for the extracted continuation methods.
+
+`dispatch.wait_vitality` owns the shared worker/reviewer wait state machine: vitality reduction,
+recovery-policy rungs, suspension SIGCONT/operator escalation, guarded one-shot respawn, second-stall
+blocking and the bounded unobservable-head escalation. `DispatcherRuntime` calls its four package
+entry points from worker/review/gate orchestration; the module calls back only for the existing
+worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects. Gate verdict,
+review verdict, Assessment and merge policy remain in the runtime for later bounded extractions.
 
 Dependency rules:
 
