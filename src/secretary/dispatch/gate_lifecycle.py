@@ -18,6 +18,7 @@ from secretary.dispatch.gate import (
     GateResult,
 )
 from secretary.dispatch.gate import _fingerprint as _gate_fingerprint
+from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.gate import validation_ci as _validation_ci
 from secretary.dispatch.gate_receipt import AcceptedGreenGate
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
