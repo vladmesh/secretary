@@ -87,7 +87,7 @@ from secretary.dispatch.production import _budget_event_type, production_adopt_a
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     DispatcherRecord,
 )
 from secretary.projects.contract import (
@@ -103,7 +103,7 @@ from secretary.projects.contract import (
 from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatcher_tui import (
@@ -111,7 +111,7 @@ from secretary.dispatcher_tui import (
     TuiDeliveryError,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     GateTransportError,
     HeadPaneNotReady,
 )
@@ -127,7 +127,7 @@ from secretary.dispatcher_watchdog import (
     pid_file_path,
     stall_seconds,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     ContinuationLivenessState,
     ContinuationProviderCondition,
     ContinuationRecoveryRung,
