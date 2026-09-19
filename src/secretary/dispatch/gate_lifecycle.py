@@ -23,7 +23,7 @@ from secretary.dispatch.gate import validation_ci as _validation_ci
 from secretary.dispatch.gate_receipt import AcceptedGreenGate
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
-from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, GateTransportError, HostError, ProjectGitAccessError
 from secretary.dispatch.wait_vitality import execute_recovery_intent as _execute_recovery_intent
@@ -145,7 +145,7 @@ def accept_green_gate(
     record.gate_state = "green"
     record.gate_pending_since = 0.0
     _reset_infrastructure_reruns(record)
-    record.gate_attestation = accepted.receipt if accepted.receipt is not None else {}
+    record.gate_attestation = PersistedGateReceipt(accepted.receipt)
     records[ref] = record
     runtime.save_records(payload, records)
     if accepted.receipt is not None and stage in {"assessment", "release"}:
