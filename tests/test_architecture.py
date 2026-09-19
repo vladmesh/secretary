@@ -144,10 +144,10 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("verify_worker_result(", advance_source)
         self.assertLess(
             advance_source.index("_worker_report_marker("),
-            advance_source.index("if continuation.delivery_pending:"),
+            advance_source.index("_recover_worker_continuation("),
         )
         self.assertLess(
-            advance_source.index("if continuation.delivery_confirmed:"),
+            advance_source.index("_recover_worker_continuation("),
             advance_source.index("_handle_worker_report("),
         )
         self.assertLess(

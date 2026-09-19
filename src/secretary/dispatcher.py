@@ -6,7 +6,6 @@ import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +29,6 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
-from secretary.dispatch.claim import (
-    SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
-    SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
-    SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
-    claim_ready_task as _claim_ready_task,
-    resolve_head as _resolve_claim_head,
-)
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
@@ -54,6 +46,32 @@ from secretary.dispatch.attempt_usage import (
 )
 from secretary.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
+)
+from secretary.dispatch.claim import (
+    SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
+)
+from secretary.dispatch.claim import (
+    claim_ready_task as _claim_ready_task,
+)
+from secretary.dispatch.claim import (
+    resolve_head as _resolve_claim_head,
+)
+from secretary.dispatch.gate import (
+    GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
+    GATE_PENDING_STALL_SECONDS,
+    GATE_TRANSPORT_MAX_ATTEMPTS,
+    GateResult,
+)
+from secretary.dispatch.gate import (
+    _fingerprint as _gate_fingerprint,
+)
+from secretary.dispatch.gate import (
+    validation_ci as _validation_ci,
+)
+from secretary.dispatch.gate_receipt import (
+    AcceptedGreenGate,
 )
 from secretary.dispatch.head_vitality import (
     SnapshotSource as _SnapshotSource,
@@ -91,43 +109,6 @@ from secretary.dispatch.head_vitality_policy import (
 from secretary.dispatch.head_vitality_policy import (
     decide_recovery as _decide_recovery,
 )
-from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
-    DESTRUCTIVE_VERDICTS,
-    HEAD_STOP_GRACE_SECONDS,
-    HEAD_STOP_POLL_SECONDS,
-    OBSERVER_REPO_BRANCH,
-    OBSERVER_WORKSPACE_DIR,
-    CommandHostRuntime,
-    DispatcherHeadTransport,
-    InstanceCatalog,
-    LaunchedHead as LaunchedHead,  # noqa: F401  # Compatibility re-export.
-    _body_file_instructions,
-    _body_file_path,
-    _continuation_note,
-    _durable_head_run,
-    _gate_attestation_for_prompt,
-    _head_runtime_name,
-    _legacy_worker_branch,
-    _record_worker_delivery_evidence,
-    _report_nudge_prompt,
-    _same_repo,
-    _watchdog_kind,
-)
-from secretary.dispatch.gate import (
-    GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
-    GATE_PENDING_STALL_SECONDS,
-    GATE_TRANSPORT_MAX_ATTEMPTS,
-    GateResult,
-)
-from secretary.dispatch.gate import (
-    _fingerprint as _gate_fingerprint,
-)
-from secretary.dispatch.gate import (
-    validation_ci as _validation_ci,
-)
-from secretary.dispatch.gate_receipt import (
-    AcceptedGreenGate,
-)
 from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
@@ -137,7 +118,6 @@ from secretary.dispatch.helpers import (
     _report_adoption_baseline,
     _review_adoption_baseline,
     _round_report_ids,
-    _round_report_marker,
     _spent_report_generations,
     _task_doc_decision,
     _task_doc_protocol_prerequisites,
@@ -151,22 +131,49 @@ from secretary.dispatch.helpers import (
 from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
+from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
+    DESTRUCTIVE_VERDICTS,
+    HEAD_STOP_GRACE_SECONDS,
+    HEAD_STOP_POLL_SECONDS,
+    OBSERVER_REPO_BRANCH,
+    OBSERVER_WORKSPACE_DIR,
+    CommandHostRuntime,
+    DispatcherHeadTransport,
+    InstanceCatalog,
+    _body_file_instructions,
+    _body_file_path,
+    _continuation_note,
+    _durable_head_run,
+    _gate_attestation_for_prompt,
+    _head_runtime_name,
+    _legacy_worker_branch,
+    _record_worker_delivery_evidence,
+    _report_nudge_prompt,
+    _same_repo,
+    _watchdog_kind,
+)
+from secretary.dispatch.host import (
+    LaunchedHead as LaunchedHead,  # Compatibility re-export.
+)
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
     STAGE_RESPAWN,
-    STAGE_REWORK,
     WORKER_ROLE,
-    BringUpFailure,
 )
 from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
-    bring_up_blocked_reason as _bring_up_blocked_reason,
-    bring_up_terminal_reason as _bring_up_terminal_reason,
-    classify_bring_up_failure as _classify_bring_up_failure,
-    clear_launch_intent as _clear_launch_intent,
 )
 from secretary.dispatch.launch import (
-    confirm_launch_intent as _confirm_launch_intent,
+    bring_up_blocked_reason as _bring_up_blocked_reason,
+)
+from secretary.dispatch.launch import (
+    bring_up_terminal_reason as _bring_up_terminal_reason,
+)
+from secretary.dispatch.launch import (
+    classify_bring_up_failure as _classify_bring_up_failure,
+)
+from secretary.dispatch.launch import (
+    clear_launch_intent as _clear_launch_intent,
 )
 from secretary.dispatch.launch import (
     forget_role_head as _forget_role_head,
@@ -175,21 +182,13 @@ from secretary.dispatch.launch import (
     head_stop_unconfirmed as _head_stop_unconfirmed,
 )
 from secretary.dispatch.launch import (
-    keep_reserved_round as _keep_reserved_round,
-)
-from secretary.dispatch.launch import (
-    launch_delivery_receipt as _launch_delivery_receipt,
-)
-from secretary.dispatch.launch import (
-    launch_intent as _launch_intent,
     launch_intent_unwritable as _launch_intent_unwritable,
+)
+from secretary.dispatch.launch import (
     launch_pid_file as _launch_pid_file,
 )
 from secretary.dispatch.launch import (
     merge_launch_head_run as _merge_launch_head_run,
-)
-from secretary.dispatch.launch import (
-    reset_launch_attempts as _reset_launch_attempts,
 )
 from secretary.dispatch.launch import (
     resolve_launch_intent as _resolve_launch_intent,
@@ -236,6 +235,8 @@ from secretary.dispatch.state import (
 )
 from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
+)
+from secretary.dispatch.state import (
     claim_mismatch as _claim_mismatch,
 )
 from secretary.dispatch.state import (
@@ -243,14 +244,6 @@ from secretary.dispatch.state import (
 )
 from secretary.dispatch.state import (
     request_token as _request_token,
-)
-from secretary.dispatch.tui import (
-    COMPOSER_EMPTY,
-    COMPOSER_UNKNOWN,
-    READINESS_BUSY,
-)
-from secretary.dispatch.tui import (
-    delivery_readiness_state as _delivery_readiness_state,
 )
 from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
@@ -260,12 +253,11 @@ from secretary.dispatch.types import (
     STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REVIEW_VERDICT,
     STOPPED_BY_WATCHDOG,
-    DispatcherError,
     GateTransportError,
-    HeadLaunchAborted,
     HostError,
     ProjectGitAccessError,
 )
+from secretary.dispatch.types import DispatcherError as DispatcherError
 from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
@@ -274,6 +266,8 @@ from secretary.dispatch.watchdog import (
 )
 from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
+)
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
 from secretary.dispatch.watchdog import (
@@ -284,6 +278,8 @@ from secretary.dispatch.watchdog import (
 )
 from secretary.dispatch.watchdog import (
     reset_idle as _reset_idle,
+)
+from secretary.dispatch.watchdog import (
     reset_wait as _reset_wait,
 )
 from secretary.dispatch.watchdog import (
@@ -295,31 +291,41 @@ from secretary.dispatch.watchdog import (
 from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
+from secretary.dispatch.worker_continuation import (
+    begin_red_transition as _begin_red_transition,
+)
+from secretary.dispatch.worker_continuation import (
+    complete_red_transition as _complete_red_transition,
+)
+from secretary.dispatch.worker_continuation import (
+    recover_worker_continuation as _recover_worker_continuation,
+)
 from secretary.dispatch.worker_launch import (
     bring_up_worker_head as _bring_up_worker_head,
+)
+from secretary.dispatch.worker_launch import (
     launch_worker_after_claim as _launch_worker_after_claim,
+)
+from secretary.dispatch.worker_launch import (
     resolve_headless_worker as _resolve_headless_worker,
+)
+from secretary.dispatch.worker_launch import (
     write_worker_relaunch_intent as _write_worker_relaunch_intent,
 )
 from secretary.dispatch.worker_report import (
     handle_worker_report as _handle_worker_report,
-    prompt_worker_report as _prompt_worker_report,
-    worker_report_marker as _worker_report_marker,
 )
-from secretary.dispatch.worker_lifecycle import (
-    BUSY_RETRY_INITIAL_SECONDS,
-    CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
-    ContinuationLivenessState,
-    ContinuationProviderCondition,
-    ContinuationRecoveryRung,
-    WorkerContinuationLiveness,
+from secretary.dispatch.worker_report import (
+    prompt_worker_report as _prompt_worker_report,
+)
+from secretary.dispatch.worker_report import (
+    worker_report_marker as _worker_report_marker,
 )
 from secretary.head_health import (
     HeadChoice,
     HeadHealth,
     HeadReadiness,
 )
-from secretary.infra.github_credential import ProjectGitAccess
 from secretary.knowledge_write import KnowledgeError, KnowledgeValidationError, write_knowledge_directory
 from secretary.routing_journal import (
     MODEL_UNKNOWN,
@@ -752,82 +758,15 @@ class DispatcherRuntime:
         if record.worker_continuation.red_transition_pending:
             # An open red transition outranks everything else. The board move may or may not have
             # committed before its tick died, so it is finished against the board as it is now.
-            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
+            return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return _launch_worker_after_claim(self, task, record, records, payload)
         marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
-        continuation = record.worker_continuation
-        if continuation.delivery_pending:
-            if marker in {"report:done", "report:blocked"}:
-                # A report after the resume phase opened proves the continuation reached the retained
-                # conversation: do not rewrite TASK.md or replay the prompt over a completed turn.
-                continuation.confirm_delivery()
-                records[ref] = record
-                self.save_records(payload, records)
-                return self._finish_retained_worker_resume(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    phase=continuation.phase or "gate",
-                )
-            # Progress is sampled before the persisted readiness backoff is interpreted. A new
-            # provider cursor beats a busy pane and resets only that ladder, never the HeadRun.
-            now = time.time()
-            provider_observation = self._observe_retained_continuation_progress(task, record, now=now)
-            blocked = self._block_unadmitted_continuation_liveness(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                phase=continuation.phase or "gate",
-                observation=provider_observation,
-            )
-            if blocked is not None:
-                return blocked
-            fresh_provider_progress = provider_observation == "progressed"
-            pending = self._continuation_recovery_window(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                phase=continuation.phase or "gate",
-                fresh_provider_progress=fresh_provider_progress,
-                now=now,
-            )
-            if pending is not None:
-                return pending
-            records[ref] = record
-            self.save_records(payload, records)
-            if (
-                fresh_provider_progress
-                and record.worker_continuation_liveness.recovery_rung
-                != ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
-            ):
-                continuation.busy_next_at = now + BUSY_RETRY_INITIAL_SECONDS
-                return _retained_worker_busy_deferred(
-                    ref,
-                    record,
-                    attempt_id,
-                    continuation.phase or "gate",
-                    delay=BUSY_RETRY_INITIAL_SECONDS,
-                )
-            if not continuation.busy_retry_due(time.time()):
-                return _retained_worker_busy_deferred(ref, record, attempt_id, continuation.phase or "gate")
-            # Nothing is woken from here: the suspension is a fact of the tick that died, and
-            # re-entering the transition is what asks the heartbeat again before reopening.
-            return self._deliver_red_continuation(
-                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
-            )
-        if continuation.delivery_confirmed:
-            # The delivery was checkpointed and the tick died before the round it opened was
-            # recorded; finishing it again keeps the rework off the round the verdict closed.
-            return self._finish_retained_worker_resume(
-                task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
-            )
+        recovered = _recover_worker_continuation(
+            self, task, record, records, payload, attempt_id, marker=marker
+        )
+        if recovered is not None:
+            return recovered
         reported = _handle_worker_report(
             self, task, record, records, payload, attempt_id, marker=marker
         )
@@ -945,7 +884,7 @@ class DispatcherRuntime:
             # A red transition whose move did not commit is finished before the gate is read again,
             # before any review marker and before a reviewer starts: a rollup that has turned green
             # since cannot retract a red round this card is already owed.
-            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
+            return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
             self._capture_outcome_source(task, record, phase="verdict", kind="card.verdict", marker=marker)
@@ -988,7 +927,7 @@ class DispatcherRuntime:
                     return self._block_red_review_ceiling(
                         task, record, records, payload, attempt_id, reds=reds
                     )
-                return self._begin_red_transition(
+                return _begin_red_transition(self, 
                     task,
                     record,
                     records,
@@ -2575,7 +2514,7 @@ class DispatcherRuntime:
         if unconfirmed is not None:
             return unconfirmed
         # The round ends with no reviewer verdict: the outcome names the gate, not a reviewer.
-        return self._begin_red_transition(
+        return _begin_red_transition(self, 
             task,
             record,
             records,
@@ -2809,705 +2748,6 @@ class DispatcherRuntime:
             "reason": result.failure_reason,
         }
 
-    def _begin_red_transition(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-        move_reason: str,
-        verdict_outcome: str,
-        decision: str = "",
-        decision_body: str = "",
-        decision_protocol_prerequisites: tuple[str, ...] = (),
-    ) -> dict[str, Any]:
-        """The only way a card goes back to In progress for rework.
-
-        The order lives here and nowhere else: the intent is on disk, with its phase, the report
-        baseline it was opened against and the reason the card is moving, before anything observable
-        moves; the board moves; and only then is it decided whether the round's own session takes the
-        continuation or a replacement does. Holding a session is deliberately not a precondition.
-        """
-        ref = task["ref"]
-        baseline = len(task.get("comments") or [])
-        # The round this transition opens is reserved here, with the intent and before the move:
-        # completion must read that generation rather than compute it, or a re-entered completion
-        # hands one rework round two generations. The observer's instruction is frozen in the same
-        # write, so what the round is for cannot be re-read from a newer decision comment.
-        record.worker_continuation.begin_red_transition(
-            phase,
-            baseline,
-            move_reason,
-            verdict_outcome,
-            decision,
-            reserved_generation=record.report_generation + 1,
-            decision_body=decision_body,
-            decision_protocol_prerequisites=decision_protocol_prerequisites,
-        )
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
-
-    def _complete_red_transition(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        ref: str,
-    ) -> dict[str, Any]:
-        """Finish the open red transition from the board as it is now.
-
-        The move is keyed on the baseline the intent was opened against, so the tick that already moved
-        the card and the tick recovering from a crash before that move run the same call and the card
-        moves once. Nothing here re-reads the verdict: the transition carries its own reason.
-        """
-        continuation = record.worker_continuation
-        phase = continuation.phase or "gate"
-        baseline = continuation.report_baseline
-        if not continuation.decision:
-            # A transition performing a decision is the second half of a round whose verdict was
-            # already recorded at the park; recording it again would overwrite that outcome.
-            self._record_verdict_routing(ref, record, continuation.verdict_outcome)
-        self.terminal_effect(
-            task,
-            record,
-            target="in_progress",
-            reason=continuation.move_reason,
-            # The board refuses to take a card out of Assessment without a decision; a red gate
-            # moving out of Validate carries none and is refused nothing.
-            decision=continuation.decision,
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{phase}-red", ref, str(baseline)
-            ),
-            terminal_state="in_progress",
-            disposition="rework",
-            verdict=(
-                "red"
-                if continuation.verdict_outcome.endswith("_red")
-                else continuation.verdict_outcome
-                if continuation.verdict_outcome in {"green", "red"}
-                else "missing"
-            ),
-        )
-        moved = self.reader.show(ref)
-        # The previous round's report stays behind this baseline, so no tick reads it as this one's.
-        record.comment_baseline = max(len(moved.get("comments") or []), baseline)
-        # Where the next verdict is scanned from, so the one just acted on is not read again.
-        record.review_baseline = record.comment_baseline
-        # The rework's generation is the one this transition reserved before the move: assigned,
-        # never advanced. A legacy transition without a reservation falls back to the advance it
-        # was written with.
-        record.report_generation = continuation.reserved_generation or record.report_generation + 1
-        # And the instruction that round is opened on, from the same transition. Always assigned,
-        # never merged: a red gate has no decision, and inheriting the prior round's would hand a
-        # worker an adjudication of review findings its code has already answered.
-        record.report_decision = continuation.decision_body
-        record.report_protocol_prerequisites = continuation.decision_protocol_prerequisites
-        record.gate_state = ""
-        record.gate_pending_since = 0.0
-        record.gate_attestation = {}
-        record.gate_transport_failures = 0
-        record.gate_transport_error = ""
-        self._reset_infrastructure_reruns(record)
-        # The judged round ends here: a stale review pin would refuse the rework's merge.
-        record.review_commit = ""
-        _reset_wait(record, "review")
-        _reset_wait(record, "worker")
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._deliver_red_continuation(moved, record, records, payload, attempt_id, phase=phase)
-
-    def _deliver_red_continuation(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-    ) -> dict[str, Any]:
-        """Hand a red verdict back to the session that wrote the code, or to one replacement.
-
-        The order is the same for the gate and for the review: the suspension is re-confirmed at the
-        moment of use, the delivery boundary is durable before the worker is woken, and every way out
-        that cannot reuse the session goes through a confirmed stop first.
-        """
-        ref = task["ref"]
-        continuation = record.worker_continuation
-        step = "review" if phase == "review" else "gate"
-        opening_delivery = not continuation.delivery_pending
-        fresh_provider_progress = False
-        if continuation.delivery_pending:
-            now = time.time()
-            provider_observation = self._observe_retained_continuation_progress(task, record, now=now)
-            blocked = self._block_unadmitted_continuation_liveness(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                phase=phase,
-                observation=provider_observation,
-            )
-            if blocked is not None:
-                return blocked
-            fresh_provider_progress = provider_observation == "progressed"
-            pending = self._continuation_recovery_window(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                phase=phase,
-                fresh_provider_progress=fresh_provider_progress,
-                now=now,
-            )
-            if pending is not None:
-                return pending
-            if (
-                record.worker_continuation_liveness.recovery_rung
-                == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
-            ):
-                if not record.worker_continuation_liveness.allow_safe_recovery_resume_once():
-                    record.worker_continuation_liveness.terminalize(
-                        "replacement", "safe recovery resume was already spent"
-                    )
-                    records[ref] = record
-                    self.save_records(payload, records)
-                    return self._restart_red_worker(
-                        task,
-                        record,
-                        records,
-                        payload,
-                        attempt_id,
-                        continuation_reason="safe recovery resume was already spent",
-                        phase=phase,
-                    )
-                # A once-only capability: persist spending it before delivery touches the pane.
-                records[ref] = record
-                self.save_records(payload, records)
-        if continuation.retained:
-            try:
-                # The suspension was confirmed on a past tick; a SIGCONT from terminal recovery or
-                # an operator since makes this a second writer. Ask the heartbeat again here.
-                self.host.confirm_worker_retained(record)
-            except HostError as exc:
-                reason = scrub_host_output(str(exc))
-                unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
-                if unconfirmed is not None:
-                    return unconfirmed
-                return self._restart_red_worker(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    continuation_reason=reason,
-                    phase=phase,
-                    worker_stopped=True,
-                )
-            if opening_delivery:
-                # Persist the delivery boundary before waking the worker, or a tick that dies after
-                # delivery replays with the old done marker read as the new round's completion.
-                continuation.begin_delivery(phase, time.time())
-                record.worker_continuation_liveness = WorkerContinuationLiveness.begin(record.worker_head_run)
-                # Establish the provider cursor before SIGCONT: the first observation is a baseline.
-                provider_observation = self._observe_retained_continuation_progress(
-                    task, record, now=time.time()
-                )
-                blocked = self._block_unadmitted_continuation_liveness(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    phase=phase,
-                    observation=provider_observation,
-                )
-                if blocked is not None:
-                    return blocked
-                fresh_provider_progress = provider_observation == "progressed"
-                records[ref] = record
-                self.save_records(payload, records)
-                pending = self._continuation_recovery_window(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    phase=phase,
-                    fresh_provider_progress=fresh_provider_progress,
-                    now=time.time(),
-                )
-                if pending is not None:
-                    return pending
-            else:
-                # An already-open boundary: recreating liveness would make no-progress unbounded.
-                records[ref] = record
-                self.save_records(payload, records)
-            try:
-                self.host.resume_worker(task, record)
-            except HostError as exc:
-                if _delivery_readiness_state(exc) == READINESS_BUSY:
-                    # The boundary saw an owned pane working before it sent anything: neither
-                    # acknowledgement nor a dead-head vote, so keep the continuation and retry.
-                    _record_worker_delivery_evidence(record, exc)
-                    liveness = record.worker_continuation_liveness
-                    # The pre-read provider cursor is the precedence rule: a fresh rollout keeps this
-                    # HeadRun and only restarts its no-progress ladder. A busy `tui-idle` does not.
-                    if fresh_provider_progress:
-                        continuation.busy_attempts = liveness.busy_attempts
-                        continuation.busy_next_at = time.time() + BUSY_RETRY_INITIAL_SECONDS
-                        records[ref] = record
-                        self.save_records(payload, records)
-                        return _retained_worker_busy_deferred(
-                            ref,
-                            record,
-                            attempt_id,
-                            phase,
-                            delay=BUSY_RETRY_INITIAL_SECONDS,
-                        )
-                    if liveness.state != ContinuationLivenessState.STALLED:
-                        # The first exact-source cursor is a persisted baseline, not evidence of a
-                        # stall: keep the head and schedule, spending no no-progress attempt.
-                        continuation.busy_next_at = time.time() + BUSY_RETRY_INITIAL_SECONDS
-                        records[ref] = record
-                        self.save_records(payload, records)
-                        return _retained_worker_busy_deferred(
-                            ref,
-                            record,
-                            attempt_id,
-                            phase,
-                            delay=BUSY_RETRY_INITIAL_SECONDS,
-                        )
-                    liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
-                    liveness.note_busy(time.time())
-                    continuation.busy_attempts = max(0, liveness.busy_attempts - 1)
-                    delay = continuation.defer_busy(time.time())
-                    # `defer_busy` owns the persisted retry deadline, liveness owns the bounded
-                    # episode count: keep them in sync, never beyond this HeadRun's evidence.
-                    continuation.busy_attempts = liveness.busy_attempts
-                    records[ref] = record
-                    self.save_records(payload, records)
-                    bounded = self._advance_no_progress_continuation(
-                        task,
-                        record,
-                        records,
-                        payload,
-                        attempt_id,
-                        phase=phase,
-                    )
-                    if bounded is not None:
-                        return bounded
-                    return _retained_worker_busy_deferred(ref, record, attempt_id, phase, delay=delay)
-                _record_worker_delivery_evidence(record, exc, failure=True)
-                records[ref] = record
-                self.save_records(payload, records)
-                return self._restart_red_worker(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    continuation_reason=scrub_host_output(str(exc)),
-                    phase=phase,
-                )
-            continuation.confirm_delivery()
-            records[ref] = record
-            self.save_records(payload, records)
-            return self._finish_retained_worker_resume(
-                task, record, records, payload, attempt_id, phase=phase
-            )
-        # Same reservation as the retained branch: the rework round is fixed on disk with the
-        # intent, so adoption resumes it rather than the round the verdict closed.
-        return self._restart_red_worker(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            continuation_reason="no retained worker session was available",
-            phase=phase,
-        )
-
-    def _observe_retained_continuation_progress(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        *,
-        now: float,
-    ) -> str:
-        """Persist provider progress before a continuation interprets `tui-idle`."""
-        try:
-            evidence = getattr(
-                self.host,
-                "provider_progress",
-                lambda _task, _record, _kind: {
-                    "state": "unavailable",
-                    "reason": "host has no provider-progress probe",
-                },
-            )(task, record, "worker")
-        except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
-            evidence = {
-                "state": "unavailable",
-                "reason": f"provider-progress probe failed: {scrub_host_output(str(exc))}",
-            }
-        liveness = record.worker_continuation_liveness
-        if not liveness.bound and record.worker_continuation.busy_attempts:
-            # An old busy count is audit data, never an exact-source observation for the ladder.
-            liveness.legacy_busy_attempts = max(
-                liveness.legacy_busy_attempts,
-                record.worker_continuation.busy_attempts,
-            )
-        observation = liveness.observe_provider(evidence, now, head_run=record.worker_head_run)
-        if liveness.admitted:
-            record.worker_continuation.busy_attempts = liveness.busy_attempts
-        if observation == "progressed":
-            record.worker_continuation.busy_next_at = 0.0
-        return observation
-
-    def _block_unadmitted_continuation_liveness(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-        observation: str,
-    ) -> dict[str, Any] | None:
-        """Take the explicit safe outcome when the liveness trust boundary is unprovable."""
-        if (
-            observation in {"baseline", "stalled", "progressed"}
-            and record.worker_continuation_liveness.admitted
-        ):
-            return None
-        if observation == ContinuationProviderCondition.LEGACY_UNBOUND_V1.value:
-            return self._restart_red_worker(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                continuation_reason="Codex provider source remained legacy-unbound for v1 progress",
-                phase=phase,
-            )
-        ref = task["ref"]
-        reason = record.worker_continuation_liveness.reason or "provider source was not admitted"
-        self.terminal_effect(
-            task,
-            record,
-            target="blocked",
-            reason=(
-                "retained continuation liveness is unprovable; preserving the exact HeadRun "
-                f"without recovery: {reason}"
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "continuation-liveness-unavailable",
-                ref,
-                phase,
-            ),
-            terminal_state="blocked",
-            disposition="blocked",
-            blocked_reason="provider",
-        )
-        records[ref] = record
-        self.save_records(payload, records)
-        return {
-            "status": "blocked",
-            "step": "review" if phase == "review" else "gate",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{phase}-red-continuation-liveness-unavailable",
-        }
-
-    def _continuation_recovery_window(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-        fresh_provider_progress: bool,
-        now: float,
-    ) -> dict[str, Any] | None:
-        """Honor the recorded safe-recovery response window before another pane interaction."""
-        liveness = record.worker_continuation_liveness
-        ref = task["ref"]
-        if liveness.terminal_outcome == "identity_fenced":
-            # The stop path is the only component allowed to resolve this: it either confirms the
-            # old HeadRun stopped and launches one replacement, or refuses. Neither takes a pane.
-            return self._restart_red_worker(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                continuation_reason="continuation liveness HeadRun identity is fenced",
-                phase=phase,
-            )
-        if liveness.recovery_rung != ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW:
-            return None
-        if now < liveness.recovery_response_deadline:
-            records[ref] = record
-            self.save_records(payload, records)
-            return _retained_worker_recovery_window(
-                ref,
-                record,
-                attempt_id,
-                phase,
-                remaining=max(0, int(liveness.recovery_response_deadline - now)),
-            )
-        if fresh_provider_progress:
-            liveness.recovery_rung = ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
-            records[ref] = record
-            self.save_records(payload, records)
-            return None
-        liveness.terminalize("replacement", "safe recovery response window showed no provider progress")
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._restart_red_worker(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            continuation_reason="safe recovery response window showed no provider progress",
-            phase=phase,
-        )
-
-    def _advance_no_progress_continuation(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-    ) -> dict[str, Any] | None:
-        """Spend the sole safe-recovery rung, then take one identity-fenced terminal outcome."""
-        liveness = record.worker_continuation_liveness
-        if not liveness.admitted or liveness.state != ContinuationLivenessState.STALLED:
-            return self._block_unadmitted_continuation_liveness(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                phase=phase,
-                observation=liveness.state.value,
-            )
-        if liveness.busy_attempts < CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS:
-            return None
-        if liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW:
-            return None
-        if liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE:
-            # The recovery's one authorised return to ordinary delivery has already been spent.
-            if liveness.recovery_resume_used:
-                liveness.terminalize("replacement", "safe recovery resume was already spent")
-            else:
-                return None
-        if liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING:
-            # The intent was durable before the capability was called, and after a crash there we
-            # cannot tell whether the provider acted. Spend the safe rung rather than retry it.
-            liveness.terminalize(
-                "replacement", "safe recovery response was unconfirmed after dispatcher recovery"
-            )
-            records[task["ref"]] = record
-            self.save_records(payload, records)
-        if not liveness.terminal:
-            # Intent first: a death inside the capability must not make the next process retry it.
-            liveness.begin_safe_recovery(time.time())
-            records[task["ref"]] = record
-            self.save_records(payload, records)
-            try:
-                result = getattr(
-                    self.host,
-                    "safe_recover_worker_continuation",
-                    lambda *_args: {
-                        "state": "unavailable",
-                        "reason": "host has no provider/terminal-safe recovery capability",
-                    },
-                )(task, record, liveness.to_json())
-            except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
-                result = {"state": "unavailable", "reason": scrub_host_output(str(exc))}
-            valid_recovery = (
-                isinstance(result, dict)
-                and str(result.get("state") or "") == "recovered"
-                and bool(result.get("safe"))
-                and str(result.get("head_run_id") or "") == liveness.head_run_id
-            )
-            if valid_recovery:
-                # The only extension point for a future provider API: its response is recorded
-                # before waiting, and it cannot tunnel a raw interrupt through a terminal command.
-                liveness.safe_recovery_response_window(time.time(), 30.0)
-                records[task["ref"]] = record
-                self.save_records(payload, records)
-                return _retained_worker_recovery_window(
-                    task["ref"],
-                    record,
-                    attempt_id,
-                    phase,
-                    remaining=30,
-                )
-            reason = (
-                str(result.get("reason") or "safe recovery capability is unavailable")
-                if isinstance(result, dict)
-                else "safe recovery capability returned an invalid shape"
-            )
-            liveness.recovery_rung = ContinuationRecoveryRung.SAFE_RECOVERY_UNAVAILABLE
-            liveness.terminalize("replacement", f"safe recovery unavailable: {reason}")
-            records[task["ref"]] = record
-            self.save_records(payload, records)
-        return self._restart_red_worker(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            continuation_reason=(
-                "provider progress remained absent after bounded continuation recovery: "
-                f"{record.worker_continuation_liveness.reason}"
-            ),
-            phase=phase,
-        )
-
-    def _finish_retained_worker_resume(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        phase: str,
-    ) -> dict[str, Any]:
-        ref = task["ref"]
-        step = "review" if phase == "review" else "gate"
-        if record.worker_continuation_liveness.bound:
-            record.worker_continuation_liveness.terminalize(
-                "reused", "retained continuation delivery was confirmed"
-            )
-        record.worker_continuation.clear()
-        record.state = "claimed"
-        rework_round = record.attempt_round + 1
-        retained_run = dict(record.worker_run)
-        self.open_worker_round(record, round_number=rework_round)
-        self.record_worker_routing(task, record, retained_run)
-        self._persist_outcome_round_context(task, record, phase="worker")
-        self._record_worker_continuation(ref, record, "reused", phase, "retained worker resumed")
-        record.worker_started_at = record.worker_progress_at = time.time()
-        records[ref] = record
-        self.save_records(payload, records)
-        return {
-            "status": "ok",
-            "step": step,
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{phase}-red-reused-worker",
-        }
-
-    def _restart_red_worker(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        continuation_reason: str,
-        phase: str,
-        worker_stopped: bool = False,
-    ) -> dict[str, Any]:
-        """Launch the red-verdict fallback only after its worker was conclusively stopped."""
-        ref = task["ref"]
-        review = phase == "review"
-        step = "review" if review else "gate"
-        blocked_kind = "rework-blocked" if review else f"{phase}-red-blocked"
-        action = "rework-started" if review else f"{phase}-red-rework"
-        continuation = "replacement"
-        if record.worker_continuation_liveness.bound and not record.worker_continuation_liveness.terminal:
-            record.worker_continuation_liveness.terminalize("replacement", continuation_reason)
-        # Unconditional on purpose: a record written by an older dispatcher, or adopted after a
-        # crash, may lack the retained timestamp while its worker lives. Ambiguity is no permission.
-        if not worker_stopped:
-            unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-        rework_round = record.attempt_round + 1
-        # The launch intent takes the transition over from here: it is durable, reserves the rework
-        # round, and recovery adopts or relaunches exactly one head. Hand it over in the same write,
-        # or both can owe this card a worker. The handover is real only on disk: restoring the held
-        # transition after a failed intent write keeps In progress from having no durable worker debt.
-        held_transition = replace(record.worker_continuation)
-        record.worker_continuation.clear()
-        failure = _write_worker_relaunch_intent(self,
-            payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
-        )
-        if failure is not None:
-            record.worker_continuation = held_transition
-            return _launch_intent_unwritable(
-                step=step,
-                ref=ref,
-                attempt_id=record.attempt_id or attempt_id,
-                role=WORKER_ROLE,
-                reason=failure,
-            )
-        launched, failed = _bring_up_worker_head(self, 
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            step=step,
-            stage=STAGE_REWORK,
-            blocked_reason="rework bring-up failed",
-            blocked_action=blocked_kind,
-        )
-        if launched is None:
-            assert failed is not None
-            return failed
-        record.state = "claimed"
-        self.open_worker_round(record, round_number=rework_round)
-        self.record_worker_routing(task, record, launched.run)
-        self._persist_outcome_round_context(task, record, phase="worker")
-        self._record_worker_continuation(ref, record, continuation, phase, continuation_reason)
-        _clear_launch_intent(record)
-        record.worker_started_at = record.worker_progress_at = time.time()
-        records[ref] = record
-        self.save_records(payload, records)
-        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
-
-    def _record_worker_continuation(
-        self, ref: str, record: DispatcherRecord, mode: str, phase: str, reason: str
-    ) -> None:
-        """Leave the red-verdict ownership decision on the card with its frozen launch snapshot."""
-        run = record.worker_run
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"Dispatcher {phase} red continuation: {mode}; worker profile {run.get('head') or record.head}, "
-                f"model {run.get('model') or 'unknown'}, effort {run.get('effort') or 'default'}; "
-                f"reason: {reason}; timestamp: {now_rfc3339()}."
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id, f"{phase}-red-continuation", ref, str(record.attempt_round)
-            ),
-        )
 
     def _block_unresumable(
         self,
@@ -4220,7 +3460,7 @@ class DispatcherRuntime:
         continuation = record.worker_continuation
         if continuation.red_transition_pending:
             # A rework decision whose move did not commit: finish it before any decision is read.
-            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
+            return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
         if continuation.assessment_pending:
             # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
             return self._complete_park(record, records, payload, attempt_id, ref=ref)
@@ -4335,7 +3575,7 @@ class DispatcherRuntime:
                 return unconfirmed
         # The findings are not repeated in the move: the rework prompt reads the card's last red
         # verdict directly. The decision is what the round is for, so it is frozen with the round.
-        return self._begin_red_transition(
+        return _begin_red_transition(self, 
             task,
             record,
             records,
@@ -5654,32 +4894,6 @@ def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
 
-def _retained_worker_busy_deferred(
-    reference: str,
-    record: DispatcherRecord,
-    attempt_id: str,
-    phase: str,
-    *,
-    delay: int | None = None,
-) -> dict[str, Any]:
-    """Report a retained continuation held by its own busy pane without changing ownership."""
-    continuation = record.worker_continuation
-    remaining = max(0, int(continuation.busy_next_at - time.time()))
-    wait = delay if delay is not None else remaining
-    return {
-        "status": "degraded",
-        "step": "review" if phase == "review" else "gate",
-        "pilot_ref": reference,
-        "attempt_id": record.attempt_id or attempt_id,
-        "action": f"{phase}-red-worker-busy",
-        "attempts": continuation.busy_attempts,
-        "reason": (
-            "the retained worker pane is busy before its continuation was delivered; its exact "
-            f"HeadRun remains owned and the pending delivery retries in {wait}s"
-        ),
-    }
-
-
 def _released_verdict(record: DispatcherRecord) -> str:
     """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
     return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
@@ -5697,55 +4911,6 @@ def _merge_terminal_reason(action: str) -> str:
     if "gate" in action:
         return "gate"
     return "implementation"
-
-
-def _retained_worker_recovery_window(
-    reference: str,
-    record: DispatcherRecord,
-    attempt_id: str,
-    phase: str,
-    *,
-    remaining: int,
-) -> dict[str, Any]:
-    """Expose a persisted provider-safe recovery wait without pretending it is a busy retry."""
-    liveness = record.worker_continuation_liveness
-    return {
-        "status": "degraded",
-        "step": "review" if phase == "review" else "gate",
-        "pilot_ref": reference,
-        "attempt_id": record.attempt_id or attempt_id,
-        "action": f"{phase}-red-worker-recovery-window",
-        "attempts": liveness.busy_attempts,
-        "reason": (
-            "a provider/terminal-safe continuation recovery is awaiting its recorded response "
-            f"window for the exact retained HeadRun ({max(0, remaining)}s remaining)"
-        ),
-    }
-
-
-def _continuation_no_progress_evidence(
-    record: DispatcherRecord,
-    state: ContinuationLivenessState,
-) -> str:
-    """Classify unchanged provider evidence without retaining or interpreting pane text."""
-    if state == ContinuationLivenessState.UNAVAILABLE:
-        return "provider_unavailable"
-    if state == ContinuationLivenessState.UNKNOWN:
-        return "provider_or_identity_unknown"
-    evidence = record.worker_delivery_evidence if isinstance(record.worker_delivery_evidence, dict) else {}
-    composer_before = str(evidence.get("composer_before") or "")
-    composer_after = str(evidence.get("composer_after") or "")
-    cursor_before = str(evidence.get("cursor_before") or "")
-    cursor_after = str(evidence.get("cursor_after") or "")
-    if (
-        composer_before
-        and composer_before == composer_after
-        and composer_before not in {COMPOSER_EMPTY, COMPOSER_UNKNOWN}
-        and cursor_before
-        and cursor_before == cursor_after
-    ):
-        return "completed_turn_residual_composer"
-    return "active_or_unknown_turn"
 
 
 def _wait_expectation(kind: str) -> str:
