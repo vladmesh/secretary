@@ -1,3 +1,462 @@
 # Astra audit
 
-Plan refresh in progress.
+Audit date: 2026-09-15  
+Original audit baseline: `main` at `419bce6decdee15dd54d7d3e7f13d662763dbe56`  
+Current progress baseline: `main` at `92dc9df727db6c3650c51e4078727531219cf1e1` (after PR #479)  
+Progress updated: 2026-09-20
+
+## Scope
+
+This audit focuses on the areas requested by the owner:
+
+- old/legacy code that can be deleted or isolated;
+- violations of the repository's own architecture direction and common Python best practices;
+- duplicated vocabularies / normalization logic;
+- weak typing, especially `dict[str, Any]` used as domain objects and string literals used as closed vocabularies;
+- incremental fixes that can be made without turning the cleanup into a rewrite.
+
+I treated `dict` as a problem only when the shape is a **closed domain contract**. Raw JSON/YAML at an adapter, persistence, or schema boundary is fine; the problem is letting those untyped bags flow deep into business logic.
+
+### Complexity scale
+
+| Score | Meaning |
+|---|---|
+| **1** | Repository-local, mechanically safe cleanup; minutes, tiny blast radius. |
+| **2** | Small refactor with obvious call sites and focused tests. |
+| **3** | Multi-module migration, but architecture stays the same and can be done incrementally. |
+| **4** | Cross-cutting domain refactor / persistence compatibility work; requires careful sequencing and broad tests. |
+| **5** | Architecture migration or removal of a live compatibility subsystem; substantial staged work. |
+
+## Executive summary
+
+The project is already moving in the right direction: `secretary.board.models`, `secretary.board.host`, the vitality code, and the runtime `HeadRun` are examples of the target style — typed immutable values, `StrEnum`, explicit protocol boundaries, and adapters that translate raw backend data before it crosses into domain code.
+
+The main problem is that the migration is only partly complete. The repository currently contains **two architectural generations at once**:
+
+1. a newer typed, feature-oriented layer (`board`, `dispatch`, `webproto`, PostgreSQL store, `HeadRuntime`); and
+2. a large compatibility layer (`triggered_agents`, flat `secretary/*.py` modules, Kanboard-shaped readers/writers, Orca-legacy runtime, dict-shaped dispatcher persistence).
+
+Most technical debt is caused by data crossing between those generations through dictionaries, string vocabularies, compatibility re-exports, and private helper imports. The best cleanup strategy is therefore **not** a rewrite. Continue moving one bounded domain at a time to the typed layer and delete the compatibility seam immediately after the last caller is migrated.
+
+## Progress
+
+- ✅ **A01 completed in PR #434:** removed the dead `secretary._env` compatibility shim, its compatibility-only architecture assertion, and `_env.py` from `LEGACY_FLAT_MODULES`.
+- ✅ **A02 completed in PR #434:** aligned the declared/tooling Python contract with the runtime by raising `requires-python` from `>=3.11` to `>=3.12` and Ruff's target from `py311` to `py312`. We intentionally did **not** add a redundant 3.11 CI run; the product now explicitly supports the Python version its CI and runtime already use.
+- ✅ **A03 completed in PR #435:** added pinned `mypy==1.18.2`, a dedicated `typecheck` dependency/CI job, and an intentionally narrow first gate over already-typed leaves (`secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`). Imported legacy modules remain outside the enforced error surface so the gate can expand incrementally instead of turning into a repository-wide migration.
+- ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
+- ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
+- ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
+- ✅ **A07 completed across PR #443 and PR #444:** #443 introduced the canonical product-side `Role(StrEnum)`, typed role subsets, and `Role`-keyed card transitions; #444 made `Actor.role` carry `Role`, normalized TaskWriter role strings at the boundary, removed the duplicate task-side role registries, derived CLI/importer role choices from the canonical vocabulary, and replaced the temporary drift ratchet with boundary tests. Persisted/event/CLI spellings remain string-compatible. The separate `triggered_agents.runtime.role_env` registry remains intentionally owned by the later A19 namespace migration rather than by A07.
+- ✅ **A08 completed in PR #445:** introduced canonical `TaskType`, `TaskComplexity`, `FamilyPreference`, `RoutingPhase`, `BlockClassification`, and `TaskDecision` `StrEnum`s plus immutable typed `TaskRouting` / `TaskMetadata` values. Task reading, create/report/decision/routing validation, CLI choices, restore, and the board importer now consume the canonical vocabulary while projecting the same strings at Kanboard/PostgreSQL/CLI/document boundaries. The A09 private codec aliases remain only as compatibility surfaces, and `secretary.board.task_routing` is now in the incremental mypy gate.
+- ✅ **A09 completed across PR #442 and PR #446:** #442 centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`; #446 added the typed sprint-read compatibility boundary and moved `board/import_board.py` off the remaining private sprint helpers. Historical private aliases remain only as same-module/backward-compatibility adapters, not cross-feature dependencies.
+- ✅ **A10 completed in PR #441:** renamed the routing-journal domain value to canonical `RoutingHeadSnapshot`, kept the runtime lifecycle value as `HeadRun`, and added a typed launch boundary without changing routing-event JSON or persisted dispatcher state. Historical routing names and the dict adapter remain compatibility surfaces until the adjacent package/state migrations remove them.
+- ✅ **A11 completed across PR #446, PR #447, PR #448, and PR #449:** #446 added the immutable typed Sprint read boundary; #447 added typed `SprintAdmission` and immutable `SprintReservationIndex` values for admission and the guard index; #448 moved create/restore-create, reopen, generic simple mutations, budget/resume/restore handling, and mutation receipts onto typed write-side values; #449 moved the remaining `SprintWriter.close()` decisions, targets, recoverable conflicts, closeout plan, retry/amendment checks, and result projection onto immutable typed close-domain values. Released storage/event/PostgreSQL/public document shapes and the public dict-returning `parse_close_decisions()` compatibility API remain unchanged.
+- ✅ **A12 completed across PR #450, PR #451, PR #452, and PR #457:** #450 introduced immutable typed payload values for the three control-plane Card marker events (`card.reported`, `card.verdict`, `card.decided`); #451 typed `attempt.usage`; #452 typed `attempt.outcome`; #457 completed the remaining durable outcome-round handoff with immutable `OutcomeRoundContext` / `OutcomeRoundPhase`, moving dispatcher production, recovery selection, terminal-obligation reads, and lineage checks off nested raw dictionaries while preserving the released v1/v2 journal wire contract. A12 is now complete; genuinely opaque/legacy `Event.data` remains an intentional boundary escape hatch rather than a target for blanket modeling.
+- ✅ **A13 completed across PR #458, PR #460, PR #461, and PR #462:** #458 typed durable lifecycle `worker_head_run` / `review_head_run`; #460 moved durable routing `worker_run` / `review_run` behind `PersistedRoutingHeadSnapshot`; #461 typed gate receipt/PR-authorship/publication identity and worker/reviewer delivery evidence; #462 completed the inventory by typing `launch_intent` (including its delivery and lifecycle/routing views) and `worker_headless`, while preserving exact historical production-state JSON and restart semantics.
+- 🟡 **A14/A15 advanced across PR #463–#479:** #463 established the narrow `secretary.dispatch` construction/command boundary and import ratchet; #464–#470 moved all dispatcher satellites into the feature package without flat forwarding modules. #471 extracted Ready-card claim/admission/preflight into `dispatch.claim`; #472 extracted post-claim bring-up and headless recovery into `dispatch.worker_launch`; #473 moved worker report selection/acceptance into `dispatch.worker_report`; #474 moved retained/red continuation into `dispatch.worker_continuation`; #475 moved shared worker/reviewer wait/watchdog/vitality into `dispatch.wait_vitality`; #476 moved the mechanical gate verdict/retry/pending lifecycle into `dispatch.gate_lifecycle`; #477 moved review-verdict acceptance plus durable Assessment parking into `dispatch.review_verdict`; #478 moved Assessment decision intake/replay plus rework/reslice execution into `dispatch.assessment_decision`; and #479 moved merge readiness, research publication, release replay/gate re-check, merge-path blocking, merge/teardown, completion-evidence enforcement and terminal Done into `dispatch.release_lifecycle`. Durable JSON, request identities, exact-SHA receipts, recovery ceilings and save/effect ordering remain unchanged. Architecture ownership ratchets now cover nine internal lifecycle owners, all included in the runtime collaborator surface where applicable, and every extracted owner that carries a typed domain boundary is in incremental mypy. `dispatcher.py` is now about 76 KiB / 1,800 lines. A14/A15 remain open for the cross-cutting runtime primitives still shared by those owners: attempt/outcome accounting and terminal effects, routing/round bookkeeping, confirmed-stop/adoption/provider-ingress helpers, and finally relocating or deleting the root compatibility façade.
+- ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
+
+PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, PR #444, PR #445, PR #446, and PR #447 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb`; PR #445 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge. PR #446 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `5b26fbd8768963153f44cc42d6a70760b3d16f0b` before squash-merge. PR #447 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `0018f63ec5a920094628593c302b99dab2a29fa0`, then squash-merged as `3215ce651402c2a300a09b497e4bffdc4cefb291`. PR #448 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `65236262ab65ff64a43918ce244a54dc9316e167`, then squash-merged as `e964d79f520a1f1584f760439acc9f043d2ad8a9`. PR #449 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `d1fd5ba7b0fc450e5b64ef97d24ffbdea9841a43`, then squash-merged as `6178c4a25d040f97f207a211bddd6beef801723c`. PR #450 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `312959800c8f77fcecaab4cad6b3ab132fa41c90`, then squash-merged as `0f6ef23aa390939afa0e01c06d7f77ec55a9a390`. PR #451 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `30b085a7fe9c0a7d933a48fd9dc7cdb41d753c1a`, then squash-merged as `b9703acfe0e6a59a4cdbcb5bc2565e33c441e9f5`. PR #452 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `f71ae9f01417b76575f29938bd2f568278e496fb`, then squash-merged as `6bbb799bcc254cd78485a04e96cb585f7bb9ca44`. PR #457 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `140b9e07811a4cdca4e60b58a06db79422e21a57`, then squash-merged as `b7b5686e69cfed175969b2029e3680628b4d514f`. PR #458 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `ea6982c48dcb62eaeb35b0471a25f47c970333bf`, then squash-merged as `fdae5cb899650f8ec474fbc14b821cd6319ee705`. PR #460 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `2625f74c99ba1f802f33faf0471db899838a9dd6`, then squash-merged as `13e512f428cf8e6067275da1a9ab9b4a1c6f22e3`. PR #461 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `fa74449a5d454da6262db63b5c4a96be12dcefb3`, then squash-merged as `7f7e91247ff8a0dfa488191ceaf2257ab8031b91`. PR #462 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `1e0355fa1ffc072d9492736a6a17ffe89eb54546`, then squash-merged as `d620e717ef8842a1beca727c3b4b994403de48e6`. PR #463 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `4dc389e3dbd8343f04c755b828aaeb816e04d08a`, then squash-merged as `d51a9686b7195be862f319b7576dedb3e232b358`. PR #464 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `95a9c3c4e50762ce67685eb645032f98300318d0`, then squash-merged as `691d254db8090b5b538892819f21a829c3396742`. PR #465 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `97992131ffc2b7044a9245fb1f4ccad4a4ca29e3`, then squash-merged as `b8725b9c7fe21ded4a26b9992c7d5341c1a8599a`. PR #466 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `f1c59f58a6ed1013ab0029b4d6e89a18c1a24dcd`, then squash-merged as `f095c184bb46a7e088f6996fbbcfdf3b5843fdba`. PR #467 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `603982d2a66edcd135736fe033e007fbb39665c6`, then squash-merged as `596a45328670ce0e906c8879489a61a177dd7eb0`. PR #468 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `a4ea23ba1e3624bfdb89b3d79c1b1ab003337646`, then squash-merged as `63d9b91859f8da4bc43baa85eb8a55f0c712e363`. PR #469 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `a2f57d7514fd6dcd346efb293ead7c6d44919cc5`, then squash-merged as `bb0c5868f7c75e87fbe503c09def5f349c032ff7`. PR #470 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `e46f1f768b017f93cc6e2501d9329da57`, then squash-merged as `f29a51547fe04fe6df81af3d20986ac3e20c17ad`. PR #471 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `9e7a349a9adc2f2fb0fe622e0b5377f5fd318acc`, then squash-merged as `a7296f5187e24b0c6bce9077b53bfe0ca3857541`. PR #472 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `41169c496b40caee821081a7d0c3f6c66cba9cf9`, then squash-merged as `5de73d817967298a3b989eb0d9cf315a08d3e306`. PR #475 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head `6aa6aae1a4982f7c98f71607c762279334c9308a` (run `35463338482`), then squash-merged as `3206f9874e1972eefbda606d065177d96d2ecb3e`. PR #476 passed incremental mypy, all seven test shards (including the 2,290-test integration-board shard), and the aggregate exact-SHA evidence/coverage gate on final head `2424e1c62fd2f3c90e24bce7143f66c8e8d7d2e0` (run `35465657653`), then squash-merged as `665717f24b495600679113b28d1aabbe6ee2508e`.
+PR #473 passed typecheck, all seven test shards and the aggregate exact-SHA evidence/coverage gate on exact head `501bfcd0c28a3af5c3d7e755409f71b982d9943f` (run `35457059838`), then squash-merged as `1770764de377b9cd360814439af4ed183942b167`. PR #474 passed typecheck, all seven test shards and the aggregate exact-SHA evidence/coverage gate on exact head `93099a7f0776b3fdac8339b974f4fe591d4f2f18` (run `35459495642`), then squash-merged as `c48c4682feef89de8a0c299cff91ca17d6cb80b8`. PR #477 passed incremental mypy, all seven test shards (including the 2,290-test integration-board shard), and the aggregate exact-SHA evidence/coverage gate on final head `6905c49f0617478e2cc2cb3eef968011508752ad` (run `35470615996`), then squash-merged as `341537fba41b684aab2b900fefd51a2b4c5a43e1`. PR #478 passed incremental mypy, all seven test shards (including the full 2,290-test integration-board shard), and the aggregate exact-SHA evidence/coverage gate on final head `d137d35e0f8cffbdb2071c6729eddbeb58850de5` (run `35473308617`), then squash-merged as `0ed5d9a60dd1d5002583535d9713d991900a5ddf`. PR #479 passed incremental mypy, all seven test shards (including the full 2,290-test integration-board shard), and the aggregate exact-SHA evidence/coverage gate on final head `ea8f662ae81d33ff04f88deab71e56acec355f5e` (run `35475948533`), then squash-merged as `92dc9df727db6c3650c51e4078727531219cf1e1`; its first CI pass exposed only the host-surface discovery omission caused by moving `teardown`, which was fixed by adding the new owner to the scanner.
+
+## Findings
+
+| ID | Finding | Complexity |
+|---|---|---:|
+| A01 | ✅ Remove the dead private `_env.py` compatibility shim — **completed in #434** | **1** |
+| A02 | ✅ Align declared Python support with the actual 3.12 runtime/CI — **completed in #434** | **1** |
+| A03 | ✅ Add a real static type checker, initially on typed packages only — **completed in #435** | **2** |
+| A04 | ✅ Replace board-backend string literals with `StrEnum` — **completed in #436** | **2** |
+| A05 | ✅ Type pause mode and pause-state documents — **completed in #438** | **2** |
+| A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
+| A07 | ✅ Centralize the product role vocabulary in one `Role(StrEnum)` — **completed across #443 and #444; legacy runtime registry belongs to A19** | **3** |
+| A08 | ✅ Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) — **completed in #445** | **3** |
+| A09 | ✅ Stop importing private task/sprint normalizers across feature boundaries — **completed across #442 and #446** | **3** |
+| A10 | ✅ Rename/consolidate the two different `HeadRun` concepts — **completed in #441** | **3** |
+| A11 | ✅ Migrate legacy sprint dicts/status strings onto the normalized sprint model — **completed across #446, #447, #448, and #449** | **3** |
+| A12 | ✅ Replace closed event payload dictionaries with typed payload objects — **completed across #450, #451, #452, and #457** | **4** |
+| A13 | ✅ Break up `DispatcherRecord`'s nested `dict[str, Any]` state — **completed across #458, #460, #461, and #462** | **4** |
+| A14 | 🟡 Remove the giant `dispatcher.py` compatibility façade — **through release/completion #479; ~76 KiB / 1,800 lines remain, mostly cross-cutting runtime/accounting/adoption primitives** | **4** |
+| A15 | 🟡 Continue the flat-root-to-feature-package migration and split god modules — **dispatcher internal extraction through release/completion #479; other large modules remain separate follow-ups** | **4** |
+| A16 | ✅ Make the active board backend explicit instead of silently defaulting to Kanboard — **completed in #440** | **2** |
+| A17 | 🟡 Retire Kanboard from the live write path after the PostgreSQL cutover window — **A16 completed the explicit-selector prerequisite; rollback/write-path retirement remains** | **5** |
+| A18 | ⏳ Move/remove one-shot Kanboard import/cutover machinery — **defer deletion/relocation until the cutover and rollback window are formally closed** | **3** |
+| A19 | Finish migration out of the legacy `triggered_agents` namespace | **5** |
+| A20 | Retire the Orca-legacy head backend after `local-pty` reaches parity | **5** |
+
+---
+
+## Detailed findings
+
+### A01. Remove the dead private `_env.py` compatibility shim — complexity 1 — completed
+
+At audit time, `src/secretary/_env.py` was only:
+
+```python
+from secretary.infra.env import positive_int
+__all__ = ["positive_int"]
+```
+
+`tests/test_architecture.py` explicitly kept the old import alive and asserted that it was the same implementation. I found no production caller that needed the private `_env` path.
+
+**Implemented in PR #434:** removed `secretary/_env.py`, removed it from `LEGACY_FLAT_MODULES`, and deleted the compatibility-only architecture assertion/imports. Full CI passed before merge.
+
+This compatibility seam is now gone rather than being preserved indefinitely.
+
+### A02. Align declared Python support with the actual runtime — complexity 1 — completed
+
+At audit time, `pyproject.toml` declared `requires-python = ">=3.11"`, while GitHub Actions ran only Python 3.12. That left the package claiming a compatibility level the project did not actually test.
+
+The original audit offered two valid fixes: add 3.11 coverage to CI, or stop declaring 3.11 support if it is intentionally unsupported. For this application, the second option is simpler and avoids paying a permanent second-version CI/compatibility cost for a Python version the controlled runtime does not need.
+
+**Implemented in PR #434:** raised `requires-python` to `>=3.12` and Ruff's `target-version` to `py312`. CI remains on Python 3.12, so package metadata, lint semantics, CI, and the intended runtime now agree.
+
+### A03. Add a real static type checker — complexity 2 — completed
+
+At audit time, the repository had extensive annotations but no mypy/pyright gate. Ruff catches syntax/style classes of problems, not type mismatches between the many dict-shaped protocols.
+
+The intended approach was incremental rather than strict checking over the whole repository at once.
+
+**Implemented in PR #435:** added pinned `mypy==1.18.2` as a dedicated `typecheck` optional dependency, configured it for Python 3.12, and added a separate GitHub Actions `typecheck` job. The initial enforced set is deliberately small and already typed: `secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`. Imported legacy modules are followed for type information but their pre-existing errors are not made part of this first gate.
+
+The new typecheck passed on the first CI run, the ordinary test shards and aggregate gate also passed, and PR #435 was merged into `main`. The checked set has since grown with A04 and A05; it should continue expanding package by package as A07–A13 remove legacy string/dict surfaces.
+
+### A04. Replace board-backend string literals with `StrEnum` — complexity 2 — completed
+
+At audit time, `secretary.board.backend` used the closed vocabulary `"kanboard" | "postgres"` as strings (`KANBOARD`, `POSTGRES`, `CARD_BACKENDS`) and also used string capability names such as `"card"`, `"sprint"`, `"product/issue"`.
+
+This was a textbook closed vocabulary and a good candidate for a small typed refactor.
+
+**Implemented in PR #436:** added `BoardBackend(StrEnum)` for `kanboard` / `postgres` and `BoardCapability(StrEnum)` for `card` / `sprint` / `product/issue`. The existing `KANBOARD`, `POSTGRES`, `CARD`, `SPRINT`, and `PRODUCT_ISSUE` exports remain as string-compatible enum-member aliases, so existing callers did not need a broad import migration. `parse_card_backend()` / `card_backend()` and the process-wide cache now carry `BoardBackend`; `POSTGRES_SERVES` and `board_client(..., serves=...)` carry the capability enum. The same PR added `secretary.board.backend` to the incremental mypy gate and tightened a few overly broad annotations exposed by that gate.
+
+The environment values, backend selection behavior, identity strings, storage shape, CLI spellings, and serialized values are unchanged. The final CI run passed typecheck, all seven test shards, and the aggregate gate before merge.
+
+### A05. Type pause mode and pause-state documents — complexity 2 — completed
+
+At audit time, `dispatcher_pause.py` had a small, stable domain model represented by dictionaries and strings:
+
+- `PAUSE_MODES = ("drain", "freeze")`;
+- alias maps for `soft/hard`;
+- `ProductionPause.load() -> dict[str, Any]`;
+- `auto_resume_status() -> dict[str, Any]`;
+- `pause_payload() -> dict[str, Any]`;
+- legacy mirror receipts as dicts.
+
+**Implemented in PR #438:** added `PauseMode(StrEnum)` for the durable `drain` / `freeze` vocabulary and `TypedDict` contracts for `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror`. `ProductionPause` remains the JSON adapter boundary; it exposes the typed state internally while persisting the same JSON object shape. The existing `soft` / `hard` aliases still normalize at the input boundary, and the legacy mirror keeps its old spelling.
+
+The PR deliberately did not turn loading into a new strict runtime validator: corrupt-file handling and the existing semantic checks stay where they were, so unreadable pause files still fail closed as a freeze and auto-resume behavior is unchanged. `secretary.dispatcher_pause` was also added to the incremental mypy gate. Full CI passed before merge, including typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
+
+### A06. Type Product/Issue vocabularies — complexity 2 — completed
+
+At audit time, `product_issues.py` defined:
+
+- `ISSUE_KINDS = {"bug", "feature", "question", "improvement"}`;
+- `ISSUE_PRIORITIES = {"P0", "P1", "P2", "P3"}`;
+- `ISSUE_CLOSE_REASONS = {"resolved", "invalid", "duplicate", "wont_do"}`.
+
+Meanwhile `board.models.Issue` was already a typed normalized value, but `priority`, `issue_kind`, and `close_reason` were plain strings.
+
+**Implemented in PR #437:** added `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s in `secretary.board.models` and exported them from `secretary.board`. The normalized `Issue` now stores those types (or `None` when metadata is absent) while its construction boundary accepts the existing string spellings and converts them immediately. Unknown vocabulary values are rejected rather than flowing deeper into the normalized domain model.
+
+The existing string wire/storage contract is unchanged: `StrEnum` remains string-compatible, so CLI inputs, Kanboard metadata and PostgreSQL values keep the same spellings. The special staged Kanboard create state that historically materialized `priority="pending"` and `issue_kind="pending"` is accepted only as a paired recovery sentinel and normalizes to absent typed metadata; `pending` is not added to either durable enum. Focused tests cover string compatibility, absent metadata, staged recovery and invalid values.
+
+The legacy validation sets in `product_issues.py` remain as compatibility/boundary validation surfaces for now; the normalized board domain contract is the enum-typed `Issue`. Full CI passed before merge.
+
+### A07. Centralize roles in one `Role(StrEnum)` — complexity 3 — completed
+
+The same role vocabulary is repeated in multiple places:
+
+- `tasks.py` (`_ROLES`, `_CREATE_ROLES`, `_EDIT_ROLES`, etc.);
+- `task_commands.py` argparse choices;
+- `triggered_agents.runtime.role_env.BOARD_ROLES`;
+- `board.card_transitions.CARD_TRANSITIONS` keys;
+- `board.models.Actor.role: str`;
+- dispatcher/runtime stop and routing paths.
+
+The duplicated sets are already drifting into multiple partially-overlapping subsets.
+
+**Implemented in PR #443 (product-side slice):** added canonical `secretary.board.roles.Role(StrEnum)` for the product board roles plus typed `BOARD_ROLES`, `CREATE_ROLES`, `PROPOSAL_CREATE_ROLES`, and `EDIT_ROLES` subsets. `CARD_TRANSITIONS` now uses `Role` keys, while `card_transition()` still accepts the existing string spellings and normalizes them at the boundary, so transition authority and external spellings are unchanged. `Role` is exported from `secretary.board`; `secretary.board.roles` and `secretary.board.card_transitions` are now in the incremental mypy gate. A focused unit ratchet asserts that the historical `tasks.py` role sets exactly match the new canonical product sets, so the compatibility surface cannot silently drift while the remaining migration is staged.
+
+**Completed in PR #444 (boundary/removal slice):** `board.models.Actor.role` now carries `Role` while accepting the released string spellings at construction boundaries. `TaskWriter` normalizes raw role strings once and uses the canonical board/create/comment/edit/proposal subsets; the duplicated task-local `_ROLES`, `_COMMENT_ROLES`, `_CREATE_ROLES`, `_PROPOSAL_CREATE_ROLES`, and `_EDIT_ROLES` registries are gone. `task_commands.py` derives argparse role choices from the canonical enum/subsets, and the board importer derives its marker-role strings from the same vocabulary instead of importing a private task constant. The temporary compatibility ratchet from #443 was replaced with tests for Actor normalization, writer authorization, CLI projection, and the absence of the duplicate registries.
+
+`triggered_agents.runtime.role_env.BOARD_ROLES` deliberately remains separate: `triggered_agents` is a legacy namespace with a dependency-direction test preventing new imports back into `secretary`. Moving that runtime-owned registry is part of A19, when role/runtime ownership itself leaves the legacy namespace; it is no longer an A07 tail.
+
+### A08. Type task routing metadata — complexity 3 — completed
+
+At audit time, `tasks.py` manually maintained `_TASK_TYPES`, `_COMPLEXITIES`, `_FAMILY_PREFERENCES`, `_ROUTING_PHASES`, `_BLOCK_CLASSIFICATIONS`, `_DECISIONS` / `_DECISION_TARGETS`, and editable/active state sets. The same concepts were normalized independently across task reads/writes, restore, the importer, CLI choices, and routing/decision paths. PR #442 had already centralized the low-level legacy fallback parser, but the domain vocabulary itself was still represented as strings.
+
+**Implemented in PR #445:** added `secretary.board.task_routing` as the canonical typed boundary, with `TaskType`, `TaskComplexity`, `FamilyPreference`, `RoutingPhase`, `BlockClassification`, and `TaskDecision` `StrEnum`s, typed `CardState` sets/decision targets, and frozen `TaskRouting` / `TaskMetadata` values. `TaskReader` now converts legacy metadata into those values once; task create/report/decision/routing validation and CLI choices consume the same vocabularies; restore uses the same typed compatibility boundary; and the board importer no longer imports the three private routing registries from the large `tasks.py` façade.
+
+The external contract is intentionally unchanged: persisted Kanboard/PostgreSQL values, CLI spellings, public task documents, SQL CHECK vocabularies, and routing-event strings are the same. Historical `_enum_or_default` / `_enum_or_none` private aliases remain where A09 compatibility tests require them, rather than broadening A08 into an unrelated compatibility cleanup. `secretary.board.task_routing` was added to the incremental mypy gate, focused tests pin the enum/default/document behavior and absence of the duplicate task-side registries, and the full PR CI passed on exact head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge.
+
+### A09. Stop cross-package imports of private normalizers — complexity 3 — completed
+
+At audit time, `board/import_board.py` imported private implementation details from both `secretary.tasks` and `secretary.sprints`, including task-side `_STATE_BY_COLUMN`, `_KNOWN_METADATA`, `_enum_or_default`, `_positive_int`, `_split_heads` and sprint-side `_budget`, `_resume`, `_source_audit`, and `_json_list`.
+
+That avoided literal duplication, but made migration semantics depend on private reader internals.
+
+**Implemented in PR #442 (task-side slice):** added the explicit compatibility module `secretary.board.legacy_codec` for the task column/metadata vocabularies and pure legacy task parsers. `tasks.py`, `restore.py`, and `board/import_board.py` now consume the same canonical functions; the historical private names in `tasks.py` remain compatibility aliases, so callers were not forced through an unrelated broad migration. The duplicate restore `_enum_or_default` implementation was removed. Focused tests pin the released normalization behavior and prove reader/restore/importer bind to the same codec. Full CI passed before merge: typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
+
+**Completed in PR #446 (sprint-side tail):** added `secretary.board.sprint_read` as the explicit typed compatibility boundary for Sprint state, budget, resume, source-audit, and legacy JSON-list metadata. `board/import_board.py` now consumes that boundary instead of importing `_budget`, `_resume`, `_source_audit`, or `_json_list` from `secretary.sprints`. The old private helpers remain thin compatibility adapters for historical same-package/test callers, so the released wire semantics are unchanged while the cross-feature private dependency is gone.
+
+A09 is therefore complete. After Kanboard retirement, the remaining compatibility codecs/adapters can be removed together with the importer/cutover path under A18 rather than being treated as unfinished A09 work.
+
+### A10. Rename/consolidate the two `HeadRun` concepts — complexity 3 — completed
+
+At audit time, there were two unrelated classes named `HeadRun`:
+
+- `triggered_agents.runtime.head.run.HeadRun`: the mutable-in-time lifecycle identity of a real launched head (`run_id`, `spec`, task ref, lifecycle, stop initiator, fanout policy);
+- `secretary.routing_journal.HeadRun`: an immutable routing/telemetry snapshot (`role`, selected profile, model, effort, resource, provider session, prompt identity).
+
+The code itself explained that these were deliberately separate, but using the same class name made imports, reviews, and the lifecycle-to-routing boundary unnecessarily ambiguous.
+
+**Implemented in PR #441:** the routing-journal class is now canonically `RoutingHeadSnapshot`; the runtime lifecycle value remains `triggered_agents.runtime.head.HeadRun`. Routing-journal internals (`AttemptRecord`, payload typing/parsing, and run keys) use the snapshot type, `routing_head_snapshot_from_profile()` is the canonical resolved-routing constructor, and `routing_head_snapshot_from_launch(..., lifecycle_run: HeadRun)` is the typed boundary joining resolved routing to a real lifecycle run.
+
+For compatibility, the historical `routing_journal.HeadRun` and `head_run_from_profile` spellings remain aliases. A10 deliberately left dispatcher persistence untouched; A13 later typed the lifecycle fields in #458 and the routing fields in #460. The old dict-returning `launched_head_run_snapshot()` adapter was removed in #460 once the dispatcher could keep the canonical `RoutingHeadSnapshot` in memory. Routing-event JSON keys/values and run-key semantics remain unchanged.
+
+Full CI passed before merge: typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
+
+### A11. Migrate legacy sprint dictionaries to the normalized sprint model — complexity 3 — completed
+
+`board.models` already has `Sprint` and `SprintState`, yet `sprints.py` still works mainly with `dict[str, Any]` and string sets such as `SPRINT_STATUSES = {"open", "closed", "stopped"}`. Guard indexes, budget documents, resumes, and readers pass ad-hoc dict shapes around.
+
+**Implemented in PR #446 (first slice):** introduced `secretary.board.sprint_read` with immutable `SprintBudget`, `SprintResume`, `SprintSourceAudit`, and `SprintReadMetadata` values plus canonical `SprintState` parsing. `SprintReader` now converts the compound legacy metadata once through that boundary and projects the existing public dict shape afterwards. The string status set is derived from `SprintState`, and the same typed boundary is reused by the one-shot importer. Persisted metadata, SQL/Kanboard storage, CLI/web/checkpoint documents, and write semantics are unchanged.
+
+**Implemented in PR #447 (second slice):** added immutable `SprintAdmission` and `SprintReservationIndex` domain values. Admission candidates/open-sprint collision checks now cross a typed boundary instead of passing raw sprint dictionaries into the conflict helpers; the local version-2 guard index is parsed, updated, and rendered through the typed index while keeping its on-disk JSON version and shape unchanged. Existing public/storage sprint dictionaries remain compatibility projections. The new admission module is included in the incremental mypy gate, focused admission/index tests were added, and the new test file is registered in the fail-closed CI shard manifest. Full PR CI passed on exact head SHA `0018f63ec5a920094628593c302b99dab2a29fa0`; the PR squash-merged as `3215ce651402c2a300a09b497e4bffdc4cefb291`.
+
+**Implemented in PR #448 (third slice, all non-close write flow):** added immutable `SprintCreateIntent`, `SprintReopenIntent`, `SprintWriteSnapshot`, and `SprintMutationReceipt` values in `secretary.board.sprint_write`. Create/restore-create now keep typed intent through validation/admission and render the historical dict only at transaction/event boundaries; reopen uses typed replay identity and sprint/admission values; the generic simple-mutation path, budget hard-stop bookkeeping, resume, restore, current-task handling, audit/result projection, and reservation-index update consume typed Sprint values instead of carrying the public sprint dict through business logic. `secretary.board.sprint_write` is in the incremental mypy gate and focused tests pin the old document projections. PostgreSQL/Kanboard storage, transaction JSON, event vocabularies, CLI/web documents, and public Sprint result shapes are unchanged. Full PR CI passed on exact head SHA `65236262ab65ff64a43918ce244a54dc9316e167`; the PR squash-merged as `e964d79f520a1f1584f760439acc9f043d2ad8a9`.
+
+**Implemented in PR #449 (final slice):** added `secretary.board.sprint_close` with immutable typed values for close intent, explicit issue/card decisions, the frozen task target set, recoverable conflicts, the Sprint close snapshot, and the closeout plan. `SprintWriter.close()` now normalizes those closed domain shapes once and keeps typed values through planning, retry/amendment checks, issue/card disposition, closeout writing, and result projection; dictionaries remain only at the released audit/transaction/event/PostgreSQL/public boundaries. The public `parse_close_decisions()` API still returns its historical dict shape, while its validated contents pass through the typed model internally. `secretary.board.sprint_close` is part of the incremental mypy gate, focused close regressions passed before the PR, and the full pull-request CI passed before merge. A11 is now complete; broader event-payload typing remains A12 rather than being folded into this migration.
+
+### A12. Replace closed event payload dicts with typed payload objects — complexity 4 — completed
+
+The normalized `Event` is typed, but `Event.data` and several host operations still use `dict[str, Any]` / `dict[str, object]`. Some of those payloads are genuinely extensible, but others are tightly closed schemas that are manually validated key-by-key (for example outcome round context).
+
+**Implemented in PR #450 (first bounded slice):** added immutable `ReportPayload`, `VerdictPayload`, and `DecisionPayload` values for the three control-plane Card marker events. `MarkerComment` now normalizes the released dict-shaped input once into a typed payload at the host boundary and retains the complete historical event-data projection separately, so event JSON and recovery evidence are unchanged. The typed payload owns the closed marker/status/classification/decision/prerequisite contract while the adapter still preserves additive evidence such as `assessment_visit`, hashes, specification revision, `request_related_refs`, and `marker_occurrence`. Focused tests pin report/verdict/decision normalization and exact decision-data round-trip behavior. Full PR CI passed on exact head SHA `312959800c8f77fcecaab4cad6b3ab132fa41c90`, then the PR squash-merged as `0f6ef23aa390939afa0e01c06d7f77ec55a9a390`.
+
+**Implemented in PR #451 (second bounded slice):** added immutable `AttemptUsagePayload`, `AttemptUsagePhase`, and `TokenAccount` values for the closed `attempt.usage` event schema. The dispatcher-side builder constructs the typed payload first and projects the exact historical dict only at the `Event.data` boundary; `BoardEventCanon.attempt_usage_occurrences()` normalizes usage events once and carries that value on `AttemptUsageOccurrence`; causal predecessor selection and predecessor-boundary reads now consume the typed payload instead of indexing `event.data` directly. The released data keys/values, request/event ownership, committed+pending occurrence projection, provider journal reads, token-attribution arithmetic, and degraded-outcome semantics are unchanged. `secretary.board.attempt_usage` is now in the incremental mypy gate, and focused round-trip/invariant/compatibility tests cover the new boundary. Full PR CI passed on exact head SHA `30b085a7fe9c0a7d933a48fd9dc7cdb41d753c1a`, then squash-merged as `b9703acfe0e6a59a4cdbcb5bc2565e33c441e9f5`.
+
+**Implemented in PR #452 (third bounded slice):** added immutable `AttemptOutcomePayload` plus typed source-event ids, usage completeness, lineage requiredness, verdict, and terminal-state values for the released v1/v2 `attempt.outcome` event data. `BoardEventCanon.attempt_outcome_occurrences()` now normalizes each outcome once and carries that value on `AttemptOutcomeOccurrence`; natural-key and committed-outcome recovery reads consume the typed payload instead of indexing raw outcome event dictionaries. Offline analytics outcome projection, source validation, usage-completeness checks, and lineage-completeness projection also consume the typed value while rendering the exact same checkpoint rows. The released v1/v2 event-data dictionaries, `(card_ref, attempt_id, report_generation)` identity, request/event ownership, checkpoint projection shape, generic `Event.data` compatibility, and lifecycle-effect semantics remain unchanged. `secretary.board.attempt_outcome` is in the incremental mypy gate, focused round-trip/invariant/compatibility tests cover the boundary, and the full PR CI passed on exact head SHA `f71ae9f01417b76575f29938bd2f568278e496fb` before squash-merge as `6bbb799bcc254cd78485a04e96cb585f7bb9ca44`.
+
+**Implemented in PR #457 (final bounded slice):** added immutable `OutcomeRoundContext` and `OutcomeRoundPhase` for the released v1/v2 outcome-round handoff. Dispatcher production now constructs the typed value before persistence; recovery selection, terminal-outcome obligation reads, and lineage-source checks consume typed fields; `TaskWriter.outcome_round_context()` normalizes legacy mapping callers once and projects the exact historical dictionary only at the audit/journal boundary. Field sets, validation semantics, request identity, lifecycle behavior, and journal spellings remain unchanged. `secretary.board.outcome_round_context` is in the incremental mypy gate. Full PR CI passed on exact head SHA `140b9e07811a4cdca4e60b58a06db79422e21a57`, then the PR squash-merged as `b7b5686e69cfed175969b2029e3680628b4d514f`. A12 is complete.
+
+### A13. Break up `DispatcherRecord`'s nested dictionaries — complexity 4 — completed
+
+`DispatcherRecord` itself is a dataclass. At audit time its most stateful durable subcontracts were still nested `dict[str, Any]` values. The migration kept the released production-state JSON as the compatibility boundary while moving lifecycle, routing, gate identity, delivery, launch intent, and headless recovery onto typed in-memory values.
+
+The runtime already had typed `HeadRun`, `StopInitiator`, continuation values, vitality episode values, and A10's typed `RoutingHeadSnapshot`; A13 closes the remaining inventoried dispatcher-owned durable bags rather than replacing the persistence format.
+
+**Implemented in PR #458 (first bounded slice):** moved `worker_head_run` / `review_head_run` behind `PersistedHeadRun`. Complete modern durable documents are parsed once into the canonical lifecycle `HeadRun`; the same boundary retains the exact JSON mapping so persistence and existing recovery/status callers keep the released shape while the migration is staged. Historical/minimal records that do not carry the complete modern `HeadRun` schema remain readable without inventing missing identity facts, and later legacy dict assignments are normalized at the `DispatcherRecord` boundary. No state keys, lifecycle semantics, or serialized values changed. Full PR CI passed on exact head SHA `ea6982c48dcb62eaeb35b0471a25f47c970333bf`; the PR squash-merged as `fdae5cb899650f8ec474fbc14b821cd6319ee705`.
+
+**Implemented in PR #460 (second bounded slice):** moved `worker_run` / `review_run` behind `PersistedRoutingHeadSnapshot`. Historical/partial mappings retain their exact durable JSON while exposing A10's canonical `RoutingHeadSnapshot` in memory; current typed assignments project the same released routing document. Dispatcher fallback creation, launch enrichment, committed-event recovery, and attempt-usage recovery now cross the typed routing boundary, and the obsolete dict-returning `launched_head_run_snapshot()` adapter is gone. `routing_journal.py` and `dispatcher_state.py` are now in the incremental mypy gate. Full PR CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `2625f74c99ba1f802f33faf0471db899838a9dd6`; the PR squash-merged as `13e512f428cf8e6067275da1a9ab9b4a1c6f22e3`.
+
+**Implemented in PR #461 (third bounded slice):** moved `gate_attestation` behind `PersistedGateReceipt` with the canonical `GateReceipt` as its typed view; added immutable `GatePrAuthorship` / `GatePublishedRef` values and compatible persisted wrappers for the PR-ownership and remote-publication leases; and moved `worker_delivery_evidence` / `review_delivery_evidence` behind `PersistedDeliveryEvidence` with canonical `DeliveryEvidence` views. Historical/partial mappings keep their exact durable JSON, while current typed assignments project the same released documents. Gate ownership/publication consumers and worker/reviewer delivery-failure accounting now consume typed views; focused hosts that intentionally use mapping-shaped fake records keep their old mapping contract. Full PR CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `fa74449a5d454da6262db63b5c4a96be12dcefb3`; the PR squash-merged as `7f7e91247ff8a0dfa488191ceaf2257ab8031b91`.
+
+**Implemented in PR #462 (final slice):** added immutable `LaunchIntent` / `LaunchDelivery` values behind the mapping-compatible `PersistedLaunchIntent` boundary and immutable `HeadlessRecoveryEpisode` behind `PersistedHeadlessRecoveryEpisode`. New worker/reviewer launch intents and headless recovery episodes are constructed as typed values; launch liveness/clear paths, the headless episode identity, and the shared status/sprint-status projection consume typed views. Remaining legacy call sites may still mutate the mapping-compatible wrappers in place, so those wrappers deliberately derive a fresh typed view after such writes instead of caching stale state. Historical/partial mappings and additive unknown keys still project byte-for-byte to the released JSON shape; launch fencing, pre-host durable-write ordering, adoption/relaunch rules, and headless refusal policy are unchanged. Focused restart/round-trip tests pin both historical and current typed forms. Full PR CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `1e0355fa1ffc072d9492736a6a17ffe89eb54546`; the PR squash-merged as `d620e717ef8842a1beca727c3b4b994403de48e6`.
+
+A13 is now complete. The previously audited `gate_workflow_dispatch` bag is already gone from current `main`; genuinely open-ended adapter/event mappings remain compatibility boundaries rather than targets for blanket modeling.
+
+### A14. Remove the giant `dispatcher.py` compatibility façade — complexity 4
+
+At audit time, `src/secretary/dispatcher.py` was about 324 KB and mixed composition, compatibility re-exports and lifecycle implementations. After PR #479 it is about 76 KiB / 1,800 lines. Construction is package-owned, all flat dispatcher satellites are gone, and every major card lifecycle state machine from claim through terminal release now has an explicit `secretary.dispatch` owner. The remaining root runtime is no longer one giant business state machine; it is mostly the cross-cutting substrate those owners still call back into: provider-event ingress, confirmed-stop/adoption helpers, routing/round bookkeeping, attempt usage/outcome lineage and publication, generic `terminal_effect`, and production-state persistence. A14 therefore remains open, but its next slices should be organized around those shared runtime capabilities rather than another card-state transition.
+
+This makes dependency direction hard to see and encourages new callers/tests to import the old monolith even after behavior has moved elsewhere.
+
+**Fix:**
+
+1. inventory external/internal imports from `secretary.dispatcher`;
+2. move callers to narrow feature APIs (`secretary.dispatch.*`);
+3. reduce `dispatcher.py` to a thin compatibility module;
+4. delete it when the last supported import path is gone.
+
+**Implemented in PR #463 (first bounded slice):** moved production runtime construction and instance data-dir resolution out of the monolith into `secretary.dispatch.bootstrap`; moved `secretary/dispatcher_commands.py` to `secretary.dispatch.commands` with no forwarding module; switched the CLI and web pause operation to the narrow APIs; and added an architecture ratchet that permits production imports of `secretary.dispatcher` only from `dispatch/bootstrap.py`. The state machine itself (`DispatcherRuntime`) remains in `dispatcher.py`, so this is a dependency-boundary reduction rather than an attempt to move the 300+ KB runtime in one PR. Full PR CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `4dc389e3dbd8343f04c755b828aaeb816e04d08a`; the PR squash-merged as `d51a9686b7195be862f319b7576dedb3e232b358`.
+
+**Implemented in PR #464 (second bounded slice):** moved the complete pause state and pause operation ownership from the flat `dispatcher_pause.py` / `dispatcher_pause_ops.py` modules into `secretary.dispatch.pause` / `secretary.dispatch.pause_ops`; rewired the dispatcher, production loop, CLI/status, web protocol, and tests to those package paths; kept the existing incremental mypy gate on the relocated pause state module; and deleted both flat modules rather than preserving compatibility forwarding shims. Pause persistence, locking, drain/freeze behavior, legacy mirroring, auto-resume semantics, CLI spellings, and web protocol documents remain unchanged. Full PR CI passed typecheck, all seven test shards, and the aggregate evidence/coverage gate on exact head SHA `95a9c3c4e50762ce67685eb645032f98300318d0`; the PR squash-merged as `691d254db8090b5b538892819f21a829c3396742`.
+
+**Implemented in PR #465 (third bounded slice):** moved the mechanical validation gate and its exact-SHA receipt schema from `dispatcher_gate.py` / `dispatcher_gate_receipt.py` into `secretary.dispatch.gate` / `secretary.dispatch.gate_receipt`. Production callers, dispatcher state, tests, and fakes now use the feature-package paths; both flat modules were deleted without forwarding shims and removed from `LEGACY_FLAT_MODULES`. The onboarding `secretary.gate` path remains separate, and the runtime gate state machine in `DispatcherRuntime` intentionally stays in the monolith for a later bounded extraction. The final PR head `97992131ffc2b7044a9245fb1f4ccad4a4ca29e3` passed typecheck, all seven test shards, and the aggregate test gate, then squash-merged as `b8725b9c7fe21ded4a26b9992c7d5341c1a8599a`.
+
+**Implemented in PR #466 (fourth bounded slice):** moved the observer lifecycle and its pre-advance fence from `dispatcher_observer.py` / `dispatcher_observer_fence.py` into `secretary.dispatch.observer` / `secretary.dispatch.observer_fence`. Production tick, host/pause/status, web protocol, fakes, mocks, and contract tests now use the feature-package paths; both flat modules were deleted without forwarding shims and removed from `LEGACY_FLAT_MODULES`. The move intentionally preserved observer delivery, liveness, durable state, fencing, and host semantics rather than splitting the 150+ KB observer implementation in the same PR. Full CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `f1c59f58a6ed1013ab0029b4d6e89a18c1a24dcd`; the PR squash-merged as `f095c184bb46a7e088f6996fbbcfdf3b5843fdba`.
+
+**Implemented in PR #467 (fifth bounded slice):** moved the complete production loop from `dispatcher_production.py` into `secretary.dispatch.production`, rewired the dispatcher façade, web pause reads, pipeline telemetry, tests, mock paths, and documentation references, removed the flat-root module from `LEGACY_FLAT_MODULES`, and retained no forwarding shim. The production tick/run/probe/observe implementation, `ProductionState` persistence, reconciliation, checkpoint coordination, lifecycle behavior, and durable JSON were intentionally unchanged. Full CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on exact head SHA `603982d2a66edcd135736fe033e007fbb39665c6`; the PR squash-merged as `596a45328670ce0e906c8879489a61a177dd7eb0`.
+
+**Implemented in PR #468 (sixth bounded slice):** moved the shared dispatcher state/model layer from `dispatcher_state.py`, `dispatcher_types.py`, and `dispatcher_worker_lifecycle.py` into `secretary.dispatch.state`, `secretary.dispatch.types`, and `secretary.dispatch.worker_lifecycle`. All production, web, test, fixture, mock-target, and incremental-mypy consumers now use the feature-package paths; the three flat-root modules were removed from `LEGACY_FLAT_MODULES` with no forwarding shims. `DispatcherRecord` durable projections, stop/review/error vocabularies, worker continuation semantics, and released JSON remain unchanged. The first CI pass exposed one missed large-suite import in `tests/test_dispatcher.py`; after correcting it, exact head `a4ea23ba1e3624bfdb89b3d79c1b1ab003337646` passed typecheck, all seven test shards, and the aggregate evidence/coverage gate, then squash-merged as `63d9b91859f8da4bc43baa85eb8a55f0c712e363`.
+
+**Implemented in PR #469 (seventh bounded slice):** moved the head-observation infrastructure from `dispatcher_heartbeat.py`, `dispatcher_watchdog.py`, and `dispatcher_tui.py` into `secretary.dispatch.heartbeat`, `secretary.dispatch.watchdog`, and `secretary.dispatch.tui`. Production, legacy-runtime, web, test, fixture, and mock-target consumers now use the package paths; all three flat-root modules were removed from `LEGACY_FLAT_MODULES` with no forwarding shims. Heartbeat identity semantics, watchdog thresholds/recovery behavior, provider-progress parsing, launch/review state machines, persistence, and public protocol documents remain unchanged. The first full CI pass exposed one code-search-invisible import in the large `tests/test_dispatcher.py`; after correcting it, exact head `a2f57d7514fd6dcd346efb293ead7c6d44919cc5` passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate, then squash-merged as `bb0c5868f7c75e87fbe503c09def5f349c032ff7`.
+
+**Implemented in PR #470 (eighth bounded slice):** moved the remaining dispatcher launch/review satellite layer from `dispatcher_helpers.py`, `dispatcher_launch.py`, `dispatcher_launcher.py`, and `dispatcher_review.py` into `secretary.dispatch.helpers`, `secretary.dispatch.launch`, `secretary.dispatch.launcher`, and `secretary.dispatch.review`. Production, status, pause, observer, host, tests, fakes, subprocess imports, and mock targets now use the package paths; all four flat modules were removed without forwarding shims. Launch intent persistence, bring-up classification, reviewer recovery/delivery, workspace preflight, and released protocol/state semantics remain unchanged. The first CI pass exposed one code-search-invisible import in the large `tests/test_dispatcher.py` plus one test-only prefix rewrite mistake for `dispatcher_launcher`; after correcting both, exact head `e46f1f768b017f93cc6e2501d9329da1b848da57` passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate, then squash-merged as `f29a51547fe04fe6df81af3d20986ac3e20c17ad`.
+
+**Implemented in PR #471 (ninth bounded slice):** extracted the first coherent state-machine responsibility from `DispatcherRuntime` itself. Ready-card head/failover resolution, sprint reservation admission, broad-check and project-Git-access preflights, pre-claim refusal writing, and the durable board claim now live in `secretary.dispatch.claim`. A typed `ClaimHandoff` is the explicit seam between the committed claim and the still-monolithic worker bring-up/recovery path. Both the runtime tick and `secretary.dispatch.production` now call the feature-owned claim boundary; production no longer calls `runtime._claim`. The old façade keeps only thin compatibility forwards for direct `_claim` / `resolve_head` callers and the historical sprint-admission constants, while an architecture ratchet prevents the moved implementation helpers from returning. The new module is included in incremental mypy and dispatcher collaborator-surface checks. The first CI pass exposed four tests that intentionally exercised the old private façade; those were either kept on a narrow forwarding shim or moved to patch the new package seam. Exact head `9e7a349a9adc2f2fb0fe622e0b5377f5fd318acc` then passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before squash-merge as `a7296f5187e24b0c6bce9077b53bfe0ca3857541`. Worker bring-up/recovery (`_launch_worker_after_claim`) remains deliberately separate.
+
+**Implemented in PR #472 (tenth bounded slice / second internal extraction):** moved the post-claim worker lifecycle into `secretary.dispatch.worker_launch`. The new boundary owns durable claim-to-worker bring-up, shared worker relaunch/failure primitives, and the headless-worker recovery/refusal/replacement path. `dispatch.claim` now consumes its typed `ClaimHandoff` by calling the package-owned launch boundary directly instead of reaching back into `runtime._launch_worker_after_claim`; recovered `claim_verified` and later relaunch call sites also use the package functions while the larger report, retained-continuation, gate, review, and merge state machines remain on `DispatcherRuntime`. The module is in incremental mypy and dispatcher collaborator-surface coverage, and an architecture ratchet prevents the moved implementations from returning to the monolith. One large-suite test still monkeypatched the old private headless-refusal method; after moving that patch to the new module seam, exact head `41169c496b40caee821081a7d0c3f6c66cba9cf9` passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate, then squash-merged as `5de73d817967298a3b989eb0d9cf315a08d3e306`.
+
+**Implemented in PR #473 (eleventh bounded slice / third internal extraction):** added `secretary.dispatch.worker_report` for report marker selection, `report:done` / `report:blocked` acceptance, durable worker-result verification, Validate transitions, stale/infra report handling, and the one-shot report nudge. `_advance_worker` keeps claim/adoption and retained-continuation recovery orchestration, calls report selection before continuation recovery and report consumption afterwards, then delegates the unchanged headless/generic wait paths. Five report-specific methods were removed from `DispatcherRuntime` with no forwarding shims. Retention-before-move, terminal-path-before-source-handoff, report generation/request identity and intent-before-send nudge semantics are unchanged. Seven focused boundary tests pin crash/replay ordering; the large-suite private helper caller now uses the package owner. Architecture ownership/order ratchets, collaborator-surface coverage and incremental mypy include the new boundary. Shared wait/vitality, retained/red continuation, gate/review/merge and research publication remain separate work. Full PR CI passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head `501bfcd0c28a3af5c3d7e755409f71b982d9943f` (run `35457059838`), then squash-merged as `1770764de377b9cd360814439af4ed183942b167`.
+
+**Implemented in PR #474 (twelfth bounded slice / fourth internal extraction):** moved retained/red worker continuation into `secretary.dispatch.worker_continuation`: durable transition intent, replayable board rework move, retained delivery and bounded provider-progress recovery, plus the confirmed-stop handoff to the existing worker-launch boundary. Ten runtime implementation methods, three helpers and the inline delivery-recovery branches now have a package owner with no implementation callbacks to the old methods. Red-transition replay remains before report lookup; delivery recovery remains after lookup and before report consumption, so a report can prove an earlier delivery without resending a prompt. Intent-before-effect ordering, reserved generation/request identity, exact provider binding, busy backoff, one-shot safe recovery, and replacement/launch-intent debt semantics are preserved. Models remain in `worker_lifecycle`; the gate reset uses the existing canonical empty `PersistedGateReceipt` with unchanged JSON. Fifteen focused replay/failure/ownership tests, architecture ordering ratchets, collaborator-surface coverage and incremental mypy cover the new boundary. The existing `dispatcher.DispatcherError` compatibility export is explicit after import cleanup; 111 focused/architecture/full-contract tests passed locally. Final head `93099a7f0776b3fdac8339b974f4fe591d4f2f18` passed typecheck, all seven test shards and the aggregate exact-SHA evidence/coverage gate (run `35459495642`), then squash-merged as `c48c4682feef89de8a0c299cff91ca17d6cb80b8`. The normal CI workflow is unchanged and temporary workbench files are absent from the merged diff. Gate/review/Assessment/merge and research publication remain separate work.
+
+**Implemented in PR #475 (thirteenth bounded slice / fifth internal extraction):** moved the shared worker/reviewer wait state machine into `secretary.dispatch.wait_vitality`: vitality reduction, recovery-policy rungs, suspended-head SIGCONT/operator escalation, guarded one-shot respawn, second-stall blocking, and bounded unobservable-head escalation. Eighteen runtime methods were removed with no forwarding methods; worker/reviewer confirmed-stop lifecycle boundaries and terminal/routing effects remain collaborators, while gate verdict, review verdict, Assessment and merge policy stay in `DispatcherRuntime`. Exact durable state, request identities, vitality verdicts, recovery rungs, destructive guard semantics, wait ceilings and save/effect ordering are preserved. The first CI iteration exposed mechanical extraction issues (typed free-function signatures and compatibility imports); the final head `6aa6aae1a4982f7c98f71607c762279334c9308a` passed typecheck, all seven test shards and the aggregate exact-SHA evidence/coverage gate in run `35463338482`, then squash-merged as `3206f9874e1972eefbda606d065177d96d2ecb3e`. The next A14/A15 scope must be re-sliced from the remaining gate/review/Assessment/merge lifecycle rather than combining it into one PR.
+
+**Implemented in PR #476 (fourteenth bounded slice / sixth internal extraction):** extracted the mechanical validation state machine into `secretary.dispatch.gate_lifecycle`. The package now owns the initial gate question, exact-SHA green acceptance, red-to-rework handoff, pending-CI state, transport retry ceilings, bounded infrastructure reruns and gate-pending worker-vitality integration. The infrastructure-rerun reset was moved to the gate domain itself, removing the remaining worker-report/continuation callback through `DispatcherRuntime`. Review verdict handling, Assessment parking/decisions, merge-readiness and final release remain deliberately outside this boundary. `dispatcher.py` dropped to about 117 KiB / 2,819 lines. Incremental mypy, architecture ownership ratchets and collaborator-surface discovery include the new owner. The first CI iteration found only extraction-boundary cleanup (typed receipt persistence and two tests still reading the pending ceiling from the old façade); final head `2424e1c62fd2f3c90e24bce7143f66c8e8d7d2e0` passed typecheck, all seven test shards and the aggregate exact-SHA evidence/coverage gate in run `35465657653`, then squash-merged as `665717f24b495600679113b28d1aabbe6ee2508e`. At that point the next bounded candidate was review-verdict/parking ownership; that follow-up is now complete in PR #477.
+
+**Implemented in PR #477 (fifteenth bounded slice / seventh internal extraction):** moved review-verdict acceptance and durable Assessment parking into `secretary.dispatch.review_verdict`. The package now owns `review:green` / `review:red` marker consumption, reviewer-stop handoff at verdict acceptance, green/red verdict bookkeeping, the no-observer red-review ceiling, pre-park merge readiness and gate handoff, plus durable park intent/move/replay. Reviewer launch/wait remains in `DispatcherRuntime`; Assessment decision execution, final release/merge, completion evidence and research publication deliberately remain outside this boundary. `dispatcher.py` dropped to about 99 KiB / 2,381 lines. Incremental mypy and an architecture ownership ratchet cover the new owner, with direct production/test consumers rewired to the package API rather than kept through façade shims. The first CI iteration exposed exactly two stale private callers (`_advance_assessment` park replay and one direct test); both were moved to `dispatch.review_verdict`, and no compatibility method was restored. Final head `6905c49f0617478e2cc2cb3eef968011508752ad` passed incremental mypy, all seven test shards including the 2,290-test integration-board shard, and the aggregate exact-SHA evidence/coverage gate in run `35470615996`, then squash-merged as `341537fba41b684aab2b900fefd51a2b4c5a43e1`. That Assessment-decision follow-up is now complete in PR #478; release/merge/completion evidence stayed separate as intended.
+
+**Implemented in PR #478 (sixteenth bounded slice / eighth internal extraction):** moved Assessment decision intake/replay plus rework/reslice execution into `secretary.dispatch.assessment_decision`. The new owner finishes pending red-transition or park replay before reading a decision, recovers the canonical decision/body/prerequisite declaration, persists decision outcome-round lineage when available, opens the rework round with the frozen observer instruction, and performs the reslice terminal effect. Release deliberately remained a callback into the separate runtime-owned release/merge/completion state machine for the next slice. No forwarding methods were restored; the only façade compatibility kept was the already-public `STOPPED_BY_REVIEW_VERDICT` constant re-export. CI exposed that re-export plus two test-only callers of the removed `_recorded_decision`; the callers were rewired directly to the package owner. Final head `d137d35e0f8cffbdb2071c6729eddbeb58850de5` passed incremental mypy, all seven test shards including the 2,290-test integration-board shard, and the aggregate exact-SHA evidence/coverage gate in run `35473308617`, then squash-merged as `0ed5d9a60dd1d5002583535d9713d991900a5ddf`. `dispatcher.py` was then about 90 KiB / 2,180 lines.
+
+**Implemented in PR #479 (seventeenth bounded slice / ninth internal extraction):** added `secretary.dispatch.release_lifecycle` and moved the final release/completion state machine out of the root runtime. The package now owns shared review-drift/merge-readiness checks, research-report publication, decided release replay with a fresh gate read, merge-path terminal blocking, merge/teardown, completion-evidence enforcement and the only path to terminal Done. `dispatch.review_verdict`, `dispatch.assessment_decision` and `dispatch.gate_lifecycle` call that package owner directly rather than using runtime forwarding methods. Generic `terminal_effect`, attempt usage/outcome lineage/publication, routing, adoption, confirmed-stop helpers and production-state persistence deliberately remain separate. The first full CI run found one extraction-boundary omission only: runtime host-surface discovery no longer saw `host.teardown` after it moved to the new module; the contract scanner was extended to include `release_lifecycle` rather than weakening the assertion. Final head `ea8f662ae81d33ff04f88deab71e56acec355f5e` passed incremental mypy, all seven test shards including the 2,290-test integration-board shard, and the aggregate exact-SHA evidence/coverage gate in run `35475948533`, then squash-merged as `92dc9df727db6c3650c51e4078727531219cf1e1`. The root dispatcher is now about 76 KiB / 1,800 lines. The next bounded candidate is the cross-cutting attempt/outcome accounting boundary: outcome-round source capture, attempt usage/outcome obligations/publication and `terminal_effect` should move together, while routing/adoption/confirmed-stop orchestration remains a later separate slice.
+
+The same principle applies to compatibility re-exports in `dispatch.host` and lazy `board.__getattr__` exports.
+
+### A15. Continue flat-root migration and split god modules — complexity 4
+
+The architecture document already declares the desired feature-first package layout and `tests/test_architecture.py` explicitly lists a large `LEGACY_FLAT_MODULES` allowlist. That is good containment, but the allowlist is still very large.
+
+Several modules are large enough that they have become architecture boundaries by accident:
+
+- `dispatcher.py` ~76 KiB / 1,800 lines after #479;
+- `tasks.py` ~217 KiB / 4,924 lines;
+- `dispatch/host.py` ~217 KiB / 4,710 lines;
+- `sprints.py` ~142 KiB / 3,293 lines;
+- `dispatch/observer.py` ~148 KiB / 3,449 lines (moved from the flat root in #466; still a later split candidate);
+- `board/import_board.py` ~135 KiB / 3,135 lines;
+- `web/pages.py` ~131 KiB / 2,820 lines;
+- `cutover/__init__.py` ~103 KiB / 2,542 lines.
+
+**Fix:** keep using the existing architecture test as a ratchet: every cleanup PR should move a coherent slice from the flat root into the target feature package and remove that filename from `LEGACY_FLAT_MODULES`. Avoid creating new forwarding modules unless an installed/public entry point genuinely needs one.
+
+**Implemented in PR #463 (first bounded slice):** removed `dispatcher_commands.py` from the flat-root allowlist by moving its implementation to `secretary.dispatch.commands`; no root-level compatibility shim was retained. The same PR added a dedicated `secretary.dispatcher` import ratchet so later package extractions cannot be undone by new production callers of the monolith.
+
+**Implemented in PR #464 (second bounded slice):** removed `dispatcher_pause.py` and `dispatcher_pause_ops.py` from the flat-root allowlist by moving both implementations to `secretary.dispatch.pause` and `secretary.dispatch.pause_ops`. Production, web, test, documentation, and mypy references now use the feature-package paths, and no root-level compatibility shims were retained.
+
+**Implemented in PR #465 (third bounded slice):** removed `dispatcher_gate.py` and `dispatcher_gate_receipt.py` from the flat-root allowlist by moving them to `secretary.dispatch.gate` and `secretary.dispatch.gate_receipt`. All callers use the new paths and no compatibility forwarding modules were retained.
+
+**Implemented in PR #466 (fourth bounded slice):** removed `dispatcher_observer.py` and `dispatcher_observer_fence.py` from the flat-root allowlist by moving them to `secretary.dispatch.observer` and `secretary.dispatch.observer_fence`. All production/protocol/test consumers use the new paths and no compatibility forwarding modules were retained. The observer implementation remains large, but it is now owned by the correct feature package and can be split independently of the flat-root migration.
+
+**Implemented in PR #467 (fifth bounded slice):** removed `dispatcher_production.py` from the flat-root allowlist by moving the unchanged production-loop implementation to `secretary.dispatch.production`. Runtime, protocol, telemetry, test, and mock consumers now use the package path and no compatibility forwarding module was retained. The ~71 KB production implementation is now owned by the correct feature package and can be split internally later without mixing that work with the root-layout migration.
+
+**Implemented in PR #468 (sixth bounded slice):** removed `dispatcher_state.py`, `dispatcher_types.py`, and `dispatcher_worker_lifecycle.py` from the flat-root allowlist by moving them to `secretary.dispatch.state`, `secretary.dispatch.types`, and `secretary.dispatch.worker_lifecycle`. GitHub recognized the implementation files as renames; callers and mock targets were rewired rather than preserved through root-level shims, and the mypy path followed the relocated state module.
+
+**Implemented in PR #469 (seventh bounded slice):** removed `dispatcher_heartbeat.py`, `dispatcher_watchdog.py`, and `dispatcher_tui.py` from the flat-root allowlist by moving them to `secretary.dispatch.heartbeat`, `secretary.dispatch.watchdog`, and `secretary.dispatch.tui`. GitHub recognized all three implementation files as renames; production, runtime, web, test, fixture, and mock targets were rewired directly to the package paths, with no root-level compatibility shims retained.
+
+**Implemented in PR #470 (eighth bounded slice):** removed `dispatcher_helpers.py`, `dispatcher_launch.py`, `dispatcher_launcher.py`, and `dispatcher_review.py` from the flat-root allowlist by moving them to `secretary.dispatch.helpers`, `secretary.dispatch.launch`, `secretary.dispatch.launcher`, and `secretary.dispatch.review`. GitHub recognized all four implementation files as renames; production and test consumers were rewired directly to the package paths with no compatibility forwarding modules. After this PR, `src/secretary/dispatcher.py` is the only remaining `dispatcher*.py` file at the package root, so the next A14/A15 slices must be bounded extractions from the monolith rather than more satellite-file moves.
+
+**Implemented in PR #471 (ninth bounded slice / first internal extraction):** moved roughly 700 lines of claim/admission/preflight implementation out of the remaining root monolith into `secretary.dispatch.claim`. This is intentionally not another whole-file relocation: `dispatcher.py` remains the compatibility/state-machine façade, but the feature package now owns one complete Ready-to-durable-claim responsibility and production consumes it directly. The compatibility methods left on `DispatcherRuntime` are forwarding shims rather than duplicate implementations, and tests ratchet the implementation helpers out of the monolith.
+
+**Implemented in PR #472 (tenth bounded slice / second internal extraction):** moved about 800 lines of worker bring-up and headless-worker recovery implementation out of the root monolith into `secretary.dispatch.worker_launch`. This continues the internal split rather than creating another façade: claim hands directly into the new package module, later runtime state machines call its narrow relaunch/recovery functions, and tests/typecheck/architecture checks follow the new ownership. `dispatcher.py` is now about 268 KiB / 6.3k lines, down from roughly 301 KB after #471, while remaining the only flat-root `dispatcher*.py` module.
+
+**Implemented in PR #473 (eleventh bounded slice / third internal extraction):** removed a net 582 lines from the root dispatcher by making `dispatch.worker_report` own report acceptance/refusal and report prompting. `dispatcher.py` is now 242 KiB / 5,752 lines. The new module contains the implementation, not a forwarding facade; old method ownership is ratcheted out and the normal CI workflow is unchanged. The temporary extraction workflow was removed before PR CI and is absent from the merged diff.
+
+**Implemented in PR #474 (twelfth bounded slice / fourth internal extraction):** removed a net 835 lines from the root dispatcher by extracting the complete retained/red continuation cycle into `dispatch.worker_continuation`. The feature package owns both transition replay and delivery recovery, while preserving their distinct positions around report lookup. Durable model ownership and general wait/vitality or gate/review policy did not move. The new boundary is covered by replay/failure tests, ownership/order ratchets, host-surface contracts and incremental mypy; no compatibility forwarding module or service workflow was added.
+
+**Implemented in PR #475 (thirteenth bounded slice / fifth internal extraction):** extracted the complete shared wait/watchdog/vitality policy into `dispatch.wait_vitality`. `dispatcher.py` is now about 150 KiB / 3,611 lines. The package owner covers worker/reviewer wait decisions, vitality reduction, recovery rungs, suspension recovery and guarded respawn/escalation; gate-specific orchestration consumes the narrow reduction/recovery entry points without moving gate verdict policy itself. Ownership/order ratchets, host-surface discovery and incremental mypy now include the boundary.
+
+**Implemented in PR #476 (fourteenth bounded slice / sixth internal extraction):** moved the complete mechanical gate orchestration out of the root dispatcher into `dispatch.gate_lifecycle`, leaving the low-level host gate implementation in `dispatch.gate`. Green/red/pending/transport decisions, infrastructure reruns and the gate-pending vitality bridge now have a package owner; the reset primitive is also gate-owned rather than a runtime callback used by worker modules. `dispatcher.py` is now about 117 KiB / 2,819 lines. The new owner is covered by incremental mypy, collaborator-surface discovery and an architecture ratchet, with review/Assessment/release explicitly excluded from this slice. The review/parking scope excluded here is now complete in #477.
+
+**Implemented in PR #477 (fifteenth bounded slice / seventh internal extraction):** extracted review-verdict acceptance and durable Assessment parking into `dispatch.review_verdict`. The root dispatcher no longer owns the private verdict/park helpers or their replay path; the Assessment recovery caller and direct test consumer now call the package owner rather than façade shims. `dispatcher.py` is now about 99 KiB / 2,381 lines. Incremental mypy and the architecture ownership ratchet include the new module. Assessment decision execution moved in #478; final release/merge/completion remains intentionally in the root façade as the next separately bounded extraction.
+
+**Implemented in PR #478 (sixteenth bounded slice / eighth internal extraction):** extracted `dispatch.assessment_decision` from the root dispatcher. Decision adoption/replay, canonical decision recovery, rework transition opening and reslice terminal execution now live in the feature package; direct test consumers were moved to the package API rather than preserved through method shims. Release remained runtime-owned for the following bounded slice. `dispatcher.py` was then about 90 KiB / 2,180 lines, and incremental mypy plus the architecture ownership ratchet covered the new module.
+
+**Implemented in PR #479 (seventeenth bounded slice / ninth internal extraction):** extracted `dispatch.release_lifecycle` from the root dispatcher and moved the shared merge-readiness helpers out of `dispatch.review_verdict` with it. Research publication, release gate/replay, merge-path blocking, merge/teardown, completion evidence and terminal Done now have one package owner; review, Assessment and gate modules call it directly. `dispatcher.py` dropped by roughly 380 net lines to about 76 KiB / 1,800 lines. The new module is in incremental mypy and the runtime host-surface/architecture ratchets. Full CI on final head `ea8f662ae81d33ff04f88deab71e56acec355f5e` passed in run `35475948533` before squash-merge as `92dc9df727db6c3650c51e4078727531219cf1e1`.
+
+Also move the implementation out of `cutover/__init__.py`; package `__init__` should expose a small API, not contain a 100 KB implementation.
+
+### A16. Make the active board backend explicit — complexity 2 — completed
+
+At audit time, production served the live board from PostgreSQL, but `board.backend.parse_card_backend()` still treated an absent/empty `SECRETARY_CARD_BACKEND` as `kanboard`. That migration default made configuration loss capable of silently selecting the legacy writer.
+
+**Implemented in PR #440:** confirmed the installed web, dispatcher, and role launch paths all receive the instance `runtime.env` selector, then removed the implicit backend default. Missing, empty, and unknown selectors now refuse; explicit `postgres` and `kanboard` remain supported, so rollback is still an explicit configuration choice. The test suite now pins `kanboard` rather than relying on absence, and the status schema records that there is no product default.
+
+This remains intentionally separate from deleting Kanboard itself.
+
+### A17. Retire Kanboard from the live write path — complexity 5
+
+The codebase currently maintains two full board implementations plus compatibility logic between them. The architecture/docs say the live production installation is PostgreSQL while Kanboard is retained as a read-only archive, but product code still contains live Kanboard readers/writers, direct Kanboard construction exceptions, transaction journals, restore paths, and host adapters.
+
+**Fix (staged):**
+
+1. require explicit backend selection and fail closed (A16 completed; no implicit default);
+2. make all production writers refuse Kanboard unless a dedicated rollback flag is set;
+3. freeze a rollback deadline and export/archive requirements;
+4. remove Kanboard write paths;
+5. then remove Kanboard readers and compatibility parsing that no longer serves recovery/import.
+
+Trying to delete it in one PR would be risky because backup/restore/import and historical audit compatibility still depend on it.
+
+### A18. Move/remove one-shot Kanboard import and cutover machinery — complexity 3
+
+`board/import_board.py` is ~136 KB and `cutover/__init__.py` is ~106 KB. Much of this exists to perform/verify a one-time storage migration. Once all supported installations are cut over and the rollback window is closed, keeping this code in the normal runtime package permanently increases the maintenance surface and forces current domain code to retain legacy normalizers.
+
+**Fix:** after the migration lifecycle is formally closed, either delete these paths or move the importer to a versioned offline migration/tooling package that is not imported by the running product.
+
+Before deletion, preserve the migration report/schema documentation needed to recover old archives.
+
+### A19. Finish migration out of `triggered_agents` — complexity 5
+
+`docs/ARCHITECTURE.md` explicitly calls `src/triggered_agents` a **legacy namespace**, yet `secretary` still imports runtime paths, role environment, head models, references, board transport, head registry, and runtime operations from it. `secretary.role_env` itself is mostly a re-export façade over `triggered_agents.runtime.role_env`.
+
+This creates inverted ownership: the product package owns the architecture, while a legacy package still owns many of its core runtime types.
+
+**Fix:** migrate in dependency order:
+
+1. pure runtime types/utilities (`head`, paths, redaction, transport contracts) into `secretary.runtime` / `secretary.infra`;
+2. move composition-specific runtime logic next;
+3. move curator/steward/retro under `secretary.automations`;
+4. leave `triggered-agents` as a temporary CLI compatibility entry point;
+5. remove the package after the last installed unit/command uses the new path.
+
+The architecture test that restricts back-imports is already a good ratchet for this work.
+
+### A20. Retire Orca-legacy after local-pty parity — complexity 5
+
+The head-runtime abstraction is a strong design improvement, but there are still two runtime backends and the absent/default profile backend remains `orca-legacy`. The Orca implementation has weaker stop semantics and drives a large amount of compatibility code around panes, leaves, aliasing, readiness and external session-manager behavior.
+
+**Fix:** define explicit parity/exit criteria for `local-pty` (worker, reviewer, observer/service heads, recovery, drain/stop, operator diagnostics, rollback). Once met:
+
+1. make `local-pty` the only default;
+2. migrate installed head profiles;
+3. remove `orca-legacy` selection and its adapter;
+4. delete pane-specific compatibility state (`handle`/`leaf` paths that are no longer needed by any persisted old record after the support window).
+
+This is likely the single biggest long-term simplification after the board-store migration.
+
+---
+
+## Suggested execution order
+
+### Phase 1 — low-risk cleanup and guardrails
+
+~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, ~~A05~~, ~~A06~~, ~~A16~~.
+
+Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #438, A06 via #437, and A16 via #440.
+
+### Phase 2 — collapse string/dict protocols
+
+~~A07~~, ~~A08~~, ~~A09~~, ~~A10~~, ~~A11~~.
+
+Phase 2 is complete: A07–A11 now have typed domain boundaries while preserving the released compatibility/storage projections. A12 completed the bounded payload/handoff migrations, and A13 subsequently completed the durable dispatcher-state inventory. The active cleanup tier is now package boundaries under A14/A15.
+
+A10 is complete via PR #441. A07 is complete across PR #443 and PR #444: product board roles now have one canonical typed vocabulary from the normalized Actor through TaskWriter, CLI choices, transitions, and importer boundaries; the separate legacy runtime registry stays with A19. A08 is complete via PR #445. A09 is complete across PR #442 and PR #446: both task and sprint cross-feature private-normalizer imports are gone. A11 is complete across PR #446, PR #447, PR #448, and PR #449: read normalization, admission/guard state, non-close writes, and the close transaction now each have typed domain boundaries while released persistence/public projections remain compatible. A12 is complete across PR #450, PR #451, PR #452, and PR #457. A13 is complete across PR #458, PR #460, PR #461, and PR #462.
+
+### Phase 3 — dispatcher typing and package boundaries
+
+A13 is complete. A14/A15 remain active, but after #479 the major card lifecycle state machines are no longer the reason `DispatcherRuntime` is large. The remaining work is cross-cutting runtime infrastructure and should continue as bounded capabilities rather than a wholesale class move.
+
+PR #458 completed lifecycle `worker_head_run` / `review_head_run`, #460 completed routing snapshots, #461 completed gate identity and delivery evidence, and #462 completed `launch_intent` plus `worker_headless`, preserving durable JSON. #463 established the package construction boundary; #464–#470 completed the move-only satellite migration. #471 extracted claim/admission/preflight; #472 worker bring-up/headless recovery; #473 worker report acceptance; #474 retained/red continuation; #475 shared wait/watchdog/vitality; #476 mechanical gate lifecycle; #477 review-verdict acceptance and durable Assessment parking; #478 Assessment decision intake/replay plus rework/reslice; #479 release/completion, including research publication, release gate/replay, merge/teardown, completion evidence and terminal Done.
+
+The root dispatcher is now about 76 KiB / 1,800 lines. Its remaining responsibilities cluster into: (1) attempt/outcome accounting and generic terminal effects; (2) routing/round bookkeeping; (3) confirmed-stop, adoption and provider-ingress primitives; and (4) thin top-level orchestration/state persistence. The next bounded scope should be **attempt/outcome accounting + terminal effect**: move outcome-round source capture, attempt usage/outcome obligation construction/publication, pending recovery and `terminal_effect` behind one package boundary. Do not pull routing/adoption/confirmed-stop code into that PR unless a tiny helper is inseparable. After that, re-audit whether the remaining façade is small enough to relocate `DispatcherRuntime` itself rather than continuing to fragment it.
+
+### Phase 4 — delete compatibility subsystems
+
+A17, A18, A19, A20.
+
+These should be driven by explicit migration/rollback criteria, because they remove live compatibility behavior rather than just reorganizing code.
+
+## General recommendation
+
+The repository already has the right target architecture written down. The next cleanup work should optimize for **subtraction**:
+
+- prefer deleting a compatibility path over adding another façade;
+- parse untyped external data once, then use typed values internally;
+- keep closed vocabularies as `StrEnum`, not sets of magic strings copied between modules;
+- let `tests/test_architecture.py` keep ratcheting the old layout smaller;
+- treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
+
+With A01–A13 and A16 complete and A14/A15 advanced through PR #479, all nine major internal card-lifecycle responsibilities now have package owners: `dispatch.claim`, `dispatch.worker_launch`, `dispatch.worker_report`, `dispatch.worker_continuation`, `dispatch.wait_vitality`, `dispatch.gate_lifecycle`, `dispatch.review_verdict`, `dispatch.assessment_decision` and `dispatch.release_lifecycle`. The next cleanup tier inside A14 is no longer another business transition; it is the shared attempt/outcome accounting and terminal-effect substrate, followed separately by routing/adoption/confirmed-stop primitives and then a decision on relocating the remaining `DispatcherRuntime` façade. A15 remains broader than the dispatcher: `tasks.py`, `dispatch/host.py`, `sprints.py`, `dispatch/observer.py`, `board/import_board.py`, `web/pages.py` and `cutover/__init__.py` are still large independent split/retirement candidates. A17–A20 remain migration/deprecation projects that need explicit rollback/exit criteria; A18 should not be treated as ordinary cleanup until the Kanboard cutover/rollback lifecycle is formally closed.
