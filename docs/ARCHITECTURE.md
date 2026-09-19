@@ -57,8 +57,10 @@ dispatcher for the extracted continuation methods.
 recovery-policy rungs, suspension SIGCONT/operator escalation, guarded one-shot respawn, second-stall
 blocking and the bounded unobservable-head escalation. `DispatcherRuntime` calls its four package
 entry points from worker/review/gate orchestration; the module calls back only for the existing
-worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects. Gate verdict,
-review verdict, Assessment and merge policy remain in the runtime for later bounded extractions.
+worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects. Mechanical gate
+verdict, transport retry, bounded infrastructure rerun and pending-CI policy are package-owned by
+`secretary.dispatch.gate_lifecycle`; review verdict, Assessment and merge policy remain in the
+runtime for later bounded extractions.
 
 Dependency rules:
 
