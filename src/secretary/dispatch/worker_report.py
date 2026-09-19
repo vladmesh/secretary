@@ -17,6 +17,7 @@ from secretary.board.completion_evidence import (
     infra_report_fields,
     render_infra_completion_record,
 )
+from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import (
     _last_marker_body,
@@ -174,7 +175,7 @@ def handle_worker_report(
         record.gate_pending_since = 0.0
         record.gate_transport_failures = 0
         record.gate_transport_error = ""
-        runtime._reset_infrastructure_reruns(record)
+        _reset_infrastructure_reruns(record)
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         records[ref] = record
@@ -350,7 +351,7 @@ def _accept_stale_infrastructure_done(
     record.gate_pending_since = 0.0
     record.gate_transport_failures = 0
     record.gate_transport_error = ""
-    runtime._reset_infrastructure_reruns(record)
+    _reset_infrastructure_reruns(record)
     _reset_wait(record, "worker")
     _reset_wait(record, "review")
     runtime.writer.comment(
