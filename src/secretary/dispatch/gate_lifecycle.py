@@ -1,9 +1,9 @@
 """Mechanical validation gate lifecycle and bounded recovery.
 
 This module owns the dispatcher state machine from asking the mechanical gate through
-green/red/pending/transport/infrastructure outcomes. Review, Assessment, merge/release
-and terminal merge policy remain owned by DispatcherRuntime; shared head vitality remains
-owned by dispatch.wait_vitality.
+green/red/pending/transport/infrastructure outcomes. Review and Assessment remain separate;
+release/merge terminal blocking is package-owned by dispatch.release_lifecycle, and shared
+head vitality remains owned by dispatch.wait_vitality.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch import release_lifecycle
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -131,7 +132,7 @@ def accept_green_gate(
         if stage == "initial":
             return _block_missing_gate_receipt(runtime, task, record, records, payload, attempt_id)
         step = "assessment" if stage == "release" else "review"
-        return runtime._block_merge_path(
+        return release_lifecycle.block_merge_path(runtime,
             task,
             record,
             records,
@@ -231,7 +232,7 @@ def gate_red_to_worker(
         # pull request's base or the project's triggers are what is wrong (secretary-1541).
         # Sending the worker back over its own code would spend a round on the wrong file, so
         # this goes to a human with the cause named instead.
-        return runtime._block_merge_path(
+        return release_lifecycle.block_merge_path(runtime,
             task,
             record,
             records,
@@ -651,7 +652,7 @@ def block_gate_transport(
         f"so it never returned a verdict; this is a transport failure, not a red gate. "
         f"Last transport error: {last}"
     )
-    return runtime._block_merge_path(
+    return release_lifecycle.block_merge_path(runtime,
         task,
         record,
         records,
