@@ -48,6 +48,7 @@ from secretary.dispatch import review as dispatcher_review
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
+from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
@@ -98,6 +99,7 @@ _RUNTIME_MODULES = (
     dispatcher_worker_launch,
     dispatcher_worker_continuation,
     dispatcher_worker_report,
+    dispatcher_wait_vitality,
 )
 
 # Attribute owners as they are spelled at the call sites: `self.host` inside DispatcherRuntime,

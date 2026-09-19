@@ -25,7 +25,7 @@ from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary import dispatcher as dispatcher_module
+from secretary.dispatch import wait_vitality as wait_vitality_module
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 
 
@@ -155,8 +155,8 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._rewind_idle()
 
         with mock.patch.object(
-            type(self.runtime),
-            "_reduce_and_store_vitality_episode",
+            wait_vitality_module,
+            "reduce_and_store_vitality_episode",
             lambda *args, **kwargs: None,
         ):
             self.tick()  # stamps the fresh waiting window
@@ -193,7 +193,7 @@ class TheGuardReallyFiresTests(DispatcherRuntimeFixture, unittest.TestCase):
         with mock.patch.object(
             dispatcher_module,
             "_assert_destructive_allowed",
-            wraps=dispatcher_module._assert_destructive_allowed,
+            wraps=wait_vitality_module._assert_destructive_allowed,
         ) as guard:
             outcome = self.tick()
 

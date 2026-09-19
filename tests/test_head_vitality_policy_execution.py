@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import secretary.dispatcher as secretary_dispatcher
+from secretary.dispatch import wait_vitality as secretary_wait_vitality
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.watchdog import (
@@ -205,7 +205,7 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
         proc.send_signal(signal.SIGSTOP)
         self._wait_parked(proc.pid)
 
-        sent = self.runtime._sigcont_head({"ref": "s1-5-real"}, record, kind="worker")
+        sent = secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker")
 
         self.assertTrue(sent)
         self.assertTrue(
@@ -243,11 +243,11 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
             return real_killpg(group, number)
 
         with (
-            mock.patch.object(secretary_dispatcher.os, "kill", side_effect=audit_kill),
-            mock.patch.object(secretary_dispatcher.os, "killpg", side_effect=audit_killpg),
+            mock.patch.object(secretary_wait_vitality.os, "kill", side_effect=audit_kill),
+            mock.patch.object(secretary_wait_vitality.os, "killpg", side_effect=audit_killpg),
         ):
             self.assertTrue(
-                self.runtime._sigcont_head({"ref": "s1-5-real"}, record, kind="worker"),
+                secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker"),
             )
         self.assertEqual(
             signalled,
@@ -262,7 +262,7 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
         proc.send_signal(signal.SIGSTOP)
         self._wait_parked(proc.pid)
 
-        sent = self.runtime._sigcont_head({"ref": "s1-5-real"}, foreign_record, kind="worker")
+        sent = secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, foreign_record, kind="worker")
 
         self.assertFalse(sent, "a mismatched identity must never be resumed")
         self.assertTrue(

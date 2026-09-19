@@ -20,6 +20,7 @@ from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
+from secretary.dispatch import wait_vitality as wait_vitality_module
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import idle_stall_seconds, stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
@@ -390,7 +391,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
         with (
             mock.patch.object(
-                type(self.runtime),
+                wait_vitality_module,
                 "_escalate_unobservable_wait",
                 side_effect=AssertionError("the escalation arm was disabled"),
             ),
