@@ -152,11 +152,40 @@ class SourceLayoutTests(unittest.TestCase):
         )
         self.assertLess(
             advance_source.index("_handle_worker_report("),
-            advance_source.index("self._wait_watchdog("),
+            advance_source.index("_wait_watchdog(self, "),
         )
         for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
             self.assertIn(f"def {entry}(", report_source)
         self.assertNotIn("from secretary.dispatcher import", report_source)
+
+
+    def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        wait_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "wait_vitality.py"
+        ).read_text(encoding="utf-8")
+        helpers = (
+            "_decide_wait_by_verdict",
+            "_escalate_unobservable_wait",
+            "_recovery_policy_decision",
+            "_execute_recovery_intent",
+            "_sigcont_head",
+            "_guard_or_wait",
+            "_trigger_wait_watchdog",
+            "_respawn_wait",
+            "_escalate_wait",
+        )
+        for helper in helpers:
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"runtime.{helper}(", wait_source)
+        for entry in (
+            "wait_watchdog",
+            "execute_recovery_intent",
+            "recovery_policy_outcome",
+            "reduce_and_store_vitality_episode",
+        ):
+            self.assertIn(f"def {entry}(", wait_source)
+        self.assertNotIn("from secretary.dispatcher import", wait_source)
 
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
