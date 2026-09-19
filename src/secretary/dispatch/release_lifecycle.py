@@ -29,6 +29,7 @@ def released_verdict(record: DispatcherRecord) -> str:
     """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
     return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
 
+
 def merge_terminal_reason(action: str) -> str:
     """Classify the terminal cause a merge path actually reached.
 
@@ -41,6 +42,7 @@ def merge_terminal_reason(action: str) -> str:
     if "gate" in action:
         return "gate"
     return "implementation"
+
 
 def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> str:
     """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
@@ -60,6 +62,7 @@ def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -
         f"is now on `{current[:12]}`: the verdict describes a different state of the code. The "
         f"card is back in In progress; rework it and report again."
     )
+
 
 def merge_readiness(
     runtime: Any, task: dict[str, Any], record: DispatcherRecord
@@ -85,6 +88,7 @@ def merge_readiness(
     if result.status == "pending":
         return "pending", result, ""
     return "red", result, ""
+
 
 def block_merge_path(
     runtime: Any,
@@ -120,6 +124,7 @@ def block_merge_path(
     records.pop(ref, None)
     runtime.save_records(payload, records)
     return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
+
 
 def transfer_research_report(
     runtime: Any,
@@ -194,6 +199,7 @@ def transfer_research_report(
     )
     return None
 
+
 def release_parked(
     runtime: Any,
     task: dict[str, Any],
@@ -228,10 +234,10 @@ def release_parked(
             decision="release",
             verdict=released_verdict(record),
         )
-    kind, result, detail = merge_readiness(self, task, record)
+    kind, result, detail = merge_readiness(runtime, task, record)
     if kind == "transport":
         # A release that could not ask the gate is not a release that was refused.
-        retry = gate_lifecycle.gate_transport_retry(self, 
+        retry = gate_lifecycle.gate_transport_retry(runtime, 
             task,
             record,
             records,
@@ -242,7 +248,7 @@ def release_parked(
         )
         if retry is not None:
             return retry
-        return gate_lifecycle.block_gate_transport(self, 
+        return gate_lifecycle.block_gate_transport(runtime, 
             task,
             record,
             records,
@@ -254,10 +260,10 @@ def release_parked(
         )
     if kind != "drift":
         # `drift` is decided before the gate is asked; only an answer clears the budget.
-        gate_lifecycle.gate_answered(self, ref, record, records, payload)
+        gate_lifecycle.gate_answered(runtime, ref, record, records, payload)
     if kind == "pending":
         if result is None:
-            return runtime._block_merge_path(
+            return block_merge_path(runtime,
                 task,
                 record,
                 records,
@@ -268,7 +274,7 @@ def release_parked(
                 step="assessment",
                 outcome="merge gate result unavailable",
             )
-        return gate_lifecycle.gate_pending(self, 
+        return gate_lifecycle.gate_pending(runtime, 
             task,
             record,
             records,
@@ -283,7 +289,7 @@ def release_parked(
             "drift": f"the release cannot land: {detail}",
             "failed": f"the merge gate could not be read: {detail}",
         }.get(kind, "the mechanical gate is no longer green for the checkout this release was decided on")
-        return runtime._block_merge_path(
+        return block_merge_path(runtime,
             task,
             record,
             records,
@@ -295,7 +301,7 @@ def release_parked(
             outcome=f"release {kind}",
         )
     if result is None:
-        return runtime._block_merge_path(
+        return block_merge_path(runtime,
             task,
             record,
             records,
@@ -306,7 +312,7 @@ def release_parked(
             step="assessment",
             outcome="merge gate result unavailable",
         )
-    blocked = gate_lifecycle.accept_green_gate(self, task, record, records, payload, attempt_id, result, stage="release")
+    blocked = gate_lifecycle.accept_green_gate(runtime, task, record, records, payload, attempt_id, result, stage="release")
     if blocked is not None:
         return blocked
     return release_effect(runtime,
@@ -320,6 +326,7 @@ def release_parked(
         decision="release",
         verdict=released_verdict(record),
     )
+
 
 def release_effect(
     runtime: Any,
@@ -357,7 +364,7 @@ def release_effect(
                 step=step,
                 outcome="merge failed",
             )
-    blocked = require_completion_evidence(runtime,task, record, records, payload, attempt_id, step=step)
+    blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
     if blocked is not None:
         return blocked
     try:
@@ -391,6 +398,7 @@ def release_effect(
     records.pop(ref, None)
     runtime.save_records(payload, records)
     return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+
 
 def require_completion_evidence(
     runtime: Any,
