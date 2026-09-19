@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 from typing import Any
 
+from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.host import _record_worker_delivery_evidence
 from secretary.dispatch.launch import STAGE_REWORK, WORKER_ROLE
@@ -233,7 +234,7 @@ def complete_red_transition(
     record.gate_attestation = PersistedGateReceipt()
     record.gate_transport_failures = 0
     record.gate_transport_error = ""
-    runtime._reset_infrastructure_reruns(record)
+    _reset_infrastructure_reruns(record)
     # The judged round ends here: a stale review pin would refuse the rework's merge.
     record.review_commit = ""
     _reset_wait(record, "review")
