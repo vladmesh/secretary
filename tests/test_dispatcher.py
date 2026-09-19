@@ -59,7 +59,7 @@ from secretary.dispatch.gate import (
     _backend_call,
     _pr_digest,
 )
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
+from secretary.dispatch.heartbeat import run_heartbeat_identity
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
@@ -106,7 +106,7 @@ GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "git
 from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
     provider_progress_for_run,
@@ -115,7 +115,7 @@ from secretary.dispatch.types import (
     GateTransportError,
     HeadPaneNotReady,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
