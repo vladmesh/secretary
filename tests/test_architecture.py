@@ -92,7 +92,14 @@ class SourceLayoutTests(unittest.TestCase):
         production_source = (
             ROOT / "src" / "secretary" / "dispatch" / "production.py"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("\n    def _claim(", dispatcher_source)
+        for helper in (
+            "_failover_collapse",
+            "_broad_check_contract_verdict",
+            "_sprint_admission_refusal",
+            "_project_git_access",
+            "_write_claim_preflight_block",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
         self.assertNotIn("runtime._claim(", production_source)
 
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
