@@ -15,20 +15,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Remove redundant explicit-reexport suppression
+      - name: Make existing gate reset explicit at typed boundary
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('src/secretary/dispatcher.py')
+          p = Path('src/secretary/dispatch/worker_continuation.py')
           text = p.read_text()
-          text = text.replace('LaunchedHead as LaunchedHead,  # noqa: F401  # Compatibility re-export.', 'LaunchedHead as LaunchedHead,  # Compatibility re-export.')
+          text = text.replace('from secretary.dispatch.state import DispatcherRecord, now_rfc3339', 'from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt, now_rfc3339')
+          text = text.replace('record.gate_attestation = {}', 'record.gate_attestation = PersistedGateReceipt()')
+          p.write_text(text)
+          p = Path('tests/test_dispatcher_worker_continuation.py')
+          text = p.read_text().replace('from secretary.dispatch.state import DispatcherRecord\n', 'from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt\n')
+          text = text.replace('    def test_red_move_replay_keeps_its_request_and_reserved_generation(self) -> None:\n        snapshots = []', '    def test_red_move_replay_keeps_its_request_and_reserved_generation(self) -> None:\n        self.record.gate_attestation = PersistedGateReceipt({"previous_round": "receipt"})\n        snapshots = []')
+          text = text.replace('        first_request = self.runtime.terminal_effect.call_args.kwargs["request_id"]', '        self.assertIsInstance(self.record.gate_attestation, PersistedGateReceipt)\n        self.assertEqual(self.record.gate_attestation.to_json(), {})\n        first_request = self.runtime.terminal_effect.call_args.kwargs["request_id"]')
           p.write_text(text)
           PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/secretary/dispatcher.py
+          git add src/secretary/dispatch/worker_continuation.py tests/test_dispatcher_worker_continuation.py
           if ! git diff --cached --quiet; then
-            git commit -m "style: remove redundant explicit re-export suppression"
+            git commit -m "refactor: use canonical empty gate receipt in continuation reset"
             git push origin HEAD:work/worker-continuation-extraction
           fi
       - name: Archive tracked candidate without Git credentials
