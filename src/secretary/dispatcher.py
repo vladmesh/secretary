@@ -735,13 +735,13 @@ class DispatcherRuntime:
                     if not mismatch:
                         record.state = "claim_verified"
                         self.save_records(payload, records)
-                        return _launch_worker_after_claim(self,task, record, records, payload)
+                        return _launch_worker_after_claim(self, task, record, records, payload)
         if record.worker_continuation.red_transition_pending:
             # An open red transition outranks everything else. The board move may or may not have
             # committed before its tick died, so it is finished against the board as it is now.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
-            return _launch_worker_after_claim(self,task, record, records, payload)
+            return _launch_worker_after_claim(self, task, record, records, payload)
         # The round the dispatcher is holding, not merely the card's last report marker: a marker is
         # attributed to a round through the request id its command carried, which the audit keeps.
         marker = _round_report_marker(
@@ -993,7 +993,7 @@ class DispatcherRuntime:
             }
         # Before any wait: a card cannot wait for a report from a worker no record can name. The
         # watchdog below observes a head; this decides whether there is one to observe at all.
-        headless = _resolve_headless_worker(self,task, record, records, payload, attempt_id)
+        headless = _resolve_headless_worker(self, task, record, records, payload, attempt_id)
         if headless is not None:
             return headless
         watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="worker")
@@ -1367,7 +1367,7 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
-        failure = _write_worker_relaunch_intent(self,payload, records, ref, record, action="stale-done-rework")
+        failure = _write_worker_relaunch_intent(self, payload, records, ref, record, action="stale-done-rework")
         if failure is not None:
             return _launch_intent_unwritable(
                 step="advance",
@@ -2754,7 +2754,7 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            failure = _write_worker_relaunch_intent(self,payload, records, ref, record, action="worker-respawn")
+            failure = _write_worker_relaunch_intent(self, payload, records, ref, record, action="worker-respawn")
             if failure is not None:
                 return _launch_intent_unwritable(
                     step=step,
