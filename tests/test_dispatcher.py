@@ -31,35 +31,21 @@ from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary.dispatch.bootstrap import default_data_dir
-from secretary.dispatch.head_vitality import HeadVitalityError
-from secretary.dispatch.head_vitality_episode import (
-    VitalityEpisode,
-    VitalityVerdict,
-)
-from secretary.dispatcher import (
-    STOPPED_BY_REVIEW_VERDICT,
-    STOPPED_BY_WATCHDOG,
-    CommandHostRuntime,
-    DispatcherError,
-    DispatcherRuntime,
-    HostError,
-    InstanceCatalog,
-    LaunchedHead,
-    _body_file_path,
-    _continuation_note,
-    _gate_attestation_for_prompt,
-    _legacy_worker_branch,
-    _report_nudge_prompt,
-)
 from secretary.dispatch.gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
     PR_BODY_SECTION_CHARS,
     GateResult,
     _backend_call,
     _pr_digest,
+)
+from secretary.dispatch.head_vitality import HeadVitalityError
+from secretary.dispatch.head_vitality_episode import (
+    VitalityEpisode,
+    VitalityVerdict,
 )
 from secretary.dispatch.heartbeat import run_heartbeat_identity
 from secretary.dispatch.helpers import (
@@ -91,6 +77,21 @@ from secretary.dispatch.review import (
 )
 from secretary.dispatch.state import (
     DispatcherRecord,
+)
+from secretary.dispatcher import (
+    STOPPED_BY_REVIEW_VERDICT,
+    STOPPED_BY_WATCHDOG,
+    CommandHostRuntime,
+    DispatcherError,
+    DispatcherRuntime,
+    HostError,
+    InstanceCatalog,
+    LaunchedHead,
+    _body_file_path,
+    _continuation_note,
+    _gate_attestation_for_prompt,
+    _legacy_worker_branch,
+    _report_nudge_prompt,
 )
 from secretary.projects.contract import (
     BROAD_CHECK_NOT_DECLARED,
@@ -8240,7 +8241,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             pass
 
         with (
-            mock.patch.object(self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied),
+            mock.patch.object(dispatcher_worker_continuation, "_deliver_red_continuation", side_effect=DispatcherDied),
             self.assertRaises(DispatcherDied),
         ):
             self._park_and_decide("rework")
@@ -8712,7 +8713,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             pass
 
         with (
-            mock.patch.object(self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied),
+            mock.patch.object(dispatcher_worker_continuation, "_deliver_red_continuation", side_effect=DispatcherDied),
             self.assertRaises(DispatcherDied),
         ):
             self._park_and_decide("rework", reason="add a live check")

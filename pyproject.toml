@@ -74,6 +74,7 @@ files = [
     "src/secretary/dispatch/claim.py",
     "src/secretary/dispatch/worker_launch.py",
     "src/secretary/dispatch/worker_report.py",
+    "src/secretary/dispatch/worker_continuation.py",
     "src/secretary/routing_journal.py",
     "src/secretary/dispatch/state.py",
     "src/secretary/dispatch/pause.py",
