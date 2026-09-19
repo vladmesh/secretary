@@ -316,7 +316,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_fanout_refusal_commits_its_lifecycle_effect_and_outcome(self) -> None:
         self.start_dispatcher()
         with mock.patch(
-            "secretary.dispatcher._write_launch_intent",
+            "secretary.dispatch.worker_launch._write_launch_intent",
             return_value="codex-fanout-policy: prohibited source",
         ):
             blocked = self.tick()
