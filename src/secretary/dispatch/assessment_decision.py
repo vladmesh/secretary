@@ -9,6 +9,7 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.dispatch.helpers import _last_marker_body
+from secretary.dispatch import release_lifecycle
 from secretary.dispatch.review_verdict import complete_park as _complete_park
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import STOPPED_BY_REVIEW_VERDICT, HostError
@@ -28,8 +29,8 @@ def advance_assessment(
 ) -> dict[str, Any]:
     """Advance a parked card through its recorded Assessment decision.
 
-    Decision intake/replay and the rework/reslice effects live here. A release delegates back to
-    the separate release/merge state machine owned by DispatcherRuntime.
+    Decision intake/replay and the rework/reslice effects live here. A release delegates to the
+    package-owned release/merge/completion lifecycle.
     """
     ref = task["ref"]
     record = records.get(ref)
@@ -111,9 +112,8 @@ def advance_assessment(
             runtime, task, record, records, payload, attempt_id, reason=reason
         )
 
-    # Release/merge/completion evidence is intentionally the next bounded extraction.
-    return runtime._release_parked(
-        task, record, records, payload, attempt_id, reason=reason
+    return release_lifecycle.release_parked(
+        runtime, task, record, records, payload, attempt_id, reason=reason
     )
 
 
