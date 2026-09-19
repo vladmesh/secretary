@@ -17,7 +17,7 @@ from secretary.board.terminal_taxonomy import (
     read_terminal_taxonomy,
 )
 from secretary.checkpoint import checkpoint_snapshot
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
     WORKER_ROLE,
