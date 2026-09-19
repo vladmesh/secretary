@@ -22,6 +22,7 @@ from secretary.board.completion_evidence import (
     review_required,
 )
 from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch import release_lifecycle
 from secretary.dispatch.observer import render_observer_prompt
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
@@ -99,7 +100,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def _no_transfer(self):
         """A release whose transfer produced nothing: the evidence check alone decides."""
-        return mock.patch.object(type(self.runtime), "_transfer_research_report", return_value=None)
+        return mock.patch.object(release_lifecycle, "transfer_research_report", return_value=None)
 
     def test_infra_with_review_skipped_goes_from_ready_to_done_without_a_candidate(self) -> None:
         self._kind("infra", review="skipped")
