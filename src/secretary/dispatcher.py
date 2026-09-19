@@ -257,6 +257,7 @@ from secretary.dispatch.types import (
     HostError,
     ProjectGitAccessError,
 )
+from secretary.dispatch.types import DispatcherError as DispatcherError
 from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
