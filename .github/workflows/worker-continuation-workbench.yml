@@ -15,18 +15,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install pinned formatter
-        run: python3 -m pip install ruff==0.16.4
-      - name: Apply scoped extraction
+      - name: Remove redundant explicit-reexport suppression
         run: |
-          python3 .workbench/extract_continuation.py
-          python3 -m ruff check --select I001,F401 --fix src/secretary/dispatcher.py src/secretary/dispatch/worker_continuation.py tests/test_dispatcher_worker_continuation.py tests/test_architecture.py tests/test_dispatcher.py tests/test_dispatcher_contracts.py tests/test_dispatcher_launch_intent.py
-          python3 -m ruff format src/secretary/dispatch/worker_continuation.py tests/test_dispatcher_worker_continuation.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/secretary/dispatcher.py')
+          text = p.read_text()
+          text = text.replace('LaunchedHead as LaunchedHead,  # noqa: F401  # Compatibility re-export.', 'LaunchedHead as LaunchedHead,  # Compatibility re-export.')
+          p.write_text(text)
+          PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src tests pyproject.toml docs
+          git add src/secretary/dispatcher.py
           if ! git diff --cached --quiet; then
-            git commit -m "refactor: extract retained worker continuation lifecycle"
+            git commit -m "style: remove redundant explicit re-export suppression"
             git push origin HEAD:work/worker-continuation-extraction
           fi
       - name: Archive tracked candidate without Git credentials
@@ -42,9 +44,10 @@ jobs:
         run: python3 -m pip install -e '.[memory,ci,typecheck,dev]'
       - name: Lint changed Python
         run: python3 -m ruff check src/secretary/dispatcher.py src/secretary/dispatch/worker_continuation.py tests/test_dispatcher_worker_continuation.py tests/test_architecture.py tests/test_dispatcher.py tests/test_dispatcher_contracts.py tests/test_dispatcher_launch_intent.py
+      - name: Check incremental types
+        run: python3 -m mypy
       - name: Check extracted boundary
+        if: always()
         env:
           TA_SECRETARY_REPO: ${{ github.workspace }}
-        run: |
-          python3 -m mypy
-          python3 -m unittest tests.test_dispatcher_worker_continuation tests.test_dispatcher_worker_report tests.test_architecture tests.test_dispatcher_contracts.HostSurfaceContractTests
+        run: python3 -m unittest tests.test_dispatcher_worker_continuation tests.test_dispatcher_worker_report tests.test_architecture tests.test_dispatcher_contracts.HostSurfaceContractTests
