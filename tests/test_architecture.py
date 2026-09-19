@@ -102,6 +102,30 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
         self.assertNotIn("runtime._claim(", production_source)
 
+    def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+            encoding="utf-8"
+        )
+        claim_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "claim.py"
+        ).read_text(encoding="utf-8")
+        worker_launch_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "worker_launch.py"
+        ).read_text(encoding="utf-8")
+        for helper in (
+            "_launch_worker_after_claim",
+            "_worker_launch_failure",
+            "_bring_up_worker_head",
+            "_worker_relaunch_intent",
+            "_resolve_headless_worker",
+            "_relaunch_headless_worker",
+            "_refuse_headless_worker",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        self.assertNotIn("runtime._launch_worker_after_claim(", claim_source)
+        self.assertIn("def launch_worker_after_claim(", worker_launch_source)
+        self.assertIn("def resolve_headless_worker(", worker_launch_source)
+
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
         imports: set[tuple[str, str]] = set()

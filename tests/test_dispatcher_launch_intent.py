@@ -4202,7 +4202,7 @@ class HostLaunchContourTests(unittest.TestCase):
         ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
-        self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
+        self.assertFalse(head_process_status(record.worker_pid_file).get("stopped"))
         self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
 
