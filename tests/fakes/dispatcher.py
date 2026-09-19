@@ -25,8 +25,8 @@ from secretary.dispatcher import (
 )
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatcher_launch import CAUSE_BASE_BRANCH_CONTRACT
-from secretary.dispatcher_launcher import claude_launch_model, role_launch_env
+from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
+from secretary.dispatch.launcher import claude_launch_model, role_launch_env
 from secretary.dispatch.observer import OBSERVER_HEAD_FALLBACK
 from secretary.dispatch.types import HeadLaunchAborted, ReviewLaunch
 from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status

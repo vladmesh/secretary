@@ -31,7 +31,7 @@ from secretary.dispatch import gate as dispatcher_gate
 from secretary.cli import main
 from secretary.config import validate_instance
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatcher_launch import FAILURE_CLASS_INFRASTRUCTURE
+from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE
 from secretary.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
 from secretary.infra import github_credential
 from secretary.infra.github_credential import (

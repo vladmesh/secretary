@@ -16,7 +16,7 @@ from secretary.dispatcher import (
     SPRINT_RESERVATION_RESERVED,
     SPRINT_RESERVATION_UNVERIFIABLE,
 )
-from secretary.dispatcher_launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
+from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
 from secretary.dispatch.production import _budget_event_type, _reconcile_sprint_budget
 from secretary.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
