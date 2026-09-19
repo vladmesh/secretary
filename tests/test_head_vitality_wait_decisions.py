@@ -20,9 +20,9 @@ from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.types import HostError
 from secretary.dispatcher_watchdog import idle_stall_seconds, stall_seconds
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 
 
