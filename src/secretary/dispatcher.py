@@ -192,6 +192,7 @@ from secretary.dispatch.types import (
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_REVIEW_VERDICT,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
     GateTransportError,
     HostError,
