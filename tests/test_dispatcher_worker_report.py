@@ -55,11 +55,11 @@ class WorkerReportBoundaryTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 events = []
                 self.record.outcome_terminal_path = OutcomeTerminalPath.NO_ACCEPTED_REPORT
-                self.runtime.save_records.side_effect = lambda *_: events.append(
+                self.runtime.save_records.side_effect = lambda *_, events=events: events.append(
                     ("save", self.record.outcome_terminal_path)
                 )
 
-                def fail_source(*args, **kwargs):
+                def fail_source(*args, events=events, **kwargs):
                     events.append(("source", self.record.outcome_terminal_path))
                     raise RuntimeError("source unavailable")
 
@@ -125,7 +125,7 @@ class WorkerReportBoundaryTests(unittest.TestCase):
 
     def test_nudge_is_saved_before_delivery_and_spent_before_a_failed_comment(self) -> None:
         events = []
-        self.runtime.save_records.side_effect = lambda *_: events.append(
+        self.runtime.save_records.side_effect = lambda *_, events=events: events.append(
             ("save", self.record.worker_report_nudge.stage.value)
         )
         self.runtime.host.prompt_worker_report.side_effect = lambda *_: events.append(
