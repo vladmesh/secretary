@@ -32,7 +32,13 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
-from secretary.dispatch.claim import claim_ready_task as _claim_ready_task
+from secretary.dispatch.claim import (
+    SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
+    claim_ready_task as _claim_ready_task,
+    resolve_head as _resolve_claim_head,
+)
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
@@ -344,6 +350,7 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuationLiveness,
 )
 from secretary.head_health import (
+    HeadChoice,
     HeadHealth,
     HeadReadiness,
 )
@@ -535,6 +542,10 @@ class DispatcherRuntime:
 
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)
+
+    def resolve_head(self, preferred: str) -> HeadChoice:
+        """Compatibility entry point; claim-owned resolution lives in dispatch.claim."""
+        return _resolve_claim_head(self, preferred)
 
     def _require_head_ready(self, head: str) -> None:
         readiness = self.head_readiness(head)
@@ -751,6 +762,25 @@ class DispatcherRuntime:
             "pilot_ref": ref,
             "attempt_id": attempt_id,
         }
+
+    def _claim(
+        self,
+        task: dict[str, Any],
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        resume_workspace: bool = False,
+    ) -> dict[str, Any]:
+        """Compatibility entry point; production claim ownership lives in dispatch.claim."""
+        return _claim_ready_task(
+            self,
+            task,
+            records,
+            payload,
+            attempt_id,
+            resume_workspace=resume_workspace,
+        )
 
     def _launch_worker_after_claim(
         self,
