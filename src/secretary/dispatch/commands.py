@@ -21,7 +21,7 @@ from pathlib import Path
 
 from secretary.dispatch.bootstrap import runtime_from_args
 from secretary.dispatch.head_status import head_status
-from secretary.dispatcher_types import DispatcherError, HostError
+from secretary.dispatch.types import DispatcherError, HostError
 from secretary.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from secretary.tasks import TaskError
 from secretary.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND

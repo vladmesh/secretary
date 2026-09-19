@@ -37,7 +37,7 @@ from secretary.candidate_history import (
     repair_message,
 )
 from secretary.dispatch.gate_receipt import is_exact_sha, mint_gate_receipt
-from secretary.dispatcher_state import GatePrAuthorship, GatePublishedRef
+from secretary.dispatch.state import GatePrAuthorship, GatePublishedRef
 from secretary.dispatcher_helpers import (
     _last_marker_body,
     _legacy_worker_branch,
@@ -45,7 +45,7 @@ from secretary.dispatcher_helpers import (
     safe_one_line,
     scrub_host_output,
 )
-from secretary.dispatcher_types import GateTransportError, HostError, ProjectGitAccessError
+from secretary.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
 
 # Pending CI has a bounded watchdog so missing checks cannot strand a card.
 GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SECONDS", str(6 * 3600)))

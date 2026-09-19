@@ -33,7 +33,7 @@ from secretary.dispatch.observer import (
 )
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     DispatcherRecord,
     close_divergence,
     divergence_is_open,
@@ -43,10 +43,10 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
+from secretary.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.sprints import SprintWriter, budget_thresholds
 from secretary.tasks import ACTIVE_STATES, TaskError
 
