@@ -16,7 +16,7 @@ from secretary.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
     complete_red_transition as _complete_red_transition,
 )
-from secretary.tasks import _event_payload, assessment_resolution, specification_revision
+from secretary.tasks import TaskError, _event_payload, assessment_resolution, specification_revision
 
 
 def advance_assessment(
@@ -90,7 +90,7 @@ def advance_assessment(
                 source_event_id=decision_event_id,
                 marker=f"decision:{decision}",
             )
-        except (OSError, ValueError):
+        except (OSError, TaskError, ValueError):
             # The decision has already committed. Do not turn a journal outage into a new
             # lifecycle authority; terminal projection retains the missing-decision diagnostic.
             pass
