@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from secretary.dispatcher_helpers import scrub_host_output
-from secretary.dispatcher_launch import (
+from secretary.dispatch.helpers import scrub_host_output
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     STAGE_REVIEW,
     WORKER_ROLE,
@@ -32,9 +32,9 @@ from secretary.dispatcher_launch import (
     undelivered_launch_delivery,
     write_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
-from secretary.dispatcher_tui import (
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.state import attempt_request_id as _attempt_request_id
+from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_REFUSED,
     READINESS_BLOCKED,
     READINESS_BUSY,
@@ -42,40 +42,40 @@ from secretary.dispatcher_tui import (
     delivery_readiness_state,
     terminal_readiness,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     HeadLaunchAborted,
     HostError,
     review_pane_label,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     review_infra_retry_attempts as _review_infra_retry_attempts,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     PaneHostError,
@@ -84,9 +84,9 @@ from triggered_agents.runtime.pane_host import (
 
 
 def candidate_sha(record: DispatcherRecord) -> str:
-    """The checkout the green gate attested, as the receipt itself recorded it."""
-    attestation = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
-    return str(attestation.get("validated_sha") or "")
+    """The checkout the green gate attested, as the typed receipt itself recorded it."""
+    receipt = record.gate_attestation.receipt
+    return receipt.validated_sha if receipt is not None else ""
 
 
 def review_infrastructure_retry(
@@ -817,8 +817,9 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     if not isinstance(evidence, dict) or not evidence:
         return
     record.review_delivery_evidence = dict(evidence)
+    typed = record.review_delivery_evidence.evidence
     # Preserve a successful receipt when a later reviewer-launch step aborts.
-    if not bool(evidence.get("turn_confirmed")) and delivery_readiness_state(evidence) != READINESS_BUSY:
+    if typed is not None and not typed.turn_confirmed and delivery_readiness_state(typed) != READINESS_BUSY:
         record.review_delivery_failures += 1
 
 

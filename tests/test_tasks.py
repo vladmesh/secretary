@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -26,14 +27,14 @@ from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoa
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
-from secretary.data import export_board
-from secretary.dispatcher_state import claim_mismatch
+from secretary.data import export_board, init_layout
+from secretary.dispatch.state import claim_mismatch
 from secretary.restore import import_normalized_board
 from secretary.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
-    launched_head_run_snapshot,
+    routing_head_snapshot_from_launch,
     routing_payload,
 )
 from secretary.sprints import refresh_active_sprint_projects
@@ -725,6 +726,47 @@ class TaskCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
+    def test_create_passes_kind_review_and_live_impact_through(self) -> None:
+        """secretary-1638: `--type infra`, `--review` and `--live-impact` reach the writer as given."""
+        for extra, review, live_impact in (
+            ([], "", False),
+            (["--review", "skipped", "--live-impact"], "skipped", True),
+        ):
+            writer = mock.Mock()
+            writer.return_value.create.return_value = {"action": "created"}
+            with (
+                tempfile.TemporaryDirectory() as tmp,
+                mock.patch("secretary.task_commands.TaskWriter", writer),
+                mock.patch("secretary.task_commands.card_client"),
+                mock.patch.dict("os.environ", {}, clear=True),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = main(
+                    ["task", "create", "--role", "po", "--instance", tmp, "--data-dir", tmp,
+                     "--project", "secretary", "--type", "infra", "--title", "T", *extra]
+                )
+            self.assertEqual(code, 0)
+            kwargs = writer.return_value.create.call_args.kwargs
+            self.assertEqual(
+                (kwargs["task_type"], kwargs["review"], kwargs["live_impact"]), ("infra", review, live_impact)
+            )
+
+    def test_show_renders_kind_review_and_live_impact(self) -> None:
+        client = FakeKanboard()
+        client.metadata[12].update({"task_type": "research", "review": "skipped", "live_impact": "1"})
+        output = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("secretary.task_commands.card_client", return_value=client),
+            mock.patch.dict("os.environ", {}, clear=True),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
+        self.assertEqual(code, 0)
+        card = json.loads(output.getvalue())
+        self.assertEqual((card["type"], card["review"], card["live_impact"]), ("research", "skipped", True))
+        self.assertNotIn("review", card.get("extensions", {}).get("kanboard", {}))
+
     def test_create_rejects_codex_mode_for_non_codex_head_before_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1256,6 +1298,9 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 "retry": {"same": 0, "switched": 0, "heads": []},
                 "sprint": None,
                 "record_type": "task",
+                # secretary-1638: a research card's stored review choice defaults to skipped.
+                "review": "skipped",
+                "live_impact": False,
                 "extensions": {
                     "kanboard": {
                         "record_type": "task",
@@ -2343,6 +2388,271 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(event["payload"]["head"], "codex-extra")
         self.assertIn("title_sha256", event["payload"])
 
+    BOUNDS = (
+        "Probe the live queue.\n\n## Impact bounds\n\n### Allowed\nRead the staging queue.\n\n"
+        "### Forbidden\nWrites to production.\n\n### Cleanup\nDrop the probe consumer.\n"
+    )
+
+    def stored_metadata(self, reference: str) -> dict:
+        return dict(self._board("getTaskMetadata", task_id=self.backend_id(reference)) or {})
+
+    def create_kind(self, reference: str, task_type: str, **fields: object) -> dict:
+        with self.open_sprint() as sprint:
+            return self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type=task_type,
+                title=f"{task_type} card",
+                reference=reference,
+                request_id=f"create-{reference}",
+                sprint=sprint,
+                **fields,
+            )
+
+    def test_create_stores_each_kind_with_its_default_review(self) -> None:
+        """secretary-1638: three kinds, and the review choice is stored per kind, not derived."""
+        for number, (task_type, review) in enumerate(
+            (("code", "required"), ("research", "skipped"), ("infra", "skipped")), start=530
+        ):
+            with self.subTest(task_type=task_type):
+                result = self.create_kind(f"secretary-{number}", task_type)
+                card = self.card(f"secretary-{number}")
+                self.assertEqual(
+                    (card["type"], card["review"], card["live_impact"]), (task_type, review, False)
+                )
+                self.assertEqual(result["task"]["review"], review)
+                self.assertEqual(self.writer.audit.events(f"secretary-{number}")[0]["payload"]["review"], review)
+        # The stored value is a board fact: clearing it is what makes a card legacy again.
+        self.assertEqual(self.stored_metadata("secretary-531")["review"], "skipped")
+
+    def test_a_legacy_card_with_no_stored_review_reads_as_required(self) -> None:
+        card = self.card("secretary-468")
+        self.assertNotIn("review", self.stored_metadata("secretary-468"))
+        self.assertEqual((card["review"], card["live_impact"]), ("required", False))
+
+    def test_create_accepts_a_review_override_in_both_directions(self) -> None:
+        self.create_kind("secretary-540", "code", review="skipped")
+        self.create_kind("secretary-541", "research", review="required")
+        self.create_kind("secretary-542", "infra", review="required")
+        self.assertEqual(
+            [self.card(f"secretary-{number}")["review"] for number in (540, 541, 542)],
+            ["skipped", "required", "required"],
+        )
+
+    def test_an_explicit_reviewer_head_does_not_decide_the_review(self) -> None:
+        """Whether review runs is `--review` or the kind default; a reviewer head never changes it."""
+        self.create_kind("secretary-543", "code", review_head="claude-opus")
+        card = self.card("secretary-543")
+        self.assertEqual((card["review"], card["routing"]["review_head_override"]), ("required", "claude-opus"))
+        self.create_kind("secretary-544", "research", review="required", review_head="claude-opus")
+        self.assertEqual(self.card("secretary-544")["review"], "required")
+
+        before = self.board_snapshot()
+        for task_type, fields in (
+            ("code", {"review": "skipped"}),
+            # No `--review`: research defaults to skipped, and a head the sprint does not pin contradicts it.
+            ("research", {}),
+        ):
+            with self.subTest(task_type=task_type), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+                self.create_kind("secretary-545", task_type, review_head="claude-opus", **fields)
+            self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+        with self.assertRaisesRegex(TaskError, "review must be one of") as raised:
+            self.create_kind("secretary-545", "code", review="sometimes")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    def test_live_impact_is_refused_outside_research(self) -> None:
+        before = self.board_snapshot()
+        for task_type in ("code", "infra"):
+            with self.subTest(task_type=task_type), self.assertRaisesRegex(TaskError, "research attribute") as raised:
+                self.create_kind("secretary-545", task_type, live_impact=True, description=self.BOUNDS)
+            self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    def test_live_impact_research_needs_declared_impact_bounds(self) -> None:
+        before = self.board_snapshot()
+        for description, missing in (
+            ("no bounds at all", "needs a '## Impact bounds' section"),
+            ("## Impact bounds\n### Allowed\nstaging\n### Cleanup\nundo\n", "missing '### Forbidden'"),
+            (
+                "## Impact bounds\n### Allowed\nstaging\n### Forbidden\n\n### Cleanup\nundo\n",
+                "empty '### Forbidden'",
+            ),
+            (
+                "## Impact bounds\n### Allowed\nstaging\n### Forbidden\nprod\n## Notes\n### Cleanup\nundo\n",
+                "missing '### Cleanup'",
+            ),
+        ):
+            with self.subTest(missing=missing), self.assertRaisesRegex(TaskError, re.escape(missing)) as raised:
+                self.create_kind("secretary-546", "research", live_impact=True, description=description)
+            self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+        result = self.create_kind("secretary-546", "research", live_impact=True, description=self.BOUNDS)
+        self.assertTrue(result["task"]["live_impact"])
+        card = self.card("secretary-546")
+        self.assertEqual((card["type"], card["review"], card["live_impact"]), ("research", "skipped", True))
+        self.assertTrue(self.writer.audit.events("secretary-546")[0]["payload"]["live_impact"])
+        # Without the flag a research card's description is its own business.
+        self.create_kind("secretary-547", "research", description="no bounds needed")
+        self.assertFalse(self.card("secretary-547")["live_impact"])
+
+    def test_edit_cannot_strip_the_impact_bounds_of_a_live_impact_card(self) -> None:
+        self.create_kind("secretary-548", "research", live_impact=True, description=self.BOUNDS)
+        before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "needs a '## Impact bounds' section") as raised:
+            self.writer.edit(role="po", actor="operator", reference="secretary-548", description="bounds gone")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+        revised = self.BOUNDS.replace("Read the staging queue.", "Read the staging queue twice.")
+        self.create_kind("secretary-547", "research", description=self.BOUNDS)
+        with self.open_sprint():
+            self.writer.edit(role="observer", actor="observer", reference="secretary-548", description=revised)
+            # A card without the flag keeps its free-form description.
+            self.writer.edit(role="observer", actor="observer", reference="secretary-547", description="anything")
+        self.assertEqual(self.card("secretary-548")["description"], revised)
+        self.assertEqual(self.card("secretary-547")["description"], "anything")
+
+    def restore_destination(self):
+        """An empty board to restore an export into; the SQL parity run answers a fresh store."""
+        return _EmptyWriteKanboard()
+
+    def test_kind_review_and_live_impact_survive_export_and_restore(self) -> None:
+        self.create_kind("secretary-550", "research", live_impact=True, description=self.BOUNDS)
+        self.create_kind("secretary-551", "infra", review="required")
+        self.create_kind("secretary-552", "code", review="skipped")
+        # The fixture's two legacy rows predate `record_type`; the export requires one.
+        self.set_card_metadata("secretary-468", record_type="task")
+        self.set_card_metadata("old-1", record_type="task", project="secretary", task_type="research")
+        expected = {
+            "old-1": ("research", "required", False),
+            "secretary-468": ("code", "required", False),
+            "secretary-550": ("research", "skipped", True),
+            "secretary-551": ("infra", "required", False),
+            "secretary-552": ("code", "skipped", False),
+        }
+        data_dir = Path(self.tmpdir.name) / "round-trip"
+        init_layout(data_dir)
+        export_board(
+            data_dir, instance_dir=Path(self.tmpdir.name), reader=self.writer.reader, sprint_client=SprintKanboard()
+        )
+        exported = {
+            card["reference"]: card
+            for card in json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))["cards"]
+        }
+        self.assertEqual(exported["secretary-550"]["metadata"]["live_impact"], "1")
+        self.assertEqual(exported["secretary-551"]["metadata"]["review"], "required")
+        self.assertNotIn("review", exported["secretary-468"]["metadata"])
+
+        destination = self.restore_destination()
+        self.assertEqual(import_normalized_board(data_dir, client=destination), len(exported))
+        restored = TaskReader(destination)
+        self.assertEqual(
+            {
+                reference: (card["type"], card["review"], card["live_impact"])
+                for reference in expected
+                for card in [restored.show(reference)]
+            },
+            expected,
+        )
+
+    def test_edit_refuses_a_reviewer_head_on_a_skipped_card(self) -> None:
+        self.create_kind("secretary-549", "infra")
+        before = self.board_snapshot()
+        # The sprint pins no reviewer, so any head the caller names contradicts `skipped`.
+        with self.open_sprint(), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+            self.writer.edit(role="observer", actor="observer", reference="secretary-549", review_head="claude-opus")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    @contextlib.contextmanager
+    def pinned_sprint(self):
+        """The open sprint with both executors pinned, as `sprint:1446` itself is."""
+        from secretary.sprint_observer import executor_pinned
+
+        with self.open_sprint() as ref:
+            sprint = {
+                "ref": ref,
+                "status": "open",
+                "repositories": ["secretary"],
+                "reservations": ["secretary"],
+                "executors": {"worker": executor_pinned("codex-worker"), "reviewer": executor_pinned("claude-review")},
+            }
+            with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
+                yield ref
+
+    def create_in(self, sprint_context, reference: str, task_type: str, **fields: object) -> dict:
+        role = str(fields.pop("role", "observer"))
+        with sprint_context as sprint:
+            self.writer.create(
+                role=role,
+                actor=role,
+                project="secretary",
+                task_type=task_type,
+                title=f"{task_type} card",
+                reference=reference,
+                request_id=f"create-{reference}",
+                sprint=sprint or "",
+                **fields,
+            )
+        card = self.card(reference)
+        return (card["review"], card["routing"]["head_override"] or None, card["routing"]["review_head_override"] or None)
+
+    def test_a_sprint_reviewer_pin_decides_who_reviews_whatever_the_review_choice(self) -> None:
+        """secretary-1638 round 3: the pin is applied as on base; `skipped` refuses only an unpinned head."""
+        pinned = ("codex-worker", "claude-review")
+        for reference, task_type, fields, expected in (
+            ("secretary-560", "research", {}, ("skipped", *pinned)),
+            ("secretary-561", "infra", {}, ("skipped", *pinned)),
+            ("secretary-562", "code", {}, ("required", *pinned)),
+            ("secretary-563", "research", {"review": "required"}, ("required", *pinned)),
+            ("secretary-564", "research", {"review": "skipped", "review_head": "claude-review"}, ("skipped", *pinned)),
+            ("secretary-565", "research", {"review_head": "claude-review"}, ("skipped", *pinned)),
+        ):
+            with self.subTest(reference=reference):
+                self.assertEqual(self.create_in(self.pinned_sprint(), reference, task_type, **fields), expected)
+
+        before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
+            self.create_in(self.pinned_sprint(), "secretary-566", "research", review="skipped", review_head="other")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
+        self.assertBoardUnchanged(before)
+
+    def test_without_a_sprint_skipped_refuses_any_explicit_reviewer_head(self) -> None:
+        # A proposal in Issues is the create that names no sprint.
+        no_sprint = contextlib.nullcontext(None)
+        self.assertEqual(self.create_in(no_sprint, "secretary-567", "research", target="issues", role="retro"), ("skipped", None, None))
+        self.assertEqual(self.create_in(no_sprint, "secretary-568", "code", target="issues", role="retro"), ("required", None, None))
+        before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
+            self.create_in(no_sprint, "secretary-569", "research", target="issues", role="retro", review_head="claude-review")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    def test_edit_of_a_skipped_card_in_a_pinned_sprint_keeps_the_pin(self) -> None:
+        self.create_in(self.pinned_sprint(), "secretary-570", "infra")
+        self.create_in(self.pinned_sprint(), "secretary-571", "code")
+        self.set_card_metadata("secretary-570", review_head="")
+        with self.pinned_sprint():
+            # Empty head: the pin is written, exactly as on base.
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="")
+            self.assertEqual(self.card("secretary-570")["routing"]["review_head_override"], "claude-review")
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="claude-review")
+            self.assertEqual(self.card("secretary-570")["review"], "skipped")
+            # A required card is untouched by the review choice.
+            self.writer.edit(role="observer", actor="observer", reference="secretary-571", review_head="")
+            self.assertEqual(self.card("secretary-571")["routing"]["review_head_override"], "claude-review")
+
+        before = self.board_snapshot()
+        with self.pinned_sprint(), self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
+            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="other")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
+        self.assertBoardUnchanged(before)
+
     def test_auto_reference_uses_board_wide_project_high_water_mark(self) -> None:
         # The new Kanboard row will be 14, which is already a historical reference.
         self.client.tasks[0]["reference"] = "secretary-14"
@@ -2782,6 +3092,27 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
 
         self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
         self.assertEqual(create_writes, self.board_call_count("createTask"))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+    def test_pending_create_replay_restores_review_and_live_impact(self) -> None:
+        """secretary-1638: a repaired create writes the review choice and flag its payload recorded."""
+        fields = dict(
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="research",
+            title="Live probe",
+            description=self.BOUNDS,
+            reference="secretary-524",
+            live_impact=True,
+            request_id="create-replay-kind",
+        )
+        with self.open_sprint() as sprint:
+            with self.board_refuses("saveTaskMetadata"), self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.create(**fields, sprint=sprint)
+            result = self.writer.create(**fields, sprint=sprint)
+
+        self.assertEqual((result["task"]["review"], result["task"]["live_impact"]), ("skipped", True))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_ready_reset_preserves_codex_launch_mode(self) -> None:
@@ -4929,12 +5260,13 @@ class RoutingJournalTests(unittest.TestCase):
             )
             document.write_text("later rework instruction\n", encoding="utf-8")
 
-            snapshot = launched_head_run_snapshot(
-                self._run("worker", "codex"), lifecycle_run=lifecycle.to_json()
+            snapshot = routing_head_snapshot_from_launch(
+                self._run("worker", "codex").to_json(), lifecycle_run=lifecycle.to_json()
             )
 
-        self.assertEqual(snapshot["prompt_path"], str(document))
-        self.assertEqual(snapshot["prompt_version"], "sha256:" + hashlib.sha256(original).hexdigest())
+        self.assertIsInstance(snapshot, HeadRun)
+        self.assertEqual(snapshot.prompt_path, str(document))
+        self.assertEqual(snapshot.prompt_version, "sha256:" + hashlib.sha256(original).hexdigest())
 
 
 class ReportDurabilityGateTests(unittest.TestCase):
@@ -4988,7 +5320,11 @@ class ReportDurabilityGateTests(unittest.TestCase):
         self.assertNotEqual(caught.exception.exit_code, 0)
         self.assertIn("code.py", caught.exception.message)
         self.assertIn("commit", caught.exception.message)
-        self.assertEqual(self.client.calls, [])
+        # The refusal depends on the card's kind (a research/infra card has no candidate to commit),
+        # so the card is read first; nothing is written.
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_exact_done_report_replays_after_the_workspace_becomes_dirty(self) -> None:
@@ -5014,6 +5350,40 @@ class ReportDurabilityGateTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
         self.assertEqual(len(self.client.comments[12]), 1)
+
+    def test_a_research_or_infra_done_report_does_not_require_a_committed_workspace(self) -> None:
+        """No candidate is published for these kinds; report artifacts may sit uncommitted."""
+        (self.workspace / ".secretary-report").mkdir()
+        (self.workspace / ".secretary-report" / "report.md").write_text("findings\n", encoding="utf-8")
+        infra = "## What was done\nRotated the key.\n\n## How to verify\n`ssh host true`\n"
+        for kind, body in (("research", "findings"), ("infra", infra)):
+            with self.subTest(kind=kind):
+                self.client.metadata[12]["task_type"] = kind
+                self.assertEqual(self._report("done", body)["action"], "reported")
+
+    def test_a_research_done_report_without_its_report_file_is_refused_without_touching_the_board(self) -> None:
+        self.client.metadata[12]["task_type"] = "research"
+        (self.workspace / "report.md").write_text("findings at the wrong place\n", encoding="utf-8")
+        with self.assertRaises(TaskError) as caught:
+            self._report("done", "findings")
+        self.assertEqual(caught.exception.code, "validation")
+        self.assertIn("`.secretary-report/report.md`", caught.exception.message)
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
+
+    def test_an_infra_done_report_without_both_sections_is_refused(self) -> None:
+        self.client.metadata[12]["task_type"] = "infra"
+        for body in (
+            "## What was done\nRotated the key.\n",
+            "## How to verify\n`ssh host true`\n",
+            "## What was done\n\n## How to verify\n`ssh host true`\n",
+        ):
+            with self.subTest(body=body), self.assertRaises(TaskError) as caught:
+                self._report("done", body)
+            self.assertEqual(caught.exception.code, "validation")
+            self.assertIn("## How to verify", caught.exception.message)
+        self.assertEqual(self.client.comments.get(12, []), [])
 
     def test_untracked_file_is_refused(self) -> None:
         (self.workspace / "scratch.py").write_text("print(3)\n", encoding="utf-8")
@@ -6351,3 +6721,43 @@ class AuditCommittedIndexTests(unittest.TestCase):
                 self.assertIsNone(self.audit.committed_event(f"missing-{index}"))
 
         self.assertEqual(parsed, [])
+
+
+class LegacyTaskCodecTests(unittest.TestCase):
+    def test_reader_restore_and_importer_share_legacy_task_codec(self) -> None:
+        import importlib
+
+        from secretary.board import legacy_codec
+
+        importer = importlib.import_module("secretary.board.import_board")
+        restore = importlib.import_module("secretary.restore")
+
+        self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(tasks._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
+        self.assertIs(tasks._text, legacy_codec.text)
+        self.assertIs(tasks._positive_int, legacy_codec.positive_int)
+        self.assertIs(tasks._nonnegative_int, legacy_codec.nonnegative_int)
+        self.assertIs(tasks._null_if_empty, legacy_codec.null_if_empty)
+        self.assertIs(tasks._split_heads, legacy_codec.split_heads)
+        self.assertIs(tasks._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(tasks._enum_or_none, legacy_codec.enum_or_none)
+        self.assertIs(restore._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(restore._positive_int, legacy_codec.positive_int)
+        self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(importer._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(importer._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
+        self.assertIs(importer._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(importer._split_heads, legacy_codec.split_heads)
+
+    def test_legacy_task_codec_preserves_released_normalization(self) -> None:
+        from secretary.board import legacy_codec
+
+        self.assertEqual(legacy_codec.text(None), "")
+        self.assertEqual(legacy_codec.text(17), "17")
+        self.assertEqual(legacy_codec.positive_int("3"), 3)
+        self.assertIsNone(legacy_codec.positive_int("0"))
+        self.assertEqual(legacy_codec.nonnegative_int("-3"), 0)
+        self.assertEqual(legacy_codec.split_heads("a,,b"), ["a", "b"])
+        self.assertEqual(legacy_codec.enum_or_default("x", {"x"}, "d"), "x")
+        self.assertEqual(legacy_codec.enum_or_default("y", {"x"}, "d"), "d")
+        self.assertIsNone(legacy_codec.enum_or_none("y", {"x"}))

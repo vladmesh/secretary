@@ -1260,7 +1260,7 @@ class ThresholdTests(unittest.TestCase):
                 VitalityThresholds(suspect_after=bad, confirm_after=600.0)
 
     def test_defaults_align_with_the_watchdogs_idle_ceiling(self) -> None:
-        from secretary.dispatcher_watchdog import IDLE_STALL_DEFAULT
+        from secretary.dispatch.watchdog import IDLE_STALL_DEFAULT
 
         self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.suspect_after, float(IDLE_STALL_DEFAULT))
         self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.confirm_after, 2.0 * float(IDLE_STALL_DEFAULT))

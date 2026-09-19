@@ -10,7 +10,16 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import CARD, SPRINT, board_client
+from secretary.board.completion_evidence import (
+    RESEARCH_REPORT_DIR,
+    has_candidate,
+    missing_completion_evidence,
+    render_research_completion_link,
+    research_report_path,
+    research_report_refusal,
+    review_required,
+)
+from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
 from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
@@ -21,7 +30,13 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
-from secretary.config import DataDirError, instance_data_dir
+from secretary.dispatch.claim import (
+    SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
+    SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
+    claim_ready_task as _claim_ready_task,
+    resolve_head as _resolve_claim_head,
+)
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
@@ -85,12 +100,10 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     CommandHostRuntime,
     DispatcherHeadTransport,
     InstanceCatalog,
-    LaunchedHead,
-    _blocked_actions_and_their_infrastructure_twins,
+    LaunchedHead as LaunchedHead,  # noqa: F401  # Compatibility re-export.
     _body_file_instructions,
     _body_file_path,
     _continuation_note,
-    _delivery_evidence_json,
     _durable_head_run,
     _gate_attestation_for_prompt,
     _head_runtime_name,
@@ -100,22 +113,22 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _same_repo,
     _watchdog_kind,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     _fingerprint as _gate_fingerprint,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     AcceptedGreenGate,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
     _last_marker,
@@ -123,7 +136,6 @@ from secretary.dispatcher_helpers import (
     _last_review_red_body,
     _report_adoption_baseline,
     _review_adoption_baseline,
-    _round_blocked_report_classification,
     _round_report_ids,
     _round_report_marker,
     _spent_report_generations,
@@ -133,159 +145,114 @@ from secretary.dispatcher_helpers import (
     _worker_id,
     scrub_host_output,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     red_review_count as _red_review_count,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
-    STAGE_CLAIM,
     STAGE_RESPAWN,
     STAGE_REWORK,
     WORKER_ROLE,
     BringUpFailure,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
-)
-from secretary.dispatcher_launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
-)
-from secretary.dispatcher_launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
-)
-from secretary.dispatcher_launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
-)
-from secretary.dispatcher_launch import (
     clear_launch_intent as _clear_launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     confirm_launch_intent as _confirm_launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     forget_role_head as _forget_role_head,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     head_stop_unconfirmed as _head_stop_unconfirmed,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     keep_reserved_round as _keep_reserved_round,
 )
-from secretary.dispatcher_launch import (
-    launch_aborted as _launch_aborted,
-)
-from secretary.dispatcher_launch import (
-    launch_deferred as _launch_deferred,
-)
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_delivery_receipt as _launch_delivery_receipt,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_intent as _launch_intent,
-)
-from secretary.dispatcher_launch import (
     launch_intent_unwritable as _launch_intent_unwritable,
-)
-from secretary.dispatcher_launch import (
-    launch_left_a_head as _launch_left_a_head,
-)
-from secretary.dispatcher_launch import (
     launch_pid_file as _launch_pid_file,
 )
-from secretary.dispatcher_launch import (
-    mark_launch_aborted as _mark_launch_aborted,
-)
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     merge_launch_head_run as _merge_launch_head_run,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     reset_launch_attempts as _reset_launch_attempts,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     resolve_launch_intent as _resolve_launch_intent,
 )
-from secretary.dispatcher_launch import (
-    write_launch_intent as _write_launch_intent,
-)
-from secretary.dispatcher_pause import ProductionPause
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause import ProductionPause
+from secretary.dispatch.pause_ops import (
     pause as _pause_pipeline,
 )
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause_ops import (
     pause_status as _pause_status,
 )
-from secretary.dispatcher_pause_ops import (
+from secretary.dispatch.pause_ops import (
     resume as _resume_pipeline,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     ProductionState,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_observe as _production_observe,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_probe as _production_probe,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_run as _production_run,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_tick as _production_tick,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     end_review_pane as _end_review_pane,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     recover_review_launch as _recover_review_launch,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     start_review as _start_review,
 )
-from secretary.dispatcher_state import (
-    CLAIM_SKIP_FAILOVER_COLLAPSE,
-    CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
-    CLAIM_SKIP_RESOURCE_NOT_READY,
+from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
     OutcomeTerminalPath,
     now_rfc3339,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from secretary.dispatcher_state import (
-    claim_actual as _claim_actual,
-)
-from secretary.dispatcher_state import (
     claim_mismatch as _claim_mismatch,
 )
-from secretary.dispatcher_state import (
-    new_attempt_id as _new_attempt_id,
-)
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     outcome_terminal_path as _outcome_terminal_path,
 )
-from secretary.dispatcher_state import (
-    record_attempt as _record_attempt,
-)
-from secretary.dispatcher_state import (
-    record_divergence as _record_divergence,
-)
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     request_token as _request_token,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     READINESS_BUSY,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -299,40 +266,47 @@ from secretary.dispatcher_types import (
     HostError,
     ProjectGitAccessError,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
-)
-from secretary.dispatcher_watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     reset_idle as _reset_idle,
-)
-from secretary.dispatcher_watchdog import (
     reset_wait as _reset_wait,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     stall_seconds as _stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     suspension_response_window_seconds as _suspension_response_window_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
+    launch_worker_after_claim as _launch_worker_after_claim,
+    resolve_headless_worker as _resolve_headless_worker,
+    write_worker_relaunch_intent as _write_worker_relaunch_intent,
+)
+from secretary.dispatch.worker_report import (
+    handle_worker_report as _handle_worker_report,
+    prompt_worker_report as _prompt_worker_report,
+    worker_report_marker as _worker_report_marker,
+)
+from secretary.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
@@ -344,18 +318,9 @@ from secretary.head_health import (
     HeadChoice,
     HeadHealth,
     HeadReadiness,
-    resolve_head_chain,
 )
 from secretary.infra.github_credential import ProjectGitAccess
-from secretary.projects.contract import (
-    CONTRACT_FIT,
-    CONTRACT_REFUSED,
-    CONTRACT_UNDECIDABLE,
-    UNDECIDABLE_NO_REGISTERED_PROJECT,
-    UNDECIDABLE_PROJECT_UNAVAILABLE,
-    ContractUnusable,
-    ContractVerdict,
-)
+from secretary.knowledge_write import KnowledgeError, KnowledgeValidationError, write_knowledge_directory
 from secretary.routing_journal import (
     MODEL_UNKNOWN,
     REVIEWER,
@@ -366,7 +331,7 @@ from secretary.routing_journal import (
     attempts as _routing_attempts,
 )
 from secretary.routing_journal import (
-    launched_head_run_snapshot as _launched_head_run_snapshot,
+    routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
 )
 from secretary.routing_journal import (
     routing_payload as _routing_payload,
@@ -375,6 +340,7 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.sprints import SprintReader, budget_thresholds
+from secretary.state_repo import StateRepoError
 from secretary.tasks import (
     TaskAudit,
     TaskError,
@@ -383,7 +349,6 @@ from secretary.tasks import (
     _event_payload,
     assessment_resolution,
     specification_revision,
-    task_audit_for,
 )
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
@@ -399,94 +364,6 @@ from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
-
-#: Why a card standing in an active execution state without a live worker was refused a
-#: replacement launch (secretary-1544). The key is the durable recovery error: it goes on the
-#: record, into the tick outcome and into the card's own comment, so "In progress" is never the
-#: only description of a card nobody is working on.
-HEADLESS_RECOVERY_REASONS: dict[str, str] = {
-    "workspace_missing": "the retained worker checkout is gone, so no candidate can be bound",
-    "workspace_unbindable": (
-        "the retained checkout is not this card's registered worktree on its own branch"
-    ),
-    "workspace_unreadable": "the retained checkout could not be read",
-    "candidate_unknown": "the retained checkout names no candidate commit",
-    "round_already_answered": (
-        "the retained candidate's round already has an accepted worker report, so an active "
-        "execution state owes no worker work; the continuation is a dispatcher-owned exact-SHA "
-        "validation, which this path does not perform"
-    ),
-}
-#: The blocked-reason taxonomy each recovery error is charged to.
-_HEADLESS_RECOVERY_BLOCKED_REASON: dict[str, str] = {
-    "round_already_answered": "operator",
-}
-
-
-def _tree_state_label(dirty: Any) -> str:
-    """Say `unknown` for a tree nothing read, rather than calling it clean."""
-    if dirty is None:
-        return "unknown"
-    return "dirty" if dirty else "clean"
-
-
-def _headless_episode_token(record: DispatcherRecord) -> str:
-    """The id discriminator that separates one headless episode of a card from the next.
-
-    A card with no dispatcher record does not get a minted attempt id: production ticks it under the
-    constant `production_adopt_attempt_id(ref)`, the same string for that card forever
-    (`dispatcher_production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
-    second episode would replay the first episode's committed event instead of moving the board —
-    the tick reporting a transition that did not happen (secretary-1544 round 5).
-
-    The stamp this returns is dispatcher-owned and episode-scoped in both directions. It is written
-    once, when the episode is first observed, and it survives every tick of that episode, so a tick
-    that died between the board move and its own bookkeeping replays onto the same id and moves
-    nothing twice. It does not survive the episode, because the refusal drops the record with it, so
-    the next return of the same card mints a new one and gets its own move.
-
-    Two parts, because neither alone is enough. The wall clock is what a replay must not disturb,
-    but it has a resolution and two episodes of a fast-moving card could land inside it. The card's
-    comment count cannot: a refusal writes its own move and reason onto the card, so the next
-    episode is stamped strictly higher whatever the clock says.
-    """
-    episode = record.worker_headless or {}
-    since = float(episode.get("since") or 0.0)
-    comments = int(episode.get("comment_baseline") or 0)
-    return f"episode-{since:.6f}-c{comments}" if since else "episode-unstamped"
-
-
-def _headless_worker(record: DispatcherRecord) -> bool:
-    """Whether this card owes a worker that nothing on the record can name or reach.
-
-    Not an absence of health: an absence of *identity*. A record here has no pane, no leaf, no
-    heartbeat path and no launch intent, so there is nothing for a watchdog to observe, nudge or
-    replace, and nothing that could ever answer the report the tick would otherwise wait for.
-    """
-    continuation = record.worker_continuation
-    return not (
-        # `owns_head` is the project's own question — does anything here still have to be settled
-        # before a replacement opens — and it is the right one: a HeadRun left on the record by a
-        # stop that already forgot the pane and the heartbeat names a head nobody can reach.
-        record.owns_head(WORKER_ROLE)
-        or record.launch_intent
-        or record.paused_worker_at
-        or continuation.delivery_pending
-        or continuation.delivery_confirmed
-        or continuation.red_transition_pending
-    )
-
-
-def default_data_dir(instance_path: Path) -> Path:
-    try:
-        return instance_data_dir(_instance_file(instance_path))
-    except DataDirError as exc:
-        raise DispatcherError("invalid_instance", f"invalid instance: {exc}", 2) from None
-
-
-def _instance_file(path: Path) -> Path:
-    return path / "instance.yaml" if path.is_dir() else path
-
 
 def _usage_fallback_snapshot(
     journal_role: str,
@@ -552,26 +429,9 @@ class DispatcherRuntime:
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)
 
-    def _head_fallback(self, head: str) -> list[str] | None:
-        """`head`'s fallback chain, or None when the registry does not describe it at all.
-
-        None is not an empty chain. The existence question is answered here as one lookup and never
-        put to a readiness probe, whose `HostError` for an undescribed head would escape the walk and
-        take the tick's Ready pass with it.
-        """
-        try:
-            return self.catalog.head_fallback(head)
-        except HostError:
-            return None
-
     def resolve_head(self, preferred: str) -> HeadChoice:
-        """The head to actually launch for `preferred`, walking the canon's fallback chain.
-
-        Substitution follows only the chain the canon writes down, and only at claim, where the
-        decision is recorded on the card. When nothing in the chain is launchable the answer is an
-        empty head: the caller claim-skips and the card waits in Ready.
-        """
-        return resolve_head_chain(preferred, self.head_readiness, self._head_fallback)
+        """Compatibility entry point; claim-owned resolution lives in dispatch.claim."""
+        return _resolve_claim_head(self, preferred)
 
     def _require_head_ready(self, head: str) -> None:
         readiness = self.head_readiness(head)
@@ -765,7 +625,8 @@ class DispatcherRuntime:
         if task["state"] == "ready":
             resume_workspaces = payload.get("resume_workspaces")
             resume_workspace = isinstance(resume_workspaces, dict) and ref in resume_workspaces
-            return self._claim(
+            return _claim_ready_task(
+                self,
                 task,
                 records,
                 payload,
@@ -788,324 +649,6 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
         }
 
-    def _failover_collapse(self, worker: HeadChoice, review: HeadChoice) -> dict[str, Any] | None:
-        """The refusal when a failover would hand both roles to one head, else None.
-
-        Only a failover can collapse the pair here: two roles pointed at one head by the canon itself
-        is an installation's own decision and is not overruled.
-        """
-        if not review.resolved or review.head != worker.head:
-            return None
-        if not (worker.substituted or review.substituted):
-            return None
-        return {
-            "status": "skipped",
-            "step": "head-preflight",
-            "action": CLAIM_SKIP_FAILOVER_COLLAPSE,
-            "head": worker.head,
-            "review_head": review.head,
-            "readiness": worker.readiness.to_json(),
-            "reason": (
-                f"failover would run worker and reviewer on the same head {worker.head}: "
-                f"worker {worker.reason}; reviewer {review.reason}"
-            ),
-            "failover": {"worker": worker.to_json(), "review": review.to_json()},
-        }
-
-    def _comment_head_failover(
-        self, ref: str, attempt_id: str, worker: HeadChoice, review: HeadChoice
-    ) -> None:
-        """Write the substitution onto the card, once per claim, or do nothing."""
-        lines = [
-            f"{role} head {choice.head} instead of {choice.preferred}: {choice.reason}"
-            for role, choice in (("Worker", worker), ("Reviewer", review))
-            if choice.substituted
-        ]
-        if not lines:
-            return
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body="Head failover at claim. " + " ".join(lines),
-            request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
-        )
-
-    def _broad_check_contract_verdict(self, task: dict[str, Any]) -> ContractVerdict:
-        """This card's broad-check contract, as one of the three named states (secretary-1458).
-
-        Offline and cheap: the binding and the adapter beside it, read before anything is claimed.
-        Every way of not getting an answer is a named state rather than a fall-through, because a
-        fall-through is what "nothing came back, so the card may go" was made of. A card that names
-        no registered project, and a project this installation cannot look up at all, are open
-        questions about the registry — the paths that need the binding fail on it in their own
-        words — and they are returned as such, not as approval.
-        """
-        project = str(task.get("project") or "")
-        if not project:
-            return ContractVerdict.as_undecidable(
-                UNDECIDABLE_NO_REGISTERED_PROJECT,
-                "",
-                f"card {task.get('ref')!r} names no registered project, so it has no adapter and "
-                "no broad-check contract to judge",
-            )
-        try:
-            return self.catalog.broad_check_verdict(project)
-        except HostError as exc:
-            return ContractVerdict.as_undecidable(
-                UNDECIDABLE_PROJECT_UNAVAILABLE,
-                "",
-                f"registered project {project!r} could not be read: {exc}",
-            )
-
-    def _contract_preflight_decision(
-        self,
-        task: dict[str, Any],
-        verdict: ContractVerdict,
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-    ) -> tuple[BringUpFailure, str, ContractUnusable] | None:
-        """What the verdict buys this card: the outcome that stops it, or None to issue it.
-
-        Exhaustive over the three states by name, with no default branch that lets an unrecognised
-        answer through as permission. Which state buys what is `projects.contract`'s decision and
-        is only carried out here:
-
-        * `refused` stops the card before it is issued — that is the guarantee the card exists for;
-        * `undecidable` issues it, because the open question is a documented compatibility promise
-          (a relative interpreter is resolved from a workspace that does not exist yet) and the
-          side that will hold that tree answers it there. It is a decision with a name, not the
-          absence of one;
-        * `fit` issues it, as always.
-        """
-        if verdict.state == CONTRACT_REFUSED and verdict.refusal is not None:
-            failure, reason = self._contract_preflight_outcome(
-                task,
-                attempt_id=attempt_id,
-                head=head,
-                review_head=review_head,
-                refusal=verdict.refusal,
-            )
-            return failure, reason, verdict.refusal
-        if verdict.state in (CONTRACT_FIT, CONTRACT_UNDECIDABLE):
-            return None
-        raise HostError(f"unreadable broad-check contract verdict {verdict.state!r}")
-
-    def _contract_preflight_outcome(
-        self,
-        task: dict[str, Any],
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-        refusal: ContractUnusable,
-    ) -> tuple[BringUpFailure, str]:
-        """The typed infrastructure outcome for a card nobody can broad-check, decided before claim.
-
-        Pure: it turns the refusal the preflight already read off the registry into the class, the
-        evidence and the card's Blocked reason, and touches neither the board, the host nor the
-        filesystem. That is what lets the claim and the transition it is the door to stand next to
-        each other with nothing that can fail in between.
-
-        This is the same outcome a bring-up that produced no head carries, made by the same
-        classifier and written with the same durable action token: an installation whose registry
-        cannot supply a usable contract is a failure of the host, not a verdict about the card. The
-        two properties the card must have follow from that token alone rather than from anything
-        here — the sprint budget reads it and counts the block as uncharged, and a block is not a
-        retry, so no new attempt is opened and nothing is scheduled to come back.
-        """
-        detail = (
-            f"the broad-check contract of registered project {task.get('project')!r} cannot "
-            f"attest this card: {refusal.detail()}"
-        )
-        failure = self._unclaimed_preflight_failure(
-            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-        )
-        reason = (
-            "the card was not given to a worker: this project's broad-check contract cannot "
-            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
-        )
-        return failure, reason
-
-    def _unclaimed_preflight_failure(
-        self, task: dict[str, Any], *, attempt_id: str, head: str, review_head: str, detail: str
-    ) -> BringUpFailure:
-        """A pre-claim refusal as the bring-up taxonomy names it: infrastructure, never retried."""
-        # The card has no record and will get none. The classifier reads one only to count the
-        # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
-        # own identity is what the outcome carries.
-        unclaimed = DispatcherRecord(
-            worker=_worker_id(task),
-            workspace="",
-            handle="",
-            head=head,
-            review_head=review_head,
-            attempt_id=attempt_id,
-            comment_baseline=0,
-            review_baseline=0,
-            state="",
-            claimed_at=0.0,
-        )
-        return _classify_bring_up_failure(
-            None,
-            unclaimed,
-            WORKER_ROLE,
-            stage=STAGE_CLAIM,
-            attempt_id=attempt_id,
-            detail=detail,
-        )
-
-    def _project_git_access(self, task: dict[str, Any]) -> ProjectGitAccess:
-        """The registered project's remote Git access, asked before anything is claimed."""
-        try:
-            return self.host.project_git_access(str(task.get("project") or ""))
-        except HostError as exc:
-            # The host could not even ask. That is silence about the credential, not a refusal.
-            return ProjectGitAccess(
-                "unreachable", "unknown", "none", "host", scrub_host_output(str(exc))[:240]
-            )
-
-    def _git_access_preflight_outcome(
-        self,
-        task: dict[str, Any],
-        access: ProjectGitAccess,
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-    ) -> tuple[BringUpFailure, str]:
-        """The typed outcome for a card whose project's remote Git access was refused by name.
-
-        Pure, like `_contract_preflight_outcome`: it names the project, the refusal code, the
-        transport and the fixed-vocabulary reason, and touches neither board nor host. A refused
-        credential is a determinate host condition, so the card is blocked uncharged and no
-        attempt is scheduled to come back; it is not the transport class the gate retries.
-        """
-        detail = (
-            f"registered project {task.get('project')!r} refused remote Git access "
-            f"(refusal={access.code}, transport={access.transport}): {access.reason}"
-        )
-        failure = self._unclaimed_preflight_failure(
-            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-        )
-        reason = (
-            "the card was not given to a worker: this project's remote Git access was refused "
-            f"before the claim, so no workspace and no head were created. {detail}\n{failure.clause()}"
-        )
-        return failure, reason
-
-    def _git_access_preflight_blocked(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        access: ProjectGitAccess,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Write the Git access refusal decided before the claim, immediately after it."""
-        self._write_claim_preflight_block(
-            task,
-            ref,
-            records,
-            payload,
-            attempt_id=attempt_id,
-            action="git-access-preflight-blocked",
-            failure=failure,
-            reason=reason,
-        )
-        return {
-            "status": "blocked",
-            "step": "git-access-preflight",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "project Git access preflight refused",
-            "git_access": {"project": str(task.get("project") or ""), **access.to_json()},
-            **failure.outcome_fields(reason),
-        }
-
-    def _contract_preflight_blocked(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        refusal: ContractUnusable,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Write the outcome decided before the claim, immediately after it."""
-        self._write_claim_preflight_block(
-            task,
-            ref,
-            records,
-            payload,
-            attempt_id=attempt_id,
-            action="contract-preflight-blocked",
-            failure=failure,
-            reason=reason,
-        )
-        return {
-            "status": "blocked",
-            "step": "contract-preflight",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "broad-check contract preflight failed",
-            "contract_refusal": refusal.evidence(),
-            **failure.outcome_fields(reason),
-        }
-
-    def _write_claim_preflight_block(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        action: str,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> None:
-        """Nothing is computed here and nothing is read: the transition is the first statement made
-        about the claimed card, and the dispatcher's own bookkeeping only follows it.
-        """
-        self.terminal_effect(
-            task,
-            DispatcherRecord(
-                worker=_worker_id(task),
-                workspace="",
-                handle="",
-                head="",
-                review_head="",
-                attempt_id=attempt_id,
-                attempt_round=self._journal_round(ref) + 1,
-                comment_baseline=0,
-                review_baseline=0,
-                state="",
-                claimed_at=0.0,
-            ),
-            target="blocked",
-            reason=reason,
-            request_id=_attempt_request_id(
-                attempt_id,
-                _bring_up_blocked_action(action, failure),
-                ref,
-            ),
-            terminal_state="blocked",
-            disposition="blocked",
-            blocked_reason=_bring_up_terminal_reason(failure),
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-
     def _claim(
         self,
         task: dict[str, Any],
@@ -1115,408 +658,15 @@ class DispatcherRuntime:
         *,
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
-        ref = task["ref"]
-        # Both heads are decided here, before anything is claimed, and both may be decided against
-        # the card's preference. Nothing launchable at the end of either walk is a claim-skip: the
-        # card stays in Ready and the outcome below names the dead resource.
-        worker_choice = self.resolve_head(self.catalog.worker_head(task))
-        if not worker_choice.resolved:
-            return {
-                "status": "skipped",
-                "step": "head-preflight",
-                "action": CLAIM_SKIP_RESOURCE_NOT_READY,
-                "pilot_ref": ref,
-                "head": worker_choice.preferred,
-                "readiness": worker_choice.readiness.to_json(),
-                "reason": worker_choice.reason,
-                "failover": {"worker": worker_choice.to_json()},
-            }
-        review_choice = self.resolve_head(self.catalog.review_head(task))
-        collapse = self._failover_collapse(worker_choice, review_choice)
-        if collapse is not None:
-            return dict(collapse, pilot_ref=ref)
-        head = worker_choice.head
-        review_head = review_choice.head or review_choice.preferred
-        contract_verdict = self._broad_check_contract_verdict(task)
-        # Project Git access is a separate preflight at the same boundary. It is asked only when the
-        # contract does not already refuse the card, so that refusal stays what it was: decided off
-        # the registry with the host untouched. An unanswered probe leaves the card in Ready.
-        git_access = None if contract_verdict.state == CONTRACT_REFUSED else self._project_git_access(task)
-        if git_access is not None and git_access.state == "unreachable":
-            return {
-                "status": "skipped",
-                "step": "git-access-preflight",
-                "action": CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
-                "pilot_ref": ref,
-                "git_access": {"project": str(task.get("project") or ""), **git_access.to_json()},
-                "reason": (
-                    f"project {task.get('project')!r} remote gave the Git access preflight no answer: "
-                    f"{git_access.reason or git_access.code}"
-                ),
-            }
-        # A card the dispatcher still holds a record for, back in Ready with its claim already
-        # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
-        # the record, so the claim would replay idempotently, return the old event and leave the card
-        # Ready: every re-run gets a fresh identity before claiming. A committed claim with no record
-        # is a genuine board divergence and still fails closed below.
-        active = records.get(ref)
-        requeued = active is not None
-        retry_after_block = resume_workspace or any(
-            self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-            for action in _blocked_actions_and_their_infrastructure_twins(
-                "bringup-blocked",
-                "worker-result-blocked",
-                "worker-blocked",
-                "worker-respawn-blocked",
-                "worker-wait-stall",
-                "rework-blocked",
-                "contract-preflight-blocked",
-                "git-access-preflight-blocked",
-                "gate-blocked",
-                "gate-red-blocked",
-                "gate-pending-stall",
-                "merge-gate-blocked",
-                "merge-gate-red-blocked",
-                "merge-blocked",
-                "release-drift-blocked",
-                "release-failed-blocked",
-                "review-blocked",
-                "review-freeze-red-blocked",
-                "review-inventory-blocked",
-                "review-wait-stall",
-                "stale-done-rework-blocked",
-            )
-        )
-        if requeued and active is not None:
-            # The preempted head can still be in the workspace the next round claims, and it is
-            # stopped through the workspace, not the handle: an adopted head has no handle on record.
-            if active.owns_head("review"):
-                # A preempt out of Validate leaves the worker pane closed by `start_review` but the
-                # reviewer up; left alone its verdict would land on the new attempt.
-                unconfirmed = self._end_review_pane_confirmed(
-                    active,
-                    records,
-                    payload,
-                    ref,
-                    step="claim",
-                    attempt_id=attempt_id,
-                    initiator=STOPPED_BY_REPLACEMENT,
-                )
-                if unconfirmed is not None:
-                    return unconfirmed
-            if active.needs_settling():
-                unconfirmed = self._stop_worker_confirmed(active, ref, step="claim", attempt_id=attempt_id)
-                if unconfirmed is not None:
-                    return unconfirmed
-        if retry_after_block or requeued:
-            attempt_id = _new_attempt_id()
-            _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
-            payload["attempt_id"] = attempt_id
-        claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
-        worker_id = _worker_id(task)
-        # Claim is the only board transition that can record a Ready refusal.
-        contract_outcome = self._contract_preflight_decision(
+        """Compatibility entry point; production claim ownership lives in dispatch.claim."""
+        return _claim_ready_task(
+            self,
             task,
-            contract_verdict,
-            attempt_id=attempt_id,
-            head=head,
-            review_head=review_head,
-        )
-        git_access_outcome = (
-            self._git_access_preflight_outcome(
-                task, git_access, attempt_id=attempt_id, head=head, review_head=review_head
-            )
-            if contract_outcome is None and git_access is not None and git_access.state == "refused"
-            else None
-        )
-        self.writer.claim(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            worker=worker_id,
-            resolved_head=head,
-            resolved_review_head=review_head,
-            slug=task.get("workspace", {}).get("slug") or "",
-            base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=claim_request_id,
-        )
-        if contract_outcome is not None:
-            failure, blocked_reason, refusal = contract_outcome
-            return self._contract_preflight_blocked(
-                task,
-                ref,
-                records,
-                payload,
-                attempt_id=attempt_id,
-                refusal=refusal,
-                failure=failure,
-                reason=blocked_reason,
-            )
-        if git_access_outcome is not None and git_access is not None:
-            failure, blocked_reason = git_access_outcome
-            return self._git_access_preflight_blocked(
-                task,
-                ref,
-                records,
-                payload,
-                attempt_id=attempt_id,
-                access=git_access,
-                failure=failure,
-                reason=blocked_reason,
-            )
-        self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
-        claimed = self.reader.show(ref)
-        record = DispatcherRecord(
-            worker=worker_id,
-            workspace="",
-            handle="",
-            head=head,
-            review_head=review_head,
-            attempt_id=attempt_id,
-            comment_baseline=len(claimed.get("comments") or []),
-            review_baseline=0,
-            report_generation=1,
-            state="claim_verified",
-            claimed_at=time.time(),
-            preferred_head=worker_choice.preferred if worker_choice.substituted else "",
-            preferred_review_head=(review_choice.preferred if review_choice.substituted else ""),
-        )
-        self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._launch_worker_after_claim(
-            claimed,
-            record,
             records,
             payload,
-            require_existing_workspace=retry_after_block,
+            attempt_id,
+            resume_workspace=resume_workspace,
         )
-
-    def _launch_worker_after_claim(
-        self,
-        claimed: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        require_existing_workspace: bool = False,
-    ) -> dict[str, Any]:
-        ref = claimed["ref"]
-        self._persist_outcome_round_context(claimed, record, phase="worker")
-        mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
-        if mismatch:
-            divergence = _record_divergence(
-                payload,
-                record.attempt_id,
-                ref,
-                "claim",
-                "claim_live_mismatch",
-                expected={
-                    "state": "in_progress",
-                    "worker": record.worker,
-                    "resolved_head": record.head,
-                    "resolved_review_head": record.review_head,
-                },
-                actual=_claim_actual(claimed),
-                details=mismatch,
-            )
-            return {
-                "status": "blocked",
-                "step": "claim",
-                "pilot_ref": ref,
-                "attempt_id": record.attempt_id,
-                "reason": "claim live board mismatch",
-                "divergence_id": divergence["id"],
-            }
-        live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
-        if live_head.get("known") and live_head.get("alive"):
-            # This record belongs to the claim being opened now, so it has no HeadRun that can prove
-            # the pre-existing heartbeat is its own. Signalling that workspace would turn an absence
-            # of ownership into permission to stop it: keep the claim and make the ambiguity visible.
-            return {
-                "status": "degraded",
-                "step": "claim",
-                "action": "orphan-worker-heartbeat-unbound",
-                "pilot_ref": ref,
-                "attempt_id": record.attempt_id,
-                "reason": "a live worker heartbeat has no durable HeadRun binding for this claim",
-            }
-        # The workspace is asked of the host rather than taken from its answer: with it and the pid
-        # file the next tick can stop a head whose handle a tick dying mid-launch never recorded.
-        failure = _write_launch_intent(
-            self,
-            payload,
-            records,
-            ref,
-            record,
-            role=WORKER_ROLE,
-            action="claim",
-            head=record.head,
-            workspace=self.host.restore_workspace(claimed, record.worker),
-        )
-        if failure is not None:
-            if failure.startswith("codex-fanout-policy:"):
-                # No terminal was created. This is policy evidence, not a transient failure worth
-                # retrying: a later tick with the same schema is the same prohibited launch.
-                self.terminal_effect(
-                    claimed,
-                    record,
-                    target="blocked",
-                    reason=f"Codex provider fan-out policy refused worker preflight: {failure}",
-                    request_id=_attempt_request_id(record.attempt_id, "codex-fanout-blocked", ref),
-                    terminal_state="blocked",
-                    disposition="blocked",
-                    blocked_reason="provider",
-                )
-                records.pop(ref, None)
-                self.save_records(payload, records)
-                return {
-                    "status": "blocked",
-                    "step": "claim",
-                    "pilot_ref": ref,
-                    "attempt_id": record.attempt_id,
-                    "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
-                    "reason": failure,
-                }
-            return _launch_intent_unwritable(
-                step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
-            )
-        # The launch intent already contains the exact preflight HeadRun. Bind its provider source
-        # before `prepare_worker` can create a pane, not after TASK.md has been delivered.
-        self.bind_codex_provider_ingress(
-            record,
-            records,
-            payload,
-            role=WORKER_ROLE,
-            reference=ref,
-        )
-        try:
-            prepared = self.host.prepare_worker(
-                claimed,
-                record.worker,
-                record.head,
-                attempt_id=record.attempt_id,
-                require_existing_workspace=require_existing_workspace,
-                generation=record.report_generation,
-                failover=bool(record.preferred_head),
-                heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
-            )
-        except (HeadLaunchAborted, HostError) as exc:
-            aborted = self._worker_launch_failure(
-                payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
-            )
-            if aborted is not None:
-                return aborted
-            _clear_launch_intent(record)
-            deferred = _launch_deferred(
-                record,
-                exc,
-                step="claim",
-                ref=ref,
-                attempt_id=record.attempt_id,
-                role=WORKER_ROLE,
-            )
-            if deferred is not None:
-                records[ref] = record
-                self.save_records(payload, records)
-                return deferred
-            # An infrastructure outcome blocks for a person; it is not a new attempt.
-            failure = _classify_bring_up_failure(
-                exc, record, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=record.attempt_id
-            )
-            reason = _bring_up_blocked_reason(
-                "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
-            )
-            self.terminal_effect(
-                claimed,
-                record,
-                target="blocked",
-                reason=reason,
-                request_id=_attempt_request_id(
-                    record.attempt_id, _bring_up_blocked_action("bringup-blocked", failure), ref
-                ),
-                terminal_state="blocked",
-                disposition="blocked",
-                blocked_reason=_bring_up_terminal_reason(failure),
-            )
-            records.pop(ref, None)
-            self.save_records(payload, records)
-            return {
-                "status": "blocked",
-                "step": "claim",
-                "pilot_ref": ref,
-                "reason": "host bring-up failed",
-                **failure.outcome_fields(reason),
-            }
-        record.workspace = prepared["workspace"]
-        _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
-        # The intent carries the pane, the launch snapshot and this head's own run before the record
-        # is told anything else: from here every failure is one over a worker that is already running.
-        # The delivery receipt goes with them, because a recovery of this launch has to be able to
-        # tell a worker that received its TASK pointer from one whose composer swallowed it.
-        _confirm_launch_intent(
-            self,
-            payload,
-            records,
-            ref,
-            record,
-            handle=str(prepared.get("handle") or ""),
-            leaf=str(prepared.get("leaf") or ""),
-            run=prepared.get("run"),
-            head_run=dict(prepared.get("head_run") or {}),
-            delivery=_launch_delivery_receipt(prepared.get("delivery_evidence")),
-        )
-        try:
-            self._settle_worker_pane(
-                ref,
-                record,
-                str(prepared.get("handle") or ""),
-                str(prepared.get("leaf") or ""),
-            )
-        except HeadLaunchAborted as exc:
-            return self._worker_launch_aborted(
-                payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
-            )
-        record.worker_started_at = record.worker_progress_at = time.time()
-        record.state = "claimed"
-        _reset_launch_attempts(record, WORKER_ROLE)
-        resume_workspaces = payload.get("resume_workspaces")
-        if isinstance(resume_workspaces, dict):
-            resume_workspaces.pop(ref, None)
-        records[ref] = record
-        self.save_records(payload, records)
-        # The worker is up: record the head running it from the launcher's own snapshot. An adopted
-        # claim predating routing telemetry has no round, so this opens one from the journal. Spend
-        # the intent only once that lands: a refusal leaves the head adoptable and its routing owed.
-        self.record_worker_routing(claimed, record, prepared.get("run"))
-        _clear_launch_intent(record)
-        self.save_records(payload, records)
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"Production dispatcher claimed {ref}, attempt {record.attempt_id}, "
-                f"worker {record.worker}, workspace {prepared['workspace']}."
-            ),
-            request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
-        )
-        outcome = {
-            "status": "ok",
-            "step": "claim",
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id,
-            "worker": record.worker,
-            "workspace": prepared["workspace"],
-            "head": record.head,
-            "review_head": record.review_head,
-        }
-        if record.preferred_head or record.preferred_review_head:
-            # The tick says a head was substituted in the same line that says the card was claimed:
-            # an operator must not have to open the card to see the work runs elsewhere.
-            outcome["preferred_head"] = record.preferred_head
-            outcome["preferred_review_head"] = record.preferred_review_head
-        return outcome
 
     def _end_review_pane_confirmed(
         self,
@@ -1571,176 +721,6 @@ class DispatcherRuntime:
         record.worker_continuation.drop_session()
         return None
 
-    def _worker_launch_aborted(
-        self,
-        payload: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        ref: str,
-        record: DispatcherRecord,
-        exc: HeadLaunchAborted,
-        *,
-        step: str,
-        attempt_id: str,
-    ) -> dict[str, Any]:
-        """A worker bring-up that failed with its terminal already open."""
-        _mark_launch_aborted(self, payload, records, ref, record, exc)
-        return _launch_aborted(
-            step=step,
-            ref=ref,
-            attempt_id=record.attempt_id or attempt_id,
-            role=WORKER_ROLE,
-            reason=scrub_host_output(str(exc)),
-        )
-
-    def _worker_launch_failure(
-        self,
-        payload: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        ref: str,
-        record: DispatcherRecord,
-        exc: Exception,
-        *,
-        step: str,
-        attempt_id: str,
-    ) -> dict[str, Any] | None:
-        """The aborted-launch outcome when this failure may have left a worker running, else None."""
-        _record_worker_delivery_evidence(record, exc, failure=True)
-        if not isinstance(exc, HeadLaunchAborted):
-            if not _launch_left_a_head(record):
-                return None
-            exc = HeadLaunchAborted(
-                str(exc),
-                workspace=record.workspace,
-                pid_file=_launch_pid_file(WORKER_ROLE, ref),
-                evidence=_delivery_evidence_json(exc, "worker-launch"),
-            )
-        return self._worker_launch_aborted(
-            payload, records, ref, record, exc, step=step, attempt_id=attempt_id
-        )
-
-    def _settle_worker_pane(self, ref: str, record: DispatcherRecord, handle: str, leaf: str) -> None:
-        """Put the pane identity of a worker head that is already up onto its record."""
-        record.handle = handle
-        record.worker_leaf = leaf
-
-    def _bring_up_worker_head(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        step: str,
-        stage: str,
-        blocked_reason: str,
-        blocked_action: str,
-        blocked_request_suffix: str = "",
-    ) -> tuple[LaunchedHead | None, dict[str, Any] | None]:
-        """Relaunch this card's worker in its own workspace, under the intent already on disk.
-
-        The blocked transition is named rather than handed in whole, because the action token is
-        where the outcome's class becomes durable: only the shared classifier below decides which
-        of the two tokens this relaunch writes.
-        """
-        ref = task["ref"]
-        try:
-            self._require_head_ready(record.head)
-            self.bind_codex_provider_ingress(
-                record,
-                records,
-                payload,
-                role=WORKER_ROLE,
-                reference=ref,
-            )
-            launched = self.host.restart_worker(
-                task, record, heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or "")
-            )
-        except Exception as exc:  # noqa: BLE001 — classified by what it left running, not by type
-            aborted = self._worker_launch_failure(
-                payload, records, ref, record, exc, step=step, attempt_id=attempt_id
-            )
-            if aborted is not None:
-                return None, aborted
-            intent = dict(_launch_intent(record))
-            _clear_launch_intent(record)
-            deferred = _launch_deferred(
-                record,
-                exc,
-                step=step,
-                ref=ref,
-                attempt_id=record.attempt_id or attempt_id,
-                role=WORKER_ROLE,
-            )
-            if deferred is not None:
-                # A rework reserved its round before the host call, and that round is over whether
-                # or not its head lived: the deferred relaunch belongs to the round the rework opened.
-                _keep_reserved_round(self, record, intent)
-                # Nothing of this launch is running and the record names no head, so the next tick retries.
-                records[ref] = record
-                self.save_records(payload, records)
-                return None, deferred
-            return None, self._block_failed_worker_restart(
-                ref=ref,
-                record=record,
-                records=records,
-                payload=payload,
-                attempt_id=attempt_id,
-                step=step,
-                stage=stage,
-                reason=blocked_reason,
-                action=blocked_action,
-                request_suffix=blocked_request_suffix,
-                error=exc,
-            )
-        # The head is up. Its pane, launch configuration and own run go into the intent before
-        # anything else, so an adoption gets the run that launched rather than a fresh identity.
-        _confirm_launch_intent(
-            self,
-            payload,
-            records,
-            ref,
-            record,
-            handle=launched.handle,
-            leaf=launched.leaf,
-            run=launched.run,
-            head_run=dict(launched.head_run),
-            delivery=_launch_delivery_receipt(launched.delivery_evidence),
-        )
-        _record_worker_delivery_evidence(record, launched.delivery_evidence)
-        try:
-            self._settle_worker_pane(ref, record, launched.handle, launched.leaf)
-        except HeadLaunchAborted as exc:
-            return None, self._worker_launch_aborted(
-                payload, records, ref, record, exc, step=step, attempt_id=attempt_id
-            )
-        _reset_launch_attempts(record, WORKER_ROLE)
-        return launched, None
-
-    def _worker_relaunch_intent(
-        self,
-        payload: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        ref: str,
-        record: DispatcherRecord,
-        *,
-        action: str,
-        round_number: int | None = None,
-    ) -> str | None:
-        """Fix a rework or respawn bring-up on disk before `restart_worker` is called."""
-        return _write_launch_intent(
-            self,
-            payload,
-            records,
-            ref,
-            record,
-            role=WORKER_ROLE,
-            action=action,
-            head=record.head,
-            workspace=record.workspace,
-            round_number=round_number,
-        )
-
     def _advance_worker(
         self,
         task: dict[str, Any],
@@ -1768,30 +748,14 @@ class DispatcherRuntime:
                     if not mismatch:
                         record.state = "claim_verified"
                         self.save_records(payload, records)
-                        return self._launch_worker_after_claim(task, record, records, payload)
+                        return _launch_worker_after_claim(self, task, record, records, payload)
         if record.worker_continuation.red_transition_pending:
             # An open red transition outranks everything else. The board move may or may not have
             # committed before its tick died, so it is finished against the board as it is now.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
-            return self._launch_worker_after_claim(task, record, records, payload)
-        # The round the dispatcher is holding, not merely the card's last report marker: a marker is
-        # attributed to a round through the request id its command carried, which the audit keeps.
-        marker = _round_report_marker(
-            self.audit,
-            ref,
-            _round_report_ids(
-                record.workspace, record.attempt_id or attempt_id, ref, record.report_generation
-            ),
-        )
-        if marker in {"report:done", "report:blocked"}:
-            # Persist the terminal path before looking up the source handoff.
-            # A failed lookup must not turn every later Validate, gate or
-            # reviewer effect into a path that claims no report was consumed.
-            record.outcome_terminal_path = OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
-            records[ref] = record
-            self.save_records(payload, records)
-            self._capture_outcome_source(task, record, phase="report", kind="card.reported", marker=marker)
+            return _launch_worker_after_claim(self, task, record, records, payload)
+        marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
@@ -1864,174 +828,14 @@ class DispatcherRuntime:
             return self._finish_retained_worker_resume(
                 task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
-        if marker == "report:done":
-            if continuation.validation_move_pending:
-                # Frozen and recorded before a tick died mid-move; the replay never wakes the worker.
-                # The phase this report closed is the same one the dying tick accepted, so its
-                # usage occurrence is finished here rather than lost with that tick.
-                self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
-                    target="validate",
-                    reason="worker report:done",
-                    request_id=_attempt_request_id(
-                        record.attempt_id or attempt_id,
-                        "worker-done",
-                        ref,
-                        str(record.report_generation),
-                    ),
-                )
-                record.state = "validate"
-                self.save_records(payload, records)
-                return {
-                    "status": "ok",
-                    "step": "advance",
-                    "pilot_ref": ref,
-                    "attempt_id": attempt_id,
-                    "to": "validate",
-                }
-            try:
-                self.host.verify_worker_result(task, record)
-            except HostError as exc:
-                unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-                if unconfirmed is not None:
-                    return unconfirmed
-                self.terminal_effect(
-                    task,
-                    record,
-                    target="blocked",
-                    reason=f"worker result is not durable: {scrub_host_output(str(exc))}",
-                    request_id=_attempt_request_id(
-                        record.attempt_id or attempt_id, "worker-result-blocked", ref
-                    ),
-                    terminal_state="blocked",
-                    disposition="blocked",
-                    blocked_reason="implementation",
-                )
-                records.pop(ref, None)
-                return {
-                    "status": "blocked",
-                    "step": "advance",
-                    "pilot_ref": ref,
-                    "attempt_id": attempt_id,
-                    "reason": "worker result is not durable",
-                }
-            current_sha = self.host.head_commit(record)
-            retry_stale_no_diff_gate = False
-            reuse_report_only_gate = False
-            if current_sha and current_sha == record.rejected_sha:
-                if record.rejected_failure_class == "infrastructure":
-                    return self._accept_stale_infrastructure_done(
-                        task,
-                        record,
-                        records,
-                        payload,
-                        attempt_id,
-                        current_sha,
-                    )
-                retry_stale_no_diff_gate = self._can_retry_stale_no_diff_research_gate(
-                    task, record, current_sha
-                )
-                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(task, record, current_sha)
-                if not (retry_stale_no_diff_gate or reuse_report_only_gate):
-                    return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
-            # A no-diff research card gets one post-freeze chance to observe the dispatch it
-            # already owns.  Count that report before Validate so a persistent wrong-SHA result
-            # cannot reopen this exception forever: the next unchanged done report must still
-            # reach _reject_stale_done's human-escalation bound.
-            record.rejected_done_reports = 1 if retry_stale_no_diff_gate else 0
-            # The report is accepted: whatever the head owed, it has answered.
-            record.worker_answer_owed_since = 0.0
-            # The report is accepted from here on. Account the worker phase it closes while the
-            # head that wrote it is still on the record with its bound provider session.
-            self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
-            record.review_baseline = len(task.get("comments") or [])
-            # Freeze before moving the board. A later tick may finish the idempotent move, but it
-            # never leaves a completed worker writing while CI or a reviewer owns this checkout.
-            try:
-                self.host.retain_worker(record)
-                continuation.begin_retention(time.time())
-            except HostError:
-                # A worker with no reusable conversation is still made safe by a confirmed stop.
-                unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-                if unconfirmed is not None:
-                    return unconfirmed
-            if not reuse_report_only_gate:
-                # Fresh code state: the mechanical gate must re-run before this report reaches review.
-                record.gate_state = ""
-                record.gate_pending_since = 0.0
-                record.gate_transport_failures = 0
-                record.gate_transport_error = ""
-                self._reset_infrastructure_reruns(record)
-            _reset_wait(record, "worker")
-            _reset_wait(record, "review")
-            records[ref] = record
-            self.save_records(payload, records)
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
-                target="validate",
-                reason="worker report:done",
-                # Keyed on the generation the report closes, so this move and its replay after a
-                # crash carry one id whatever the card's comment count has done since.
-                request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, "worker-done", ref, str(record.report_generation)
-                ),
-            )
-            if continuation.validation_move_pending:
-                continuation.confirm_validation_move()
-            record.state = "validate"
-            self.save_records(payload, records)
-            return {
-                "status": "ok",
-                "step": "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "to": "validate",
-            }
-        if marker == "report:blocked":
-            # Before the stop, so the phase is accounted while its head is still described here.
-            self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
-            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-            self.terminal_effect(
-                task,
-                record,
-                target="blocked",
-                reason="worker report:blocked",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
-                terminal_state="blocked",
-                disposition="blocked",
-                verdict="blocked",
-                blocked_reason=(
-                    _round_blocked_report_classification(
-                        self.audit,
-                        ref,
-                        _round_report_ids(
-                            record.workspace,
-                            record.attempt_id or attempt_id,
-                            ref,
-                            record.report_generation,
-                        ),
-                    )
-                    or "other"
-                ),
-            )
-            records.pop(ref, None)
-            return {
-                "status": "ok",
-                "step": "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "to": "blocked",
-            }
+        reported = _handle_worker_report(
+            self, task, record, records, payload, attempt_id, marker=marker
+        )
+        if reported is not None:
+            return reported
         # Before any wait: a card cannot wait for a report from a worker no record can name. The
         # watchdog below observes a head; this decides whether there is one to observe at all.
-        headless = self._resolve_headless_worker(task, record, records, payload, attempt_id)
+        headless = _resolve_headless_worker(self, task, record, records, payload, attempt_id)
         if headless is not None:
             return headless
         watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="worker")
@@ -2045,583 +849,78 @@ class DispatcherRuntime:
             "action": "waiting-worker-report",
         }
 
-    def _resolve_headless_worker(
+    def _transfer_research_report(
         self,
         task: dict[str, Any],
         record: DispatcherRecord,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
-    ) -> dict[str, Any] | None:
-        """Settle a card standing in an active execution state with no worker at all.
-
-        The situation this closes (secretary-1544, field evidence codegen-orchestrator-1232): a card
-        is returned from Blocked straight into In progress. `_adopt` rebuilds a record from the
-        board, finds no heartbeat to bind, and — because the board claim is the old one — the audit
-        holds no claim event for the freshly synthesised attempt either, so the record settled
-        ``adopted`` with an empty handle and the tick waited for a report from a worker that was
-        stopped hours ago. Returns None when this card is not in that situation.
-
-        Exactly one of three things is durably established before the card is left active:
-
-        * a verified live worker identity — bound by `_adopt` from the worker's own heartbeat, in
-          which case this is never reached;
-        * a replacement launch intent bound to the retained workspace and its exact candidate,
-          written to disk before the host is called and adopted by the next tick if this one dies;
-        * a refusal that puts the card back in Blocked with a named recovery error.
-
-        This path has no launch intent and no delivery receipt to consult — an adopted record is
-        rebuilt from the board, and there is no evidence of what any head was ever handed. What it
-        rests on instead is the board's own consumed report markers and the retained checkout's
-        TASK.md round record: a checkout whose document belongs to a round the board has already
-        consumed a report for owes no worker work, and relaunching over it would either redo an
-        answered round or invent a document for one nobody opened.
-        """
-        ref = task["ref"]
-        if not _headless_worker(record):
-            if record.worker_headless:
-                record.worker_headless = {}
-                records[ref] = record
-                self.save_records(payload, records)
-            return None
-        # A living heartbeat this record cannot prove is its own is ambiguity, not permission: the
-        # same refusal `_launch_worker_after_claim` makes over an unbound orphan. Never relaunch
-        # beside it and never signal it.
-        live = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
-        state = self.host.retained_workspace_state(task, record)
-        record.worker_headless = {
-            "since": float(record.worker_headless.get("since") or 0.0) or time.time(),
-            # Where the card stood when this episode opened. Read once and carried, so it is the
-            # episode's own discriminator rather than whatever the board says on a later tick.
-            "comment_baseline": int(
-                record.worker_headless.get("comment_baseline") or len(task.get("comments") or [])
-            ),
-            "record_state": record.state,
-            "handle_known": False,
-            "heartbeat": str(live.get("state") or "") or "absent",
-            "workspace": state.get("workspace") or "",
-            "branch": state.get("branch") or "",
-            "expected_branch": state.get("expected_branch") or "",
-            "dirty": state.get("dirty"),
-            "candidate_sha": state.get("sha") or "",
-            "report_generation": record.report_generation,
-            "recovery_error": "",
-        }
-        if live.get("known") and live.get("alive"):
-            record.worker_headless["recovery_error"] = "orphan_heartbeat_unbound"
-            records[ref] = record
-            self.save_records(payload, records)
-            return {
-                "status": "degraded",
-                "step": "advance",
-                "pilot_ref": ref,
-                "attempt_id": record.attempt_id or attempt_id,
-                "action": "orphan-worker-heartbeat-unbound",
-                "recovery_error": "orphan_heartbeat_unbound",
-                "reason": "a live worker heartbeat has no durable HeadRun binding for this card",
-            }
-        refusal = self._headless_recovery_refusal(task, record, state)
-        record.worker_headless["recovery_error"] = refusal
-        records[ref] = record
-        self.save_records(payload, records)
-        if refusal:
-            return self._refuse_headless_worker(task, record, records, payload, attempt_id, refusal)
-        return self._relaunch_headless_worker(task, record, records, payload, attempt_id, state)
-
-    def _headless_recovery_refusal(
-        self, task: dict[str, Any], record: DispatcherRecord, state: dict[str, Any]
-    ) -> str:
-        """The recovery error that forbids a replacement launch here, or "" when one is owed."""
-        if not state.get("bound"):
-            return str(state.get("reason") or "workspace_unbindable")
-        if record.state != "adopted":
-            # A record that lived through its own launch knows the round it is in; only a record
-            # rebuilt from the board has to read the round off the checkout and the markers.
-            return ""
-        document_generation = _task_doc_report_generation(str(state.get("workspace") or ""))
-        if document_generation and document_generation <= _spent_report_generations(task):
-            # The checkout holds the document of a round whose report the board has already
-            # consumed. Out of this card's scope: the continuation for an unchanged candidate with
-            # no worker work left is dispatcher-owned exact-SHA validation (issue:3a0b263f), and
-            # inventing a worker round here would be the same fiction from the other side.
-            return "round_already_answered"
-        return ""
-
-    def _relaunch_headless_worker(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Put a replacement worker on the retained checkout, on its branch and its exact SHA."""
-        ref = task["ref"]
-        episode_token = _headless_episode_token(record)
-        # The intent is bound to the checkout that was verified above, not to a fresh one: the
-        # workspace is passed through rather than re-derived, so a replacement can never land in a
-        # different worktree than the candidate it was decided on.
-        record.workspace = str(state.get("workspace") or record.workspace)
-        failure = self._worker_relaunch_intent(
-            payload, records, ref, record, action="headless-worker-recovery"
-        )
-        if failure is not None:
-            return _launch_intent_unwritable(
-                step="advance",
-                ref=ref,
-                attempt_id=record.attempt_id or attempt_id,
-                role=WORKER_ROLE,
-                reason=failure,
-            )
-        launched, failed = self._bring_up_worker_head(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            step="advance",
-            stage=STAGE_RESPAWN,
-            blocked_reason="headless worker recovery bring-up failed",
-            blocked_action="headless-worker-recovery-blocked",
-        )
-        if launched is None:
-            assert failed is not None
-            return failed
-        now = time.time()
-        record.state = "claimed"
-        # The replacement never saw whatever the stopped head was asked for, so it owes no answer.
-        record.worker_answer_owed_since = 0.0
-        record.worker_started_at = record.worker_progress_at = now
-        _reset_wait(record, "worker")
-        _reset_idle(record, "worker")
-        self.record_worker_routing(task, record, launched.run)
-        _clear_launch_intent(record)
-        headless = dict(record.worker_headless)
-        record.worker_headless = {}
-        records[ref] = record
-        self.save_records(payload, records)
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"Dispatcher headless recovery: {ref} stood in an active state with no worker "
-                f"identity. Relaunched on the retained checkout {record.workspace} "
-                f"(branch {state.get('branch') or '(unknown)'}, candidate "
-                f"{state.get('sha') or '(unknown)'}, "
-                f"tree {_tree_state_label(state.get('dirty'))}) for report generation "
-                f"{record.report_generation}. Nothing was recreated, reset or re-seeded."
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "headless-worker-recovery",
-                ref,
-                # The episode, not the generation: an adopted record's attempt id is a constant and
-                # two episodes can share a generation, which would suppress the second comment.
-                f"{record.report_generation}-{episode_token}",
-            ),
-        )
-        return {
-            "status": "ok",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id or attempt_id,
-            "action": "headless-worker-replacement-launched",
-            "workspace": record.workspace,
-            "branch": state.get("branch") or "",
-            "candidate_sha": state.get("sha") or "",
-            "dirty": state.get("dirty"),
-            "headless_since": headless.get("since"),
-        }
-
-    def _refuse_headless_worker(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        recovery_error: str,
-    ) -> dict[str, Any]:
-        """Refuse the active-state transition and put the card back in Blocked, saying why."""
-        ref = task["ref"]
-        headless = dict(record.worker_headless)
-        explanation = HEADLESS_RECOVERY_REASONS.get(recovery_error, recovery_error)
-        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-        if unconfirmed is not None:
-            records[ref] = record
-            self.save_records(payload, records)
-            return unconfirmed
-        detail = ""
-        if headless.get("workspace"):
-            detail = (
-                f" Retained checkout {headless['workspace']}"
-                f" (branch {headless.get('branch') or '(unbound)'},"
-                f" candidate {headless.get('candidate_sha') or '(unreadable)'})."
-            )
-        self.terminal_effect(
-            task,
-            record,
-            target="blocked",
-            reason=(
-                f"headless worker recovery refused ({recovery_error}): {explanation}.{detail}"
-                " The card is returned to Blocked rather than left in an active state with no"
-                " worker."
-            ),
-            # Episode-scoped, or a card returned twice would replay the first refusal's committed
-            # event: no board move, no comment, and a tick still reporting `blocked`.
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                f"headless-recovery-{recovery_error}",
-                ref,
-                _headless_episode_token(record),
-            ),
-            terminal_state="blocked",
-            disposition="blocked",
-            blocked_reason=_HEADLESS_RECOVERY_BLOCKED_REASON.get(recovery_error, "infrastructure"),
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {
-            "status": "blocked",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id or attempt_id,
-            "action": "headless-worker-recovery-refused",
-            "recovery_error": recovery_error,
-            "reason": explanation,
-            "workspace": headless.get("workspace") or "",
-            "candidate_sha": headless.get("candidate_sha") or "",
-            "to": "blocked",
-        }
-
-    def _can_reuse_report_only_rework_gate(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        current_sha: str,
         *,
-        observer_rework: bool | None = None,
-    ) -> bool:
-        """Whether an observer-directed research report correction may keep its green gate.
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Move a research card's report directory into knowledge and link it; None when done.
 
-        A red review normally invalidates the gate for the next worker report. The one exception is
-        a research round that the observer reopened to correct the report alone: its non-empty
-        frozen decision proves that this is that round, and the receipt remains usable only when it
-        still validates the exact rejected candidate. No marker body or worker-local check can stand
-        in for the persisted dispatcher receipt here.
+        `<workspace>/.secretary-report/` replaces `state/knowledge/reports/<ref>/` through the knowledge
+        directory writer, then one `[completion:research]` comment keyed on the report generation is
+        written, so a replayed tick commits nothing new and writes no second link. A refused or failed
+        transfer Blocks the card with the cause named, keeps the workspace and writes no link. Any
+        other kind answers None at once.
         """
-        if observer_rework is None:
-            observer_rework = bool(record.report_decision.strip())
-        return (
-            task.get("type") == "research"
-            and observer_rework
-            and record.rejected_failure_reason == "red-review"
-            and bool(current_sha)
-            and current_sha == record.rejected_sha
-            and record.gate_state == "green"
-            and bool(_gate_attestation_for_prompt(record, current_sha))
-        )
-
-    def _can_retry_stale_no_diff_research_gate(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        current_sha: str,
-    ) -> bool:
-        """Whether a stale no-diff gate may retry after the worker is frozen.
-
-        The initial no-diff poll can see another branch's workflow-dispatch run before this card's
-        own dispatch becomes visible. A fresh report is not evidence by itself: this narrow
-        persisted-dispatch match only lets the ordinary, post-retention gate poll that request.
-        Every other answer, including an old persisted receipt, takes the stale-done path.
-        """
-        return bool(
-            not record.rejected_done_reports
-            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
-        )
-
-    def _is_stale_no_diff_research_gate_recovery(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        current_sha: str,
-    ) -> bool:
-        """Whether this record identifies the narrow stale workflow-dispatch recovery."""
-        dispatch = record.gate_workflow_dispatch
-        return bool(
-            task.get("type") == "research"
-            and _validation_ci(self.host, task) == "github"
-            and record.rejected_failure_class == "substantive"
-            and record.rejected_failure_reason == "workflow-dispatch-head-sha-mismatch"
-            and bool(current_sha)
-            and current_sha == record.rejected_sha
-            and isinstance(dispatch, dict)
-            and dispatch.get("sha") == current_sha
-            and dispatch.get("workflow") == "ci.yml"
-        )
-
-    def _accept_stale_infrastructure_done(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        sha: str,
-    ) -> dict[str, Any]:
-        """Let an infra-red SHA retry the gate without opening a no-op worker round.
-
-        This is deliberately beside ``_reject_stale_done``: that safeguard remains intact for a
-        red review and a substantive gate.  The class was persisted from the gate result, so this
-        branch neither parses a card comment nor trusts a manual flag.
-        """
+        if task.get("type") != "research":
+            return None
         ref = task["ref"]
-        if record.rejected_done_reports:
-            return self._block_repeated_infrastructure_done(
+        generation = str(record.report_generation)
+        source = Path(record.workspace) / RESEARCH_REPORT_DIR
+        refusal, message = "", ""
+        if research_report_refusal(Path(record.workspace)):
+            refusal = "report_missing"
+            message = f"the workspace holds no non-empty {RESEARCH_REPORT_DIR}/report.md"
+        else:
+            try:
+                write_knowledge_directory(
+                    Path(self.catalog.instance_dir),
+                    directory=research_report_path(ref),
+                    actor="dispatcher",
+                    source_dir=source,
+                    message=(
+                        f"knowledge: research report of {ref}, report generation {generation}\n\n"
+                        f"Principal: dispatcher\nDocument: {research_report_path(ref)}\n"
+                    ),
+                )
+            except KnowledgeValidationError as exc:
+                refusal, message = exc.reason or "refused", str(exc)
+            except (KnowledgeError, StateRepoError, OSError) as exc:
+                refusal, message = "write_failed", str(exc)
+        if refusal:
+            outcome = self._block_merge_path(
                 task,
                 record,
                 records,
                 payload,
                 attempt_id,
-                sha,
-            )
-        # The report is accepted here, for the same round the first one opened: the occurrence
-        # that round already owns is what a repeated report returns, not a second account.
-        self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
-        try:
-            self.host.retain_worker(record)
-            record.worker_continuation.begin_retention(time.time())
-        except HostError:
-            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-        # A legacy/recovered record can still hand the worker an infra-classified stale SHA.  One
-        # report is enough to return it to the real gate rerun path; another identical report has
-        # no new evidence and must not reuse the same request id as a silent no-op tick.
-        record.rejected_done_reports = 1
-        record.gate_state = ""
-        record.gate_pending_since = 0.0
-        record.gate_transport_failures = 0
-        record.gate_transport_error = ""
-        self._reset_infrastructure_reruns(record)
-        _reset_wait(record, "worker")
-        _reset_wait(record, "review")
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"The repeated done report for HEAD {sha} was accepted for automatic mechanical "
-                f"gate retry: the previous red was classified from its CI step as infrastructure "
-                f"({record.rejected_failure_reason or 'enumerated infrastructure signature'}). "
-                "No worker rework round was opened."
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "stale-done-infrastructure-retry",
-                ref,
-                str(record.report_generation),
-            ),
-        )
-        record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
-        record.review_baseline = record.comment_baseline
-        records[ref] = record
-        self.save_records(payload, records)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            target="validate",
-            reason=(
-                "worker report:done retries an infrastructure-classified mechanical gate on the same SHA"
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "stale-done-infrastructure-validate",
-                ref,
-                str(record.report_generation),
-            ),
-        )
-        record.state = "validate"
-        self.save_records(payload, records)
-        return {
-            "status": "ok",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "to": "validate",
-            "action": "stale-done-infrastructure-retry",
-        }
-
-    def _block_repeated_infrastructure_done(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        sha: str,
-    ) -> dict[str, Any]:
-        """A second stale infra report cannot add evidence after the accepted gate retry."""
-        ref = task["ref"]
-        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-        if unconfirmed is not None:
-            return unconfirmed
-        reports = record.rejected_done_reports + 1
-        self.terminal_effect(
-            task,
-            record,
-            target="blocked",
-            reason=(
-                f"The worker reported done {reports} times on unchanged infrastructure-classified "
-                f"HEAD {sha} ({record.rejected_failure_reason or 'enumerated CI-service signature'}). "
-                "One report already returned the SHA to the bounded Actions rerun path; a further "
-                "identical report has no new gate evidence."
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "stale-done-infrastructure-blocked",
-                ref,
-                str(reports),
-            ),
-            terminal_state="blocked",
-            disposition="blocked",
-            blocked_reason="infrastructure",
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {
-            "status": "blocked",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": "stale-done-infrastructure-blocked",
-        }
-
-    def _reject_stale_done(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        sha: str,
-    ) -> dict[str, Any]:
-        """Bounce one repeated rejected result, then leave the diagnosis to a human."""
-        ref = task["ref"]
-        rejected = record.rejected_done_reports + 1
-        if rejected >= 2:
-            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-            record.rejected_done_reports = rejected
-            self.terminal_effect(
-                task,
-                record,
-                target="blocked",
+                action="research-report-transfer-refused",
                 reason=(
-                    f"The worker reported done twice with no new work: HEAD {sha} was already "
-                    "rejected by the mechanical gate or by a red review. A human needs to look at "
-                    "this."
+                    f"research report transfer refused ({refusal}): {scrub_host_output(message)}. "
+                    f"Nothing was linked and the card cannot be Done; the workspace and its "
+                    f'`{RESEARCH_REPORT_DIR}/` are kept. See docs/PROTOCOLS.md, "Card kinds, live impact '
+                    'and the review choice".'
                 ),
-                request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id,
-                    "stale-done-blocked",
-                    ref,
-                    str(record.rejected_done_reports),
-                ),
-                terminal_state="blocked",
-                disposition="blocked",
-                blocked_reason="implementation",
+                step=step,
+                outcome="research report transfer refused",
             )
-            records.pop(ref, None)
-            self.save_records(payload, records)
-            return {
-                "status": "blocked",
-                "step": "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "reason": "worker repeatedly reported rejected SHA",
-            }
-
-        # The rework worker opens in this same checkout, so the head that reported the stale done has
-        # to be confirmed gone first; a refusal ends the tick before the comment and the relaunch.
-        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-        if unconfirmed is not None:
-            return unconfirmed
-        # Counted only once the bounce happens; a tick stopped at the refusal rejected nothing.
-        record.rejected_done_reports = rejected
-        # The head now owes the dispatcher an answer. Stamped here so the vitality reduction can
-        # read the pair "rejected report, then a turn that ended" as an explicit stall signal
-        # rather than leaving it to the outer report ceiling (secretary-1543).
-        record.worker_answer_owed_since = time.time()
+            outcome["transfer_refusal"] = refusal
+            return outcome
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
-            body=(
-                f"The done report was rejected: HEAD {sha} was already rejected by the mechanical "
-                "gate or by a red review. Do and commit new work, then report again. If the cause "
-                "is a test or the gate itself and the code should not change, use "
-                "report --kind blocked; another done on this SHA moves the card to Blocked."
-            ),
+            body=render_research_completion_link(ref),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "stale-done-rework", ref, str(record.rejected_done_reports)
+                record.attempt_id or attempt_id, "completion-research", ref, generation
             ),
         )
-        record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
-        record.review_baseline = record.comment_baseline
-        # The bounce restarts this attempt with a new TASK.md, so it is a new report round: without a
-        # new generation the next done report would be deduped against the stale one just rejected.
-        # The routing round does not move here, so this generation cannot be `attempt_round`.
-        record.report_generation += 1
-        # Nobody adjudicated this round: it was opened by the bounce, not an observer. The decision
-        # that opened the previous one goes with it, or the document names a review this is not about.
-        record.report_decision = ""
-        record.report_protocol_prerequisites = ()
-        _reset_wait(record, "worker")
-        _reset_wait(record, "review")
-        moved = self.reader.show(ref)
-        failure = self._worker_relaunch_intent(payload, records, ref, record, action="stale-done-rework")
-        if failure is not None:
-            return _launch_intent_unwritable(
-                step="advance",
-                ref=ref,
-                attempt_id=record.attempt_id or attempt_id,
-                role=WORKER_ROLE,
-                reason=failure,
-            )
-        launched, failed = self._bring_up_worker_head(
-            moved,
-            record,
-            records,
-            payload,
-            attempt_id,
-            step="advance",
-            stage=STAGE_REWORK,
-            blocked_reason="stale-result rework bring-up failed",
-            blocked_action="stale-done-rework-blocked",
-        )
-        if launched is None:
-            assert failed is not None
-            return failed
-        _record_worker_delivery_evidence(record, launched.delivery_evidence)
-        record.state = "claimed"
-        # A rejected done report earns no verdict, so this stays the same round.
-        self.record_worker_routing(moved, record, launched.run)
-        _clear_launch_intent(record)
-        record.worker_started_at = record.worker_progress_at = time.time()
-        records[ref] = record
-        self.save_records(payload, records)
-        return {
-            "status": "ok",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": "stale-done-rework",
-        }
+        return None
 
     def _advance_review(
         self,
@@ -2718,10 +1017,19 @@ class DispatcherRuntime:
             )
         # Mechanical gate: a fresh report clears the cheap CI/local gate before the expensive
         # reviewer is spawned. A review already in flight cleared the gate when it launched.
-        if record.state not in ("review_starting", "reviewing") and record.gate_state != "green":
+        # A research/infra card has no candidate, so it has no mechanical gate at all.
+        if (
+            has_candidate(task)
+            and record.state not in ("review_starting", "reviewing")
+            and record.gate_state != "green"
+        ):
             gated = self._run_gate(task, record, records, payload, attempt_id)
             if gated is not None:
                 return gated
+        if not review_required(task) and record.state not in ("review_starting", "reviewing"):
+            # `review: skipped`: no reviewer for any kind. The accepted report takes the path a green
+            # verdict takes, which for a code card still re-reads the gate and merges on release.
+            return self._park_green_verdict(task, record, records, payload, attempt_id, reviewed=False)
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
@@ -2920,7 +1228,8 @@ class DispatcherRuntime:
                 # The confirmed boundary: ask once for the report before anything
                 # destructive, exactly as the idle ladder did -- but only when the
                 # episode itself says the head is stalled.
-                prompted, reason = self._prompt_worker_report(
+                prompted, reason = _prompt_worker_report(
+                    self,
                     task, record, records, payload, attempt_id, trigger=reason
                 )
                 if prompted is not None:
@@ -2942,7 +1251,8 @@ class DispatcherRuntime:
             # lost turn recovers conversationally instead of destructively.
             suspicion_basis = episode.reason or "strong quiet past the suspect threshold"
             if kind == "worker":
-                prompted, trigger = self._prompt_worker_report(
+                prompted, trigger = _prompt_worker_report(
+                    self,
                     task,
                     record,
                     records,
@@ -3773,94 +2083,6 @@ class DispatcherRuntime:
         )
         return episode
 
-    def _prompt_worker_report(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        trigger: str,
-    ) -> tuple[dict[str, Any] | None, str]:
-        """Spend this round's one report prompt on a confirmed-idle worker, or decline to.
-
-        Hands back the tick's outcome and the trigger the caller carries on with. A `None` outcome
-        means the watchdog carries on into its stop-and-replace path.
-
-        The order is the durability contract: intent on disk, then the send, then the confirmation. A
-        tick that dies in the middle leaves an intent that reads as spent, which is what stops a
-        restart from typing the same prompt twice.
-        """
-        ref = task["ref"]
-        nudge = record.worker_report_nudge
-        generation = record.report_generation
-        if nudge.spent(generation):
-            return None, trigger
-        if not self.host.worker_addressable(record):
-            return None, trigger
-        nudge.begin(generation, time.time())
-        records[ref] = record
-        self.save_records(payload, records)
-        try:
-            self.host.prompt_worker_report(task, record)
-        except HostError as exc:
-            _record_worker_delivery_evidence(record, exc, failure=True)
-            records[ref] = record
-            self.save_records(payload, records)
-            return None, f"{trigger}, and the report prompt was refused: {scrub_host_output(str(exc))}"
-        nudge.confirm()
-        # The prompted head owns a fresh idle window AND a fresh stall episode: charging it
-        # with the episode that produced the prompt would escalate on the next tick before
-        # the worker could have answered. The episode restarts its quiet reference at now,
-        # keeping the run identity and history, so the ladder must re-earn suspicion from
-        # the moment the worker was actually asked. That restart is ``quiet_since``, not
-        # ``started_at`` alone: the reducer measures quiet from the LATER of the last
-        # observed progress and the last restart, so for an episode that ever saw the
-        # provider advance, rewriting only ``started_at`` bought the head no grace at all
-        # and the next tick re-confirmed immediately -- removing the one conversational
-        # rung that stands between a quiet head and a respawn (secretary-1543). The
-        # progress history itself is left alone: an operator still reads when this head
-        # last actually moved.
-        _reset_idle(record, "worker")
-        episode = record.worker_vitality_episode
-        if episode is not None:
-            record.worker_vitality_episode = replace(
-                episode,
-                verdict=VitalityVerdict.HEALTHY_QUIET,
-                suspected_since=0.0,
-                confirmed_since=0.0,
-                started_at=time.time(),
-                quiet_since=time.time(),
-                updated_at=time.time(),
-                reason="report prompt delivered; the quiet clock restarts here",
-            )
-        records[ref] = record
-        self.save_records(payload, records)
-        # Persisted before the comment: a raising writer must not leave the prompt unrecorded.
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body=(
-                f"Dispatcher wait watchdog: {trigger}. The worker head was asked once to run the "
-                f"report command for generation {generation}. The round, its TASK.md and its owner "
-                "are unchanged. Another idle episode in this round stops the head instead."
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "worker-report-prompt", ref, str(generation)
-            ),
-        )
-        return {
-            # Degraded, not ok: a card whose worker had to be reminded is not moving on its own.
-            "status": "degraded",
-            "step": "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": "worker-report-prompted",
-            "reason": trigger,
-        }, trigger
-
     def _trigger_wait_watchdog(
         self,
         task,
@@ -3962,7 +2184,7 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            failure = self._worker_relaunch_intent(payload, records, ref, record, action="worker-respawn")
+            failure = _write_worker_relaunch_intent(self, payload, records, ref, record, action="worker-respawn")
             if failure is not None:
                 return _launch_intent_unwritable(
                     step=step,
@@ -3971,7 +2193,7 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
-            launched, failed = self._bring_up_worker_head(
+            launched, failed = _bring_up_worker_head(self, 
                 task,
                 record,
                 records,
@@ -4198,7 +2420,7 @@ class DispatcherRuntime:
         record.gate_state = "green"
         record.gate_pending_since = 0.0
         self._reset_infrastructure_reruns(record)
-        record.gate_attestation = accepted.persisted_payload()
+        record.gate_attestation = accepted.receipt if accepted.receipt is not None else {}
         records[ref] = record
         self.save_records(payload, records)
         if accepted.receipt is not None and stage in {"assessment", "release"}:
@@ -4308,20 +2530,14 @@ class DispatcherRuntime:
                 result,
                 phase=phase,
             )
-        current_sha = self.host.head_commit(record)
-        preserve_stale_no_diff_retry = bool(
-            result.failure_reason == "workflow-dispatch-head-sha-mismatch"
-            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
-        )
-        record.rejected_sha = current_sha
+        record.rejected_sha = self.host.head_commit(record)
         # `publication` is carried through instead of flattened to `substantive`: the candidate was
         # never offered to CI, and the record has to say so where a later tick reads the class.
         record.rejected_failure_class = (
             "publication" if result.failure_class == "publication" else "substantive"
         )
         record.rejected_failure_reason = result.failure_reason
-        if not preserve_stale_no_diff_retry:
-            record.rejected_done_reports = 0
+        record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         # A GateResult built without `fingerprint` (the review-freeze drift check) still gets a
@@ -4693,17 +2909,12 @@ class DispatcherRuntime:
         # worker an adjudication of review findings its code has already answered.
         record.report_decision = continuation.decision_body
         record.report_protocol_prerequisites = continuation.decision_protocol_prerequisites
-        current_sha = self.host.head_commit(record)
-        reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
-            task, record, current_sha, observer_rework=continuation.decision == "rework"
-        )
-        if not reuse_report_only_gate:
-            record.gate_state = ""
-            record.gate_pending_since = 0.0
-            record.gate_attestation = {}
-            record.gate_transport_failures = 0
-            record.gate_transport_error = ""
-            self._reset_infrastructure_reruns(record)
+        record.gate_state = ""
+        record.gate_pending_since = 0.0
+        record.gate_attestation = {}
+        record.gate_transport_failures = 0
+        record.gate_transport_error = ""
+        self._reset_infrastructure_reruns(record)
         # The judged round ends here: a stale review pin would refuse the rework's merge.
         record.review_commit = ""
         _reset_wait(record, "review")
@@ -5242,7 +3453,7 @@ class DispatcherRuntime:
         # transition after a failed intent write keeps In progress from having no durable worker debt.
         held_transition = replace(record.worker_continuation)
         record.worker_continuation.clear()
-        failure = self._worker_relaunch_intent(
+        failure = _write_worker_relaunch_intent(self,
             payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
         )
         if failure is not None:
@@ -5254,7 +3465,7 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        launched, failed = self._bring_up_worker_head(
+        launched, failed = _bring_up_worker_head(self, 
             task,
             record,
             records,
@@ -5737,12 +3948,88 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        *,
+        reviewed: bool = True,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it."""
+        """A green review verdict, or an accepted report with review skipped, parks the card.
+
+        It does not merge it. A card without a candidate has no gate to re-read and nothing to merge,
+        so it goes straight to the park or, with nobody to decide, to the release.
+        """
         ref = task["ref"]
-        # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
-        self._record_verdict_routing(ref, record, "green")
-        self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+        if reviewed:
+            # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
+            self._record_verdict_routing(ref, record, "green")
+            self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+        if has_candidate(task):
+            gated = self._merge_ready_for_park(task, record, records, payload, attempt_id)
+            if gated is not None:
+                return gated
+        else:
+            # Before the park or the release: the observer decides with the report in knowledge.
+            refused = self._transfer_research_report(
+                task, record, records, payload, attempt_id, step="review"
+            )
+            if refused is not None:
+                return refused
+        parks = self._parks_for_decision(task)
+        if not parks:
+            # No observer to release it, so the green verdict merges on its own tick.
+            return self._release_effect(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                move_reason="review:green" if reviewed else "report:done, review skipped",
+                verdict="green" if reviewed else "missing",
+            )
+        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
+        # its commit is read first, because ending the reviewer forgets the commit it judged.
+        pinned = (record.review_commit or self.host.head_commit(record)) if has_candidate(task) else ""
+        if reviewed:
+            unconfirmed = self._end_review_pane_confirmed(
+                record,
+                records,
+                payload,
+                ref,
+                step="review",
+                attempt_id=attempt_id,
+                initiator=STOPPED_BY_REVIEW_VERDICT,
+            )
+            if unconfirmed is not None:
+                return unconfirmed
+        if not has_candidate(task):
+            waits = "there is no candidate to merge, and Done waits"
+        elif reviewed:
+            waits = "the mechanical gate is green and the merge waits"
+        else:
+            waits = "the mechanical gate is green, no reviewer runs, and the merge waits"
+        return self._begin_park(
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            verdict_outcome="green" if reviewed else "missing",
+            reviewed_commit=pinned,
+            move_reason=(
+                f"{'review:green' if reviewed else 'report:done, review skipped'}. The card is parked "
+                f"in Assessment: {waits} for a release, rework or reslice decision."
+            ),
+        )
+
+    def _merge_ready_for_park(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Re-read the merge gate before a candidate is parked or released; None when it is green."""
+        ref = task["ref"]
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             retry = self._gate_transport_retry(
@@ -5834,55 +4121,14 @@ class DispatcherRuntime:
                 step="review",
                 outcome="merge gate result unavailable",
             )
-        parks = self._parks_for_decision(task)
-        blocked = self._accept_green_gate(
+        return self._accept_green_gate(
             task,
             record,
             records,
             payload,
             attempt_id,
             result,
-            stage="assessment" if parks else "release",
-        )
-        if blocked is not None:
-            return blocked
-        if not parks:
-            # No observer to release it, so the green verdict merges on its own tick.
-            return self._release_effect(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="review",
-                move_reason="review:green",
-            )
-        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
-        # its commit is read first, because ending the reviewer forgets the commit it judged.
-        reviewed = record.review_commit or self.host.head_commit(record)
-        unconfirmed = self._end_review_pane_confirmed(
-            record,
-            records,
-            payload,
-            ref,
-            step="review",
-            attempt_id=attempt_id,
-            initiator=STOPPED_BY_REVIEW_VERDICT,
-        )
-        if unconfirmed is not None:
-            return unconfirmed
-        return self._begin_park(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            verdict_outcome="green",
-            reviewed_commit=reviewed,
-            move_reason=(
-                "review:green. The card is parked in Assessment: the mechanical gate is green "
-                "and the merge waits for a release, rework or reslice decision."
-            ),
+            stage="assessment" if self._parks_for_decision(task) else "release",
         )
 
     def _begin_park(
@@ -6231,6 +4477,26 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Perform a release decision: re-check the mechanical state, then merge."""
         ref = task["ref"]
+        if not has_candidate(task):
+            # Nothing to re-check or merge: the release goes to the completion evidence check. A
+            # research card parked by a red verdict reaches here without a transfer, and one parked
+            # green has already made it, which this repeats as a no-op.
+            refused = self._transfer_research_report(
+                task, record, records, payload, attempt_id, step="assessment"
+            )
+            if refused is not None:
+                return refused
+            return self._release_effect(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="assessment",
+                move_reason=f"Observer decision: release. {reason}".strip(),
+                decision="release",
+                verdict=_released_verdict(record),
+            )
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             # A release that could not ask the gate is not a release that was refused.
@@ -6321,6 +4587,7 @@ class DispatcherRuntime:
             step="assessment",
             move_reason=f"Observer decision: release. {reason}".strip(),
             decision="release",
+            verdict=_released_verdict(record),
         )
 
     def _release_effect(
@@ -6334,25 +4601,34 @@ class DispatcherRuntime:
         step: str,
         move_reason: str,
         decision: str = "",
+        verdict: str = "green",
     ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done."""
+        """Merge the reviewed branch, tear the round down and move the card to Done.
+
+        This is the only way a card reaches Done, so the completion evidence check sits here: every
+        release, automatic or decided, first taken or replayed after a lost tick, goes through it.
+        """
         ref = task["ref"]
-        try:
-            self.host.complete_green(task, record)
-        except HostError as exc:
-            # A rejected merge must land the card in Blocked rather than escape the tick: an
-            # escaping error leaves the verdict standing and every later tick retries the merge.
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="merge-blocked",
-                reason=f"merge failed: {scrub_host_output(str(exc))}",
-                step=step,
-                outcome="merge failed",
-            )
+        if has_candidate(task):
+            try:
+                self.host.complete_green(task, record)
+            except HostError as exc:
+                # A rejected merge must land the card in Blocked rather than escape the tick: an
+                # escaping error leaves the verdict standing and every later tick retries the merge.
+                return self._block_merge_path(
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    action="merge-blocked",
+                    reason=f"merge failed: {scrub_host_output(str(exc))}",
+                    step=step,
+                    outcome="merge failed",
+                )
+        blocked = self._require_completion_evidence(task, record, records, payload, attempt_id, step=step)
+        if blocked is not None:
+            return blocked
         try:
             self.host.teardown(record)
         except HostError as exc:
@@ -6379,11 +4655,50 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
             terminal_state="done",
             disposition="release",
-            verdict="green",
+            verdict=verdict,
         )
         records.pop(ref, None)
         self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+
+    def _require_completion_evidence(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Completion evidence for kind: the one check between a release and Done.
+
+        A code card's evidence is the merge `complete_green` has just made. A research or infra card
+        is read fresh from the board, because its evidence is a marked comment written since the
+        tick's snapshot; without it the card is Blocked, naming the missing marker, and not torn down.
+        """
+        if has_candidate(task):
+            return None
+        missing = missing_completion_evidence(self.reader.show(task["ref"]))
+        if not missing:
+            return None
+        outcome = self._block_merge_path(
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            action="completion-evidence-missing",
+            reason=(
+                f"completion evidence missing: this {task.get('type')} card has no `[{missing}]` "
+                "record, so it cannot be Done. The workspace is kept; see docs/PROTOCOLS.md, "
+                '"Card kinds, live impact and the review choice".'
+            ),
+            step=step,
+            outcome="completion evidence missing",
+        )
+        outcome["missing_evidence"] = missing
+        return outcome
 
     def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
@@ -6412,16 +4727,14 @@ class DispatcherRuntime:
         head: str = "",
         workspace: str = "",
         failover: bool = False,
-    ) -> dict[str, Any]:
-        """The launch snapshot for a head the runtime has no launcher record of, or a marked
-        minimal one when its profile can no longer be read.
-        """
+    ) -> HeadRun:
+        """The typed launch snapshot for a head with no launcher record, or a marked minimal one."""
         try:
             return self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
-            ).to_json()
+            )
         except (HostError, AttributeError, KeyError, TypeError):
-            return HeadRun(role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN).to_json()
+            return HeadRun(role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN)
 
     def _journal_round(self, ref: str) -> int:
         """The last worker round the journal holds for this card. Survives a lost dispatcher record,
@@ -6437,7 +4750,10 @@ class DispatcherRuntime:
         record.review_run = {}
 
     def record_worker_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        run: HeadRun | dict[str, Any] | None = None,
     ) -> None:
         """Record the worker head this bring-up just put up, as launched."""
         ref = task["ref"]
@@ -6450,14 +4766,17 @@ class DispatcherRuntime:
             workspace=record.workspace,
             failover=bool(record.preferred_head),
         )
-        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.worker_head_run)
+        snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.worker_head_run)
         if record.worker_run and _run_key(record.worker_run) == _run_key(snapshot):
-            snapshot = record.worker_run
+            snapshot = record.worker_run.snapshot or snapshot
         record.worker_run = snapshot
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
     def record_review_routing(
-        self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        run: HeadRun | dict[str, Any] | None = None,
     ) -> None:
         """Record the reviewer head this bring-up just put up, as launched."""
         ref = task["ref"]
@@ -6470,9 +4789,9 @@ class DispatcherRuntime:
             workspace=record.workspace,
             failover=bool(record.preferred_review_head),
         )
-        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.review_head_run)
+        snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.review_head_run)
         if record.review_run and _run_key(record.review_run) == _run_key(snapshot):
-            snapshot = record.review_run
+            snapshot = record.review_run.snapshot or snapshot
         record.review_run = snapshot
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
@@ -6508,10 +4827,14 @@ class DispatcherRuntime:
                     str(head.get("role") or ""): head for head in recorded_heads if isinstance(head, dict)
                 }
                 for head in heads:
-                    recorded = by_role.get(str(head.get("role") or ""))
-                    if recorded is not None:
-                        head.clear()
-                        head.update(recorded)
+                    role = str(head.get("role") or "")
+                    recorded = by_role.get(role)
+                    if recorded is None:
+                        continue
+                    if role == WORKER:
+                        record.worker_run = recorded
+                    elif role == REVIEWER:
+                        record.review_run = recorded
             return
         self.writer.routing(
             role="dispatcher",
@@ -6558,24 +4881,23 @@ class DispatcherRuntime:
         if not record.attempt_id or record.attempt_round < 1:
             return None
         context = self._outcome_round_context(reference, record)
-        worker_context = context.get("worker", {})
-        attempt_id = str(worker_context.get("attempt_id") or record.attempt_id or "")
-        attempt = worker_context.get("attempt", record.attempt_round)
-        generation = worker_context.get("report_generation", record.report_generation)
-        if (
-            not attempt_id
-            or not isinstance(attempt, int)
-            or attempt < 1
-            or not isinstance(generation, int)
-            or generation < 1
-        ):
-            return None
-        reviewed = bool(context.get("review")) or bool(record.review_run)
-        revision = context.get("report", {}).get(
-            "specification_revision", worker_context.get("specification_revision")
+        worker_context = context.get("worker")
+        attempt_id = (worker_context.attempt_id if worker_context is not None else record.attempt_id) or ""
+        attempt = worker_context.attempt if worker_context is not None else record.attempt_round
+        generation = (
+            worker_context.report_generation if worker_context is not None else record.report_generation
         )
-        if revision is not None and not isinstance(revision, str):
-            revision = None
+        if not attempt_id or attempt < 1 or generation < 1:
+            return None
+        reviewed = "review" in context or bool(record.review_run)
+        report_context = context.get("report")
+        revision = (
+            report_context.specification_revision
+            if report_context is not None
+            else worker_context.specification_revision
+            if worker_context is not None
+            else None
+        )
         # Select requiredness before source lookup. The dispatcher persists
         # this typed path when it accepts the report; it never consults the
         # handoff being validated, so a missing handoff remains incomplete.
@@ -6637,7 +4959,7 @@ class DispatcherRuntime:
         reference: str,
         *,
         revision: str | None,
-        context: dict[str, dict[str, Any]],
+        context: dict[str, OutcomeRoundContext],
         report_required: bool,
         verdict_required: bool,
         decision_required: bool,
@@ -6662,11 +4984,10 @@ class DispatcherRuntime:
         def one(name: str, phase: str, kind: str, marker: str) -> str:
             if canon is None:
                 return f"attempt_outcome_lineage_missing_{name}"
-            handoff = context.get(phase, {})
-            event_id = handoff.get("source_event_id")
-            if not isinstance(event_id, str) or not event_id:
+            handoff = context.get(phase)
+            if handoff is None or not handoff.source_event_id:
                 return f"attempt_outcome_lineage_missing_{name}"
-            event = events.get(event_id)
+            event = events.get(handoff.source_event_id)
             if event is None:
                 return f"attempt_outcome_lineage_dangling_{name}"
             data = event.data
@@ -6676,21 +4997,30 @@ class DispatcherRuntime:
                 return f"attempt_outcome_lineage_legacy_{name}"
             if data.get("specification_revision") != revision:
                 return f"attempt_outcome_lineage_incompatible_{name}"
-            if phase == "decision" and data.get("assessment_visit") != handoff.get("assessment_visit"):
+            if phase == "decision" and data.get("assessment_visit") != handoff.assessment_visit:
                 return f"attempt_outcome_lineage_incompatible_{name}"
             source[name] = event.event_id
             return ""
 
+        report_context = context.get("report")
+        verdict_context = context.get("verdict")
+        decision_context = context.get("decision")
         diagnostics = [
-            one("report", "report", "card.reported", str(context.get("report", {}).get("marker") or ""))
-            if report_required
-            else "",
-            one("verdict", "verdict", "card.verdict", str(context.get("verdict", {}).get("marker") or ""))
-            if verdict_required
-            else "",
-            one("decision", "decision", "card.decided", str(context.get("decision", {}).get("marker") or ""))
-            if decision_required
-            else "",
+            one(
+                "report", "report", "card.reported",
+                report_context.marker if report_context is not None else "",
+            )
+            if report_required else "",
+            one(
+                "verdict", "verdict", "card.verdict",
+                verdict_context.marker if verdict_context is not None else "",
+            )
+            if verdict_required else "",
+            one(
+                "decision", "decision", "card.decided",
+                decision_context.marker if decision_context is not None else "",
+            )
+            if decision_required else "",
         ]
         return source, next((diagnostic for diagnostic in diagnostics if diagnostic), "")
 
@@ -6722,8 +5052,8 @@ class DispatcherRuntime:
         if not reference or not record.attempt_id or record.attempt_round < 1 or record.report_generation < 1:
             return
         existing_context = self._outcome_round_context(reference, record)
-        worker = existing_context.get("worker", {})
-        round_id = str(worker.get("round_id") or "")
+        worker = existing_context.get("worker")
+        round_id = worker.round_id if worker is not None else ""
         if phase == "worker":
             context_request = self._outcome_round_context_request_id(record, reference, phase)
             round_id = context_request
@@ -6751,36 +5081,43 @@ class DispatcherRuntime:
                 return
         revision = source_revision if phase != "worker" else None
         if phase != "worker" and not freeze_source_revision and source_revision is None:
-            revision = worker.get("specification_revision") if worker else None
+            revision = worker.specification_revision if worker is not None else None
         if phase == "worker":
             revision = (
                 specification_revision(self.audit.events(reference), str(task.get("description") or ""))
                 or None
             )
+        try:
+            context = OutcomeRoundContext(
+                version=2,
+                phase=OutcomeRoundPhase(phase),
+                round_id=round_id,
+                attempt_id=(
+                    worker.attempt_id
+                    if phase != "worker" and worker is not None
+                    else record.attempt_id
+                ),
+                attempt=(
+                    worker.attempt
+                    if phase != "worker" and worker is not None
+                    else record.attempt_round
+                ),
+                report_generation=(
+                    worker.report_generation
+                    if phase != "worker" and worker is not None
+                    else record.report_generation
+                ),
+                request_ids=tuple(sorted(request_ids)),
+                assessment_visit=assessment_visit,
+                source_event_id=source_event_id,
+                specification_revision=revision,
+                marker=marker,
+            )
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
         self.writer.outcome_round_context(
-            role="dispatcher",
-            actor=self.owner,
-            reference=reference,
-            request_id=context_request,
-            data={
-                "version": 2,
-                "phase": phase,
-                "round_id": round_id,
-                "attempt_id": worker.get("attempt_id", record.attempt_id)
-                if phase != "worker"
-                else record.attempt_id,
-                "attempt": worker.get("attempt", record.attempt_round)
-                if phase != "worker"
-                else record.attempt_round,
-                "report_generation": worker.get("report_generation", record.report_generation)
-                if phase != "worker"
-                else record.report_generation,
-                "request_ids": sorted(request_ids),
-                "assessment_visit": assessment_visit,
-                "source_event_id": source_event_id,
-                "specification_revision": revision,
-                "marker": marker,
-            },
+            role="dispatcher", actor=self.owner, reference=reference,
+            request_id=context_request, data=context,
         )
 
     def _capture_outcome_source(
@@ -6802,10 +5139,10 @@ class DispatcherRuntime:
         """
         reference = str(task.get("ref") or "")
         context = self._outcome_round_context(reference, record)
-        owner = context.get("worker" if phase == "report" else "review", {})
-        request_ids = owner.get("request_ids") if isinstance(owner, dict) else None
-        if not isinstance(request_ids, list):
+        owner = context.get("worker" if phase == "report" else "review")
+        if owner is None:
             return
+        request_ids = owner.request_ids
         canon = self.writer.board_host.canon
         if canon is None:
             return
@@ -6834,63 +5171,56 @@ class DispatcherRuntime:
         except (OSError, TaskError, ValueError):
             return
 
-    def _outcome_round_context(self, reference: str, record: DispatcherRecord) -> dict[str, dict[str, Any]]:
+    def _outcome_round_context(
+        self, reference: str, record: DispatcherRecord
+    ) -> dict[str, OutcomeRoundContext]:
         """Find one unsettled durable handoff without re-estimating its identity.
 
-        The fast path keeps ordinary dispatch cheap.  Adoption can lose the
+        The fast path keeps ordinary dispatch cheap. Adoption can lose the
         process-local attempt id and report generation, so its fallback uses
         only durable handoffs and excludes rounds already sealed by a lifecycle
-        effect.  It never uses card comments, workspace text, event order or
+        effect. It never uses card comments, workspace text, event order or
         request-id grammar to choose a source.
         """
-        payloads: list[dict[str, Any]] = []
+        payloads: list[OutcomeRoundContext] = []
         for event in self.audit.events(reference, kind="outcome_round_context"):
             payload = (
                 event.get("data")
                 if event.get("record_type") == "board.protocol_event"
                 else event.get("payload")
             )
-            if (
-                isinstance(payload, dict)
-                and payload.get("version") == 2
-                and isinstance(payload.get("round_id"), str)
-            ):
-                payloads.append(payload)
-        workers = [payload for payload in payloads if payload.get("phase") == "worker"]
+            if not isinstance(payload, dict) or payload.get("version") != 2:
+                continue
+            try:
+                payloads.append(OutcomeRoundContext.from_data(payload))
+            except ValueError:
+                continue
+        workers = [payload for payload in payloads if payload.phase is OutcomeRoundPhase.WORKER]
         exact = [
-            payload
-            for payload in workers
-            if payload.get("attempt_id") == record.attempt_id
-            and payload.get("attempt") == record.attempt_round
-            and payload.get("report_generation") == record.report_generation
+            payload for payload in workers
+            if payload.attempt_id == record.attempt_id
+            and payload.attempt == record.attempt_round
+            and payload.report_generation == record.report_generation
         ]
         if len(exact) == 1:
             worker = exact[0]
         else:
             sealed = {
-                (
-                    data.get("attempt_id"),
-                    data.get("attempt"),
-                    data.get("report_generation"),
-                )
+                (data.get("attempt_id"), data.get("attempt"), data.get("report_generation"))
                 for event in self.writer.board_host.canon.events(ref=reference)
                 if isinstance((data := event.data.get("attempt_outcome_owed")), dict)
             }
             unsettled = [
-                payload
-                for payload in workers
-                if (payload.get("attempt_id"), payload.get("attempt"), payload.get("report_generation"))
-                not in sealed
+                payload for payload in workers
+                if (payload.attempt_id, payload.attempt, payload.report_generation) not in sealed
             ]
             if len(unsettled) != 1:
                 return {}
             worker = unsettled[0]
-        round_id = worker["round_id"]
         context = {"worker": worker}
         for payload in payloads:
-            phase = payload.get("phase")
-            if phase in {"review", "report", "verdict", "decision"} and payload.get("round_id") == round_id:
-                context[str(phase)] = payload
+            if payload.phase is not OutcomeRoundPhase.WORKER and payload.round_id == worker.round_id:
+                context[payload.phase.value] = payload
         return context
 
     def _outcome_usage_source(
@@ -7142,12 +5472,11 @@ class DispatcherRuntime:
             # today's `heads.toml` for a head launched hours ago would not.
             snapshot = _usage_fallback_snapshot(journal_role, record, lifecycle, role=role)
         try:
-            snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=lifecycle)
+            run = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=lifecycle)
         except ValueError:
-            # An incomplete launch attestation is not a reason to drop the occurrence: the run
-            # below still reports its own adapter, model and whatever session identity it holds.
-            pass
-        run = HeadRun.from_json(snapshot)
+            # An incomplete launch attestation is not a reason to drop the occurrence: the routing
+            # snapshot still reports its adapter, model and whatever session identity it already held.
+            run = HeadRun.from_json(snapshot)
         # One order, for every provider and every lifecycle path. Projection integrity and causal
         # identity first, because neither depends on what a provider journal says and a phase slot
         # owned by another attempt may not be written whatever that journal would have said.
@@ -7321,32 +5650,6 @@ class DispatcherRuntime:
         return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
 
 
-def runtime_from_args(
-    instance: str, data_dir: str | None, *, host_mode: str, owner: str
-) -> DispatcherRuntime:
-    instance_path = Path(instance)
-    data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
-    # DispatcherRuntime also constructs a SprintReader from this client.
-    # built by the switch (board/backend.py) rather than by naming one backend here.
-    client = board_client(instance_path, serves=(CARD, SPRINT))
-    catalog = InstanceCatalog(instance_path)
-    # The audit follows the client: the same `requests`/`board_events` tables the writer commits
-    # to on PostgreSQL, the file journal on Kanboard. The command host reads the same one, so the
-    # TASK.md feedback selector and the report/verdict waits never disagree about what happened.
-    audit = task_audit_for(client, data)
-    return DispatcherRuntime(
-        TaskReader(client),
-        TaskWriter(client, data_dir=data),
-        audit,
-        data,
-        catalog,
-        CommandHostRuntime(catalog, data, mode=host_mode, audit=audit),
-        owner=owner,
-        checkpoint=CheckpointWriter(data, catalog.instance_dir),
-        checkpoint_push=CheckpointPusher(catalog.instance_dir),
-    )
-
-
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
 
@@ -7375,6 +5678,11 @@ def _retained_worker_busy_deferred(
             f"HeadRun remains owned and the pending delivery retries in {wait}s"
         ),
     }
+
+
+def _released_verdict(record: DispatcherRecord) -> str:
+    """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
+    return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
 
 
 def _merge_terminal_reason(action: str) -> str:

@@ -4,13 +4,8 @@ from __future__ import annotations
 
 import ast
 import inspect
-import os
 import unittest
 from pathlib import Path
-from unittest import mock
-
-from secretary import _env
-from secretary.infra import env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,15 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(
     """
-    __init__.py __main__.py _env.py _fsutil.py _proc.py automations.py backup.py
+    __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
     backup_policy.py backup_retention.py backup_verify.py board_transport.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
-    codex_provider_events.py config.py data.py dispatcher.py dispatcher_commands.py
-    dispatcher_gate.py dispatcher_gate_receipt.py dispatcher_heartbeat.py dispatcher_helpers.py
-    dispatcher_launch.py dispatcher_launcher.py dispatcher_observer.py
-    dispatcher_observer_fence.py dispatcher_pause.py dispatcher_pause_ops.py
-    dispatcher_production.py dispatcher_review.py dispatcher_state.py dispatcher_tui.py
-    dispatcher_types.py dispatcher_watchdog.py dispatcher_worker_lifecycle.py gate.py
+    codex_provider_events.py config.py data.py dispatcher.py
+    gate.py
     head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
     memory_write.py observer_root.py onboarding.py product_issue_commands.py product_issues.py
@@ -49,6 +40,12 @@ LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
 )
 
 
+# The monolith remains the state-machine implementation for now. Only the narrow construction
+# boundary may import it from production code; every other caller must depend on feature modules.
+# This set should become empty when DispatcherRuntime itself moves.
+DISPATCHER_FACADE_IMPORTS = frozenset({("dispatch/bootstrap.py", "secretary.dispatcher")})
+
+
 class SourceLayoutTests(unittest.TestCase):
     def test_test_support_never_imports_a_test_module(self) -> None:
         """Shared fakes are a one-way dependency, not bridges between test modules."""
@@ -64,6 +61,102 @@ class SourceLayoutTests(unittest.TestCase):
     def test_new_secretary_modules_do_not_widen_the_flat_root(self) -> None:
         current = {path.name for path in (ROOT / "src" / "secretary").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
+
+    def test_dispatcher_facade_adds_no_new_product_consumers(self) -> None:
+        package = ROOT / "src" / "secretary"
+        imports: set[tuple[str, str]] = set()
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                module = ""
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "secretary.dispatcher":
+                            imports.add((path.relative_to(package).as_posix(), alias.name))
+                    continue
+                if isinstance(node, ast.ImportFrom):
+                    if node.module == "secretary.dispatcher":
+                        module = node.module
+                    elif node.module == "secretary" and any(
+                        alias.name == "dispatcher" for alias in node.names
+                    ):
+                        module = "secretary.dispatcher"
+                if module:
+                    imports.add((path.relative_to(package).as_posix(), module))
+        self.assertEqual(imports, DISPATCHER_FACADE_IMPORTS)
+
+    def test_dispatcher_claim_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+            encoding="utf-8"
+        )
+        production_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "production.py"
+        ).read_text(encoding="utf-8")
+        for helper in (
+            "_failover_collapse",
+            "_broad_check_contract_verdict",
+            "_sprint_admission_refusal",
+            "_project_git_access",
+            "_write_claim_preflight_block",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        self.assertNotIn("runtime._claim(", production_source)
+
+    def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+            encoding="utf-8"
+        )
+        claim_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "claim.py"
+        ).read_text(encoding="utf-8")
+        worker_launch_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "worker_launch.py"
+        ).read_text(encoding="utf-8")
+        for helper in (
+            "_launch_worker_after_claim",
+            "_worker_launch_failure",
+            "_bring_up_worker_head",
+            "_worker_relaunch_intent",
+            "_resolve_headless_worker",
+            "_relaunch_headless_worker",
+            "_refuse_headless_worker",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        self.assertNotIn("runtime._launch_worker_after_claim(", claim_source)
+        self.assertIn("def launch_worker_after_claim(", worker_launch_source)
+        self.assertIn("def resolve_headless_worker(", worker_launch_source)
+
+    def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        report_source = (ROOT / "src" / "secretary" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
+        for helper in (
+            "_record_infra_completion", "_accept_stale_infrastructure_done",
+            "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"self.{helper}(", dispatcher_source)
+            self.assertNotIn(f"runtime.{helper}(", report_source)
+        runtime_tree = ast.parse(dispatcher_source)
+        advance = next(node for node in ast.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
+        advance_source = ast.get_source_segment(dispatcher_source, advance)
+        self.assertIn("_worker_report_marker(", advance_source)
+        self.assertIn("_handle_worker_report(", advance_source)
+        self.assertNotIn("verify_worker_result(", advance_source)
+        self.assertLess(
+            advance_source.index("_worker_report_marker("),
+            advance_source.index("if continuation.delivery_pending:"),
+        )
+        self.assertLess(
+            advance_source.index("if continuation.delivery_confirmed:"),
+            advance_source.index("_handle_worker_report("),
+        )
+        self.assertLess(
+            advance_source.index("_handle_worker_report("),
+            advance_source.index("self._wait_watchdog("),
+        )
+        for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
+            self.assertIn(f"def {entry}(", report_source)
+        self.assertNotIn("from secretary.dispatcher import", report_source)
 
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
@@ -84,11 +177,6 @@ class SourceLayoutTests(unittest.TestCase):
                 ):
                     imports.add((path.relative_to(package).as_posix(), node.module))
         self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)
-
-    def test_old_environment_import_is_the_same_implementation(self) -> None:
-        self.assertIs(_env.positive_int, env.positive_int)
-        with mock.patch.dict(os.environ, {"COUNT": "7"}):
-            self.assertEqual(env.positive_int("COUNT", 3), 7)
 
 
 # Every place in `secretary` that builds a board client, other than the switch itself, and the
@@ -187,7 +275,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
             "board/kanboard.py",
             "sprints.py",
             "data.py",
-            "dispatcher.py",
+            "dispatch/bootstrap.py",
             "product_issues.py",
         ):
             source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")

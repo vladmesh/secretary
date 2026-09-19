@@ -24,7 +24,7 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
+from secretary.dispatch.state import DispatcherRecord, now_rfc3339
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
@@ -283,7 +283,7 @@ class Issue3e7abdf9LegacyBusyReadinessTests(LegacyPathTests):
         turns into ``worker-launch-deferred``: the card keeps its claim and the identical
         bring-up is retried next tick. No head is stopped and nothing is replaced.
         """
-        from secretary.dispatcher_types import HeadPaneNotReady
+        from secretary.dispatch.types import HeadPaneNotReady
 
         self.start_dispatcher()
         self.host.fail_prepare_error = HeadPaneNotReady(
@@ -344,7 +344,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         unchanged; the retained case is pinned separately in
         ``Issue02fe04d7RetainedWorkerTests``.
         """
-        from secretary.dispatcher_gate import GateResult
+        from secretary.dispatch.gate import GateResult
 
         self.start_dispatcher()
         self.host.gate_results = [
@@ -413,8 +413,8 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         dispatcher is not holding, so the card's retention is cleared before the suspension is
         observed.
         """
-        from secretary.dispatcher_gate import GateResult
-        from secretary.dispatcher_watchdog import suspension_response_window_seconds
+        from secretary.dispatch.gate import GateResult
+        from secretary.dispatch.watchdog import suspension_response_window_seconds
 
         self.start_dispatcher()
         self.host.gate_results = [
@@ -482,7 +482,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         from secretary.dispatch.head_vitality_policy import (
             DEFAULT_DETERMINISTIC_REFUSAL_LIMIT,
         )
-        from secretary.dispatcher_gate import GateResult
+        from secretary.dispatch.gate import GateResult
 
         self.start_dispatcher()
         self.host.gate_results = [GateResult("pending", "CI still running")] * 8
@@ -532,7 +532,7 @@ class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
 
     def run_to_gate_pending(self, pending_ticks: int = 3) -> None:
         """Claim, report done (which retains the worker), and stamp a pending gate."""
-        from secretary.dispatcher_gate import GateResult
+        from secretary.dispatch.gate import GateResult
 
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
@@ -589,7 +589,7 @@ class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
         pinned unchanged by ``test_a_session_that_lost_its_suspension_before_the_red_gate_is
         _replaced_once`` in ``tests/test_dispatcher_launch_intent.py``.
         """
-        from secretary.dispatcher_gate import GateResult
+        from secretary.dispatch.gate import GateResult
 
         self.run_to_gate_pending(pending_ticks=3)
         self.host.worker_status_result = self.stopped_worker_status()

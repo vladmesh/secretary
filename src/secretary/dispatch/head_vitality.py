@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,

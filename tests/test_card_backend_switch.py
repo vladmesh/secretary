@@ -135,8 +135,21 @@ class SwitchRefusalTests(CardBackendEnvironment):
         self.assertIn("mysql", raised.exception.message)
         self.assertIn("kanboard, postgres", raised.exception.message)
 
-    def test_the_default_still_builds_a_kanboard_client_for_every_entity(self) -> None:
+    def test_a_missing_selector_refuses_for_every_entity(self) -> None:
         self._switch(None)
+        from secretary.tasks import KanboardClient
+
+        with mock.patch.object(KanboardClient, "for_instance", return_value="kanboard") as built:
+            for serves in ((backend.CARD,), (backend.SPRINT,), (backend.PRODUCT_ISSUE,)):
+                backend.reset_card_backend()
+                with self.subTest(serves=serves), self.assertRaises(TaskError) as raised:
+                    backend.board_client(Path("/instance"), serves=serves)
+                self.assertEqual(raised.exception.code, "backend_error")
+                self.assertIn("SECRETARY_CARD_BACKEND must be set", raised.exception.message)
+            built.assert_not_called()
+
+    def test_explicit_kanboard_still_builds_a_kanboard_client_for_every_entity(self) -> None:
+        self._switch("kanboard")
         from secretary.tasks import KanboardClient
 
         with mock.patch.object(KanboardClient, "for_instance", return_value="kanboard") as built:

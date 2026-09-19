@@ -14,16 +14,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher_observer_fence
+from secretary.dispatch import observer_fence as dispatcher_observer_fence
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
     InstanceCatalog,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_launch import infrastructure_action
-from secretary.dispatcher_observer import (
+from secretary.dispatch.heartbeat import heartbeat_identity
+from secretary.dispatch.launch import infrastructure_action
+from secretary.dispatch.observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
@@ -48,22 +48,22 @@ from secretary.dispatcher_observer import (
     render_observer_prompt,
     stop_observer_head,
 )
-from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
-from secretary.dispatcher_production import (
+from secretary.dispatch.observer_fence import EVENT_CLEARED, EVENT_FENCED
+from secretary.dispatch.production import (
     _budget_event_type,
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DeliveryEvidence,
     TuiDeliveryError,
     claude_project_dir_name,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import HostError
-from secretary.dispatcher_watchdog import initial_output_stall_seconds
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.types import HostError
+from secretary.dispatch.watchdog import initial_output_stall_seconds
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import (
@@ -3324,7 +3324,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 side_effect=accept_while_ready,
             ),
             mock.patch(
-                "secretary.dispatcher_production._reconcile_sprint_budget",
+                "secretary.dispatch.production._reconcile_sprint_budget",
                 return_value=[],
             ),
         ):
@@ -3761,18 +3761,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {"ref": "claimable", "sprint": None, "type": "code", "project": "three"},
         ]
         with (
-            mock.patch("secretary.dispatcher_production._production_tasks", side_effect=[[], ready]),
+            mock.patch("secretary.dispatch.production._production_tasks", side_effect=[[], ready]),
             mock.patch.object(
                 self.runtime.sprints,
                 "show",
                 side_effect=TaskError("backend_error", "sprint board is down", 1),
             ) as show,
-            mock.patch.object(self.runtime, "_claim", return_value={"action": "claimed"}) as claim,
+            mock.patch(
+                "secretary.dispatch.production.claim_ready_task",
+                return_value={"action": "claimed"},
+            ) as claim,
         ):
             result = _production_claim_ready(self.runtime, {}, {})
 
         self.assertEqual(show.call_count, 1)
-        self.assertEqual(claim.call_args.args[0]["ref"], "claimable")
+        self.assertIs(claim.call_args.args[0], self.runtime)
+        self.assertEqual(claim.call_args.args[1]["ref"], "claimable")
         self.assertEqual([item["ref"] for item in result["skipped_ready"]], ["broken-1", "broken-2"])
 
     def test_unreadable_sprint_board_never_stops_a_live_head(self) -> None:

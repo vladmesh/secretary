@@ -7,7 +7,7 @@ import functools
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +19,43 @@ from secretary.board.backend import (
     entity_id,
     entity_number,
     sprint_reference_number,
+)
+from secretary.board.models import SprintState
+from secretary.board.roles import Role
+from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
+from secretary.board.sprint_close import (
+    SprintCloseConflict,
+    SprintCloseDecisions,
+    SprintCloseIntent,
+    SprintCloseoutPlan,
+    SprintCloseSnapshot,
+    SprintCloseTargets,
+)
+from secretary.board.sprint_read import (
+    BUDGET_EVENT_TYPES,
+    BUDGET_RECORDED_EVENT_TYPES,
+    BUDGET_UNCHARGED_FIELD,
+    RESUME_FIELDS,
+    SprintBudget,
+    SprintReadMetadata,
+    SprintResume,
+    SprintSourceAudit,
+    sprint_string_list,
+)
+from secretary.board.sprint_read import (
+    BUDGET_UNCHARGED_EVENT_TYPES as BUDGET_UNCHARGED_EVENT_TYPES,
+)
+from secretary.board.sprint_read import (
+    BUDGET_UNCHARGED_INFRASTRUCTURE as BUDGET_UNCHARGED_INFRASTRUCTURE,
+)
+from secretary.board.sprint_read import (
+    budget_thresholds as _read_budget_thresholds,
+)
+from secretary.board.sprint_write import (
+    SprintCreateIntent,
+    SprintMutationReceipt,
+    SprintReopenIntent,
+    SprintWriteSnapshot,
 )
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -68,36 +105,10 @@ SPRINT_METADATA = {
     "sprint_observer",
     *EXECUTOR_FIELDS.values(),
 }
-SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
-# Charged restart types contribute to total and thresholds.
-BUDGET_EVENT_TYPES = (
-    "red_review",
-    "blocked",
-    "red_ci",
-    "preempt",
-    "recreated_task",
-    "hotfix",
-)
-# Infrastructure bring-up failures are visible but never spend restart budget.
-BUDGET_UNCHARGED_INFRASTRUCTURE = "infrastructure_blocked"
-BUDGET_UNCHARGED_EVENT_TYPES = (BUDGET_UNCHARGED_INFRASTRUCTURE,)
-BUDGET_RECORDED_EVENT_TYPES = BUDGET_EVENT_TYPES + BUDGET_UNCHARGED_EVENT_TYPES
-# Uncharged counts stay outside computed sprint_budget metadata.
-BUDGET_UNCHARGED_FIELD = "sprint_budget_uncharged"
-DEFAULT_BUDGET_SIGNAL = 3
-DEFAULT_BUDGET_HARD = 6
 DEFAULT_OPEN_SPRINT_LIMIT = 1
 MAX_OPEN_SPRINT_LIMIT = 2
 # Observer freshness is based on card transitions, not status-read time.
 RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
-RESUME_FIELDS = (
-    "selected_step",
-    "selected_why",
-    "rejected_alternatives",
-    "current_task",
-    "dod_state",
-    "next_safe_step",
-)
 _GUARD_INDEX = "sprints/active-repositories.json"
 # Version 1 indexes are rebuilt: guards key by project, not repository path.
 _GUARD_INDEX_VERSION = 2
@@ -109,34 +120,26 @@ SPRINT_CLOSED = "closed"
 #: is its own step: the committed event under the derived request id is the only proof the document
 #: was written, and a retry of the close reads it rather than the repository.
 SPRINT_CLOSEOUT = "closeout_written"
-SPRINT_STATUSES = {"open", "closed", "stopped"}
+SPRINT_STATUSES = {state.value for state in SprintState}
 # Terminal sprint states reject semantic writes, so their resume freshness is stable.
-SPRINT_TERMINAL_STATUSES = {"closed", "stopped"}
+SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
 # A compensated refused create holds nothing and needs no pending repair.
 _ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
 
 def active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
     """Return the local index of projects reserved by open sprints."""
-    return _read_guard_index(Path(data_dir) / _GUARD_INDEX) or {}
+    index = _read_guard_index(Path(data_dir) / _GUARD_INDEX)
+    return index.to_projects_document() if index is not None else {}
 
 
-def _read_guard_index(path: Path) -> dict[str, list[str]] | None:
-    """Return the index, or None when it is absent, unreadable or of an older version."""
+def _read_guard_index(path: Path) -> SprintReservationIndex | None:
+    """Return the typed index, or None when it is absent, unreadable or of an older version."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("version") != _GUARD_INDEX_VERSION:
-        return None
-    projects = raw.get("projects")
-    if not isinstance(projects, dict):
-        return None
-    return {
-        str(project): sorted({str(ref) for ref in refs if str(ref)})
-        for project, refs in projects.items()
-        if isinstance(refs, list) and str(project)
-    }
+    return SprintReservationIndex.from_document(raw, version=_GUARD_INDEX_VERSION)
 
 
 def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
@@ -159,7 +162,7 @@ def require_active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]
             f"the reserved-project index {_GUARD_INDEX} is missing, unreadable or of another version",
             1,
         )
-    return index
+    return index.to_projects_document()
 
 
 def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
@@ -169,43 +172,24 @@ def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
 
 
 def _replace_active_sprint_projects(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
-    projects: dict[str, list[str]] = {}
-    for sprint in sprints:
-        if sprint.get("status") != "open":
-            continue
-        reference = str(sprint.get("ref") or "")
-        if not reference:
-            continue
-        for project in sprint.get("reservations") or []:
-            name = str(project).strip()
-            if name:
-                projects[name] = sorted(set(projects.get(name, []) + [reference]))
-    _write_guard_index(data_dir, projects)
+    admissions = [SprintAdmission.from_document(sprint) for sprint in sprints]
+    _write_guard_index(data_dir, SprintReservationIndex.from_sprints(admissions))
 
 
-def update_active_sprint_projects(data_dir: str | Path, sprint: dict[str, Any]) -> None:
+def update_active_sprint_projects(data_dir: str | Path, sprint: SprintAdmission | dict[str, Any]) -> None:
     """Update one sprint's entries in the local reserved-project index."""
     with _sprint_guard_index_lock(data_dir):
         path = Path(data_dir) / _GUARD_INDEX
-        projects = _read_guard_index(path)
-        if projects is None and path.exists():
+        index = _read_guard_index(path)
+        if index is None and path.exists():
             # Rebuild stale index key spaces from the board.
             path.unlink()
             return
-        projects = projects or {}
-        reference = str(sprint.get("ref") or "")
-        for project in list(projects):
-            refs = [ref for ref in projects[project] if ref != reference]
-            if refs:
-                projects[project] = refs
-            else:
-                projects.pop(project)
-        if reference and sprint.get("status") == "open":
-            for project in sprint.get("reservations") or []:
-                name = str(project).strip()
-                if name:
-                    projects[name] = sorted(set(projects.get(name, []) + [reference]))
-        _write_guard_index(data_dir, projects)
+        admission = sprint if isinstance(sprint, SprintAdmission) else SprintAdmission.from_document(sprint)
+        index = (index or SprintReservationIndex()).without_sprint(admission.ref)
+        if admission.is_open:
+            index = index.with_sprint(admission)
+        _write_guard_index(data_dir, index)
 
 
 @contextmanager
@@ -237,13 +221,13 @@ def _exclusive_lock(path: Path):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> None:
+def _write_guard_index(data_dir: str | Path, index: SprintReservationIndex) -> None:
     path = Path(data_dir) / _GUARD_INDEX
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(
-            {"version": _GUARD_INDEX_VERSION, "projects": projects},
+            index.to_document(version=_GUARD_INDEX_VERSION),
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -254,13 +238,10 @@ def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> 
 
 def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
     """Read installation budget limits, retaining safe defaults for old installations."""
-    raw = (config or {}).get("sprint_budget") if isinstance(config, dict) else {}
-    raw = raw if isinstance(raw, dict) else {}
-    signal = _positive_int(raw.get("signal")) or DEFAULT_BUDGET_SIGNAL
-    hard = _positive_int(raw.get("hard")) or DEFAULT_BUDGET_HARD
-    if hard < signal:
-        raise TaskError("validation", "sprint budget hard threshold must not be below signal threshold", 2)
-    return {"signal": signal, "hard": hard}
+    try:
+        return _read_budget_thresholds(config)
+    except ValueError as exc:
+        raise TaskError("validation", str(exc), 2) from None
 
 
 def open_sprint_limit(config: dict[str, Any] | None = None) -> int:
@@ -312,17 +293,23 @@ def open_sprint_admission_error(rows: list[dict[str, Any]], *, limit: int) -> st
     A whole set is judged by admitting it one row at a time, in reference order, against the rows
     already accepted: an export must not be a way to arrive at a pair `create` would have refused.
     """
-    admitted: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda row: str(row.get("ref") or "")):
+    admissions = [SprintAdmission.from_document(row) for row in rows]
+    admitted: list[SprintAdmission] = []
+    for row in sorted(admissions, key=lambda row: row.ref):
         try:
             _refuse_open_sprint(row, admitted, limit=limit)
         except TaskError as exc:
-            return f"{row.get('ref') or '?'}: {exc.message}"
+            return f"{row.ref or '?'}: {exc.message}"
         admitted.append(row)
     return None
 
 
-def _refuse_open_sprint(candidate: dict[str, Any], others: list[dict[str, Any]], *, limit: int) -> None:
+def _refuse_open_sprint(
+    candidate: SprintAdmission,
+    others: list[SprintAdmission],
+    *,
+    limit: int,
+) -> None:
     """Refuse a sprint this installation has no room, or no disjoint room, for.
 
     Every collision the caller can act on is reported before the generic count refusal, because a
@@ -330,18 +317,15 @@ def _refuse_open_sprint(candidate: dict[str, Any], others: list[dict[str, Any]],
     none of them.
     """
     saturated = len(others) >= limit
-    _refuse_shared_reservations(
-        [str(project) for project in candidate.get("reservations") or []],
-        others,
-    )
+    _refuse_shared_reservations(candidate.reservations, others)
     if limit > DEFAULT_OPEN_SPRINT_LIMIT:
         _refuse_shared_resources(candidate, others)
     if saturated:
         raise _open_sprint_count_error(others, limit)
 
 
-def _open_sprint_count_error(others: list[dict[str, Any]], limit: int) -> TaskError:
-    refs = ", ".join(sorted(str(sprint["ref"]) for sprint in others))
+def _open_sprint_count_error(others: list[SprintAdmission], limit: int) -> TaskError:
+    refs = ", ".join(sorted(sprint.ref for sprint in others))
     if limit == DEFAULT_OPEN_SPRINT_LIMIT:
         return TaskError(
             "sprint_conflict",
@@ -356,12 +340,12 @@ def _open_sprint_count_error(others: list[dict[str, Any]], limit: int) -> TaskEr
     )
 
 
-def _refuse_shared_reservations(reservations: list[str], others: list[dict[str, Any]]) -> None:
+def _refuse_shared_reservations(reservations: tuple[str, ...], others: list[SprintAdmission]) -> None:
     """Refuse a project another open sprint already reserves, naming both."""
     held: dict[str, str] = {}
     for sprint in others:
-        for project in sprint.get("reservations") or []:
-            held.setdefault(str(project), str(sprint["ref"]))
+        for project in sprint.reservations:
+            held.setdefault(project, sprint.ref)
     clashes = [(project, held[project]) for project in reservations if project in held]
     if clashes:
         raise TaskError(
@@ -372,7 +356,7 @@ def _refuse_shared_reservations(reservations: list[str], others: list[dict[str, 
         )
 
 
-def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, Any]]) -> None:
+def _refuse_shared_resources(candidate: SprintAdmission, others: list[SprintAdmission]) -> None:
     """The invariants that make a second open sprint safe, above the reservations.
 
     Two open sprints may only exist while nothing they work on is shared: a different product, no
@@ -383,18 +367,18 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     The candidate's own roots are judged before any pairwise comparison and whether or not another
     sprint is open.
     """
-    product = str(candidate.get("product") or "").strip()
-    ordered = sorted(others, key=lambda row: str(row["ref"]))
+    product = candidate.product
+    ordered = sorted(others, key=lambda row: row.ref)
     # Judge both sides so disjointness does not depend on iteration order.
     if ordered and not product:
         raise TaskError(
             "resource_conflict",
             "this sprint declares no product, so it cannot be proven disjoint from "
-            f"open sprint {ordered[0]['ref']!s}",
+            f"open sprint {ordered[0].ref!s}",
             2,
         )
     roots = _scanned_roots(
-        candidate.get("repositories") or [],
+        candidate.repositories,
         refusal=lambda text, why: TaskError(
             "resource_conflict",
             f"this sprint declares repository root {text!r}, which {why}, so it cannot be "
@@ -403,8 +387,8 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
         ),
     )
     for sprint in ordered:
-        reference = str(sprint["ref"])
-        other_product = str(sprint.get("product") or "").strip()
+        reference = sprint.ref
+        other_product = sprint.product
         if not other_product:
             raise TaskError(
                 "resource_conflict",
@@ -420,7 +404,7 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
                 2,
             )
         held_roots = _scanned_roots(
-            sprint.get("repositories") or [],
+            sprint.repositories,
             # `reference` is bound here rather than closed over: the callee calls this back
             # inside the same iteration, but a refusal that named the wrong sprint would be a
             # silent lie, and the binding costs nothing.
@@ -647,8 +631,9 @@ class SprintReader:
         include_resume_freshness: bool = True,
     ) -> dict[str, Any]:
         task_id = _task_id(raw)
-        repositories = _json_list(meta.get("sprint_repositories"))
-        budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
+        read = SprintReadMetadata.from_legacy(meta, thresholds=self.thresholds, now=_now)
+        repositories = list(read.repositories)
+        budget = read.budget.to_document()
         result: dict[str, Any] = {
             "id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
             "ref": _text(raw.get("reference")),
@@ -660,7 +645,7 @@ class SprintReader:
             # Always both roles, always a state: "the owner pinned nobody" is an answer this
             # reader gives, never a key it leaves out for the caller to interpret.
             "executors": stored_executors(meta),
-            "status": meta.get("sprint_status") if meta.get("sprint_status") in SPRINT_STATUSES else "open",
+            "status": read.state.value,
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
             "audit": {
@@ -678,12 +663,12 @@ class SprintReader:
                 # A restored sprint sits on a fresh Kanboard row, so its own dates
                 # describe the recovery, not the sprint. The dates it was restored
                 # from stay readable here.
-                "source": _source_audit(meta.get("sprint_source_audit")),
+                "source": read.source_audit.to_document() if read.source_audit is not None else None,
             },
         }
         if comments is not None:
             result["comments"] = comments
-        resume = _resume(meta.get("sprint_resume"))
+        resume = read.resume.to_document() if read.resume is not None else None
         result["resume"] = resume
         if include_resume_freshness:
             result["resume_freshness"] = self._resume_freshness(result, resume)
@@ -861,6 +846,7 @@ class SprintReader:
 
 def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Put one complete Sprint protocol operation in the SQL client's transaction."""
+
     @functools.wraps(method)
     def wrapped(self: SprintWriter, *args: Any, **kwargs: Any) -> dict[str, Any]:
         if getattr(self.client, "backend_kind", "kanboard") != "postgres":
@@ -881,9 +867,7 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
                 except TaskError:
                     pass
             if exc.code == "audit_pending":
-                raise TaskError(
-                    "backend_error", "PostgreSQL Sprint transaction rolled back", 1
-                ) from None
+                raise TaskError("backend_error", "PostgreSQL Sprint transaction rolled back", 1) from None
             raise
         except Exception as exc:  # noqa: BLE001 - the rollback is the public fact.
             if isinstance(request_id, str):
@@ -891,9 +875,7 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
                     self.transactions.drop(request_id)
                 except TaskError:
                     pass
-            raise TaskError(
-                "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
-            ) from None
+            raise TaskError("backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1) from None
 
     return wrapped
 
@@ -1048,17 +1030,16 @@ class SprintWriter:
                     ) from None
             return self._create_under_admission(request_id, intent)
 
-    def _create_under_admission(
-        self, request_id: str, intent: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _create_under_admission(self, request_id: str, intent: SprintCreateIntent) -> dict[str, Any]:
+        intent_document = intent.to_document()
         document, committed = self.transactions.existing(
-            request_id, kind=SPRINT_CREATED, intent=intent
+            request_id, kind=SPRINT_CREATED, intent=intent_document
         )
         if committed is not None:
             return self._committed_result(SPRINT_CREATED, committed)
         if document is None:
-            self._check_ownership(intent["product"], intent["issues"], intent["reservations"])
-            self._check_conflicts(intent, excluding="")
+            self._check_ownership(intent.product, list(intent.issues), list(intent.reservations))
+            self._check_conflicts(intent.admission(), excluding="")
             document, committed = self._begin_create(request_id, intent)
             if committed is not None:
                 return self._committed_result(SPRINT_CREATED, committed)
@@ -1103,7 +1084,10 @@ class SprintWriter:
             require_executable_observer=False,
             canonical_repositories=False,
         )
-        document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
+        intent_document = intent.to_document()
+        document, committed = self.transactions.existing(
+            request_id, kind=SPRINT_CREATED, intent=intent_document
+        )
         if committed is not None:
             return self._committed_result(SPRINT_CREATED, committed)
         if document is None:
@@ -1131,7 +1115,7 @@ class SprintWriter:
         status: str = "open",
         require_executable_observer: bool = True,
         canonical_repositories: bool = True,
-    ) -> dict[str, Any]:
+    ) -> SprintCreateIntent:
         """The normalized request, which is both the replay key and the repair recipe.
 
         A repeat of the same request id carrying a different intent is another operation and is refused
@@ -1153,29 +1137,30 @@ class SprintWriter:
                 sprint_reference_number(reference)
             except BoardBackendError as exc:
                 raise TaskError("validation", str(exc), 2) from None
-        if status not in SPRINT_STATUSES:
-            raise TaskError("validation", f"unknown sprint status {status!r}", 2)
-        return {
-            "role": role,
-            "actor": actor,
-            "goal": goal,
-            "definition_of_done": definition_of_done,
-            "repositories": (
+        try:
+            state = SprintState(status)
+        except ValueError:
+            raise TaskError("validation", f"unknown sprint status {status!r}", 2) from None
+        pins = self._executor_intent(worker=worker, reviewer=reviewer)
+        return SprintCreateIntent(
+            role=Role(role),
+            actor=actor,
+            goal=goal,
+            definition_of_done=definition_of_done,
+            repositories=tuple(
                 canonical_repository_roots(repositories)
                 if canonical_repositories
                 else _unique_strings(repositories)
             ),
-            "product": product.strip(),
-            "issues": _unique_strings(issues),
-            "reservations": _unique_strings(reservations),
-            "reference": reference,
-            "status": status,
-            "observer": self._observer_intent(
-                observer,
-                executable=require_executable_observer,
-            ),
-            **self._executor_intent(worker=worker, reviewer=reviewer),
-        }
+            product=product.strip(),
+            issues=tuple(_unique_strings(issues)),
+            reservations=tuple(_unique_strings(reservations)),
+            reference=reference,
+            state=state,
+            observer=self._observer_intent(observer, executable=require_executable_observer),
+            worker=pins["worker"],
+            reviewer=pins["reviewer"],
+        )
 
     def _observer_intent(
         self,
@@ -1278,10 +1263,10 @@ class SprintWriter:
         return pins
 
     def _begin_create(
-        self, request_id: str, intent: dict[str, Any]
+        self, request_id: str, intent: SprintCreateIntent
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Claim the request id after the mutable preconditions have passed."""
-        reference = str(intent["reference"])
+        reference = intent.reference
         if reference:
             board_id = _sprint_board(self.client, create=False)
             if board_id is not None and self.client.call(
@@ -1295,16 +1280,17 @@ class SprintWriter:
                     raise
             else:
                 raise TaskError("validation", "sprint reference already belongs to a Pipeline card", 2)
+        intent_document = intent.to_document()
         event = self._event(
             SPRINT_CREATED,
-            str(intent["role"]),
-            str(intent["actor"]),
+            intent.role.value,
+            intent.actor,
             reference,
             request_id,
-            {"intent": intent},
+            {"intent": intent_document},
         )
         document, committed = self.transactions.begin(
-            request_id, kind=SPRINT_CREATED, intent=intent, event=event
+            request_id, kind=SPRINT_CREATED, intent=intent_document, event=event
         )
         if document is None and committed is None:
             raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
@@ -1314,14 +1300,15 @@ class SprintWriter:
         """Drive the staged create to its single audit event, or leave it repairable."""
         try:
             reference = self._finish_create(document, admitted=admitted)
-            sprint = self.reader.show(reference)
+            sprint_document = self.reader.show(reference)
+            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
             event = document["event"]
-            event["task_id"] = sprint["id"]
-            event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
+            event["task_id"] = sprint.entity_id
+            event["backend"]["revision"] = "updated_at:" + (sprint.updated_at or "unknown")
             self.transactions.save(document)
             self.transactions.complete(document)
-            update_active_sprint_projects(self.data_dir, sprint)
-            return {"action": SPRINT_CREATED, "sprint": sprint, "event_id": str(event["event_id"])}
+            update_active_sprint_projects(self.data_dir, sprint.admission())
+            return SprintMutationReceipt(SPRINT_CREATED, str(event["event_id"])).to_document(sprint_document)
         except TaskError as exc:
             if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                 raise
@@ -1370,7 +1357,7 @@ class SprintWriter:
 
     def _finish_create(self, document: dict[str, Any], *, admitted: bool) -> str:
         """Apply every backend sub-step, recognising the ones an earlier attempt did."""
-        intent = document["intent"]
+        intent = SprintCreateIntent.from_document(document["intent"])
         event = document["event"]
         progress = document.setdefault("progress", {})
         board_id = ensure_sprint_board(self.client)
@@ -1380,17 +1367,17 @@ class SprintWriter:
             staged = progress.get("task_id")
             staged_id = staged if isinstance(staged, int) else None
             self._check_reference_claim(created_ref, staged_id)
-            self._check_conflicts(intent, excluding_id=staged_id)
+            self._check_conflicts(intent.admission(reference=created_ref), excluding_id=staged_id)
         row = self._create_row(document, board_id, created_ref, admitted=admitted)
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        event.update({
-            "ref": created_ref,
-            "task_id": entity_id(
-                "sprint", getattr(self.client, "backend_kind", KANBOARD), task_id
-            ),
-        })
+        event.update(
+            {
+                "ref": created_ref,
+                "task_id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
+            }
+        )
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
         self.transactions.save(document)
@@ -1430,7 +1417,8 @@ class SprintWriter:
         therefore means naming it, and a restore without a reference is refused rather than given
         somebody else's row.
         """
-        recorded = str(document["intent"].get("reference") or document.get("reference") or "")
+        intent = SprintCreateIntent.from_document(document["intent"])
+        recorded = intent.reference or str(document.get("reference") or "")
         if recorded:
             return recorded
         if not admitted:
@@ -1495,7 +1483,7 @@ class SprintWriter:
             self.client.call(
                 "createTask",
                 project_id=board_id,
-                title=str(document["intent"]["goal"]),
+                title=SprintCreateIntent.from_document(document["intent"]).goal,
                 description=marker,
                 column_id=column_id,
                 **(
@@ -1519,35 +1507,36 @@ class SprintWriter:
             raise TaskError("backend_error", "the created sprint row was not found", 1)
         return row
 
-    def _create_values(self, intent: dict[str, Any]) -> dict[str, str]:
+    def _create_values(self, intent: SprintCreateIntent) -> dict[str, str]:
         values = {
-            "sprint_goal": str(intent["goal"]),
-            "sprint_definition_of_done": str(intent["definition_of_done"]),
-            "sprint_repositories": json.dumps(list(intent["repositories"]), separators=(",", ":")),
-            "sprint_status": str(intent.get("status") or "open"),
-            "sprint_budget": _budget_json(_budget(thresholds=self.thresholds)),
+            "sprint_goal": intent.goal,
+            "sprint_definition_of_done": intent.definition_of_done,
+            "sprint_repositories": json.dumps(list(intent.repositories), separators=(",", ":")),
+            "sprint_status": intent.state.value,
+            "sprint_budget": _budget_json(SprintBudget.from_legacy(thresholds=self.thresholds).to_document()),
             "sprint_current_task": "",
             "sprint_resume": "",
         }
         # Written with the fields, which is before the reference publishes the row: a sprint is
-        # never readable open without the observer it was opened with.  A restored row that
+        # never readable open without the observer it was opened with. A restored row that
         # carried no observer at all keeps carrying none, and the strict reader refuses it.
-        if intent.get("observer") is not None:
-            values[OBSERVER_FIELD] = encode_observer(intent["observer"])
+        if intent.observer is not None:
+            values[OBSERVER_FIELD] = encode_observer(intent.observer)
         # A pinned executor is written with the rest of the fields, for the same reason: the row is
         # never readable with cards to cut under a pin the sprint was not opened with. A role the
         # operator pinned nothing on gets no field at all, which is how absence stays absence.
         for role, field in EXECUTOR_FIELDS.items():
-            if intent.get(role):
-                values[field] = encode_executor(str(intent[role]))
+            executor = {"worker": intent.worker, "reviewer": intent.reviewer}[role]
+            if executor:
+                values[field] = encode_executor(executor)
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
-        if intent["product"]:
-            values["sprint_product"] = str(intent["product"])
-        if intent["issues"]:
-            values["sprint_issues"] = json.dumps(list(intent["issues"]), separators=(",", ":"))
-        if intent["reservations"]:
-            values["sprint_reservations"] = json.dumps(list(intent["reservations"]), separators=(",", ":"))
+        if intent.product:
+            values["sprint_product"] = intent.product
+        if intent.issues:
+            values["sprint_issues"] = json.dumps(list(intent.issues), separators=(",", ":"))
+        if intent.reservations:
+            values["sprint_reservations"] = json.dumps(list(intent.reservations), separators=(",", ":"))
         return values
 
     def _ensure_metadata(
@@ -1590,11 +1579,8 @@ class SprintWriter:
         return all(stored.get(key) == value for key, value in values.items())
 
     def _committed_result(self, action: str, committed: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "action": action,
-            "sprint": self.reader.show(str(committed["ref"])),
-            "event_id": str(committed["event_id"]),
-        }
+        sprint_document = self.reader.show(str(committed["ref"]))
+        return SprintMutationReceipt(action, str(committed["event_id"])).to_document(sprint_document)
 
     def _check_ownership(self, product: str, issues: list[str], reservations: list[str]) -> None:
         """Prove the sprint owns a product, an open issue and registered projects.
@@ -1671,7 +1657,7 @@ class SprintWriter:
 
     def _check_conflicts(
         self,
-        candidate: dict[str, Any],
+        candidate: SprintAdmission,
         *,
         excluding: str = "",
         excluding_id: int | None = None,
@@ -1691,7 +1677,11 @@ class SprintWriter:
                 or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
             )
         ]
-        _refuse_open_sprint(candidate, others, limit=self._open_sprint_limit())
+        _refuse_open_sprint(
+            candidate,
+            [SprintAdmission.from_document(sprint) for sprint in others],
+            limit=self._open_sprint_limit(),
+        )
 
     @_sql_atomic
     def comment(
@@ -1740,7 +1730,7 @@ class SprintWriter:
     def _set_current_task_atomic(
         self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str
     ) -> dict[str, Any]:
-        def mutation(sprint: dict[str, Any]) -> None:
+        def mutation(sprint: SprintWriteSnapshot) -> None:
             task = TaskReader(self.client).show(task_reference)
             if task.get("sprint") != reference:
                 raise TaskError("validation", "current task is not linked to this sprint", 2)
@@ -1768,7 +1758,7 @@ class SprintWriter:
         self._role(role, {"po", "dispatcher", "steward"})
         if event_type not in BUDGET_RECORDED_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
-        # One recording path for both families; only the charge is conditional.  An uncharged type
+        # One recording path for both families; only the charge is conditional. An uncharged type
         # can never reach the hard limit, so it never takes the typed hard-stop edge below.
         charged = event_type in BUDGET_EVENT_TYPES
         request_id = request_id or str(uuid.uuid4())
@@ -1798,19 +1788,18 @@ class SprintWriter:
                 if self.audit.committed_event(request_id)
                 else self._pending("budget_recorded", existing)
             )
-        before = self.reader.show(reference)
-        before_budget = _budget(before.get("budget"), self.thresholds)
+        before_document = self.reader.show(reference)
+        before = SprintWriteSnapshot.from_document(before_document, thresholds=self.thresholds)
+        before_budget = before.budget
         hard_stop = (
-            charged and before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
+            charged
+            and before.state is SprintState.OPEN
+            and before_budget.total + 1 >= self.thresholds["hard"]
         )
         if hard_stop:
-            budget = _budget(
-                {
-                    "by_type": dict(before_budget["by_type"])
-                    | {event_type: before_budget["by_type"][event_type] + 1}
-                },
-                self.thresholds,
-            )
+            counts = dict(before_budget.by_type)
+            counts[event_type] += 1
+            budget = SprintBudget.from_legacy({"by_type": counts}, thresholds=self.thresholds)
             event = self._event(
                 "budget_recorded",
                 role,
@@ -1821,7 +1810,7 @@ class SprintWriter:
                     "event_type": event_type,
                     "source_event_id": source_event_id or None,
                     "hard_limit_stop": True,
-                    "budget": {"by_type": budget["by_type"]},
+                    "budget": {"by_type": dict(budget.by_type)},
                 },
                 before,
             )
@@ -1836,22 +1825,22 @@ class SprintWriter:
                 event=event,
             )
 
-        def mutation(sprint: dict[str, Any]) -> None:
-            budget = _budget(sprint.get("budget"), self.thresholds)
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            budget = sprint.budget
             if charged:
-                budget["by_type"][event_type] += 1
-                budget = _budget({"by_type": budget["by_type"]}, self.thresholds)
-                values = {"sprint_budget": _budget_json(budget)}
+                counts = dict(budget.by_type)
+                counts[event_type] += 1
+                normalized = SprintBudget.from_legacy({"by_type": counts}, thresholds=self.thresholds)
+                values = {"sprint_budget": _budget_json(normalized.to_document())}
             else:
-                budget["uncharged"][event_type] += 1
+                uncharged = dict(budget.uncharged)
+                uncharged[event_type] += 1
                 values = {
-                    BUDGET_UNCHARGED_FIELD: json.dumps(
-                        budget["uncharged"], sort_keys=True, separators=(",", ":")
-                    )
+                    BUDGET_UNCHARGED_FIELD: json.dumps(uncharged, sort_keys=True, separators=(",", ":"))
                 }
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
 
-        result = self._write(
+        return self._write(
             "budget_recorded",
             role,
             actor,
@@ -1860,11 +1849,10 @@ class SprintWriter:
             {
                 "event_type": event_type,
                 "source_event_id": source_event_id or None,
-                "hard_limit_stop": hard_stop,
+                "hard_limit_stop": False,
             },
             mutation,
         )
-        return result
 
     def _finish_hard_budget(
         self,
@@ -1955,7 +1943,8 @@ class SprintWriter:
         stop_request_id = request_id + ":budget-hard-stop"
         if self.audit.committed_event(stop_request_id) is not None:
             return
-        sprint = self.reader.show(reference)
+        sprint_document = self.reader.show(reference)
+        sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
         event = self._event(
             "budget_hard_stopped",
             role,
@@ -1985,8 +1974,14 @@ class SprintWriter:
         through_event: str = "",
     ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "observer", "steward"})
-        normalized = _resume(entry, required=True)
-        assert normalized is not None
+        try:
+            normalized = SprintResume.from_legacy(entry, required=True, now=_now)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        if normalized is None:
+            raise TaskError("validation", "resume entry must be a JSON object", 2)
+        if _timestamp(normalized.recorded_at) is None:
+            raise TaskError("validation", "resume recorded_at must include a timezone", 2)
         delivery_id = delivery_id.strip()
         through_event = through_event.strip()
         if bool(delivery_id) != bool(through_event):
@@ -2023,22 +2018,22 @@ class SprintWriter:
         role: str,
         actor: str,
         reference: str,
-        normalized: dict[str, str],
+        normalized: SprintResume,
         request_id: str,
         delivery_id: str,
         through_event: str,
     ) -> dict[str, Any]:
-        def mutation(sprint: dict[str, Any]) -> None:
+        def mutation(sprint: SprintWriteSnapshot) -> None:
             self.client.call(
                 "saveTaskMetadata",
                 task_id=_sprint_number(sprint),
-                values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))},
+                values={"sprint_resume": json.dumps(normalized.to_document(), separators=(",", ":"))},
             )
             self.client.call(
                 "createComment",
                 task_id=_sprint_number(sprint),
                 user_id=0,
-                content="[sprint:resume]\n" + normalized["selected_step"],
+                content="[sprint:resume]\n" + normalized.selected_step,
             )
 
         payload = {"fields": list(RESUME_FIELDS)}
@@ -2053,70 +2048,52 @@ class SprintWriter:
         role: str,
         actor: str,
         reference: str,
-        decisions: dict[str, list[dict[str, str]]] | None = None,
+        decisions: SprintCloseDecisions | Mapping[str, Any] | None = None,
         request_id: str | None = None,
         reason: str = "",
         closeout: str = "",
     ) -> dict[str, Any]:
-        """Close a sprint on decisions its caller states, not on decisions inferred here.
-
-        What became of every declared issue and every card still in a working state are both stated by
-        the caller and checked before the transaction opens; a close short of a decision writes nothing
-        and names what is missing.
-
-        `reason` is why the owner is closing this sprint, and `closeout` is the account of what became
-        of the work that this close writes into `state/knowledge` as a step of its own terminal phase.
-        Neither is inferred: the closeout's prose is the closing PO's, and what this writer owns is the
-        document's path, its link to this sprint and the fact that it is written exactly once. A close
-        made with no closeout writes none -- the operation
-        (:meth:`secretary.webproto.sprint_ops.SprintOperationLayer.sprint_close`) is where a closing
-        PO is required to state one, so that the many callers that merely need a closed sprint are not
-        made to invent an account of one.
-
-        Neither field makes a close a completed Definition of Done. See
-        :data:`secretary.sprint_close.CLOSE_NOT_DONE`.
-
-        The whole close runs under the admission gate every opening of a sprint takes, and that is the
-        invariant it exists for: between the moment this sprint is published `closed` and the moment its
-        last disposition is written, no `sprint create` may be admitted on the projects this sprint
-        reserved. A successor admitted in that window would re-reserve the project and its guard would
-        refuse a disposition of the already-closed sprint. Every path through the close holds the gate,
-        and it is taken outside the sprint's reference lock: admission first, then anything narrower.
-        """
+        """Close a sprint on explicit typed decisions while preserving the durable JSON contract."""
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
-        intent = {"role": role, "actor": actor, "reference": reference}
+        try:
+            offered = SprintCloseDecisions.from_document(decisions) if decisions is not None else None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        intent = SprintCloseIntent(Role(role), actor, reference)
+        intent_document = intent.to_document()
         with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, committed = self.transactions.existing(
                     request_id,
                     kind=SPRINT_CLOSED,
-                    intent=intent,
+                    intent=intent_document,
                 )
                 if committed is not None:
-                    self._check_completed_close(
-                        committed, decisions, reason=reason, closeout=closeout
-                    )
+                    self._check_completed_close(committed, offered, reason=reason, closeout=closeout)
                     return self._close_result(committed)
                 if document is not None:
-                    self._check_staged_decisions(document, decisions)
+                    self._check_staged_decisions(document, offered)
                     self._check_staged_closeout(document, reason=reason, closeout=closeout)
                 if document is None:
                     from secretary.sprint_close import plan_close_decisions
 
-                    sprint = self.reader.show(reference, include_cards=False)
+                    sprint_document = self.reader.show(reference, include_cards=False)
+                    sprint = SprintCloseSnapshot.from_document(sprint_document)
                     targets = self._close_targets(sprint)
-                    declared = [str(issue) for issue in sprint.get("issues") or []]
                     plan = plan_close_decisions(
-                        decisions,
-                        declared_issues=declared,
-                        remaining=list(targets["remaining"]),
-                        states=dict(targets["remaining_states"]),
-                        issue_states=self._declared_issue_states(declared),
+                        offered,
+                        declared_issues=sprint.issues,
+                        remaining=targets.remaining,
+                        states=targets.remaining_state_map,
+                        issue_states=self._declared_issue_states(list(sprint.issues)),
                     )
                     self._check_close_decisions_are_writable(plan)
+                    closeout_plan = self._plan_closeout(
+                        sprint, plan, actor=actor, reason=reason, closeout=closeout
+                    )
                     event = self._event(
                         SPRINT_CLOSED,
                         role,
@@ -2124,26 +2101,24 @@ class SprintWriter:
                         reference,
                         request_id,
                         {
-                            "intent": intent,
+                            "intent": intent_document,
                             "reason": str(reason or ""),
-                            "closeout": self._plan_closeout(
-                                sprint, plan, actor=actor, reason=reason, closeout=closeout
-                            ),
-                            "targets": targets,
+                            "closeout": closeout_plan.to_document() if closeout_plan else None,
+                            "targets": targets.to_document(),
                             "archived_tasks": [],
-                            "remaining_tasks": list(targets["remaining"]),
-                            "decisions": plan,
+                            "remaining_tasks": list(targets.remaining),
+                            "decisions": plan.to_document(),
                             "closed_issues": [],
                             "moved_tasks": [],
                             "disposed_tasks": [],
                             "conflicts": [],
                         },
-                        sprint,
+                        sprint_document,
                     )
                     document, committed = self.transactions.begin(
                         request_id,
                         kind=SPRINT_CLOSED,
-                        intent=intent,
+                        intent=intent_document,
                         event=event,
                     )
                     if committed is not None:
@@ -2152,14 +2127,14 @@ class SprintWriter:
                         raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
                 if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                     close_payload = document["event"].get("payload", {})
-                    close_plan = close_payload.get("decisions") or {}
-                    closeout_plan = close_payload.get("closeout") or {}
+                    close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
+                    closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
                     self.client.sprints.save_close(
                         reference,
                         request_id,
-                        close_plan,
+                        close_plan.to_document(),
                         reason=str(close_payload.get("reason") or ""),
-                        closeout_document=str(closeout_plan.get("document") or "") or None,
+                        closeout_document=closeout_plan.document if closeout_plan else None,
                     )
                 return self._run_close(document)
             finally:
@@ -2225,122 +2200,131 @@ class SprintWriter:
         actual: str,
         message: str,
     ) -> None:
-        """Stop on somebody else's change, recoverably, naming what has to be decided again.
-
-        The close neither invents a verdict nor treats the other writer's as its own: it records the
-        conflict where the retry of this request id will find it, and refuses.
-        """
-        conflicts = payload.setdefault("conflicts", [])
-        if isinstance(conflicts, list) and not any(
-            isinstance(item, dict) and item.get("ref") == reference for item in conflicts
-        ):
-            conflicts.append(
-                {"section": section, "ref": reference, "verdict": verdict, "actual": actual},
+        """Stop on somebody else's change, recording a typed recoverable conflict."""
+        try:
+            conflict = SprintCloseConflict.from_document(
+                {"section": section, "ref": reference, "verdict": verdict, "actual": actual}
             )
-            self.transactions.save(document)
+        except ValueError as exc:
+            raise TaskError("audit_pending", str(exc), 4) from None
+        conflicts = payload.setdefault("conflicts", [])
+        if isinstance(conflicts, list):
+            existing = []
+            for item in conflicts:
+                if isinstance(item, Mapping):
+                    try:
+                        existing.append(SprintCloseConflict.from_document(item))
+                    except ValueError:
+                        raise TaskError(
+                            "audit_pending", "sprint close transaction has invalid conflicts", 4
+                        ) from None
+            if not any(item.ref == reference for item in existing):
+                conflicts.append(conflict.to_document())
+                self.transactions.save(document)
         raise TaskError("close_conflict", message, 3)
 
-    def _close_targets(self, sprint: dict[str, Any]) -> dict[str, Any]:
-        """Freeze this close's task set before any archival write.
-
-        A sprint that predates reservations is retained for recovery only: closing it can change its
-        status but must not retrospectively archive arbitrary cards. The record-type filter stays — a
-        Product or an Issue is not executable work — and the states of cards that are not done travel
-        with the set, because the refusal has to name them.
-        """
-        if "reservations" not in sprint:
-            return {"archive": [], "remaining": [], "remaining_states": {}}
-        cards = TaskReader(self.client).list(sprint=str(sprint["ref"]))
-        tasks = [card for card in cards if card.get("record_type") not in {"product", "issue"}]
-        return {
-            "archive": sorted(str(card["ref"]) for card in tasks if card.get("state") == "done"),
-            "remaining": sorted(str(card["ref"]) for card in tasks if card.get("state") != "done"),
-            "remaining_states": {
-                str(card["ref"]): str(card.get("state") or "unknown")
-                for card in tasks
-                if card.get("state") != "done"
-            },
-        }
+    def _close_targets(self, sprint: SprintCloseSnapshot) -> SprintCloseTargets:
+        """Freeze this close's task set before any archival write."""
+        if not sprint.has_reservations:
+            return SprintCloseTargets()
+        cards = TaskReader(self.client).list(sprint=sprint.ref)
+        return SprintCloseTargets.from_cards(cards)
 
     def _check_staged_decisions(
         self,
         document: dict[str, Any],
-        decisions: dict[str, list[dict[str, str]]] | None,
+        decisions: SprintCloseDecisions | None,
     ) -> None:
-        """A retry of a staged close carries the decisions that close was staged with.
-
-        A second delivery under the same request id that states something else is refused rather than
-        silently answered with the first one's verdicts; a retry that repeats no decisions at all is
-        the ordinary recovery call. The one amendment a retry may carry is the answer to a conflict
-        this close stopped on, for exactly the refs it recorded.
-        """
+        """A retry may repeat the staged plan, or amend exactly a recorded conflict."""
         if decisions is None:
             return
         payload = (document.get("event") or {}).get("payload") or {}
-        staged = payload.get("decisions")
-        if not isinstance(staged, dict):
+        try:
+            staged = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError:
             return
-        sections = ("issues", "cards")
-        offered = {
-            section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
-            for section in sections
-        }
-        current = {section: list(staged.get(section) or []) for section in sections}
+        offered = SprintCloseDecisions(
+            issues=tuple(sorted(decisions.issues, key=lambda entry: entry.ref)),
+            cards=tuple(sorted(decisions.cards, key=lambda entry: entry.ref)),
+        )
+        current = SprintCloseDecisions(
+            issues=tuple(sorted(staged.issues, key=lambda entry: entry.ref)),
+            cards=tuple(sorted(staged.cards, key=lambda entry: entry.ref)),
+        )
         if offered == current:
             return
         from secretary.sprint_close import ALREADY_CLOSED, ALREADY_MOVED
 
         confirmation = {"issues": ALREADY_CLOSED, "cards": ALREADY_MOVED}
-        conflicts = {
-            str(item.get("ref")): item for item in (payload.get("conflicts") or []) if isinstance(item, dict)
-        }
-        amended: list[dict[str, Any]] = []
-        for section in sections:
-            if len(offered[section]) != len(current[section]):
+        conflicts: dict[str, SprintCloseConflict] = {}
+        for item in payload.get("conflicts") or []:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                conflict = SprintCloseConflict.from_document(item)
+            except ValueError:
+                continue
+            conflicts[conflict.ref] = conflict
+        amended: list[SprintCloseConflict] = []
+        for section, current_entries, offered_entries in (
+            ("issues", current.issues, offered.issues),
+            ("cards", current.cards, offered.cards),
+        ):
+            if len(offered_entries) != len(current_entries):
                 self._refuse_restated_decisions()
-            for was, now in zip(current[section], offered[section]):
+            for was, now in zip(current_entries, offered_entries):
                 if was == now:
                     continue
-                conflict = conflicts.get(str(now.get("ref")))
+                conflict = conflicts.get(now.ref)
                 if (
                     conflict is None
-                    or was.get("ref") != now.get("ref")
-                    or conflict.get("section") != section
-                    or now.get("verdict") != confirmation[section]
-                    or now.get("actual") != conflict.get("actual")
+                    or was.ref != now.ref
+                    or conflict.section != section
+                    or now.verdict != confirmation[section]
+                    or now.actual != conflict.actual
                 ):
                     self._refuse_restated_decisions()
                 amended.append(conflict)
         if not amended:
             self._refuse_restated_decisions()
-        staged.update(offered)
-        payload["conflicts"] = [item for item in (payload.get("conflicts") or []) if item not in amended]
+        payload["decisions"] = offered.to_document()
+        payload["conflicts"] = [
+            item
+            for item in (payload.get("conflicts") or [])
+            if not (
+                isinstance(item, Mapping)
+                and any(
+                    item.get("ref") == conflict.ref and item.get("section") == conflict.section
+                    for conflict in amended
+                )
+            )
+        ]
         self.transactions.save(document)
 
     def _check_completed_close(
         self,
         committed: dict[str, Any],
-        decisions: dict[str, list[dict[str, str]]] | None,
+        decisions: SprintCloseDecisions | None,
         *,
         reason: str,
         closeout: str,
     ) -> None:
-        """A repeat of a *finished* close carries what that close was made with, or it is refused.
-
-        The same rule the staged retry is held to, at the other end of the transaction: a request id
-        is the key of one close, and a repeat naming other decisions, another reason or another
-        account of the outcome is a new close and never a second answer about this one. Repeating the
-        id with nothing is the ordinary idempotent repeat and is answered from the record.
-        """
+        """A repeat of a finished close carries the same canonical typed plan, or is refused."""
         payload = committed.get("payload") if isinstance(committed.get("payload"), dict) else {}
-        staged = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+        try:
+            staged = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", "committed sprint close has invalid decisions", 4) from exc
         if decisions is not None:
-            sections = ("issues", "cards")
-            offered = {
-                section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
-                for section in sections
-            }
-            if offered != {section: list(staged.get(section) or []) for section in sections}:
+            offered = SprintCloseDecisions(
+                issues=tuple(sorted(decisions.issues, key=lambda entry: entry.ref)),
+                cards=tuple(sorted(decisions.cards, key=lambda entry: entry.ref)),
+            )
+            current = SprintCloseDecisions(
+                issues=tuple(sorted(staged.issues, key=lambda entry: entry.ref)),
+                cards=tuple(sorted(staged.cards, key=lambda entry: entry.ref)),
+            )
+            if offered != current:
                 self._refuse_restated_decisions()
         self._check_staged_closeout({"event": committed}, reason=reason, closeout=closeout)
 
@@ -2353,52 +2337,33 @@ class SprintWriter:
 
     def _plan_closeout(
         self,
-        sprint: dict[str, Any],
-        plan: dict[str, list[dict[str, str]]],
+        sprint: SprintCloseSnapshot,
+        plan: SprintCloseDecisions,
         *,
         actor: str,
         reason: str,
         closeout: str,
-    ) -> dict[str, Any] | None:
-        """Freeze the closeout this close will write, before the transaction opens.
-
-        Frozen and not composed per attempt: the document's path carries the day the close was
-        staged, so a retry tomorrow writes the same document rather than a second one beside it, and
-        the text is the one the decisions were staged with. What the caller supplies is the account
-        of what became of the work; what this composes around it is what only the close knows -- the
-        sprint, the reason it was closed, and every verdict and disposition of the plan.
-
-        A close made with no closeout writes none. Requiring one belongs to the operation, where a
-        closing PO is the caller; requiring it here would make every caller that merely needs a
-        closed sprint invent an account of one.
-        """
+    ) -> SprintCloseoutPlan | None:
+        """Freeze the closeout this close will write, before the transaction opens."""
         if not str(closeout or "").strip():
             return None
         from secretary.sprint_close import closeout_document, closeout_path
 
-        reference = str(sprint["ref"])
-        document = closeout_path(reference, day=_now()[:10])
+        document = closeout_path(sprint.ref, day=_now()[:10])
         text = closeout_document(
-            reference=reference,
-            goal=str(sprint.get("goal") or ""),
+            reference=sprint.ref,
+            goal=sprint.goal,
             actor=actor,
             reason=str(reason or ""),
             body=str(closeout),
             decisions=plan,
         )
         self._check_closeout_is_writable(document, text, actor=actor)
-        return {
-            "document": document,
-            "text": text,
-            # The digest of the body the caller supplied, and what a retry is compared against. The
-            # composed text is not that comparison: the body sits inside it, so a *substring* of the
-            # staged prose -- an edited, shortened closeout -- would pass a containment test and the
-            # caller would be told the close succeeded with prose no document ever carried. The
-            # digest is the shape `SprintWriter.comment` already uses for the same question.
-            "body_sha256": _digest(str(closeout)),
-            "written": False,
-            "commit": "",
-        }
+        return SprintCloseoutPlan(
+            document=document,
+            text=text,
+            body_sha256=_digest(str(closeout)),
+        )
 
     def _check_closeout_is_writable(self, document: str, text: str, *, actor: str) -> None:
         """Refuse a closeout this installation cannot write, before anything is written.
@@ -2427,28 +2392,17 @@ class SprintWriter:
         return instance.parent if instance.is_file() else instance
 
     def _check_staged_closeout(self, document: dict[str, Any], *, reason: str, closeout: str) -> None:
-        """A retry of a staged close carries the closeout that close was staged with.
-
-        The ordinary recovery call states neither -- it repeats the request id and nothing else --
-        and it is the retry this exists for. What is refused is a repeat that reuses the id over a
-        *different* account of what became of the work, exactly as a repeat over different decisions
-        is refused: a request id is the key of one close, not a way to rewrite the record of one.
-        """
+        """A retry of a staged close carries the same closeout body and reason."""
         payload = (document.get("event") or {}).get("payload") or {}
-        # A close staged by a release that had neither field is retried, not refused: it carries no
-        # reason and no closeout to compare against, and it finishes as the close it was begun as.
         if "closeout" not in payload and "reason" not in payload:
             return
-        staged = payload.get("closeout")
+        staged = SprintCloseoutPlan.from_document(payload.get("closeout"))
         body = str(closeout or "").strip()
         if str(reason or "") and str(reason) != str(payload.get("reason") or ""):
             self._refuse_restated_closeout()
         if not body:
             return
-        # Exactly, and never by containment: the supplied body against the digest of the body this
-        # close was staged with. A staged plan carrying no digest cannot answer the question, and
-        # the safe answer to "is this the same closeout" that nothing can establish is no.
-        if not isinstance(staged, dict) or staged.get("body_sha256") != _digest(str(closeout)):
+        if staged is None or staged.body_sha256 != _digest(str(closeout)):
             self._refuse_restated_closeout()
 
     def _refuse_restated_closeout(self) -> None:
@@ -2458,35 +2412,28 @@ class SprintWriter:
             2,
         )
 
-    def _check_close_decisions_are_writable(self, plan: dict[str, list[dict[str, str]]]) -> None:
-        """Refuse a plan this installation cannot perform, before the transaction opens.
-
-        Closing an issue writes durable Product/Issue records addressed through the installation
-        directory, and archiving a card whose head is still running is refused by the archive itself.
-        Asked here, either refusal names the card and leaves the sprint open; asked halfway through the
-        close, it would be a transaction to repair.
-        """
+    def _check_close_decisions_are_writable(self, plan: SprintCloseDecisions) -> None:
+        """Refuse a plan this installation cannot perform, before the transaction opens."""
         from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
 
-        # A verdict that writes nothing to the issue needs nothing of the installation either.
-        closing = [entry for entry in plan["issues"] if entry["verdict"] not in {KEEP_OPEN, ALREADY_CLOSED}]
+        closing = [entry for entry in plan.issues if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED}]
         if closing and self.instance is None:
             raise TaskError(
                 "validation",
                 "closing an issue with the sprint needs the instance directory; pass --instance",
                 2,
             )
-        if not plan["cards"]:
+        if not plan.cards:
             return
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         live = []
-        for entry in plan["cards"]:
+        for entry in plan.cards:
             try:
-                writer._check_dispatcher_archivable(entry["ref"])
+                writer._check_dispatcher_archivable(entry.ref)
             except TaskError as exc:
                 if exc.code != "live_work":
                     raise
-                live.append(entry["ref"])
+                live.append(entry.ref)
         if live:
             raise TaskError(
                 "live_work",
@@ -2502,25 +2449,20 @@ class SprintWriter:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             raise TaskError("audit_pending", "sprint close transaction has no payload", 4)
-        targets = payload.get("targets")
-        if not isinstance(targets, dict):
-            raise TaskError("audit_pending", "sprint close transaction has no task targets", 4)
-        archive = targets.get("archive")
-        if not isinstance(archive, list) or not all(isinstance(ref, str) for ref in archive):
-            raise TaskError("audit_pending", "sprint close transaction has invalid archival targets", 4)
+        try:
+            targets = SprintCloseTargets.from_document(payload.get("targets"))
+            decisions = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", f"sprint close transaction is invalid: {exc}", 4) from None
+        archive = list(targets.archive)
         archived = payload.setdefault("archived_tasks", [])
         if not isinstance(archived, list) or not all(isinstance(ref, str) for ref in archived):
             raise TaskError("audit_pending", "sprint close transaction has invalid archival progress", 4)
-        decisions = payload.get("decisions")
-        if decisions is not None and not isinstance(decisions, dict):
-            raise TaskError("audit_pending", "sprint close transaction has invalid decisions", 4)
         try:
-            self._close_declared_issues(document, event, payload, decisions or {})
+            self._close_declared_issues(document, event, payload, decisions)
             writer = TaskWriter(self.client, data_dir=self.data_dir) if archive else None
             for task_ref in archive:
                 step_request_id = _close_archive_request_id(str(document["request_id"]), task_ref)
-                # The payload says what this close has recorded; the step's own request id says
-                # what it has performed, and only the second one may end a step.
                 if self._close_step_status(step_request_id) != "done":
                     assert writer is not None
                     writer.archive(
@@ -2534,8 +2476,7 @@ class SprintWriter:
                 if task_ref not in archived:
                     archived.append(task_ref)
                     self.transactions.save(document)
-            # Publish closed last so unfinished closes retain project reservations.
-            self._dispose_remaining_cards(document, event, payload, decisions or {})
+            self._dispose_remaining_cards(document, event, payload, decisions, targets)
             self._write_closeout(document, event, payload)
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
@@ -2560,8 +2501,6 @@ class SprintWriter:
             if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                 raise
             if exc.code == "close_conflict":
-                # Recoverable by construction: the conflict is on the record, and the retry of
-                # this request id may answer exactly it. Saying so is the point of the refusal.
                 raise
             if exc.code in {
                 "validation",
@@ -2576,7 +2515,7 @@ class SprintWriter:
             raise TaskError(
                 "audit_pending", "sprint close is pending repair; retry with the same request id", 4
             ) from None
-        except (OSError, KeyError, TypeError):
+        except (OSError, KeyError, TypeError, ValueError):
             raise TaskError(
                 "audit_pending", "sprint close is pending repair; retry with the same request id", 4
             ) from None
@@ -2588,29 +2527,18 @@ class SprintWriter:
         document: dict[str, Any],
         event: dict[str, Any],
         payload: dict[str, Any],
-        decisions: dict[str, Any],
+        decisions: SprintCloseDecisions,
     ) -> None:
-        """Perform the closing verdicts, one issue at a time, through the close's progress.
-
-        An issue left open, or confirmed `already_closed`, is performed by doing nothing to it: its
-        basis is already in this close's payload. Whether a closing verdict still has work is answered
-        by the step's own derived request id and never by the issue looking closed — an issue closed
-        with no committed step of ours is somebody else's close, and this close stops on it.
-        """
+        """Perform the typed closing verdicts, one issue at a time."""
         from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
 
-        verdicts = decisions.get("issues")
-        if not isinstance(verdicts, list):
-            return
         closed = payload.setdefault("closed_issues", [])
         if not isinstance(closed, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid issue progress", 4)
         pending = [
             entry
-            for entry in verdicts
-            if isinstance(entry, dict)
-            and entry.get("verdict") not in {KEEP_OPEN, ALREADY_CLOSED}
-            and entry.get("ref") not in closed
+            for entry in decisions.issues
+            if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED} and entry.ref not in closed
         ]
         if not pending:
             return
@@ -2621,11 +2549,10 @@ class SprintWriter:
                 2,
             )
         store = self._issue_store()
-        # Persist the close plan before its first issue write.
         document.setdefault("progress", {})["issues_started"] = True
         self.transactions.save(document)
         for entry in pending:
-            reference = str(entry["ref"])
+            reference = entry.ref
             step_request_id = _close_step_request_id(str(document["request_id"]), "issue", reference)
             status = self._close_step_status(step_request_id)
             if status != "done":
@@ -2637,19 +2564,17 @@ class SprintWriter:
                         payload,
                         section="issues",
                         reference=reference,
-                        verdict=str(entry["verdict"]),
+                        verdict=entry.verdict,
                         actual=carried,
                         message=(
                             f"issue {reference} was closed as {carried} by somebody else, and this "
-                            f"close states {entry['verdict']}; retry with that decision amended to "
+                            f"close states {entry.verdict}; retry with that decision amended to "
                             f"already_closed naming {carried}"
                         ),
                     )
-                # A pending step is this close's own half-written one, and driving the same
-                # derived request id again is what finishes it.
                 store.close_issue(
                     reference=reference,
-                    reason=str(entry["verdict"]),
+                    reason=entry.verdict,
                     actor=str(document["intent"]["actor"]),
                     request_id=step_request_id,
                 )
@@ -2662,44 +2587,30 @@ class SprintWriter:
         document: dict[str, Any],
         event: dict[str, Any],
         payload: dict[str, Any],
-        decisions: dict[str, Any],
+        decisions: SprintCloseDecisions,
+        targets: SprintCloseTargets,
     ) -> None:
-        """Take every card that was not done into the recorded end its disposition names.
-
-        Each disposition is two backend writes — the board state, then the archival — and each is a
-        step under its own derived request id. A `drop` passes through Ready deliberately: it is the
-        released edge that releases a retained worker, and a card still holding a claim cannot be
-        archived at all.
-
-        Whether a card needs the move is answered by the state this close froze into its plan, not by
-        the board now; whether the move has happened is answered by the step's own request id.
-        """
+        """Take every remaining card into the recorded end its typed disposition names."""
         from secretary.sprint_close import ALREADY_MOVED, DISPOSITION_TARGETS
 
-        dispositions = decisions.get("cards")
-        if not isinstance(dispositions, list) or not dispositions:
+        if not decisions.cards:
             return
         moved = payload.setdefault("moved_tasks", [])
         disposed = payload.setdefault("disposed_tasks", [])
         if not isinstance(moved, list) or not isinstance(disposed, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid disposition progress", 4)
-        planned = (payload.get("targets") or {}).get("remaining_states") or {}
+        planned = targets.remaining_state_map
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         reader = TaskReader(self.client)
         actor = str(document["intent"]["actor"])
-        for entry in dispositions:
-            if not isinstance(entry, dict):
-                raise TaskError("audit_pending", "sprint close transaction has invalid dispositions", 4)
-            reference = str(entry["ref"])
-            verdict = str(entry["verdict"])
-            reason = str(entry["reason"])
-            # A confirmed card is where it needs to be already, and it was said so explicitly.
+        for entry in decisions.cards:
+            reference = entry.ref
+            verdict = entry.verdict
+            reason = entry.reason
             target = "" if verdict == ALREADY_MOVED else DISPOSITION_TARGETS[verdict]
             if target and str(planned.get(reference) or "") != target:
                 move_request_id = _close_step_request_id(
-                    str(document["request_id"]),
-                    "dispose-move",
-                    reference,
+                    str(document["request_id"]), "dispose-move", reference
                 )
                 status = self._close_step_status(move_request_id)
                 if status != "done":
@@ -2732,9 +2643,7 @@ class SprintWriter:
                 moved.append(reference)
                 self.transactions.save(document)
             archive_request_id = _close_step_request_id(
-                str(document["request_id"]),
-                "dispose-archive",
-                reference,
+                str(document["request_id"]), "dispose-archive", reference
             )
             if self._close_step_status(archive_request_id) != "done":
                 writer.archive(
@@ -2752,23 +2661,9 @@ class SprintWriter:
     def _write_closeout(
         self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any]
     ) -> None:
-        """Write this close's knowledge closeout, once, as a step of its terminal phase.
-
-        A step exactly like the issue verdicts and the dispositions beside it: it runs under its own
-        request id derived from the close's, that id's committed event is the only proof it happened,
-        and a retry of the close drives the same id rather than writing a second document. The write
-        itself is :func:`secretary.knowledge_write.write_knowledge_document` -- the one writer of
-        `state/knowledge` -- and this adds no second one.
-
-        It runs before the status is published, so the order the close already holds is unchanged: an
-        interrupted close still leaves the sprint open and still holds its reservations, and a sprint
-        that reads `closed` has its closeout written.
-
-        The document says what became of the work. It does not say the Definition of Done was
-        reached: :data:`secretary.sprint_close.CLOSE_NOT_DONE` is written into it.
-        """
-        plan = payload.get("closeout")
-        if not isinstance(plan, dict) or not plan.get("document"):
+        """Write this close's typed knowledge-closeout plan exactly once."""
+        plan = SprintCloseoutPlan.from_document(payload.get("closeout"))
+        if plan is None:
             return
         reference = str(event["ref"])
         step_request_id = _close_step_request_id(str(document["request_id"]), "closeout", reference)
@@ -2777,9 +2672,7 @@ class SprintWriter:
         from secretary.knowledge_write import KnowledgeError, write_knowledge_document
 
         actor = str(document["intent"]["actor"])
-        self._check_closeout_is_writable(str(plan["document"]), str(plan["text"]), actor=actor)
-        # Durable before the write, as the marker is before the first issue write: from here on a
-        # refusal is `audit_pending` with the staged plan retained, never a discarded close.
+        self._check_closeout_is_writable(plan.document, plan.text, actor=actor)
         document.setdefault("progress", {})["closeout_started"] = True
         self.transactions.save(document)
         step = self._event(
@@ -2788,53 +2681,45 @@ class SprintWriter:
             actor,
             reference,
             step_request_id,
-            {
-                "close_request_id": str(document["request_id"]),
-                "document": str(plan["document"]),
-                "commit": "",
-            },
+            {"close_request_id": str(document["request_id"]), "document": plan.document, "commit": ""},
             self.reader.show(reference, include_cards=False),
         )
         self.audit.stage(step_request_id, step)
         try:
             written = write_knowledge_document(
-                self._instance_dir(),
-                document=str(plan["document"]),
-                actor=actor,
-                text=str(plan["text"]),
+                self._instance_dir(), document=plan.document, actor=actor, text=plan.text
             )
         except KnowledgeError as exc:
             raise TaskError("backend_error", f"sprint close could not write its closeout: {exc}", 1) from None
         step["payload"]["commit"] = written.commit
-        # Whether *this* attempt added the document to the history. A retry of a close whose write
-        # landed and whose journal write did not finds the same content on disk and commits nothing.
         step["payload"]["changed"] = bool(written.changed)
         self.audit.stage(step_request_id, step)
         self.audit.append(step_request_id, step)
         self._require_close_step_settled(step_request_id)
-        plan["written"] = True
-        plan["commit"] = written.commit
+        payload["closeout"] = plan.mark_written(written.commit).to_document()
         self.transactions.save(document)
 
     def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
         from secretary.sprint_close import CLOSE_NOT_DONE
 
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+        try:
+            decisions = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", "sprint close has invalid decisions", 4) from exc
+        closeout_plan = SprintCloseoutPlan.from_document(payload.get("closeout"))
         return {
             "action": SPRINT_CLOSED,
             "sprint": self.reader.show(str(event["ref"])),
             "event_id": str(event["event_id"]),
             "archived_tasks": list(payload.get("archived_tasks") or []),
             "remaining_tasks": list(payload.get("remaining_tasks") or []),
-            "issue_decisions": list(decisions.get("issues") or []),
+            "issue_decisions": [entry.to_document() for entry in decisions.issues],
             "closed_issues": list(payload.get("closed_issues") or []),
-            "card_dispositions": list(decisions.get("cards") or []),
+            "card_dispositions": [entry.to_document() for entry in decisions.cards],
             "disposed_tasks": list(payload.get("disposed_tasks") or []),
             "reason": str(payload.get("reason") or ""),
-            "closeout": _closeout_result(payload.get("closeout")),
-            # Said on the answer and not only in the documentation: a caller reading this result is
-            # exactly the reader who might otherwise take `closed` for `done`.
+            "closeout": closeout_plan.to_result() if closeout_plan else None,
             "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
         }
 
@@ -2859,30 +2744,34 @@ class SprintWriter:
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
-        intent = {
-            "role": role,
-            "actor": actor,
-            "reference": reference,
-            "observer": self._observer_intent(observer, executable=True),
-        }
+        intent = SprintReopenIntent(
+            role=Role(role),
+            actor=actor,
+            reference=reference,
+            observer=self._observer_intent(observer, executable=True),
+        )
+        intent_document = intent.to_document()
         with sprint_admission_lock(self.data_dir):
-            document, committed = self.transactions.existing(request_id, kind=SPRINT_REOPENED, intent=intent)
+            document, committed = self.transactions.existing(
+                request_id, kind=SPRINT_REOPENED, intent=intent_document
+            )
             if committed is not None:
                 return self._committed_result(SPRINT_REOPENED, committed)
             if document is None:
-                sprint = self.reader.show(reference, include_cards=False)
-                self._check_reopen(sprint, reference, intent["observer"])
+                sprint_document = self.reader.show(reference, include_cards=False)
+                sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+                self._check_reopen(sprint, reference)
                 event = self._event(
                     SPRINT_REOPENED,
                     role,
                     actor,
                     reference,
                     request_id,
-                    {"intent": intent},
+                    {"intent": intent_document},
                     sprint,
                 )
                 document, committed = self.transactions.begin(
-                    request_id, kind=SPRINT_REOPENED, intent=intent, event=event
+                    request_id, kind=SPRINT_REOPENED, intent=intent_document, event=event
                 )
                 if committed is not None:
                     return self._committed_result(SPRINT_REOPENED, committed)
@@ -2890,23 +2779,14 @@ class SprintWriter:
                     raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
             return self._run_reopen(document)
 
-    def _check_reopen(
-        self,
-        sprint: dict[str, Any],
-        reference: str,
-        observer: dict[str, Any] | None,
-    ) -> None:
-        """Every rule an open sprint has to satisfy, read live before any write.
-
-        The candidate is the row as it stands, under the observer this reopen declares rather than the
-        one the closed row happens to carry.
-        """
+    def _check_reopen(self, sprint: SprintWriteSnapshot, reference: str) -> None:
+        """Every rule an open sprint has to satisfy, read live before any write."""
         missing = [
             name
             for name, value in (
-                ("product", sprint.get("product")),
-                ("issues", sprint.get("issues")),
-                ("reservations", sprint.get("reservations")),
+                ("product", sprint.product),
+                ("issues", sprint.issues),
+                ("reservations", sprint.reservations),
             )
             if not value
         ]
@@ -2918,65 +2798,53 @@ class SprintWriter:
                 + "; open a new sprint that owns its issues instead of reopening it",
                 2,
             )
-        reservations = [str(project) for project in sprint.get("reservations") or []]
-        self._check_ownership(
-            str(sprint.get("product") or ""),
-            [str(issue) for issue in sprint.get("issues") or []],
-            reservations,
-        )
-        self._check_conflicts(dict(sprint) | {"observer": observer}, excluding=reference)
+        self._check_ownership(sprint.product, list(sprint.issues), list(sprint.reservations))
+        self._check_conflicts(sprint.admission(), excluding=reference)
 
     def _run_reopen(self, document: dict[str, Any]) -> dict[str, Any]:
         """Drive the staged reopen to its single audit event, or leave it repairable."""
-        reference = str(document["intent"]["reference"])
+        intent = SprintReopenIntent.from_document(document["intent"])
+        reference = intent.reference
         try:
-            sprint = self.reader.show(reference, include_cards=False)
+            sprint_document = self.reader.show(reference, include_cards=False)
+            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
             if not (document.get("progress") or {}).get("opened_done"):
                 # A staged reopen held nothing while it waited for its repeat, so the
                 # installation is measured again before this sprint becomes the open one.
-                self._check_conflicts(
-                    dict(sprint) | {"observer": document["intent"]["observer"]},
-                    excluding=reference,
-                )
-            # The value the row carries now, recorded durably before the write that replaces
-            # it: a reopen refused on a later attempt has to put back what it found, and by
-            # then the row already carries the value this reopen wrote.
+                self._check_conflicts(sprint.admission(), excluding=reference)
+            # The value the row carries now, recorded durably before the write that replaces it.
             self._record_observer_preimage(document, sprint)
-            # Observer first, status second, and each step is recorded durably: a reopen that
-            # dies between them leaves a still-closed row already carrying its fresh choice,
-            # and the repeat finds that step done rather than writing it twice.
             document.setdefault("progress", {})["observer_started"] = True
             self.transactions.save(document)
+            if intent.observer is None:
+                raise TaskError("validation", "sprint reopen intent lacks its observer", 2)
             self._transition_host(
-                role=str(document["intent"]["role"]),
-                actor=str(document["intent"]["actor"]),
+                role=intent.role.value,
+                actor=intent.actor,
                 reference=reference,
                 target="open",
                 reason="Sprint reopened",
                 request_id=str(document["request_id"]) + ":typed-reopen",
-                observer=encode_observer(document["intent"]["observer"]),
+                observer=encode_observer(intent.observer),
             )
             document.setdefault("progress", {})["observer_done"] = True
             document.setdefault("progress", {})["opened_done"] = True
             self.transactions.save(document)
-            sprint = self.reader.show(reference)
+            sprint_document = self.reader.show(reference)
+            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
             event = document["event"]
-            event["task_id"] = sprint["id"]
-            event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
+            event["task_id"] = sprint.entity_id
+            event["backend"]["revision"] = "updated_at:" + (sprint.updated_at or "unknown")
             self.transactions.save(document)
             self.transactions.complete(document)
-            update_active_sprint_projects(self.data_dir, sprint)
-            return {"action": SPRINT_REOPENED, "sprint": sprint, "event_id": str(event["event_id"])}
+            update_active_sprint_projects(self.data_dir, sprint.admission())
+            return SprintMutationReceipt(SPRINT_REOPENED, str(event["event_id"])).to_document(sprint_document)
         except TaskError as exc:
             if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                 raise
             answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
             )
-            # The refusal is only this request's answer once the row is back the way it was
-            # found and nothing is left staged.  A rollback that could not be written back
-            # leaves the observer this attempt wrote on the row, so the caller is told the
-            # request is repairable under the same request id rather than refused.
             if answer and self._compensate_reopen(document, reference):
                 raise
             raise TaskError(
@@ -2984,45 +2852,33 @@ class SprintWriter:
                 "sprint reopen is pending repair; retry with the same request id",
                 4,
             ) from None
-        except (OSError, KeyError, TypeError):
+        except (OSError, KeyError, TypeError, ValueError):
             raise TaskError(
                 "audit_pending",
                 "sprint reopen is pending repair; retry with the same request id",
                 4,
             ) from None
 
-    def _record_observer_preimage(self, document: dict[str, Any], sprint: dict[str, Any]) -> None:
-        """Record what the row's observer was, once, before this reopen writes over it.
-
-        A row that carries no value has no preimage; its absence is recorded as such, so a rollback
-        knows it cannot put the row back and leaves the reopen repairable instead.
-        """
+    def _record_observer_preimage(self, document: dict[str, Any], sprint: SprintWriteSnapshot) -> None:
+        """Record what the row's observer was, once, before this reopen writes over it."""
         progress = document.setdefault("progress", {})
         if "observer_preimage" in progress:
             return
-        current = sprint.get("observer") if "observer" in sprint else None
         try:
-            progress["observer_preimage"] = encode_observer(current) if current else None
+            progress["observer_preimage"] = encode_observer(sprint.observer) if sprint.observer else None
         except ValueError:
             progress["observer_preimage"] = None
         self.transactions.save(document)
 
     def _compensate_reopen(self, document: dict[str, Any], reference: str) -> bool:
-        """Undo a refused reopen's observer write and drop its intent.
-
-        This request is over, so it must leave the row exactly as it found it. Anything it cannot undo
-        leaves the intent in place, because then something of this request does still exist. Returns
-        whether the row and the journal are back the way this reopen found them.
-        """
+        """Undo a refused reopen's observer write and drop its intent."""
         progress = document.get("progress") or {}
         if progress.get("opened_done"):
             return False
         try:
-            sprint = self.reader.show(reference, include_cards=False)
-            # The status is read rather than taken from the staged steps: a step recorded as
-            # started proves an attempt, not a write, and only a row still not open is one
-            # this refusal may put back.
-            if str(sprint.get("status") or "") == "open":
+            sprint_document = self.reader.show(reference, include_cards=False)
+            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+            if sprint.state is SprintState.OPEN:
                 return False
             if progress.get("observer_started") or progress.get("observer_done"):
                 preimage = progress.get("observer_preimage")
@@ -3037,7 +2893,7 @@ class SprintWriter:
                     is not True
                 ):
                     return False
-        except (TaskError, OSError, KeyError, TypeError):
+        except (TaskError, OSError, KeyError, TypeError, ValueError):
             return False
         document["progress"] = {}
         self.transactions.save(document)
@@ -3057,7 +2913,7 @@ class SprintWriter:
         if unknown:
             raise TaskError("validation", "restore carries unknown sprint fields: " + ", ".join(unknown), 2)
 
-        def mutation(sprint: dict[str, Any]) -> None:
+        def mutation(sprint: SprintWriteSnapshot) -> None:
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=dict(values))
 
         return self._write(
@@ -3133,7 +2989,7 @@ class SprintWriter:
         reference: str,
         request_id: str | None,
         payload: dict[str, Any],
-        mutation: Callable[[dict[str, Any]], Any],
+        mutation: Callable[[SprintWriteSnapshot], Any],
     ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
@@ -3148,20 +3004,9 @@ class SprintWriter:
                     2,
                 )
             return self._pending(kind, pending)
-        sprint = self.reader.show(reference)
-        # A closed or stopped sprint takes no further *semantic* work: no current card is set on it
-        # and no observer resume is recorded against it, because both are statements about work in
-        # progress under a contract that has ended.
-        #
-        # A comment is not that, and it is admitted (issue:9eee1d8ee505bc4ecdc2). Adding the outcome
-        # to a sprint after it closed is what a PO does, and refusing it here is what sent one
-        # reaching past this protocol into the board's own `createComment` more than once. It
-        # changes nothing else: the status is untouched, the sprint is not reopened, `closed` is not
-        # an open sprint's status so `update_active_sprint_projects` restores no reservation, and
-        # the tick has already stopped the observer of a sprint that is no longer open -- so there
-        # is no head to wake and no delivery batch that can carry it. `sprint_comment_delivery` says
-        # exactly that rather than implying a delivery that cannot happen.
-        if sprint["status"] in {"closed", "stopped"} and kind in {
+        sprint_document = self.reader.show(reference)
+        sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+        if sprint.state in {SprintState.CLOSED, SprintState.STOPPED} and kind in {
             "current_task_set",
             "resume_recorded",
         }:
@@ -3178,32 +3023,32 @@ class SprintWriter:
         return self._record(kind, event)
 
     def _record(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
-        sprint = self.reader.show(str(event["ref"]))
-        event["task_id"] = sprint["id"]
-        event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
+        sprint_document = self.reader.show(str(event["ref"]))
+        sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+        event["task_id"] = sprint.entity_id
+        event["backend"]["revision"] = "updated_at:" + (sprint.updated_at or "unknown")
         request_id = str(event["request_id"])
         self.audit.stage(request_id, event)
         event_id = self.audit.append(request_id, event)
-        update_active_sprint_projects(self.data_dir, sprint)
-        return {"action": kind, "sprint": sprint, "event_id": event_id}
+        update_active_sprint_projects(self.data_dir, sprint.admission())
+        return SprintMutationReceipt(kind, event_id).to_document(sprint_document)
 
     def _committed(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "action": kind,
-            "sprint": self.reader.show(str(event["ref"])),
-            "event_id": self.audit.append(str(event["request_id"]), event),
-        }
+        sprint_document = self.reader.show(str(event["ref"]))
+        event_id = self.audit.append(str(event["request_id"]), event)
+        return SprintMutationReceipt(kind, event_id).to_document(sprint_document)
 
     def _pending(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
         # The staged event is only retained after a successful backend mutation in the
         # simple writes. Creation stages its Kanboard id before assigning metadata.
-        sprint = self.reader.show(str(event["ref"]))
-        event["task_id"] = sprint["id"]
-        event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
+        sprint_document = self.reader.show(str(event["ref"]))
+        sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+        event["task_id"] = sprint.entity_id
+        event["backend"]["revision"] = "updated_at:" + (sprint.updated_at or "unknown")
         self.audit.stage(str(event["request_id"]), event)
         event_id = self.audit.append(str(event["request_id"]), event)
-        update_active_sprint_projects(self.data_dir, sprint)
-        return {"action": kind, "sprint": sprint, "event_id": event_id}
+        update_active_sprint_projects(self.data_dir, sprint.admission())
+        return SprintMutationReceipt(kind, event_id).to_document(sprint_document)
 
     def _event(
         self,
@@ -3213,8 +3058,11 @@ class SprintWriter:
         reference: str,
         request_id: str,
         payload: dict[str, Any],
-        sprint: dict[str, Any] | None = None,
+        sprint: SprintWriteSnapshot | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        task_id = (
+            sprint.entity_id if isinstance(sprint, SprintWriteSnapshot) else sprint["id"] if sprint else ""
+        )
         return {
             "event_id": "evt_" + uuid.uuid4().hex,
             "schema_version": 1,
@@ -3222,7 +3070,7 @@ class SprintWriter:
             "actor": {"role": role, "id": actor},
             "kind": kind,
             "outcome": "success",
-            "task_id": sprint["id"] if sprint else "",
+            "task_id": task_id,
             "ref": reference,
             "backend": {
                 "kind": getattr(self.client, "backend_kind", "kanboard"),
@@ -3239,14 +3087,10 @@ class SprintWriter:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
 
 
-def _sprint_number(sprint: dict[str, Any] | None) -> int:
-    """The sprint's number, read through the same parser a card's number is read through.
-
-    It carried the same one-prefix defect `_card_task_id` did: `sprint_kanboard_` is one
-    spelling of `<kind>_<backend>_<n>`, and the convention is minted and parsed in
-    `board/backend.py` so that no consumer has to know which backend answered.
-    """
-    number = entity_number("sprint", (sprint or {}).get("id"))
+def _sprint_number(sprint: SprintWriteSnapshot | dict[str, Any] | None) -> int:
+    """The sprint's number, read through the same parser a card's number is read through."""
+    entity = sprint.entity_id if isinstance(sprint, SprintWriteSnapshot) else (sprint or {}).get("id")
+    number = entity_number("sprint", entity)
     if number is None:
         raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
     return number
@@ -3291,19 +3135,9 @@ def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool
 
 
 def _closeout_result(plan: Any) -> dict[str, Any] | None:
-    """What a close answers with about its closeout: where it is, and that it was written once.
-
-    `None` is a close made with no closeout at all, and it is never spelled the same way as a
-    closeout that was written: "this close wrote no document" and "this document is the record of
-    this close" are different facts about the sprint.
-    """
-    if not isinstance(plan, dict) or not plan.get("document"):
-        return None
-    return {
-        "document": str(plan.get("document") or ""),
-        "commit": str(plan.get("commit") or ""),
-        "written": bool(plan.get("written")),
-    }
+    """Released compatibility helper backed by the typed closeout boundary."""
+    typed = SprintCloseoutPlan.from_document(plan)
+    return typed.to_result() if typed is not None else None
 
 
 def _close_step_request_id(request_id: str, step: str, reference: str) -> str:
@@ -3420,11 +3254,8 @@ def _observer(meta: dict[str, str]) -> dict[str, Any]:
 
 
 def _json_list(value: str | None) -> list[str]:
-    try:
-        raw = json.loads(value or "[]")
-    except ValueError:
-        return []
-    return _unique_strings(raw) if isinstance(raw, list) else []
+    """Released private compatibility alias around the typed Sprint read boundary."""
+    return sprint_string_list(value)
 
 
 def _budget(
@@ -3432,48 +3263,8 @@ def _budget(
     thresholds: dict[str, int] | None = None,
     uncharged: Any = None,
 ) -> dict[str, Any]:
-    """The normalized budget: charged counts that move the thresholds, uncharged counts beside them.
-
-    `uncharged` is the separately stored quantity; where it is not given, an already normalized
-    budget passed as `value` carries its own. Both families default to zero for every type, so a
-    sprint stored before a type existed reads as zero rather than as an error.
-    """
-    source = value if isinstance(value, dict) else {}
-    if isinstance(value, str):
-        try:
-            source = json.loads(value)
-        except ValueError:
-            source = {}
-    by_type = source.get("by_type") if isinstance(source, dict) else {}
-    counts = {event_type: _budget_count(by_type, event_type) for event_type in BUDGET_EVENT_TYPES}
-    if uncharged is None:
-        uncharged = source.get("uncharged") if isinstance(source, dict) else {}
-    if isinstance(uncharged, str):
-        try:
-            uncharged = json.loads(uncharged)
-        except ValueError:
-            uncharged = {}
-    spare = {event_type: _budget_count(uncharged, event_type) for event_type in BUDGET_UNCHARGED_EVENT_TYPES}
-    limits = thresholds or budget_thresholds()
-    # Deliberately only the charged counts: an uncharged outcome is visible, and moves nothing.
-    total = sum(counts.values())
-    return {
-        "total": total,
-        "by_type": counts,
-        "uncharged": spare,
-        "thresholds": limits,
-        "signal_reached": total >= limits["signal"],
-        "hard_reached": total >= limits["hard"],
-    }
-
-
-def _budget_count(counts: Any, event_type: str) -> int:
-    if not isinstance(counts, dict):
-        return 0
-    try:
-        return max(0, int(counts.get(event_type, 0)))
-    except (TypeError, ValueError):
-        return 0
+    """Released private compatibility projection of :class:`SprintBudget`."""
+    return SprintBudget.from_legacy(value, thresholds=thresholds, uncharged=uncharged).to_document()
 
 
 def _budget_json(budget: dict[str, Any]) -> str:
@@ -3484,40 +3275,18 @@ def _budget_json(budget: dict[str, Any]) -> str:
 
 
 def _source_audit(value: Any) -> dict[str, str] | None:
-    """The audit metadata a restored sprint was recreated from, when it has one."""
-    source = value
-    if isinstance(value, str):
-        try:
-            source = json.loads(value or "null")
-        except ValueError:
-            return None
-    if not isinstance(source, dict):
-        return None
-    result = {field: _text(source.get(field)) for field in SOURCE_AUDIT_FIELDS}
-    return result if any(result.values()) else None
+    """Released private compatibility projection of :class:`SprintSourceAudit`."""
+    source = SprintSourceAudit.from_legacy(value)
+    return source.to_document() if source is not None else None
 
 
 def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
-    source = value
-    if isinstance(value, str):
-        try:
-            source = json.loads(value)
-        except ValueError:
-            source = None
-    if not isinstance(source, dict):
-        if required:
-            raise TaskError("validation", "resume entry must be a JSON object", 2)
+    try:
+        resume = SprintResume.from_legacy(value, required=required, now=_now)
+    except ValueError as exc:
+        raise TaskError("validation", str(exc), 2) from None
+    if resume is None:
         return None
-    missing = [
-        field
-        for field in RESUME_FIELDS
-        if not isinstance(source.get(field), str) or not source[field].strip()
-    ]
-    if missing:
-        if required:
-            raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)
-        return None
-    recorded_at = _text(source.get("recorded_at")) or _now()
-    if required and _timestamp(recorded_at) is None:
+    if required and _timestamp(resume.recorded_at) is None:
         raise TaskError("validation", "resume recorded_at must include a timezone", 2)
-    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": recorded_at}
+    return resume.to_document()

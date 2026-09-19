@@ -9,7 +9,7 @@ one scheme — the classification of such a record into "this launch is running"
 It lives here rather than in the control plane that grew it because both of the things that need
 it live under this package: `local_pty_head.LocalPtyHeadRuntime` and `orca_legacy_head` are handed
 this reader by whoever builds them, and the mechanical-role driver in `runtime/dispatch.py` builds
-one too. `secretary.dispatcher_watchdog` re-exports every name below, so the control plane keeps
+one too. `secretary.dispatch.watchdog` re-exports every name below, so the control plane keeps
 the spelling it has always used and there is still exactly one implementation.
 
 A record survives a reboot and a pid can be handed out again, which is why a bare "does this

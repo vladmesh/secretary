@@ -240,6 +240,39 @@ class CardMappingTests(unittest.TestCase):
         self.assertEqual(result.rows["tasks"], [])
         self.assertIn("outside the CHECK vocabulary", result.report.records_not_imported[0]["reason"])
 
+    def test_kind_review_and_live_impact_become_columns_and_legacy_review_stays_null(self) -> None:
+        """secretary-1638: `infra`, `review` and `live_impact` are columns, not extensions."""
+        result = self.plan_of(
+            pipeline=(
+                PRODUCT,
+                row(2, "secretary-10", meta=card_meta()),
+                row(3, "secretary-11", meta=card_meta(task_type="research", review="skipped", live_impact="1")),
+                row(4, "secretary-12", meta=card_meta(task_type="infra", review="required")),
+            )
+        )
+        tasks = {task["task_ref"]: task for task in result.rows["tasks"]}
+        self.assertEqual(
+            {ref: (task["task_type"], task["review"], task["live_impact"]) for ref, task in tasks.items()},
+            {
+                "secretary-10": ("code", None, False),
+                "secretary-11": ("research", "skipped", True),
+                "secretary-12": ("infra", "required", False),
+            },
+        )
+        for task in tasks.values():
+            self.assertNotIn("review", task["extensions"].get("kanboard", {}))
+            self.assertNotIn("live_impact", task["extensions"].get("kanboard", {}))
+
+    def test_a_review_outside_the_vocabulary_or_live_impact_off_research_is_refused(self) -> None:
+        for meta, reason in (
+            (card_meta(review="sometimes"), "review 'sometimes' is outside the CHECK vocabulary"),
+            (card_meta(live_impact="1"), "only research may carry it"),
+        ):
+            with self.subTest(reason=reason):
+                result = self.plan_of(pipeline=(PRODUCT, row(2, "secretary-10", meta=meta)))
+                self.assertEqual(result.rows["tasks"], [])
+                self.assertIn(reason, result.report.records_not_imported[0]["reason"])
+
     def test_a_duplicated_reference_keeps_the_live_row_and_names_the_other_one(self) -> None:
         result = self.plan_of(
             pipeline=(

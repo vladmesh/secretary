@@ -24,8 +24,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
-from secretary.dispatcher_state import request_token
+from secretary.dispatch.heartbeat import run_heartbeat_identity
+from secretary.dispatch.state import request_token
 from secretary.infra.env import positive_int
 
 # The launch-identity record is written by the head's own shell (`head.command.with_pid_heartbeat`)

@@ -15,9 +15,9 @@ from unittest import mock
 from secretary.broad_check import load_receipt, receipt_path, run_broad_check
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
-from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.gate import GateResult
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.types import HostError
 
 
 def _observation(classification: str = "valid") -> RuntimeProvenance:
@@ -118,7 +118,6 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             host.catalog = SimpleNamespace(integration_base=lambda project, override: "main")
             with (
                 mock.patch("secretary.dispatch.host._validation_ci", return_value="github"),
-                mock.patch.object(host, "_no_diff_research_delivery_is_complete", return_value=False),
                 mock.patch.object(
                     host, "_merge_github_pr", side_effect=lambda *args: host.effects.append("merge")
                 ),
@@ -422,7 +421,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             first = exclude.read_text(encoding="utf-8")
             host._prepare_workspace_environment(str(workspace))
 
-            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n")
+            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n/.secretary-report/\n")
             self.assertEqual(exclude.read_text(encoding="utf-8"), first)
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:

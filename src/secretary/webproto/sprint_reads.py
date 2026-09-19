@@ -23,7 +23,7 @@ a new fact. Every value below is read from the source that already owns it:
   against, refused rather than answered `{}` here, because "this sprint holds no project any more"
   and "nobody could read the index" are opposite answers;
 * the sprint itself from :class:`secretary.sprints.SprintReader`, and the observer's liveness from
-  :func:`secretary.dispatcher_observer.observer_snapshot` over the dispatcher's own production
+  :func:`secretary.dispatch.observer.observer_snapshot` over the dispatcher's own production
   state.
 
 **The listing and the watched sprint are one read with two framings.** `sprint_list` and
@@ -84,7 +84,7 @@ classification, exactly as `secretary sprint status` does.
 
 **And so is delivery.** :meth:`SprintReadLayer.sprint_comment_delivery` answers where one saved
 comment stands by placing its committed audit event against the delivery cursors
-`secretary.dispatcher_observer` already keeps -- `acknowledged_through`, the batch stage and
+`secretary.dispatch.observer` already keeps -- `acknowledged_through`, the batch stage and
 `through_event`. It opens no second cursor, keeps no second store and schedules nothing: redelivery
 belongs to the production tick, and this reports what that tick recorded. Delivery is a *batch*
 fact, never a per-comment one, which is why the answer is a relation between two ids rather than a
@@ -109,7 +109,7 @@ from typing import Any
 from secretary.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.headless import headless_cards
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     DeliveryStage,
     ObserverDelivery,
     delivery_evidence_summary,

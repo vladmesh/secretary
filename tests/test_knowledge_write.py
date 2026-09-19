@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -7,10 +8,12 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.checkpoint import CheckpointWriter
+from secretary.cli import main as cli_main
 from secretary.data import DataExport
 from secretary.knowledge_write import (
     KnowledgeValidationError,
     list_knowledge_documents,
+    write_knowledge_directory,
     write_knowledge_document,
 )
 from secretary.state_repo import StateRepoError
@@ -300,6 +303,186 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
             self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
             board = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
             self.assertIn(f"round {round_index}", board)
+
+
+REPORT = "reports/secretary-1640"
+
+
+class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
+    """`write_knowledge_directory` and `knowledge write --dir` (secretary-1640)."""
+
+    def source(self, files: dict[str, str | bytes]) -> Path:
+        root = Path(self.tmpdir.name) / "source"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir()
+        for name, data in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(data, bytes):
+                path.write_bytes(data)
+            else:
+                path.write_text(data, encoding="utf-8")
+        return root
+
+    def write_dir(self, source: Path, *, directory: str = REPORT):
+        return write_knowledge_directory(
+            self.instance_dir, directory=directory, actor="dispatcher", source_dir=source
+        )
+
+    def report_files(self) -> list[str]:
+        return git(
+            self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", f"state/knowledge/{REPORT}"
+        ).split()
+
+    def assert_refused(self, source: Path, reason: str, *, directory: str = REPORT) -> None:
+        head_before = git(self.instance_dir, "rev-parse", "HEAD").strip()
+        with self.assertRaises(KnowledgeValidationError) as caught:
+            self.write_dir(source, directory=directory)
+        self.assertEqual(caught.exception.reason, reason, str(caught.exception))
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head_before)
+        self.assertFalse((self.instance_dir / "state" / "knowledge" / "reports").exists())
+
+    def test_the_directory_lands_with_subdirectories_and_binary_files_unchanged(self):
+        binary = bytes(range(256))
+        result = self.write_dir(
+            self.source(
+                {"report.md": "# Findings\n", "data/results.csv": "a,b\n1,2\n", "data/blob.bin": binary}
+            )
+        )
+
+        self.assertTrue(result.changed)
+        self.assertEqual(
+            sorted(self.report_files()),
+            [
+                f"state/knowledge/{REPORT}/{name}"
+                for name in ("data/blob.bin", "data/results.csv", "report.md")
+            ],
+        )
+        target = self.instance_dir / "state" / "knowledge" / REPORT
+        self.assertEqual((target / "data" / "blob.bin").read_bytes(), binary)
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
+        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/knowledge").strip(), "")
+
+    def test_a_rewrite_replaces_the_whole_directory_and_identical_content_adds_no_commit(self):
+        first = self.write_dir(self.source({"report.md": "one\n", "old.txt": "gone soon\n"}))
+        second = self.write_dir(self.source({"report.md": "two\n"}))
+        again = self.write_dir(self.source({"report.md": "two\n"}))
+
+        self.assertTrue(second.changed)
+        self.assertNotEqual(first.commit, second.commit)
+        self.assertEqual(self.report_files(), [f"state/knowledge/{REPORT}/report.md"])
+        self.assertFalse((self.instance_dir / "state" / "knowledge" / REPORT / "old.txt").exists())
+        self.assertFalse(again.changed)
+        self.assertEqual(again.commit, second.commit)
+        history = git(self.instance_dir, "log", "--format=%H", "--", f"state/knowledge/{REPORT}").split()
+        self.assertEqual(len(history), 2)
+
+    def test_the_commit_touches_only_the_directory_pathspec(self):
+        (self.instance_dir / "state" / "knowledge").mkdir(parents=True)
+        stray = self.instance_dir / "state" / "knowledge" / "loose.md"
+        stray.write_text("uncommitted\n", encoding="utf-8")
+
+        self.write_dir(self.source({"report.md": "one\n"}))
+
+        self.assertNotIn("state/knowledge/loose.md", self.head_files())
+
+    def test_a_symlink_in_the_source_is_refused(self):
+        source = self.source({"report.md": "one\n"})
+        (source / "link.md").symlink_to(source / "report.md")
+        self.assert_refused(source, "special_file")
+
+    def test_every_git_named_entry_is_refused(self):
+        """secretary-1640 remark: `.gitignore`, `.gitattributes`, `.gitmodules` change what git records."""
+        for name in (".git", ".gitignore", ".gitattributes", ".gitmodules", "data/.gitignore", "data/.git-keep"):
+            with self.subTest(entry=name):
+                self.assert_refused(self.source({"report.md": "one\n", name: "x\n"}), "special_file")
+        source = self.source({"report.md": "one\n"})
+        (source / "nested" / ".git").mkdir(parents=True)
+        self.assert_refused(source, "special_file")
+
+    def swap_leftovers(self) -> list[str]:
+        """Every swap-shaped name under `state/knowledge`, where a knowledge commit would find it."""
+        knowledge = self.instance_dir / "state" / "knowledge"
+        return sorted(
+            str(path.relative_to(knowledge))
+            for path in knowledge.rglob("*")
+            if path.name.endswith((".old", ".new")) or path.name.startswith("swap.")
+        )
+
+    def test_a_crash_during_the_swap_leaves_nothing_a_knowledge_commit_picks_up(self):
+        """Staging lives outside `state/knowledge`; the next write under the lock puts the swap right.
+
+        The crash is simulated as a `BaseException` between moving the previous directory aside and
+        moving the new one in, the window in which neither is at the target.
+        """
+        self.write_dir(self.source({"report.md": "one\n", "data/a.csv": "1\n"}))
+        committed = sorted(self.report_files())
+        real_replace = __import__("os").replace
+        calls = []
+
+        def crash_on_second(src, dst):
+            calls.append((src, dst))
+            if len(calls) == 2:
+                raise KeyboardInterrupt("simulated crash")
+            return real_replace(src, dst)
+
+        with (
+            mock.patch("secretary.knowledge_write.os.replace", side_effect=crash_on_second),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.write_dir(self.source({"report.md": "two\n"}))
+
+        target = self.instance_dir / "state" / "knowledge" / REPORT
+        self.assertFalse(target.exists(), "the crash hit the window with nothing at the target")
+        self.assertEqual(self.swap_leftovers(), [], "nothing swap-shaped was left under state/knowledge")
+        swap_root = self.instance_dir / "state" / ".knowledge-swap"
+        self.assertTrue(any(swap_root.iterdir()), "the interrupted swap is parked outside knowledge")
+        # A staging directory an earlier crash left before anything moved is swept as well.
+        (swap_root / "swap.stale" / "new").mkdir(parents=True)
+
+        result = self.write(document="decisions/after-the-crash.md", text="# After\n")
+
+        self.assertTrue(result.changed)
+        self.assertEqual((target / "report.md").read_text(encoding="utf-8"), "one\n", "put back, not lost")
+        self.assertEqual(sorted(self.report_files()), committed, "the commit neither dropped nor added")
+        self.assertFalse(any(name.startswith("state/.knowledge-swap") for name in self.head_files()))
+        self.assertEqual(self.swap_leftovers(), [])
+        self.assertEqual(list(swap_root.iterdir()), [])
+        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/knowledge").strip(), "")
+
+    def test_a_target_path_that_escapes_is_refused(self):
+        source = self.source({"report.md": "one\n"})
+        for bad in ("../outside", "reports/../../escape", "/abs/dir", "reports/with space"):
+            with self.subTest(path=bad):
+                self.assert_refused(source, "path", directory=bad)
+
+    def test_a_missing_or_empty_source_is_refused(self):
+        self.assert_refused(Path(self.tmpdir.name) / "absent", "source_missing")
+        empty = self.source({})
+        (empty / "only-a-subdirectory").mkdir()
+        self.assert_refused(empty, "source_empty")
+
+    def test_a_secret_in_any_text_file_is_refused(self):
+        leaked = "token sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX\n"
+        self.assert_refused(self.source({"report.md": "clean\n", "scripts/run.sh": leaked}), "secret")
+
+    def test_a_source_over_the_cap_is_refused(self):
+        source = self.source({"report.md": "clean\n", "data.bin": b"\0" * 64})
+        with mock.patch("secretary.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
+            self.assert_refused(source, "size_cap")
+
+    def test_cli_takes_exactly_one_of_file_and_dir(self):
+        source = self.source({"report.md": "one\n"})
+        base = ["knowledge", "write", "--instance", str(self.instance_dir), "--actor", "po", "--path", REPORT]
+        with mock.patch("sys.stderr"):
+            self.assertNotEqual(cli_main(base), 0)
+            self.assertNotEqual(
+                cli_main([*base, "--dir", str(source), "--file", str(source / "report.md")]), 0
+            )
+        with mock.patch("builtins.print"):
+            self.assertEqual(cli_main([*base, "--dir", str(source)]), 0)
+        self.assertEqual(self.report_files(), [f"state/knowledge/{REPORT}/report.md"])
 
 
 if __name__ == "__main__":

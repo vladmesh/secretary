@@ -14,33 +14,36 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import dispatcher_launch, dispatcher_observer, dispatcher_review
+from secretary.dispatch import launch as dispatcher_launch
+from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch.worker_launch import bring_up_worker_head
+from secretary.dispatch import observer as dispatcher_observer
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     confirm_launch_intent,
     resolve_launch_intent,
     write_launch_intent,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     OBSERVER_ROLE,
     ObserverRecord,
     _bind_codex_provider_ingress,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     _adopt_launch_intent as adopt_observer_launch_intent,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import provider_progress_for_run
-from secretary.dispatcher_types import HostError
-from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.tui import provider_progress_for_run
+from secretary.dispatch.types import HostError
+from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
 from secretary.head_health import HeadReadiness
 from secretary.projects.contract import (
     ContractVerdict,
@@ -1517,7 +1520,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             "record",
             new=self._fail_recorder,
         ):
-            launched, failure = runtime._bring_up_worker_head(
+            launched, failure = bring_up_worker_head(
+                runtime,
                 task,
                 record,
                 records,

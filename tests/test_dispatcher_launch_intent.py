@@ -27,7 +27,7 @@ from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
-from secretary import dispatcher_launch
+from secretary.dispatch import launch as dispatcher_launch
 from secretary._fsutil import file_lock
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
@@ -36,23 +36,39 @@ from secretary.dispatcher import (
     InstanceCatalog,
     LaunchedHead,
 )
-from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
-from secretary.dispatcher_production import _budget_event_type
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import (
+from secretary.dispatch.gate import GateResult
+from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
+from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
+from secretary.dispatch.production import _budget_event_type
+from secretary.dispatch.state import (
+    DispatcherRecord,
+    GatePrAuthorship,
+    GatePublishedRef,
+    HeadlessRecoveryEpisode,
+    LaunchDelivery,
+    LaunchIntent,
+    PersistedDeliveryEvidence,
+    PersistedGatePrAuthorship,
+    PersistedGatePublishedRef,
+    PersistedGateReceipt,
+    PersistedHeadlessRecoveryEpisode,
+    PersistedLaunchIntent,
+    PersistedRoutingHeadSnapshot,
+)
+from secretary.dispatch.tui import (
+    DeliveryEvidence,
     TuiDeliveryError,
     claude_project_dir_name,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
+from secretary.dispatch.watchdog import (
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
@@ -61,7 +77,7 @@ from secretary.projects.contract import (
     ModuleContract,
 )
 from secretary.projects.integration_base import resolve_integration_base
-from secretary.routing_journal import attempts as routing_attempts
+from secretary.routing_journal import RoutingHeadSnapshot, attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
@@ -134,6 +150,323 @@ def _document_report_id(workspace: str) -> str:
     line = next(line for line in document.splitlines() if "--kind done" in line)
     return line.split("--request-id ", 1)[1].split()[0]
 
+
+class DispatcherRoutingSnapshotStateTests(unittest.TestCase):
+    """A13: routing telemetry is typed in memory without rewriting durable state."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_partial_routing_mapping_round_trips_exactly(self) -> None:
+        payload = {
+            "role": "worker",
+            "head": "codex",
+            "head_source": "role_default",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "model_source": "profile",
+            "effort": "high",
+        }
+        record = self.record(worker_run=payload)
+
+        self.assertIsInstance(record.worker_run, PersistedRoutingHeadSnapshot)
+        self.assertIsNotNone(record.worker_run.snapshot)
+        self.assertEqual(record.worker_run.snapshot.head, "codex")
+        self.assertEqual(record.to_json()["worker_run"], payload)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
+        self.assertEqual(restarted.worker_run.to_json(), payload)
+        self.assertEqual(restarted.worker_run.snapshot.head, "codex")
+
+    def test_typed_routing_assignment_projects_json_and_empty_clears_it(self) -> None:
+        snapshot = RoutingHeadSnapshot(
+            role="reviewer",
+            head="claude-opus",
+            adapter="claude",
+            model="opus",
+            model_source="profile",
+            effort="high",
+        )
+        record = self.record(review_run=snapshot)
+
+        self.assertIs(record.review_run.snapshot, snapshot)
+        self.assertEqual(record.to_json()["review_run"], snapshot.to_json())
+
+        record.review_run = {}
+        self.assertIsNone(record.review_run.snapshot)
+        self.assertEqual(record.to_json()["review_run"], {})
+
+
+class DispatcherGateDeliveryStateTests(unittest.TestCase):
+    """A13: gate identity and delivery evidence are typed without rewriting durable JSON."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_gate_and_delivery_mappings_round_trip_exactly(self) -> None:
+        attestation = {"validated_sha": "short", "base_sha": "legacy", "legacy": "keep"}
+        authorship = {"number": 17, "digest": "d" * 64, "sent": "s" * 64, "legacy": "keep"}
+        published = {"branch": "pipeline/card", "sha": "a" * 40, "legacy": "keep"}
+        delivery = {
+            "subject": "worker-prompt",
+            "stage": "payload_written",
+            "turn_confirmed": False,
+            "reason": "historical",
+            "legacy": "keep",
+        }
+        record = self.record(
+            gate_attestation=attestation,
+            gate_pr_authorship=authorship,
+            gate_published_ref=published,
+            worker_delivery_evidence=delivery,
+            review_delivery_evidence=delivery,
+        )
+
+        self.assertIsInstance(record.gate_attestation, PersistedGateReceipt)
+        self.assertIsNone(record.gate_attestation.receipt)
+        self.assertIsInstance(record.gate_pr_authorship, PersistedGatePrAuthorship)
+        self.assertEqual(record.gate_pr_authorship.authorship.number, 17)
+        self.assertIsInstance(record.gate_published_ref, PersistedGatePublishedRef)
+        self.assertEqual(record.gate_published_ref.published_ref.branch, "pipeline/card")
+        self.assertIsInstance(record.worker_delivery_evidence, PersistedDeliveryEvidence)
+        self.assertEqual(record.worker_delivery_evidence.evidence.reason, "historical")
+
+        durable = record.to_json()
+        self.assertEqual(durable["gate_attestation"], attestation)
+        self.assertEqual(durable["gate_pr_authorship"], authorship)
+        self.assertEqual(durable["gate_published_ref"], published)
+        self.assertEqual(durable["worker_delivery_evidence"], delivery)
+        self.assertEqual(durable["review_delivery_evidence"], delivery)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(durable)))
+        self.assertEqual(restarted.gate_attestation.to_json(), attestation)
+        self.assertEqual(restarted.gate_pr_authorship.to_json(), authorship)
+        self.assertEqual(restarted.gate_published_ref.to_json(), published)
+        self.assertEqual(restarted.worker_delivery_evidence.to_json(), delivery)
+        self.assertEqual(restarted.review_delivery_evidence.to_json(), delivery)
+
+    def test_typed_gate_and_delivery_assignments_project_released_json(self) -> None:
+        receipt = GateReceipt(
+            validated_sha="a" * 40,
+            base_sha="b" * 40,
+            gate_mode="local",
+            required_checks=(TerminalCheck("unit", "SUCCESS"),),
+            completed_at="2026-09-18T00:00:00+00:00",
+            command_or_check_set_digest="c" * 64,
+        )
+        authorship = GatePrAuthorship(number=19, digest="d" * 64, sent="e" * 64)
+        published = GatePublishedRef(branch="pipeline/card", sha="f" * 40)
+        delivery = DeliveryEvidence(
+            handle="pane-1",
+            subject="worker-prompt",
+            stage="acknowledged",
+            turn_confirmed=True,
+            reason="",
+        )
+        record = self.record(
+            gate_attestation=receipt,
+            gate_pr_authorship=authorship,
+            gate_published_ref=published,
+            worker_delivery_evidence=delivery,
+            review_delivery_evidence=delivery,
+        )
+
+        self.assertIs(record.gate_attestation.receipt, receipt)
+        self.assertIs(record.gate_pr_authorship.authorship, authorship)
+        self.assertIs(record.gate_published_ref.published_ref, published)
+        self.assertIs(record.worker_delivery_evidence.evidence, delivery)
+        self.assertIs(record.review_delivery_evidence.evidence, delivery)
+        self.assertEqual(record.to_json()["gate_attestation"], receipt.as_dict())
+        self.assertEqual(record.to_json()["gate_pr_authorship"], authorship.to_json())
+        self.assertEqual(record.to_json()["gate_published_ref"], published.to_json())
+        self.assertEqual(record.to_json()["worker_delivery_evidence"], delivery.to_json())
+        self.assertEqual(record.to_json()["review_delivery_evidence"], delivery.to_json())
+
+        record.gate_attestation = {}
+        record.gate_pr_authorship = {}
+        record.gate_published_ref = {}
+        record.worker_delivery_evidence = {}
+        record.review_delivery_evidence = {}
+        self.assertIsNone(record.gate_attestation.receipt)
+        self.assertIsNone(record.gate_pr_authorship.authorship)
+        self.assertIsNone(record.gate_published_ref.published_ref)
+        self.assertIsNone(record.worker_delivery_evidence.evidence)
+        self.assertIsNone(record.review_delivery_evidence.evidence)
+
+
+class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
+    """A13: launch intent and headless recovery are typed without rewriting durable JSON."""
+
+    @staticmethod
+    def record(**changes: Any) -> DispatcherRecord:
+        values: dict[str, Any] = {
+            "worker": "worker-1",
+            "workspace": "/tmp/card",
+            "handle": "pane-1",
+            "head": "codex",
+            "review_head": "claude",
+            "attempt_id": "attempt-1",
+            "comment_baseline": 0,
+            "review_baseline": 0,
+            "state": "claimed",
+            "claimed_at": 1.0,
+        }
+        values.update(changes)
+        return DispatcherRecord(**values)
+
+    def test_historical_launch_and_headless_mappings_round_trip_exactly(self) -> None:
+        launch = {
+            "role": "worker",
+            "action": "claim",
+            "run_id": "legacy-run",
+            "delivery": {
+                "state": "busy",
+                "attempts": 2,
+                "next_at": 123.5,
+                "legacy": "keep",
+            },
+            "legacy": "keep",
+        }
+        headless = {
+            "since": 100.25,
+            "comment_baseline": 7,
+            "record_state": "adopted",
+            "handle_known": False,
+            "heartbeat": "absent",
+            "workspace": "/tmp/card",
+            "branch": "pipeline/card",
+            "expected_branch": "pipeline/card",
+            "dirty": False,
+            "candidate_sha": "a" * 40,
+            "report_generation": 3,
+            "recovery_error": "round_already_answered",
+            "legacy": "keep",
+        }
+        record = self.record(launch_intent=launch, worker_headless=headless)
+
+        self.assertIsInstance(record.launch_intent, PersistedLaunchIntent)
+        self.assertEqual(record.launch_intent.intent.role, "worker")
+        self.assertEqual(record.launch_intent.intent.delivery.attempts, 2)
+        self.assertIsInstance(record.worker_headless, PersistedHeadlessRecoveryEpisode)
+        self.assertEqual(record.worker_headless.episode.candidate_sha, "a" * 40)
+        self.assertEqual(record.worker_headless.episode.recovery_error, "round_already_answered")
+
+        durable = record.to_json()
+        self.assertEqual(durable["launch_intent"], launch)
+        self.assertEqual(durable["worker_headless"], headless)
+
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(durable)))
+        self.assertEqual(restarted.launch_intent.to_json(), launch)
+        self.assertEqual(restarted.worker_headless.to_json(), headless)
+        self.assertEqual(restarted.launch_intent.intent.action, "claim")
+        self.assertEqual(restarted.worker_headless.episode.comment_baseline, 7)
+
+    def test_typed_launch_and_headless_assignments_project_released_json(self) -> None:
+        evidence = DeliveryEvidence(
+            handle="pane-1",
+            subject="worker-prompt",
+            stage="acknowledged",
+            turn_confirmed=True,
+        )
+        routing = RoutingHeadSnapshot(
+            role="worker",
+            head="codex",
+            adapter="codex",
+            model="gpt-5.6-terra",
+            model_source="profile",
+            effort="high",
+        )
+        head_run = accepted_transport_run(
+            "codex",
+            role="worker",
+            workspace="/tmp/card",
+            task_ref=head_ops.TaskRef.card("secretary-1", document="/tmp/card/TASK.md"),
+            pid_file="/tmp/card.pid",
+            run_id="run-1",
+        )
+        intent = LaunchIntent(
+            role="worker",
+            action="claim",
+            head="codex",
+            workspace="/tmp/card",
+            pid_file="/tmp/card.pid",
+            run_id="run-1",
+            task="card:secretary-1",
+            attempt_id="attempt-1",
+            round_number=1,
+            opens_round=True,
+            respawns=0,
+            at=123.0,
+            routing_run=routing,
+            head_run=head_run,
+            delivery=LaunchDelivery(
+                state="confirmed",
+                receipt="accepted",
+                evidence=evidence,
+            ),
+            launched=True,
+        )
+        episode = HeadlessRecoveryEpisode(
+            since=456.0,
+            comment_baseline=4,
+            record_state="adopted",
+            heartbeat="absent",
+            workspace="/tmp/card",
+            branch="pipeline/card",
+            expected_branch="pipeline/card",
+            dirty=False,
+            candidate_sha="b" * 40,
+            report_generation=2,
+        )
+        record = self.record(launch_intent=intent, worker_headless=episode)
+
+        self.assertEqual(record.launch_intent.intent.role, "worker")
+        self.assertEqual(record.launch_intent.intent.routing_run, routing)
+        self.assertTrue(record.launch_intent.intent.head_run.same_run(head_run))
+        self.assertEqual(record.launch_intent.intent.delivery.evidence.subject, "worker-prompt")
+        self.assertEqual(record.worker_headless.episode, episode)
+        self.assertEqual(record.to_json()["launch_intent"], intent.to_json())
+        self.assertEqual(record.to_json()["worker_headless"], episode.to_json())
+
+        # Legacy call sites still mutate these mapping-compatible wrappers in place. The typed
+        # view must track those writes until the last compatibility mutation is removed.
+        record.launch_intent["action"] = "worker-respawn"
+        record.worker_headless["recovery_error"] = "candidate_unknown"
+        self.assertEqual(record.launch_intent.intent.action, "worker-respawn")
+        self.assertEqual(record.worker_headless.episode.recovery_error, "candidate_unknown")
+
+        record.launch_intent = {}
+        record.worker_headless = {}
+        self.assertIsNone(record.launch_intent.intent)
+        self.assertIsNone(record.worker_headless.episode)
 
 class LaunchIntentTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -3772,7 +4105,7 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.host, "_run_json", run_json),
-            mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0),
+            mock.patch("secretary.dispatch.tui.latest_claude_user_turn_for", return_value=1.0),
         ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
@@ -3863,13 +4196,13 @@ class HostLaunchContourTests(unittest.TestCase):
         with (
             mock.patch.object(self.host, "_run_json", run_json),
             mock.patch(
-                "secretary.dispatcher_tui.latest_claude_user_turn_for",
+                "secretary.dispatch.tui.latest_claude_user_turn_for",
                 side_effect=latest_turn,
             ),
         ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
-        self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
+        self.assertFalse(head_process_status(record.worker_pid_file).get("stopped"))
         self.assertTrue(any(command[2] == "wait" for command in calls))
         self.assertTrue(any(command[2] == "send" for command in calls))
 

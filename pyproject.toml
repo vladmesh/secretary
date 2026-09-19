@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 managed = false
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 # The linter is part of the contract, so its version is too: a rule set that means one thing
 # on the author's machine and another in a gate is not a gate. `required-version` makes any
 # other ruff refuse to run instead of silently reporting a different set of findings; install
@@ -51,6 +51,41 @@ select = [
 # protocol prose and command examples intact instead of wrapping them for a column limit.
 ignore = ["E501", "S101"]
 
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+# Start with typed leaves only. Imported legacy modules are followed for type information, but
+# their existing debt is not promoted into this first gate; the checked set grows deliberately.
+files = [
+    "src/secretary/board/models.py",
+    "src/secretary/board/roles.py",
+    "src/secretary/board/attempt_usage.py",
+    "src/secretary/board/attempt_outcome.py",
+    "src/secretary/board/outcome_round_context.py",
+    "src/secretary/board/card_transitions.py",
+    "src/secretary/board/task_routing.py",
+    "src/secretary/board/sprint_read.py",
+    "src/secretary/board/sprint_admission.py",
+    "src/secretary/board/sprint_write.py",
+    "src/secretary/board/sprint_close.py",
+    "src/secretary/board/host.py",
+    "src/secretary/board/backend.py",
+    "src/secretary/dispatch/runtime_provenance.py",
+    "src/secretary/dispatch/claim.py",
+    "src/secretary/dispatch/worker_launch.py",
+    "src/secretary/dispatch/worker_report.py",
+    "src/secretary/routing_journal.py",
+    "src/secretary/dispatch/state.py",
+    "src/secretary/dispatch/pause.py",
+    "src/secretary/po/models.py",
+]
+follow_imports = "silent"
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+show_error_codes = true
+
 [tool.coverage.run]
 branch = true
 relative_files = true
@@ -63,7 +98,7 @@ description = "Portable secretary appliance CLI skeleton."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "PyYAML>=6.0",
     # 4.18 is the first release whose validators take a `referencing` registry (its own
@@ -96,6 +131,9 @@ dev = [
 ]
 ci = [
     "coverage>=7.6",
+]
+typecheck = [
+    "mypy==1.18.2",
 ]
 memory = [
     "mcp==1.28.1",

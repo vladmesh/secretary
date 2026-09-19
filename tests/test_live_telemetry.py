@@ -24,23 +24,24 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-import secretary.dispatcher as dispatcher_module
+import secretary.dispatch.bootstrap as dispatcher_bootstrap
 from secretary import host
 from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
-from secretary.dispatcher import DispatcherRuntime, default_data_dir, runtime_from_args
-from secretary.dispatcher_observer import (
+from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
+from secretary.dispatcher import DispatcherRuntime
+from secretary.dispatch.observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
     put_observers,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_ERRORS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
-from secretary.dispatcher_watchdog import idle_stall_seconds
+from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
@@ -208,7 +209,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         over exactly this is the round-3 blocker.
         """
         return mock.patch(
-            "secretary.dispatcher_production._reconcile_production",
+            "secretary.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "degraded",
@@ -371,7 +372,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         finish does that.
         """
         with mock.patch(
-            "secretary.dispatcher_production._reconcile_production",
+            "secretary.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "blocked",
@@ -400,7 +401,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatcher_production._production_tasks",
+                "secretary.dispatch.production._production_tasks",
                 side_effect=TaskError("backend_unavailable", "board is down", 1),
             ),
             self.assertRaises(TaskError),
@@ -433,7 +434,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         outage = mock.patch(
-            "secretary.dispatcher_production._production_tasks",
+            "secretary.dispatch.production._production_tasks",
             side_effect=TaskError("backend_unavailable", "board is down", 1),
         )
         with contextlib.ExitStack() as stack:
@@ -512,7 +513,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatcher_production._reconcile_production",
+                "secretary.dispatch.production._reconcile_production",
                 side_effect=RuntimeError("host is gone"),
             ),
             self.assertRaises(RuntimeError),
@@ -828,7 +829,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         with (
             mock.patch("secretary.tasks.KanboardClient"),
             mock.patch(
-                "secretary.dispatcher.board_client", wraps=dispatcher_module.board_client
+                "secretary.dispatch.bootstrap.board_client", wraps=dispatcher_bootstrap.board_client
             ) as selected,
         ):
             runtime = runtime_from_args(

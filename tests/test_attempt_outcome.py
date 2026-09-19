@@ -10,9 +10,9 @@ from unittest import mock
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
-from secretary.dispatcher_state import OutcomeTerminalPath
-from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.state import OutcomeTerminalPath
+from secretary.dispatch.gate import GateResult
+from secretary.dispatch.types import HostError
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
@@ -316,7 +316,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_fanout_refusal_commits_its_lifecycle_effect_and_outcome(self) -> None:
         self.start_dispatcher()
         with mock.patch(
-            "secretary.dispatcher._write_launch_intent",
+            "secretary.dispatch.worker_launch._write_launch_intent",
             return_value="codex-fanout-policy: prohibited source",
         ):
             blocked = self.tick()

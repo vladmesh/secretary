@@ -25,13 +25,13 @@ answer from being read as something it is not. It is derived from exactly the du
 3. :data:`FREEZE_CONTRACT` -- a freeze is a different command that stops those heads, and it is
    never an implicit upgrade of a drain. It is named here so an operator can see what the other
    command would do; it is deliberately not offered as a variant of the soft path, and
-   `secretary.dispatcher_pause_ops.pause` refuses to change mode while paused.
+   `secretary.dispatch.pause_ops.pause` refuses to change mode while paused.
 4. The `state` section carries the `stopped_worker`, `stopped_reviewer` and `stopped_observer`
-   lists and the `on_resume` sentence that :mod:`secretary.dispatcher_pause` already writes, so what
+   lists and the `on_resume` sentence that :mod:`secretary.dispatch.pause` already writes, so what
    a resume would put back is said by the thing that stopped it.
 
 **Every rule stays where it already is.** `normalize_pause_mode`, `on_resume_text` and
-`auto_resume_status` are :mod:`secretary.dispatcher_pause`'s; the per-card head line -- what it means
+`auto_resume_status` are :mod:`secretary.dispatch.pause`'s; the per-card head line -- what it means
 that a head is missing -- is `dispatcher_pause_ops.head_lines`, the same call `pause_status` makes;
 the observer rows are `observer_snapshot`'s. Nothing here re-decides any of them and nothing here
 opens a second flag, store or lock.
@@ -64,16 +64,16 @@ from typing import Any
 
 from secretary.board.backend import SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
-from secretary.dispatcher_observer import observer_snapshot
-from secretary.dispatcher_pause import (
+from secretary.dispatch.observer import observer_snapshot
+from secretary.dispatch.pause import (
     ProductionPause,
     auto_resume_status,
     legacy_mirror_path,
     normalize_pause_mode,
     on_resume_text,
 )
-from secretary.dispatcher_pause_ops import head_lines
-from secretary.dispatcher_production import ProductionState
+from secretary.dispatch.pause_ops import head_lines
+from secretary.dispatch.production import ProductionState
 from secretary.sprints import SprintReader
 from secretary.tasks import _TYPED_RECORD_TYPES
 from secretary.webproto import sources
@@ -145,7 +145,7 @@ FREEZE_CONTRACT = {
     "statement": (
         "A freeze is a different command, not a stronger drain, and it is never reached "
         "implicitly: this layer exposes no freeze operation, `pause_drain` takes no mode, and "
-        "`secretary.dispatcher_pause_ops.pause` refuses to change mode while the pipeline is "
+        "`secretary.dispatch.pause_ops.pause` refuses to change mode while the pipeline is "
         "paused, so a drain is never quietly turned into a freeze. Freezing is `secretary pause "
         "freeze`, issued deliberately, after a resume."
     ),

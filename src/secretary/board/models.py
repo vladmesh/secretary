@@ -17,6 +17,7 @@ from secretary.board.terminal_taxonomy import (
     TERMINAL_DISPOSITIONS,
     read_terminal_taxonomy,
 )
+from secretary.board.roles import Role
 
 EntityRef: TypeAlias = str
 
@@ -121,6 +122,27 @@ class IssueState(StrEnum):
     CLOSED = "closed"
 
 
+class IssueKind(StrEnum):
+    BUG = "bug"
+    FEATURE = "feature"
+    QUESTION = "question"
+    IMPROVEMENT = "improvement"
+
+
+class IssuePriority(StrEnum):
+    P0 = "P0"
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+
+
+class IssueCloseReason(StrEnum):
+    RESOLVED = "resolved"
+    INVALID = "invalid"
+    DUPLICATE = "duplicate"
+    WONT_DO = "wont_do"
+
+
 class SprintState(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
@@ -159,16 +181,57 @@ class Product:
         return EntityKind.PRODUCT
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Issue:
     ref: EntityRef
     title: str
     product_ref: EntityRef
-    state: IssueState = IssueState.OPEN
-    priority: str = ""
-    issue_kind: str = ""
-    description: str = ""
-    close_reason: str | None = None
+    state: IssueState
+    priority: IssuePriority | None
+    issue_kind: IssueKind | None
+    description: str
+    close_reason: IssueCloseReason | None
+
+    def __init__(
+        self,
+        ref: EntityRef,
+        title: str,
+        product_ref: EntityRef,
+        state: IssueState = IssueState.OPEN,
+        priority: IssuePriority | str | None = None,
+        issue_kind: IssueKind | str | None = None,
+        description: str = "",
+        close_reason: IssueCloseReason | str | None = None,
+    ) -> None:
+        # A staged Kanboard create historically exposes ``pending/pending`` before its metadata
+        # finish step.  Keep accepting that recovery-only wire shape, but normalize it to absence
+        # rather than polluting either closed vocabulary with a value that can never be persisted.
+        if priority == "pending" or issue_kind == "pending":
+            if priority != "pending" or issue_kind != "pending":
+                raise ValueError("incomplete Issue vocabulary must omit both priority and kind")
+            priority = None
+            issue_kind = None
+        if priority == "":
+            priority = None
+        if issue_kind == "":
+            issue_kind = None
+        if close_reason == "":
+            close_reason = None
+        try:
+            normalized_priority = None if priority is None else IssuePriority(priority)
+            normalized_kind = None if issue_kind is None else IssueKind(issue_kind)
+            normalized_close_reason = None if close_reason is None else IssueCloseReason(close_reason)
+        except ValueError as exc:
+            raise ValueError(f"invalid Issue vocabulary: {exc}") from None
+        object.__setattr__(self, "ref", ref)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "product_ref", product_ref)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "priority", normalized_priority)
+        object.__setattr__(self, "issue_kind", normalized_kind)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "close_reason", normalized_close_reason)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         _non_empty(self.ref, "issue ref")
@@ -221,16 +284,27 @@ class Card:
 BoardEntity: TypeAlias = Product | Issue | Sprint | Card
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Actor:
     """The protocol identity that made a board mutation."""
 
-    role: str
+    role: Role
     id: str
     head_run_ref: str | None = None
 
+    def __init__(self, role: Role | str, id: str, head_run_ref: str | None = None) -> None:
+        try:
+            normalized_role = Role(role)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid actor role: {role!r}") from exc
+        object.__setattr__(self, "role", normalized_role)
+        object.__setattr__(self, "id", id)
+        object.__setattr__(self, "head_run_ref", head_run_ref)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        _non_empty(self.role, "actor role")
+        if not isinstance(self.role, Role):
+            raise ValueError("actor role must be a Role")
         _non_empty(self.id, "actor id")
         if self.head_run_ref is not None:
             _non_empty(self.head_run_ref, "actor head-run ref")

@@ -538,7 +538,7 @@ class TransportIndependenceTests(unittest.TestCase):
         """
         http httpx requests urllib urllib3 socket socketserver ssl asyncio aiohttp flask fastapi
         starlette uvicorn django jinja2 tornado werkzeug wsgiref html cgi bottle sanic quart
-        secretary.dispatcher_review secretary.dispatch.head_status triggered_agents.runtime.pane_host
+        secretary.dispatch.review secretary.dispatch.head_status triggered_agents.runtime.pane_host
         """.split()
     )
 

@@ -53,16 +53,16 @@ from enum import Enum
 from typing import Any
 
 from secretary.codex_provider_events import CodexProviderSourceError
-from secretary.dispatcher_launch import merge_launch_head_run
-from secretary.dispatcher_state import now_rfc3339, request_token
-from secretary.dispatcher_tui import (
+from secretary.dispatch.launch import merge_launch_head_run
+from secretary.dispatch.state import now_rfc3339, request_token
+from secretary.dispatch.tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     READINESS_BUSY,
     delivery_readiness_state,
 )
-from secretary.dispatcher_types import HostError
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.types import HostError
+from secretary.dispatch.watchdog import (
     head_run_process_status,
     heartbeat_is_dead,
     heartbeat_is_live_match,
@@ -70,7 +70,7 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
     WorkerContinuationLiveness,
@@ -3418,6 +3418,13 @@ def _executor_lines(sprint: dict[str, Any]) -> list[str]:
             else f"- {role}: not pinned. The owner fixed no {role} profile for this sprint, so you "
             f"choose one per card under the current rules — not a sprint that runs without a {role}."
         )
+    # The reviewer head says who reviews, never whether: that is the card's stored review choice.
+    lines.append(
+        "- review: whether a card is reviewed at all is its `review` choice, not the reviewer head. "
+        "It defaults to required for `code` and skipped for `research` and `infra`; "
+        "`--review skipped` or `--review required` on the card overrides the default. A skipped "
+        "card launches no reviewer; a skipped code card still runs the gate and merges on release."
+    )
     return lines
 
 

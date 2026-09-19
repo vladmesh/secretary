@@ -9,17 +9,31 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.board.backend import card_client
+from secretary.board.models import CardState
+from secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
+from secretary.board.task_routing import (
+    BlockClassification,
+    FamilyPreference,
+    TaskComplexity,
+    TaskDecision,
+    TaskReview,
+    TaskType,
+)
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
-    _BLOCK_CLASSIFICATIONS,
     TaskError,
     TaskReader,
     TaskWriter,
     task_audit_for,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+
+
+def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:
+    """Project a canonical role subset onto argparse's string boundary."""
+    return tuple(role.value for role in Role if role in roles)
 
 
 def _add_instance_arg(parser) -> None:
@@ -75,7 +89,7 @@ def add_task_subcommands(subparsers) -> None:
     task_list.add_argument(
         "--state",
         action="append",
-        choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+        choices=tuple(state.value for state in CardState),
     )
     task_list.add_argument("--project")
     task_list.add_argument("--sprint")
@@ -94,7 +108,7 @@ def add_task_subcommands(subparsers) -> None:
         "repair-references-apply", help="apply an exact previewed duplicate-reference repair"
     )
     _add_data_dir_args(repair_apply)
-    repair_apply.add_argument("--role", required=True, choices=("po",))
+    repair_apply.add_argument("--role", required=True, choices=(Role.PO.value,))
     repair_apply.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     repair_apply.add_argument("--plan-id", required=True)
     repair_apply.add_argument("--task-id", action="append", required=True, type=int)
@@ -103,21 +117,34 @@ def add_task_subcommands(subparsers) -> None:
     repair_apply.set_defaults(handler=run_task_repair_references_apply)
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument(
-        "--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer")
+        "--role", required=True, choices=_role_choices(CREATE_ROLES)
     )
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
     task_create.add_argument("--project", required=True)
-    task_create.add_argument("--type", required=True, choices=("code", "research"))
+    task_create.add_argument("--type", required=True, choices=tuple(kind.value for kind in TaskType))
     task_create.add_argument("--title", required=True)
     task_create.add_argument("--description", default="")
     task_create.add_argument("--body-file")
     task_create.add_argument("--ref", default="")
-    task_create.add_argument("--state", choices=("issues", "ready"), default="ready")
+    task_create.add_argument("--state", choices=(CardState.ISSUES.value, CardState.READY.value), default=CardState.READY.value)
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
+    task_create.add_argument(
+        "--review",
+        choices=("", *(value.value for value in TaskReview)),
+        default="",
+        help="whether the card is reviewed; default required for code, skipped for research and infra "
+        "(a --review-head the sprint does not pin is refused with skipped)",
+    )
+    task_create.add_argument(
+        "--live-impact",
+        action="store_true",
+        help="research only: the card touches live systems; its description must declare "
+        "'## Impact bounds' with '### Allowed', '### Forbidden' and '### Cleanup'",
+    )
     task_create.add_argument("--slug", default="")
     task_create.add_argument(
         "--base-branch",
@@ -133,9 +160,9 @@ def add_task_subcommands(subparsers) -> None:
         "--supersedes", default="", help="reference of the predecessor card a --seed-ref inherits from"
     )
     task_create.add_argument(
-        "--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard"
+        "--complexity", choices=tuple(value.value for value in TaskComplexity), default=TaskComplexity.STANDARD.value
     )
-    task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
+    task_create.add_argument("--family-preference", choices=tuple(value.value for value in FamilyPreference), default=FamilyPreference.AUTO.value)
     # No `choices`: `--codex-mode exec` names a launch shape the product removed, and it is
     # answered with that sentence in `_validate_codex_mode_for_create` rather than with argparse's
     # "invalid choice" over a flag whose only remaining value is the default anyway.
@@ -163,7 +190,7 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument(
             "--role",
             required=True,
-            choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"),
+            choices=_role_choices(BOARD_ROLES),
         )
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         _add_data_dir_args(command)
@@ -173,11 +200,11 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
             # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
             # rules so the protocol is the same from a script as from the CLI.
-            command.add_argument("--classification", default="", choices=("", *_BLOCK_CLASSIFICATIONS))
+            command.add_argument("--classification", default="", choices=("", *(value.value for value in BlockClassification)))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "decide":
-            command.add_argument("--kind", required=True, choices=("release", "rework", "reslice"))
+            command.add_argument("--kind", required=True, choices=tuple(value.value for value in TaskDecision))
             command.add_argument("--reason-file")
             command.add_argument(
                 "--protocol-prerequisite",
@@ -193,19 +220,19 @@ def add_task_subcommands(subparsers) -> None:
                 "--target",
                 dest="to",
                 required=True,
-                choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+                choices=tuple(state.value for state in CardState),
             )
             command.add_argument("--reason-file")
             # A card leaves Assessment on a decision somebody recorded with `task decide`, and
             # the move has to name it: the writer checks it against the card's audit.
-            command.add_argument("--decision", default="", choices=("", "release", "rework", "reslice"))
+            command.add_argument("--decision", default="", choices=("", *(value.value for value in TaskDecision)))
             _add_sprint_override_args(command)
         if name == "archive":
             command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
-    task_edit.add_argument("--role", required=True, choices=("po", "dispatcher", "observer"))
+    task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
     task_edit.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_edit)
     task_edit.add_argument("--request-id")
@@ -218,7 +245,7 @@ def add_task_subcommands(subparsers) -> None:
     task_edit.set_defaults(handler=run_task_edit)
     task_claim = task_subcommands.add_parser("claim")
     task_claim.add_argument("--ref", required=True)
-    task_claim.add_argument("--role", required=True, choices=("dispatcher",))
+    task_claim.add_argument("--role", required=True, choices=(Role.DISPATCHER.value,))
     task_claim.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_claim)
     task_claim.add_argument("--request-id")
@@ -358,6 +385,8 @@ def run_task_create(args: argparse.Namespace) -> int:
             budget_event=args.budget_event,
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
+            review=args.review,
+            live_impact=args.live_impact,
             request_id=args.request_id,
         )
 

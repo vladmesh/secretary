@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from secretary.board.marker_payload import MarkerPayload, marker_payload_from_data
 from secretary.board.models import (
     Actor,
     BoardEntity,
@@ -129,36 +130,57 @@ class TransitionRequest:
             raise ValueError("transition data must be an object")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class MarkerComment:
-    """One control-plane comment expressed as a complete typed occurrence.
+    """One control-plane comment expressed as a typed marker payload.
 
-    ``data`` is deliberately the complete marker payload, including the text
-    that will appear on the board.  The adapter renders it only after staging;
-    callers never hand it a separately composed comment body.
+    Callers may still hand over the released dictionary shape.  The host
+    boundary normalizes it immediately to one of the closed marker payload
+    values; adapters serialize it back only when they stage the board event.
     """
 
     ref: EntityRef
     kind: EventKind
     actor: Actor
     reason: str
-    data: dict[str, object]
-    related_refs: RelatedRefs = field(default_factory=RelatedRefs)
-    request_id: str | None = None
-    # A command-level admission that is only relevant to a fresh occurrence.
-    # The host calls it after resolving request ownership and before staging or
-    # issuing the one Kanboard effect, so exact replay never re-runs it.
-    fresh_admission: Callable[[], None] | None = field(default=None, compare=False, repr=False)
+    payload: MarkerPayload
+    related_refs: RelatedRefs
+    request_id: str | None
+    fresh_admission: Callable[[], None] | None
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.ref, str) or not self.ref.strip():
+    def __init__(
+        self,
+        ref: EntityRef,
+        kind: EventKind,
+        actor: Actor,
+        reason: str,
+        data: MarkerPayload | dict[str, object],
+        related_refs: RelatedRefs = RelatedRefs(),
+        request_id: str | None = None,
+        fresh_admission: Callable[[], None] | None = None,
+    ) -> None:
+        if not isinstance(ref, str) or not ref.strip():
             raise ValueError("marker Card ref must be a non-empty string")
-        if not isinstance(self.reason, str) or not self.reason.strip():
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError("marker reason must be a non-empty string")
-        if self.kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
+        if kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
             raise ValueError("marker comment kind must be a declared control-plane event kind")
-        if not isinstance(self.data, dict):
-            raise ValueError("marker comment data must be an object")
+        payload = data
+        if isinstance(data, dict):
+            payload = marker_payload_from_data(kind.value, reason, data)
+        object.__setattr__(self, "ref", ref)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "actor", actor)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "payload", payload)
+        object.__setattr__(self, "related_refs", related_refs)
+        object.__setattr__(self, "request_id", request_id)
+        object.__setattr__(self, "fresh_admission", fresh_admission)
+
+    @property
+    def data(self) -> dict[str, object]:
+        """Released adapter projection of the typed payload."""
+        return self.payload.to_event_data()
 
 
 @dataclass(frozen=True, slots=True)

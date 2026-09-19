@@ -213,7 +213,7 @@ from .tui_delivery import (
 #: Supervisor transport failures become unreachable-head receipts.
 _UNREACHABLE = (local_pty.LocalPtyError, OSError)
 
-#: How the launch-identity reader is called. The shape of `secretary.dispatcher_watchdog`'s
+#: How the launch-identity reader is called. The shape of `secretary.dispatch.watchdog`'s
 #: `head_process_status`, which is the one this runtime is meant to be given.
 IdentityReader = Callable[..., Mapping[str, Any]]
 
@@ -477,7 +477,7 @@ class LocalPtyHeadRuntime:
     `head_process_status` is the launch-identity reader, and it is required. There is no reading of
     a head's process this runtime invents for itself: the product has exactly one scheme for that —
     `pid`, `boot_id`, `proc_starttime_ticks` written by the head's own shell — and exactly one
-    reader of it, `head.identity.head_process_status`, which `secretary.dispatcher_watchdog`
+    reader of it, `head.identity.head_process_status`, which `secretary.dispatch.watchdog`
     re-exports for the control plane. Passing it in rather than importing it keeps every builder of
     this runtime — the dispatcher, and the mechanical-role driver in `runtime/dispatch.py` — on
     that one reader instead of on a scheme of its own.

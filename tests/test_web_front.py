@@ -2,8 +2,8 @@
 
 Hermetic on purpose. Not one test here starts Caddy, opens a socket or reads the live installation:
 the two questions this card has to answer forever -- "is every route the transport publishes behind
-the password" and "does the front proxy anywhere but loopback" -- are questions about a text, and a
-test that needed a running front would be a test nobody runs on the branch that breaks it.
+authentication" and "does the front proxy anywhere but loopback" -- are questions about a text, and
+a test that needed a running front would be a test nobody runs on the branch that breaks it.
 
 The route list is never written out here. `secretary.web.app.ROUTES` is the same table
 `docs/PROTOCOLS.md` documents and the same one `tests/test_web_transport.py` pins, so a route added
@@ -29,9 +29,13 @@ from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT
 from secretary.webfront.caddyfile import (
     HASH_SECRET_ID,
     PASSWORD_SECRET_ID,
+    SESSION_COOKIE_MAX_AGE,
+    SESSION_COOKIE_NAME,
+    SESSION_SECRET_ID,
     FrontConfig,
     FrontConfigError,
     render,
+    session_cookie_value,
 )
 from secretary.webfront.guard import CaddyfileSyntaxError, parse, unguarded_routes, upstreams
 
@@ -39,20 +43,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: A bcrypt hash of no password anybody holds: the shape `basicauth` checks, and nothing more.
 SAMPLE_HASH = "$2a$14$" + "x" * 53
+#: A fixture with more entropy-shaped text than the renderer's minimum; never a production secret.
+SAMPLE_SESSION_SECRET = "fixture-session-secret-" + "x" * 32
 
 SITES = ("https://front.example", "https://198.51.100.7")
 
 
 def rendered(**overrides) -> str:
-    fields = {"sites": SITES, "password_hash": SAMPLE_HASH}
+    fields = {
+        "sites": SITES,
+        "password_hash": SAMPLE_HASH,
+        "session_secret": SAMPLE_SESSION_SECRET,
+    }
     fields.update(overrides)
     return render(FrontConfig(**fields))
 
 
 class GuardCoverageTests(unittest.TestCase):
-    """Criterion 4: everything exposed is guarded, and a new route cannot slip out of that."""
+    """Criterion 4: everything exposed is authenticated, and a new route cannot slip out of that."""
 
-    def test_no_published_route_is_answered_without_the_password(self) -> None:
+    def test_no_published_route_is_answered_without_owner_authentication(self) -> None:
         self.assertEqual(unguarded_routes(rendered(), ROUTES), ())
 
     def test_the_routes_asked_about_are_the_documented_table_itself(self) -> None:
@@ -75,6 +85,37 @@ class GuardCoverageTests(unittest.TestCase):
         for name, path in classes.items():
             with self.subTest(name):
                 self.assertEqual(unguarded_routes(text, [path]), ())
+
+    def test_the_derived_cookie_matcher_is_itself_an_authentication_guard(self) -> None:
+        site = parse(rendered())[0]
+        self.assertEqual(site.auth_matchers, frozenset({"@owner_session"}))
+
+    def test_a_wildcard_cookie_value_is_not_treated_as_a_guard(self) -> None:
+        expected = session_cookie_value(SAMPLE_SESSION_SECRET)
+        forged = rendered().replace(expected, "*")
+        self.assertEqual(len(unguarded_routes(forged, ROUTES)), len(ROUTES))
+
+    def test_a_cookie_guard_does_not_hide_an_unguarded_no_cookie_fallback(self) -> None:
+        session = session_cookie_value(SAMPLE_SESSION_SECRET)
+        leaky = f"""
+https://front.example {{
+	tls internal
+	@owner_session header Cookie *{SESSION_COOKIE_NAME}={session}*
+	handle @owner_session {{
+		reverse_proxy 127.0.0.1:8787
+	}}
+	handle /proof-only {{
+		basicauth {{
+			owner {SAMPLE_HASH}
+		}}
+		respond 204
+	}}
+	handle {{
+		reverse_proxy 127.0.0.1:8787
+	}}
+}}
+"""
+        self.assertEqual(len(unguarded_routes(leaky, ROUTES)), len(ROUTES))
 
     def test_a_route_left_outside_the_guard_is_reported(self) -> None:
         """The predicate can fail. Without this, a green run above would mean nothing."""
@@ -147,7 +188,7 @@ class RenderedConfigTests(unittest.TestCase):
     """Criterion 3: the shape of the file, and the boundary it may not cross."""
 
     def test_the_only_upstream_is_the_loopback_transport(self) -> None:
-        self.assertEqual(upstreams(rendered()), (f"{DEFAULT_HOST}:{DEFAULT_PORT}",))
+        self.assertEqual(set(upstreams(rendered())), {f"{DEFAULT_HOST}:{DEFAULT_PORT}"})
 
     def test_a_front_that_proxied_off_the_host_is_refused_before_a_file_exists(self) -> None:
         with self.assertRaises(FrontConfigError) as refused:
@@ -167,6 +208,29 @@ class RenderedConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(FrontConfigError):
                 rendered(password_hash=value)
 
+    def test_a_front_with_no_real_session_secret_is_refused(self) -> None:
+        for value in ("", "short", "contains whitespace and is long enough to otherwise pass"):
+            with self.subTest(value=value), self.assertRaises(FrontConfigError):
+                rendered(session_secret=value)
+
+    def test_successful_basic_auth_mints_a_30_day_host_cookie(self) -> None:
+        session = session_cookie_value(SAMPLE_SESSION_SECRET)
+        text = rendered()
+        self.assertIn(f"@owner_session header Cookie *{SESSION_COOKIE_NAME}={session}*", text)
+        self.assertIn("handle @owner_session", text)
+        self.assertIn("basicauth {", text)
+        self.assertIn(
+            f'header +Set-Cookie "{SESSION_COOKIE_NAME}={session}; Path=/; '
+            f'Max-Age={SESSION_COOKIE_MAX_AGE}; HttpOnly; Secure; SameSite=Strict"',
+            text,
+        )
+
+    def test_session_secret_rotation_changes_the_browser_session_value(self) -> None:
+        other_secret = "fixture-session-secret-" + "y" * 32
+        self.assertNotEqual(
+            session_cookie_value(SAMPLE_SESSION_SECRET), session_cookie_value(other_secret)
+        )
+
     def test_no_credential_and_no_admin_surface_is_rendered(self) -> None:
         text = rendered()
         self.assertIn("admin off", text)
@@ -179,7 +243,7 @@ class RenderedConfigTests(unittest.TestCase):
         self.assertIn("\tbind 127.0.0.1", rendered(bind=("127.0.0.1",)))
 
     def test_the_repository_holds_no_password_and_no_hash(self) -> None:
-        """Criterion 6: the hash reaches the file at render time and lives in the store."""
+        """Criterion 6: auth values reach the file at render time and live in the store."""
         for path in sorted((REPO_ROOT / "src" / "secretary" / "webfront").rglob("*.py")):
             body = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
@@ -187,6 +251,7 @@ class RenderedConfigTests(unittest.TestCase):
                 self.assertNotIn("$2b$", body)
         self.assertEqual(PASSWORD_SECRET_ID, "web-front-password")
         self.assertEqual(HASH_SECRET_ID, "web-front-password-hash")
+        self.assertEqual(SESSION_SECRET_ID, "web-front-session-secret")
 
 
 class ShippedUnitTests(unittest.TestCase):

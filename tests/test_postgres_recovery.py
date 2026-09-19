@@ -964,7 +964,13 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         provision.verify_roles(instance)
         self.assertEqual(
             applied_upgrade,
-            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests", "0010_po_session_close"),
+            (
+                "0007_card_transport_key",
+                "0008_po_sessions",
+                "0009_po_requests",
+                "0010_po_session_close",
+                "0011_card_kinds",
+            ),
         )
         before_content = content_snapshot(original)
         injected = {

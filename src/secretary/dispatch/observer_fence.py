@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     ObserverRecord,
     commit_event,
     load_observers,
@@ -34,8 +34,8 @@ from secretary.dispatcher_observer import (
     observer_decision,
     stage_event,
 )
-from secretary.dispatcher_state import now_rfc3339
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.state import now_rfc3339
+from secretary.dispatch.types import HostError
 from secretary.sprint_observer import KIND_NONE, ObserverMetadataError
 from secretary.tasks import TaskError
 

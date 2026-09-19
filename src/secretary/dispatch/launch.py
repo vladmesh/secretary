@@ -1,6 +1,6 @@
 """Durable launch intent for the dispatcher-launched worker and reviewer heads.
 
-Same contour as the observer's (`dispatcher_observer`) and for the same reason: a head is a real
+Same contour as the observer's (`dispatch.observer`) and for the same reason: a head is a real
 process from the moment the host is asked for one, but `DispatcherRecord` only learns its
 workspace, pane and routing from the `save_records` at the end of the launch path.
 
@@ -50,10 +50,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_heartbeat import intent_heartbeat_identity
-from secretary.dispatcher_helpers import scrub_host_output
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import (
+from secretary.dispatch.heartbeat import intent_heartbeat_identity
+from secretary.dispatch.helpers import scrub_host_output
+from secretary.dispatch.state import DispatcherRecord, LaunchIntent
+from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_ACCEPTED,
     DELIVERY_RECEIPT_REFUSED,
     DELIVERY_RECEIPT_UNOBSERVED,
@@ -65,13 +65,13 @@ from secretary.dispatcher_tui import (
     delivery_readiness_state,
     delivery_receipt_state,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_LAUNCH_RECOVERY,
     HeadLaunchAborted,
     HeadPaneNotReady,
     HostError,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     bind_head_heartbeat,
     bring_up_defer_attempts,
     head_process_status,
@@ -250,7 +250,7 @@ def write_launch_intent(
     previous_workspace_settled = record.workspace_settled
     reserved = record.attempt_round if round_number is None else round_number
     run_id = uuid.uuid4().hex
-    preflight_run: dict[str, Any] | None = None
+    preflight_run: head_ops.HeadRun | None = None
     attest = getattr(getattr(runtime, "host", None), "preflight_codex_run", None)
     if callable(attest):
         document_name = "REVIEW.md" if role == REVIEW_ROLE else "TASK.md"
@@ -266,26 +266,26 @@ def write_launch_intent(
             )
         except Exception as exc:
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
-        preflight_run = candidate.to_json()
+        preflight_run = candidate
     record.workspace_settled = False
-    record.launch_intent = {
-        "role": role,
-        "action": action,
-        "head": head,
-        "workspace": workspace,
-        "pid_file": launch_pid_file(role, ref),
+    record.launch_intent = LaunchIntent(
+        role=role,
+        action=action,
+        head=head,
+        workspace=workspace,
+        pid_file=launch_pid_file(role, ref),
         # Fix run id before host interaction to fence crash-era heartbeat recovery.
-        "run_id": run_id,
-        "task": f"card:{ref}",
-        "attempt_id": record.attempt_id,
-        "round": reserved,
-        "opens_round": bool(reserved) and reserved != record.attempt_round,
-        "respawns": int(getattr(record, f"{role}_respawns", 0) or 0),
-        "at": time.time(),
-    }
+        run_id=run_id,
+        task=f"card:{ref}",
+        attempt_id=record.attempt_id,
+        round_number=reserved,
+        opens_round=bool(reserved) and reserved != record.attempt_round,
+        respawns=int(getattr(record, f"{role}_respawns", 0) or 0),
+        at=time.time(),
+        head_run=preflight_run,
+    )
     if preflight_run is not None:
-        record.launch_intent["head_run"] = preflight_run
-        _remember_head_run(record, role, preflight_run)
+        _remember_head_run(record, role, preflight_run.to_json())
     records[ref] = record
     try:
         runtime.save_records(payload, records)
@@ -531,8 +531,9 @@ def clear_launch_intent(record: DispatcherRecord) -> None:
     later stop falls back on when the pane handle is missing, and an adopted head never had one.
     """
     intent = launch_intent(record)
-    role = str(intent.get("role") or "")
-    pid_file = str(intent.get("pid_file") or "")
+    typed = record.launch_intent.intent
+    role = typed.role if typed is not None else str(intent.get("role") or "")
+    pid_file = typed.pid_file if typed is not None else str(intent.get("pid_file") or "")
     if role and pid_file:
         setattr(record, role_field(role, "pid_file"), pid_file)
     record.launch_intent = {}
@@ -878,7 +879,8 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
     not written, so it reads as alive until the grace window has passed.
     """
     now = time.time() if now is None else now
-    pid_file = str(intent.get("pid_file") or "")
+    typed = LaunchIntent.from_json(intent)
+    pid_file = typed.pid_file if typed is not None else str(intent.get("pid_file") or "")
     expected = intent_heartbeat_identity(intent)
     status = head_process_status(pid_file, expected=expected)
     # Heal only empty-leaf pre-bind heartbeats; never overwrite a foreign leaf.
@@ -892,7 +894,7 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
         return {"alive": False, "pid_known": True, "identity_mismatch": True}
     if status.get("known"):
         return {"alive": bool(status.get("match")), "pid_known": True}
-    started_at = float(intent.get("at") or 0.0)
+    started_at = typed.at if typed is not None else float(intent.get("at") or 0.0)
     if started_at and now - started_at <= initial_output_stall_seconds():
         return {"alive": True, "pid_known": False}
     return {"alive": False, "pid_known": False}
@@ -958,7 +960,7 @@ def resolve_launch_intent(
         return None
     if role == REVIEW_ROLE and undelivered_launch_delivery(intent):
         # Delayed import avoids the dispatcher_review launch-intent cycle.
-        from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
+        from secretary.dispatch.review import retry_busy_reviewer_launch_delivery
 
         deferred = retry_busy_reviewer_launch_delivery(runtime, task, records, payload, record, intent, step)
         if deferred is not None:
@@ -1009,7 +1011,7 @@ def stop_launch_intent(
         if role == REVIEW_ROLE and named:
             # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
             # intent through this module, and a top-level import either way would be a cycle.
-            from secretary.dispatcher_review import end_review_pane
+            from secretary.dispatch.review import end_review_pane
 
             end_review_pane(runtime.host, record, STOPPED_BY_LAUNCH_RECOVERY)
         elif named:

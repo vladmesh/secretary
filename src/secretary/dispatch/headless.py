@@ -20,6 +20,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from secretary.dispatch.state import HeadlessRecoveryEpisode
+
 
 def headless_worker(record: dict[str, Any]) -> dict[str, Any] | None:
     """Work a board column shows as in progress that no head on this record is doing.
@@ -28,23 +30,22 @@ def headless_worker(record: dict[str, Any]) -> dict[str, Any] | None:
     without opening a transcript: the record state, that there is no handle and no heartbeat, how
     long it has been like that, and the retained checkout and candidate a recovery would bind.
     """
-    episode = record.get("worker_headless")
-    if not isinstance(episode, dict) or not episode:
+    episode = HeadlessRecoveryEpisode.from_json(record.get("worker_headless"))
+    if episode is None:
         return None
-    since = _float(episode.get("since"))
     return {
-        "state": _text(episode.get("record_state")) or None,
-        "handle_known": bool(episode.get("handle_known")),
-        "heartbeat": _text(episode.get("heartbeat")) or None,
-        "since": _epoch(since),
-        "waiting_seconds": max(0, int(time.time() - since)) if since else None,
-        "workspace": _text(episode.get("workspace")) or None,
-        "branch": _text(episode.get("branch")) or None,
-        "expected_branch": _text(episode.get("expected_branch")) or None,
-        "dirty": episode.get("dirty"),
-        "candidate_sha": _text(episode.get("candidate_sha")) or None,
-        "report_generation": int(_float(episode.get("report_generation"))),
-        "recovery_error": _text(episode.get("recovery_error")) or None,
+        "state": episode.record_state or None,
+        "handle_known": episode.handle_known,
+        "heartbeat": episode.heartbeat or None,
+        "since": _epoch(episode.since),
+        "waiting_seconds": max(0, int(time.time() - episode.since)) if episode.since else None,
+        "workspace": episode.workspace or None,
+        "branch": episode.branch or None,
+        "expected_branch": episode.expected_branch or None,
+        "dirty": episode.dirty,
+        "candidate_sha": episode.candidate_sha or None,
+        "report_generation": episode.report_generation,
+        "recovery_error": episode.recovery_error or None,
     }
 
 
@@ -64,14 +65,6 @@ def headless_cards(production: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if detail is not None:
             found[reference] = detail
     return found
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
-
-
-def _float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
 def _epoch(value: float) -> str | None:

@@ -20,6 +20,13 @@ import yaml
 
 from secretary import state_repo
 from secretary._fsutil import write_text_atomic
+from secretary.board.completion_evidence import (
+    RESEARCH_REPORT_DIR,
+    RESEARCH_REPORT_FILE,
+    has_candidate,
+    no_candidate_report_contract,
+    research_report_path,
+)
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     ProtocolArtifact,
@@ -33,29 +40,29 @@ from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
 )
 from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GateResult,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     gate_check as _gate_check,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     rerun_failed_ci as _rerun_failed_ci,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     validation_ci as _validation_ci,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     accepted_receipt as _accepted_gate_receipt,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     is_exact_sha as _is_exact_sha,
 )
-from secretary.dispatcher_gate_receipt import (
+from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.heartbeat import heartbeat_identity
+from secretary.dispatch.helpers import (
     _decision_record_line,
     _last_gate_red_body,
     _legacy_worker_branch,
@@ -64,87 +71,89 @@ from secretary.dispatcher_helpers import (
     _tail,
     scrub_host_output,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     CAUSE_BASE_BRANCH_CONTRACT,
     CAUSE_WORKSPACE_CONTRACT,
     REVIEW_ROLE,
     WORKER_ROLE,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     infrastructure_action as _infrastructure_action,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     pane_state_label as _pane_state_label,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     HeadLaunchError,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     claude_launch_model as _claude_launch_model,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     role_launch_env as _role_launch_env,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_launch_prompt as _observer_launch_prompt,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_pid_file as _observer_pid_file,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
+    GatePrAuthorship,
+    GatePublishedRef,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     request_token as _request_token,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_ACCEPTED,
     READINESS_BUSY,
     READINESS_READY,
     TuiDeliveryError,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
 )
-from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import deliver_tui_prompt as _deliver_tui_prompt
+from secretary.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     provider_progress_for_run as _provider_progress_for_run,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     terminal_turn_started as _terminal_turn_started,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -157,34 +166,34 @@ from secretary.dispatcher_types import (
     ReviewLaunch,
     review_pane_label,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     bind_head_heartbeat as _bind_head_heartbeat,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     clear_head_heartbeat as _clear_head_heartbeat,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
@@ -793,7 +802,7 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
         # as the dispatcher rather than depending on a live record or wall-clock ordering. The
-        # dispatcher hands its own backend-selected audit in (`dispatcher.runtime_from_args`), which
+        # dispatcher hands its own backend-selected audit in (`dispatch.bootstrap.runtime_from_args`), which
         # is the only production construction of this host; built here from the data dir alone it
         # would be the file journal, which on the PostgreSQL backend nobody writes, so the default is
         # a host standing on its own — what a test builds — and is named as such in
@@ -1958,6 +1967,10 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
+        if not has_candidate(task):
+            # No candidate is published for a research/infra card, and its report artifacts may sit
+            # uncommitted in the checkout until the release moves them.
+            return
         completed = self._run(
             ["git", "-C", str(workspace), "status", "--porcelain"],
             "git status",
@@ -2079,8 +2092,6 @@ class CommandHostRuntime:
         branch = _legacy_worker_branch(task["ref"])
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         if _validation_ci(self, task) == "github":
-            if self._no_diff_research_delivery_is_complete(task, record):
-                return
             self._merge_github_pr(task, record, branch, base)
             self._require_production_runtime("release-after")
             return
@@ -2102,38 +2113,6 @@ class CommandHostRuntime:
         self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
         self._require_production_runtime("release-after")
-
-    def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        """Whether a dispatcher-dispatched research candidate has no delivery effect left.
-
-        A workflow-dispatch entry is written only by the no-diff research gate, and the release
-        gate has just accepted its exact-SHA receipt.  When that receipt names the same base and
-        candidate commit, GitHub has no PR to merge because there is literally nothing to land.
-        A different candidate SHA still matters even if its tree is identical: its own commit
-        cannot be delivered through a no-PR path, so make that unsupported case explicit instead
-        of pretending a GitHub PR merge can land it.
-        """
-        if task.get("type") != "research":
-            return False
-        dispatch = getattr(record, "gate_workflow_dispatch", {})
-        receipt = getattr(record, "gate_attestation", {})
-        if not isinstance(dispatch, dict) or not isinstance(receipt, dict):
-            return False
-        dispatched_sha = str(dispatch.get("sha") or "")
-        candidate_sha = str(receipt.get("validated_sha") or "")
-        base_sha = str(receipt.get("base_sha") or "")
-        if (
-            not _is_exact_sha(dispatched_sha)
-            or not _is_exact_sha(candidate_sha)
-            or not _is_exact_sha(base_sha)
-            or dispatched_sha != candidate_sha
-        ):
-            return False
-        if candidate_sha == base_sha:
-            return True
-        raise HostError(
-            "base-identical research candidate owns commits and cannot complete without a pull request"
-        )
 
     def _complete_green_instance_repo(
         self,
@@ -2433,21 +2412,19 @@ class CommandHostRuntime:
         if self.commit_state is not None:
             self.commit_state()
 
-    def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+    def commit_gate_pr_authorship(
+        self, record: DispatcherRecord, entry: GatePrAuthorship | dict[str, Any]
+    ) -> None:
         """Write down that the github gate wrote a known text on a known pull request."""
-        record.gate_pr_authorship = dict(entry)
+        record.gate_pr_authorship = entry.to_json() if isinstance(entry, GatePrAuthorship) else dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
-    def commit_gate_workflow_dispatch(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
-        """Persist a no-diff research workflow request before a later tick can repeat it."""
-        record.gate_workflow_dispatch = dict(entry)
-        if self.commit_state is not None:
-            self.commit_state()
-
-    def commit_gate_published_ref(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+    def commit_gate_published_ref(
+        self, record: DispatcherRecord, entry: GatePublishedRef | dict[str, Any]
+    ) -> None:
         """Persist the branch and object id the gate just published, as the next push's lease."""
-        record.gate_published_ref = dict(entry)
+        record.gate_published_ref = entry.to_json() if isinstance(entry, GatePublishedRef) else dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
@@ -4153,11 +4130,17 @@ class CommandHostRuntime:
             "with `git commit --amend` or `git rebase -i` and report done again; nothing is",
             "rewritten or force-pushed for you.",
             "",
-            "Before reporting done, stage AND commit everything on the worker branch: run",
-            "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
-            "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
-            "so a partial `git add` that misses your fix files will bounce the card.",
-            "",
+            *(
+                [
+                    "Before reporting done, stage AND commit everything on the worker branch: run",
+                    "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
+                    "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
+                    "so a partial `git add` that misses your fix files will bounce the card.",
+                    "",
+                ]
+                if has_candidate(task)
+                else no_candidate_report_contract(str(task.get("type") or ""))
+            ),
             "Report through the secretary task protocol only:",
             (
                 f"This document is report generation {generation}. Every request id below ends in "
@@ -4174,7 +4157,9 @@ class CommandHostRuntime:
             report_commands["wrong_task_definition"],
             "",
             f"Base branch: {base}",
-            f"Worker branch: {branch}",
+            f"Worker branch: {branch}"
+            if has_candidate(task)
+            else "Worker branch: none (no branch or PR is expected)",
             "",
             # Last, after anything the card description or decision can write into, so
             # `_task_doc_decision` reads the dispatcher's own record. Written on every document,
@@ -4349,13 +4334,19 @@ class CommandHostRuntime:
             "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
             "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
-            # Deliberately duplicates the gate's own deterministic preflight: a check that only
-            # ever runs in one place has no second opinion.
-            "Read the commit messages on this branch, not only the diff. AI co-authorship is",
-            "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
-            "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
-            "found; do not rewrite history yourself.",
-            "",
+            *(
+                [
+                    # Deliberately duplicates the gate's own deterministic preflight: a check that only
+                    # ever runs in one place has no second opinion.
+                    "Read the commit messages on this branch, not only the diff. AI co-authorship is",
+                    "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
+                    "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
+                    "found; do not rewrite history yourself.",
+                    "",
+                ]
+                if has_candidate(task)
+                else _no_candidate_review_subject(task)
+            ),
             "When a change depends on how an external backend behaves, a passing fixture is not",
             "evidence: it can encode the same wrong assumption as the code under review. Say which",
             "real behaviour you verified and how. If no end-to-end check against the real backend",
@@ -4367,6 +4358,17 @@ class CommandHostRuntime:
             verdict_commands["red"],
             "",
         ]
+        if not has_candidate(task):
+            # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
+            if record and record.previous_blockers:
+                sections[4:4] = [
+                    "## Re-review packet",
+                    "",
+                    "Previous blockers (close or explicitly retain these stable IDs):",
+                    _safe_one_line(record.previous_blockers, limit=2000),
+                    "",
+                ]
+            return "\n".join(sections)
         if attestation:
             sections[4:4] = [
                 "## Mechanical gate attestation",
@@ -4586,7 +4588,12 @@ def _gate_attestation_for_prompt(
     A record carrying only the old boolean ``gate_state`` is unavailable evidence rather than an
     invented SHA: the exact binding is the safety property.
     """
-    source = candidate if isinstance(candidate, dict) else getattr(record, "gate_attestation", {})
+    if isinstance(candidate, dict):
+        return _accepted_gate_receipt(candidate, current_sha)
+    source = getattr(record, "gate_attestation", {})
+    receipt = getattr(source, "receipt", None)
+    if receipt is not None:
+        return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
 
 
@@ -4631,7 +4638,8 @@ def _record_worker_delivery_evidence(
     if not evidence:
         return
     record.worker_delivery_evidence = evidence
-    if failure and _delivery_readiness_state(evidence) != READINESS_BUSY:
+    typed = record.worker_delivery_evidence.evidence
+    if failure and typed is not None and _delivery_readiness_state(typed) != READINESS_BUSY:
         record.worker_delivery_failures += 1
 
 
@@ -4668,6 +4676,24 @@ def _body_file_path(kind: str, reference: str, review_round: int) -> str:
     """
     root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
     return f"{root}/secretary-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
+
+
+def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
+    """What a reviewer of a research/infra card reviews, in place of a branch and its commits."""
+    if str(task.get("type") or "") == "research":
+        return [
+            "This research card has no candidate: there is no branch, diff or pull request to review.",
+            f"Review the report directory: `{RESEARCH_REPORT_DIR}/` in the worker's workspace (the",
+            f"report is `{RESEARCH_REPORT_DIR}/{RESEARCH_REPORT_FILE}`, with its artifacts beside it). Once",
+            f"transferred it lives in the instance repository at `{research_report_path(str(task['ref']))}`.",
+            "",
+        ]
+    return [
+        "This infra card has no candidate: there is no branch, diff or pull request to review.",
+        "Review the worker's `report:done` body on the card: its `## What was done` section and its",
+        "`## How to verify` section, a command or observation you can repeat.",
+        "",
+    ]
 
 
 def _body_file_instructions(body_file: str) -> list[str]:

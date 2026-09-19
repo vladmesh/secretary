@@ -31,6 +31,9 @@ from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import worker_launch as dispatcher_worker_launch
+from secretary.dispatch import worker_report as dispatcher_worker_report
+from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
     VitalityEpisode,
@@ -50,17 +53,16 @@ from secretary.dispatcher import (
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
     _report_nudge_prompt,
-    default_data_dir,
 )
-from secretary.dispatcher_gate import (
+from secretary.dispatch.gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
     PR_BODY_SECTION_CHARS,
     GateResult,
     _backend_call,
     _pr_digest,
 )
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.heartbeat import run_heartbeat_identity
+from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
     _round_record_line,
@@ -68,7 +70,7 @@ from secretary.dispatcher_helpers import (
     _task_doc_protocol_prerequisites,
     red_review_count,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
     CAUSE_PANE_NEVER_READY,
@@ -78,16 +80,16 @@ from secretary.dispatcher_launch import (
     bring_up_failure_class,
     classify_bring_up_failure,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
-from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
-from secretary.dispatcher_review import (
+from secretary.dispatch.production import _budget_event_type, production_adopt_attempt_id
+from secretary.dispatch.review import (
     start_review as start_reviewer,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     DispatcherRecord,
 )
 from secretary.projects.contract import (
@@ -103,19 +105,19 @@ from secretary.projects.contract import (
 from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     GateTransportError,
     HeadPaneNotReady,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
@@ -127,7 +129,7 @@ from secretary.dispatcher_watchdog import (
     pid_file_path,
     stall_seconds,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     ContinuationLivenessState,
     ContinuationProviderCondition,
     ContinuationRecoveryRung,
@@ -263,13 +265,13 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
         self.assertEqual(restored.to_json()["gate_pr_authorship"], entry)
         self.assertEqual(DispatcherRecord.from_json({"state": "claimed"}).gate_pr_authorship, {})
 
-    def test_workflow_dispatch_round_trips_and_is_absent_from_a_record_that_predates_it(self) -> None:
+    def test_a_record_still_carrying_the_removed_dispatch_request_loads_and_drops_it(self) -> None:
+        """The research CI dispatch is gone; a state file written while it existed still loads."""
         entry = {"sha": "a" * 40, "workflow": "ci.yml", "run_id": "77"}
-        restored = DispatcherRecord.from_json({"gate_workflow_dispatch": entry})
+        restored = DispatcherRecord.from_json({"state": "validate", "gate_workflow_dispatch": entry})
 
-        self.assertEqual(restored.gate_workflow_dispatch, entry)
-        self.assertEqual(restored.to_json()["gate_workflow_dispatch"], entry)
-        self.assertEqual(DispatcherRecord.from_json({"state": "claimed"}).gate_workflow_dispatch, {})
+        self.assertEqual(restored.state, "validate")
+        self.assertNotIn("gate_workflow_dispatch", restored.to_json())
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
@@ -2093,7 +2095,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.runtime.production_tick = blocked_tick  # type: ignore[method-assign]
 
-        with mock.patch("secretary.dispatcher_production.time.sleep") as sleep:
+        with mock.patch("secretary.dispatch.production.time.sleep") as sleep:
             result = self.runtime.production_run(
                 interval_seconds=1,
                 max_interval_seconds=10,
@@ -3921,7 +3923,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         records = self.runtime.production_state.records(payload)
         recovered = records["secretary-510-pilot"]
         recovered.rejected_done_reports = 1
-        blocked = self.runtime._block_repeated_infrastructure_done(
+        blocked = dispatcher_worker_report._block_repeated_infrastructure_done(
+            self.runtime,
             self.reader.show("secretary-510-pilot"),
             recovered,
             records,
@@ -5190,9 +5193,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_done_at_a_gate_rejected_sha_is_returned_for_rework(self) -> None:
-        # Research does not get the report-only exemption until an observer has reopened a red
-        # review and the dispatcher still holds an accepted exact-SHA receipt.
-        self.board.metadata[12]["task_type"] = "research"
         self.start_dispatcher()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self._run_worker_to_validate()
@@ -5214,179 +5214,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(record["rejected_sha"], self.host.commit)
         self.assertEqual(record["rejected_done_reports"], 1)
-
-    def test_no_diff_research_retries_a_stale_dispatch_gate_only_after_freezing_the_worker(self) -> None:
-        """A moved base cannot make the recovery gate touch a live rework checkout."""
-        self.board.metadata[12]["task_type"] = "research"
-        self.catalog._adapter = {"validation": {"ci": "github"}}
-        self.host.commit = "a" * 40
-        receipt = {
-            "validated_sha": self.host.commit,
-            "base_sha": self.host.commit,
-            "gate_mode": "github",
-            "required_checks": [{"name": "test", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
-            "completed_at": "2026-08-28T03:32:00+00:00",
-            "command_or_check_set_digest": "d" * 64,
-        }
-        self.host.gate_results = [
-            GateResult(
-                "red",
-                "workflow dispatch run 11 is for another SHA",
-                failure_reason="workflow-dispatch-head-sha-mismatch",
-            ),
-            GateResult("green", "workflow dispatch run 12 green", attestation=receipt),
-        ]
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.assertEqual(self.tick()["action"], "gate-red-rework")
-
-        payload = self.runtime.production_state.load()
-        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
-            "sha": self.host.commit,
-            "workflow": "ci.yml",
-            "run_id": "12",
-        }
-        self.runtime.production_state.save(payload)
-        self.host.calls.clear()
-        gate_check = self.host.gate_check
-
-        def moved_base_before_freeze(task, record) -> GateResult:
-            if "retain_worker" not in self.host.calls:
-                # This models the real gate's base merge. A pre-freeze call would change the
-                # candidate before its own receipt can be accepted.
-                self.host.commit = "b" * 40
-            return gate_check(task, record)
-
-        self.host.gate_check = moved_base_before_freeze  # type: ignore[method-assign]
-        self._report_done("the now-visible dispatcher workflow receipt is green")
-
-        advanced = self.tick()
-
-        self.assertEqual(advanced["to"], "validate")
-        record = self._pilot_record()
-        self.assertEqual(record["gate_state"], "")
-        self.assertEqual(self.host.gate_calls, [CARD_REF])
-        self.assertEqual(self.host.commit, "a" * 40)
-        self.assertEqual(self.tick()["action"], "review-started")
-        record = self._pilot_record()
-        self.assertEqual(record["gate_state"], "green")
-        self.assertEqual(record["gate_attestation"], receipt)
-        self.assertEqual(record["rejected_done_reports"], 1)
-        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
-        self.assertLess(self.host.calls.index("retain_worker"), self.host.calls.index("gate_check"))
-
-    def test_persistent_stale_dispatch_mismatch_blocks_after_one_post_freeze_retry(self) -> None:
-        self.board.metadata[12]["task_type"] = "research"
-        self.catalog._adapter = {"validation": {"ci": "github"}}
-        self.host.commit = "a" * 40
-        mismatch = GateResult(
-            "red",
-            "workflow dispatch run 11 is for another SHA",
-            failure_reason="workflow-dispatch-head-sha-mismatch",
-        )
-        self.host.gate_results = [mismatch, mismatch]
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.assertEqual(self.tick()["action"], "gate-red-rework")
-
-        payload = self.runtime.production_state.load()
-        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
-            "sha": self.host.commit,
-            "workflow": "ci.yml",
-            "run_id": "12",
-        }
-        self.runtime.production_state.save(payload)
-        self._report_done("the dispatcher-owned workflow dispatch may now be visible")
-
-        self.assertEqual(self.tick()["to"], "validate")
-        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
-        self.assertEqual(self.tick()["action"], "gate-red-rework")
-        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
-
-        self._report_done("the same wrong-SHA result is still all that exists")
-        blocked = self.tick()
-
-        self.assertEqual(blocked["reason"], "worker repeatedly reported rejected SHA")
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
-        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
-        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
-
-    def test_stale_no_diff_dispatch_recovery_refuses_a_green_result_without_an_exact_sha_receipt(
-        self,
-    ) -> None:
-        self.board.metadata[12]["task_type"] = "research"
-        self.catalog._adapter = {"validation": {"ci": "github"}}
-        self.host.commit = "a" * 40
-        old_receipt = {
-            "validated_sha": self.host.commit,
-            "base_sha": self.host.commit,
-            "gate_mode": "github",
-            "required_checks": [{"name": "test", "conclusion": "SUCCESS"}],
-            "completed_at": "2026-08-28T03:31:00+00:00",
-            "command_or_check_set_digest": "e" * 64,
-        }
-        self.host.gate_results = [
-            GateResult(
-                "red",
-                "workflow dispatch run 11 is for another SHA",
-                failure_reason="workflow-dispatch-head-sha-mismatch",
-            ),
-            GateResult("green", "workflow dispatch said green without a receipt"),
-        ]
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.assertEqual(self.tick()["action"], "gate-red-rework")
-        payload = self.runtime.production_state.load()
-        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
-            "sha": self.host.commit,
-            "workflow": "ci.yml",
-            "run_id": "12",
-        }
-        payload["records"][CARD_REF]["gate_state"] = "green"
-        payload["records"][CARD_REF]["gate_attestation"] = old_receipt
-        self.runtime.production_state.save(payload)
-        self._report_done("a receiptless retry is not evidence")
-
-        self.assertEqual(self.tick()["to"], "validate")
-        blocked = self.tick()
-
-        self.assertEqual(blocked["reason"], "gate receipt unavailable")
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
-        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
-
-    def test_code_card_cannot_use_the_stale_no_diff_dispatch_recovery(self) -> None:
-        self.catalog._adapter = {"validation": {"ci": "github"}}
-        self.host.commit = "a" * 40
-        receipt = {
-            "validated_sha": self.host.commit,
-            "base_sha": self.host.commit,
-            "gate_mode": "github",
-            "required_checks": [{"name": "test", "conclusion": "SUCCESS"}],
-            "completed_at": "2026-08-28T03:32:00+00:00",
-            "command_or_check_set_digest": "d" * 64,
-        }
-        self.host.gate_results = [
-            GateResult(
-                "red",
-                "workflow dispatch run 11 is for another SHA",
-                failure_reason="workflow-dispatch-head-sha-mismatch",
-            ),
-            GateResult("green", "workflow dispatch run 12 green", attestation=receipt),
-        ]
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.assertEqual(self.tick()["action"], "gate-red-rework")
-        payload = self.runtime.production_state.load()
-        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
-            "sha": self.host.commit,
-            "workflow": "ci.yml",
-            "run_id": "12",
-        }
-        self.runtime.production_state.save(payload)
-        self._report_done("code has no report-only recovery")
-
-        self.assertEqual(self.tick()["action"], "stale-done-rework")
-        self.assertEqual(self.host.gate_calls, [CARD_REF])
 
     def test_done_after_a_new_commit_is_accepted_after_stale_done_rework(self) -> None:
         self.start_dispatcher()
@@ -7112,6 +6939,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 _budget_event_type(event)
                 for event in self.audit_events()
                 if _budget_event_type(event) is not None
+                # The production tick also refuses the neighbour, a code card linked to no sprint on
+                # the project sprint:1031 reserves (secretary-1641); that block is its own card's.
+                and str(event.get("ref") or "").endswith("secretary-510-pilot")
             ],
             [BUDGET_UNCHARGED_INFRASTRUCTURE],
             # secretary-1457: the escalation is still the one budget event of this episode — the
@@ -9075,61 +8905,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self._pilot_record()["report_decision"], "")
         self.assertEqual(self._document_decision(), "")
         self.assertNotIn("Observer rework decision", self._task_document())
-
-    def test_report_only_research_rework_reuses_the_accepted_exact_sha_gate(self) -> None:
-        """A corrected report is new work for review, not new code for the mechanical gate."""
-        self.board.metadata[12]["task_type"] = "research"
-        self.catalog._adapter = {"validation": {"ci": "github"}}
-        self.host.commit = "a" * 40
-        self.host.fail_resume_worker_reason = ""
-        receipt = {
-            "validated_sha": self.host.commit,
-            "base_sha": self.host.commit,
-            "gate_mode": "github",
-            "required_checks": [{"name": "ci", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
-            "completed_at": "2026-08-28T01:31:00+00:00",
-            "command_or_check_set_digest": "d" * 64,
-        }
-        self.host.gate_results = [GateResult("green", "workflow dispatch passed", attestation=receipt)]
-        self.start_dispatcher()
-        self.assertEqual(self.reader.show(CARD_REF)["type"], "research")
-        self.tick()
-        self._report_done("initial research report")
-        self.assertEqual(self.tick()["to"], "validate")
-        self.assertEqual(self.tick()["action"], "review-started")
-        self.assertEqual(self._pilot_record()["gate_state"], "green")
-        self.assertEqual(self._pilot_record()["gate_attestation"], receipt)
-        self._review_red(body="BLOCKER-report: add the required report structure")
-        self.assertEqual(
-            self._park_and_decide("rework", reason="correct the report only")["action"],
-            "review-red-reused-worker",
-        )
-
-        reopened = self._pilot_record()
-        self.assertEqual(reopened["gate_state"], "green")
-        self.assertEqual(reopened["gate_attestation"], receipt)
-        self.assertEqual(reopened["rejected_sha"], self.host.commit)
-        self.assertEqual(reopened["report_decision"], "correct the report only")
-
-        self._report_done("corrected report with the required structure")
-        advanced = self.tick()
-
-        self.assertEqual(advanced["to"], "validate")
-        continued = self._pilot_record()
-        self.assertEqual(continued["gate_state"], "green")
-        self.assertEqual(continued["gate_attestation"], receipt)
-        self.assertEqual(continued["previous_reviewed_sha"], self.host.commit)
-        self.assertIn(
-            "corrected report with the required structure",
-            next(
-                comment["body"]
-                for comment in self.reader.show(CARD_REF)["comments"]
-                if comment["marker"] == "report:done" and "corrected report" in comment["body"]
-            ),
-        )
-
-        self.assertEqual(self.tick()["action"], "review-started")
-        self.assertEqual(self.host.gate_calls, [CARD_REF], "the accepted gate was reused, not rerun")
 
     def test_the_report_marker_baseline_is_not_the_report_generation(self) -> None:
         """`comment_baseline` keeps scanning for new markers on its own count. A generation that
@@ -11150,6 +10925,15 @@ class WorkerDurabilityTests(unittest.TestCase):
         with self.assertRaises(HostError):
             self.host.verify_worker_result({}, self.record)
 
+    def test_a_research_or_infra_card_is_not_held_to_a_clean_tree(self) -> None:
+        """No candidate is published for these kinds; report artifacts may sit uncommitted."""
+        (self.workspace / "report.md").write_text("findings\n", encoding="utf-8")
+        for kind in ("research", "infra"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.host.verify_worker_result({"type": kind}, self.record))
+        with self.assertRaises(HostError):
+            self.host.verify_worker_result({"type": "code"}, self.record)
+
     def test_other_untracked_files_still_block(self) -> None:
         (self.workspace / "scratch.py").write_text("print(3)\n", encoding="utf-8")
         with self.assertRaises(HostError):
@@ -11779,7 +11563,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             card = {"routing": {"review_head_override": "claude-default"}}
             probe = (
                 f"PYTHONPATH={shlex.quote(str(repo / 'src'))} python3 -c 'import json,sys;"
-                "from secretary.dispatcher_launcher import claude_launch_model;"
+                "from secretary.dispatch.launcher import claude_launch_model;"
                 'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
                 + shlex.quote(str(workspace))
             )
@@ -12056,7 +11840,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_claude_workspace_ready("/ws/x", config)
             after_first = json.loads(config.read_text(encoding="utf-8"))
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_claude_workspace_ready("/ws/x", config)
 
         self.assertEqual(after_first["theme"], "light")
@@ -12082,7 +11866,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_claude_workspace_ready("/ws/new", config)
             after_first = json.loads(config.read_text(encoding="utf-8"))
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_claude_workspace_ready("/ws/new", config)
 
         self.assertEqual(after_first["theme"], "dark")
@@ -12113,7 +11897,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             config.write_text(json.dumps(original), encoding="utf-8")
 
             with mock.patch(  # noqa: SIM117
-                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+                "secretary.dispatch.launcher.os.replace", side_effect=OSError("boom")
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
                     ensure_claude_workspace_ready("/ws/x", config)
@@ -12165,7 +11949,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_codex_workspace_trusted({"adapter": "codex", "codex_home": str(home)}, str(workspace))
             after_first = config.read_text(encoding="utf-8")
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_codex_workspace_trusted({"adapter": "codex", "codex_home": str(home)}, str(workspace))
 
         data = tomllib.loads(after_first)
@@ -12231,7 +12015,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             config.write_text(original, encoding="utf-8")
 
             with mock.patch(  # noqa: SIM117
-                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+                "secretary.dispatch.launcher.os.replace", side_effect=OSError("boom")
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update codex config"):
                     ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
@@ -12553,65 +12337,6 @@ class DispatcherLauncherTests(unittest.TestCase):
         # never a local force-land of the branch onto main for a PR-merged project
         self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
-
-    def test_complete_green_completes_base_identical_dispatched_research_without_a_pr(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
-            sha = "a" * 40
-            record = SimpleNamespace(
-                workspace=str(Path(tmp) / "ws"),
-                gate_workflow_dispatch={"sha": sha, "workflow": "ci.yml", "run_id": "77"},
-                gate_attestation={"validated_sha": sha, "base_sha": sha},
-            )
-
-            host.complete_green(
-                {"ref": "secretary-510-pilot", "project": "secretary", "type": "research"}, record
-            )
-
-        self.assertEqual(host.runs, [], "a base-identical candidate has no GitHub delivery to perform")
-
-    def test_complete_green_rejects_base_identical_research_with_its_own_commit(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
-            base_sha = "a" * 40
-            candidate_sha = "b" * 40
-            record = SimpleNamespace(
-                workspace=str(Path(tmp) / "ws"),
-                gate_workflow_dispatch={"sha": candidate_sha, "workflow": "ci.yml", "run_id": "77"},
-                gate_attestation={"validated_sha": candidate_sha, "base_sha": base_sha},
-            )
-
-            with self.assertRaisesRegex(HostError, "owns commits and cannot complete without a pull request"):
-                host.complete_green(
-                    {"ref": "secretary-510-pilot", "project": "secretary", "type": "research"}, record
-                )
-
-        self.assertEqual(host.runs, [])
-
-    def test_complete_green_keeps_the_pr_merge_for_a_code_card_with_dispatch_metadata(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
-            sha = "a" * 40
-            record = SimpleNamespace(
-                workspace=str(Path(tmp) / "ws"),
-                gate_workflow_dispatch={"sha": sha, "workflow": "ci.yml", "run_id": "77"},
-                gate_attestation={"validated_sha": sha, "base_sha": sha},
-            )
-
-            host.complete_green(
-                {"ref": "secretary-510-pilot", "project": "secretary", "type": "code"}, record
-            )
-
-        cmds = [" ".join(run) for run in host.runs]
-        self.assertTrue(
-            any("gh pr merge pipeline/secretary-510-pilot --merge" in command for command in cmds), cmds
-        )
 
     def test_complete_green_survives_default_checkout_refresh_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when a preserved local branch cannot fast-forward."""
@@ -13459,7 +13184,6 @@ class GithubGateHost(CommandHostRuntime):
         pr_title: str = "old title",
         pr_body: str | None = None,
         pr_base: str = "main",
-        workflow_runs: list | None = None,
     ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self._pr_open = pr_open
@@ -13476,7 +13200,6 @@ class GithubGateHost(CommandHostRuntime):
         self._statuses = statuses or []
         self._run_log = run_log
         self._run_log_error = run_log_error
-        self._workflow_runs = list(workflow_runs or [])
         self.rerun_status = {"status": "IN_PROGRESS", "conclusion": ""}
         self.rerun_requests: list[str] = []
         # stderr `gh api` fails with, when the test wants the backend not to answer at all.
@@ -13525,15 +13248,7 @@ class GithubGateHost(CommandHostRuntime):
         if args[1:3] in (["pr", "close"], ["pr", "reopen"]):
             self.pr_closed_reopened += 1
             return done()
-        if args[1:3] == ["workflow", "run"]:
-            return done()
-        if args[1:3] == ["run", "list"]:
-            return done(json.dumps(self._workflow_runs))
         if args[1:3] == ["run", "view"]:
-            run_id = args[3]
-            for run in self._workflow_runs:
-                if str(run.get("databaseId") or "") == run_id:
-                    return done(json.dumps(run))
             if "--json" in args:
                 return done(json.dumps(self.rerun_status))
             if self._run_log_error:
@@ -13563,7 +13278,7 @@ class GithubGateHost(CommandHostRuntime):
         return super()._run(args, label, cwd=cwd)
 
 
-def _build_gated_workspace(root: Path, base: str, branch: str, *, work: bool = True) -> Path:
+def _build_gated_workspace(root: Path, base: str, branch: str) -> Path:
     """A worker workspace on `branch` with an `origin` remote carrying `base`, one work commit
     ahead — the shape gate_check's base-freshness recovery and local gate run against."""
     bare = root / "origin.git"
@@ -13580,10 +13295,9 @@ def _build_gated_workspace(root: Path, base: str, branch: str, *, work: bool = T
     git(ws, "remote", "add", "origin", str(bare))
     git(ws, "push", "origin", base)
     git(ws, "checkout", "-b", branch)
-    if work:
-        (ws / "work.txt").write_text("work\n", encoding="utf-8")
-        git(ws, "add", "work.txt")
-        git(ws, "commit", "-m", "work")
+    (ws / "work.txt").write_text("work\n", encoding="utf-8")
+    git(ws, "add", "work.txt")
+    git(ws, "commit", "-m", "work")
     return ws
 
 
@@ -14212,7 +13926,7 @@ class DispatcherGateTests(unittest.TestCase):
         """`_backend_answered` has to keep these apart with the lease in play: the refusal below is
         git 2.43.0's own text for a push whose lease was stale, and the remote produced it. A
         transport failure on the same command is still no answer at all."""
-        from secretary.dispatcher_gate import _backend_answered
+        from secretary.dispatch.gate import _backend_answered
 
         push = ["git", "-C", "/ws", "push", "--force-with-lease=refs/heads/x:" + "a" * 40, "origin", "x:x"]
         refused = (
@@ -14226,158 +13940,6 @@ class DispatcherGateTests(unittest.TestCase):
         )
         self.assertTrue(_backend_answered(refused, push))
         self.assertFalse(_backend_answered(silence, push))
-
-    def test_no_diff_research_dispatches_ci_and_accepts_its_exact_sha(self) -> None:
-        """A research result can be all prose, yet its base-identical candidate still gets CI."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            sha = git(ws, "rev-parse", "HEAD")
-            host = GithubGateHost(
-                root,
-                self._github_adapter(),
-                pr_open=False,
-                workflow_runs=[
-                    {"databaseId": 77, "headSha": sha, "status": "COMPLETED", "conclusion": "SUCCESS"}
-                ],
-                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"}],
-            )
-            task = self._task()
-            task["type"] = "research"
-            record = self._record(ws)
-
-            result = host.gate_check(task, record)
-
-        self.assertEqual(result.status, "green")
-        self.assertIn("workflow dispatch run 77", result.summary)
-        self.assertEqual(self._pr_calls(host, "create"), [])
-        self.assertIn(
-            [
-                "gh",
-                "workflow",
-                "run",
-                "ci.yml",
-                "--ref",
-                "pipeline/secretary-633",
-                "-R",
-                "example-org/sample",
-            ],
-            host.gh,
-        )
-        self.assertEqual(record.gate_workflow_dispatch["sha"], sha)
-        self.assertEqual(record.gate_workflow_dispatch["run_id"], "77")
-        assert result.attestation is not None
-        self.assertEqual(result.attestation["validated_sha"], sha)
-        self.assertEqual(result.attestation["required_checks"][0]["name"], "test")
-
-    def test_no_diff_research_rejects_a_workflow_run_for_another_sha(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            host = GithubGateHost(
-                root,
-                self._github_adapter(),
-                pr_open=False,
-                workflow_runs=[
-                    {
-                        "databaseId": 78,
-                        "headSha": "f" * 40,
-                        "status": "COMPLETED",
-                        "conclusion": "SUCCESS",
-                    }
-                ],
-                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"}],
-            )
-            task = self._task()
-            task["type"] = "research"
-
-            result = host.gate_check(task, self._record(ws))
-
-        self.assertEqual(result.status, "red")
-        self.assertIn("not candidate", result.summary)
-        self.assertEqual(result.failure_reason, "workflow-dispatch-head-sha-mismatch")
-        self.assertEqual(self._pr_calls(host, "create"), [])
-
-    def test_no_diff_research_waits_when_the_dispatch_run_is_not_visible(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            host = GithubGateHost(
-                root, self._github_adapter(), pr_open=False, workflow_runs=[], check_runs=[]
-            )
-            task = self._task()
-            task["type"] = "research"
-
-            result = host.gate_check(task, self._record(ws))
-
-        self.assertEqual(result.status, "pending")
-        self.assertIn("no Actions run yet", result.summary)
-        self.assertEqual(self._pr_calls(host, "create"), [])
-
-    def test_no_diff_research_polls_one_pending_dispatch_run_without_repeating_it(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            sha = git(ws, "rev-parse", "HEAD")
-            host = GithubGateHost(
-                root,
-                self._github_adapter(),
-                pr_open=False,
-                workflow_runs=[{"databaseId": 79, "headSha": sha, "status": "IN_PROGRESS", "conclusion": ""}],
-                check_runs=[],
-            )
-            task = self._task()
-            task["type"] = "research"
-            record = self._record(ws)
-
-            first = host.gate_check(task, record)
-            second = host.gate_check(task, record)
-
-        self.assertEqual(first.status, "pending")
-        self.assertEqual(second.status, "pending")
-        self.assertEqual(len([call for call in host.gh if call[1:3] == ["workflow", "run"]]), 1)
-        self.assertIn("run 79 is in_progress", second.summary)
-
-    def test_no_diff_research_marks_a_failed_dispatch_run_red(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            sha = git(ws, "rev-parse", "HEAD")
-            host = GithubGateHost(
-                root,
-                self._github_adapter(),
-                pr_open=False,
-                workflow_runs=[
-                    {"databaseId": 80, "headSha": sha, "status": "COMPLETED", "conclusion": "FAILURE"}
-                ],
-                check_runs=[],
-            )
-            task = self._task()
-            task["type"] = "research"
-
-            result = host.gate_check(task, self._record(ws))
-
-        self.assertEqual(result.status, "red")
-        self.assertIn("concluded failure", result.summary)
-
-    def test_no_diff_code_card_keeps_the_pull_request_flow(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633", work=False)
-            host = GithubGateHost(
-                root,
-                self._github_adapter(),
-                pr_open=False,
-                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"}],
-            )
-            task = self._task()
-            task["type"] = "code"
-
-            result = host.gate_check(task, self._record(ws))
-
-        self.assertEqual(result.status, "green")
-        self.assertEqual(len(self._pr_calls(host, "create")), 1)
-        self.assertNotIn(["gh", "workflow", "run", "ci.yml"], host.gh)
 
     # --- secretary-1439: the PR carries the task, not a fixed stub ---
 
@@ -14971,7 +14533,7 @@ class DispatcherGateTests(unittest.TestCase):
 
     def _spy_backend_calls(self):
         """Record the label of every question that goes through the single backend call point."""
-        from secretary import dispatcher_gate as gate_module
+        from secretary.dispatch import gate as gate_module
 
         seen: list[str] = []
         real = gate_module._backend_call
@@ -15737,7 +15299,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertIn("optional-suite", result.summary)
 
     def test_github_rollup_honours_the_required_set(self) -> None:
-        from secretary.dispatcher_gate import _rollup
+        from secretary.dispatch.gate import _rollup
 
         items = [
             {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
@@ -15754,7 +15316,7 @@ class DispatcherGateTests(unittest.TestCase):
         )
 
     def test_github_rollup_classification(self) -> None:
-        from secretary.dispatcher_gate import _rollup
+        from secretary.dispatch.gate import _rollup
 
         self.assertEqual(_rollup([])[0], "NONE")
         self.assertEqual(_rollup([{"status": "COMPLETED", "conclusion": "SUCCESS"}])[0], "SUCCESS")
@@ -15991,13 +15553,13 @@ class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._returned_to_in_progress()
         # The episode stamp as the refusing tick persisted it, before it popped the record.
         stamped: list[dict] = []
-        original = type(self.runtime)._refuse_headless_worker
+        original = dispatcher_worker_launch._refuse_headless_worker
 
         def capture(runtime, task, record, records, payload, attempt_id, recovery_error):
             stamped.append(dict(record.worker_headless))
             return original(runtime, task, record, records, payload, attempt_id, recovery_error)
 
-        with mock.patch.object(type(self.runtime), "_refuse_headless_worker", capture):
+        with mock.patch.object(dispatcher_worker_launch, "_refuse_headless_worker", capture):
             first = self._production_tick()
 
         # The record a tick dying between the board move and its own bookkeeping leaves behind:

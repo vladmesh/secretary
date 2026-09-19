@@ -48,15 +48,15 @@ from secretary.dispatch.head_vitality import (
     snapshots_from_status,
 )
 from secretary.dispatch.head_vitality_episode import recovery_outlook
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     command_terminal_status,
     orca_workspace_inventory,
     pane_matcher,
 )
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import provider_progress_for_persisted_run
-from secretary.dispatcher_types import HostError
-from secretary.dispatcher_watchdog import head_run_process_status, pid_file_path
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.tui import provider_progress_for_persisted_run
+from secretary.dispatch.types import HostError
+from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
 from triggered_agents.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
@@ -514,7 +514,7 @@ def _drawn(pane: Any, layout: RuntimeLayout | None) -> tuple[str, str]:
     """Membership of this pty in the renderer tree, and the one honest word for each outcome.
 
     Identity is the whole difficulty. `terminal list` can hand back a different handle alias for
-    the same pty (`dispatcher_state.py:132`), so `leafId` is the primary key and the handle is only
+    the same pty (`dispatch/state.py:132`), so `leafId` is the primary key and the handle is only
     a secondary one -- and an identity that cannot be compared at all is `unknown`, never a denial.
     A negative verdict is therefore licensed only when the key that decides it is usable: a tree
     that named leaves, or a tree that draws nothing at all.

@@ -14,15 +14,28 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
+from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
+from secretary.board.legacy_codec import (
+    TASK_KNOWN_METADATA as _KNOWN_METADATA,
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
+    enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
+    nonnegative_int as _nonnegative_int,
+    null_if_empty as _null_if_empty,
+    positive_int as _positive_int,
+    split_heads as _split_heads,
+    text as _text,
+)
+from secretary.board.outcome_round_context import OutcomeRoundContext
 from secretary.board.models import (
     Actor,
     CardState,
@@ -30,6 +43,37 @@ from secretary.board.models import (
     Event,
     EventKind,
     RelatedRefs,
+)
+from secretary.board.roles import (
+    BOARD_ROLES,
+    COMMENT_ROLES,
+    CREATE_ROLES,
+    EDIT_ROLES,
+    PROPOSAL_CREATE_ROLES,
+    Role,
+)
+from secretary.board.task_routing import (
+    ACTIVE_STATES,
+    BLOCK_CLASSIFICATION_VALUES,
+    DECIDED_TARGETS,
+    DECISION_TARGETS,
+    DECISION_VALUES,
+    EDITABLE_STATES,
+    FAMILY_PREFERENCE_VALUES,
+    ROUTING_PHASE_VALUES,
+    TASK_COMPLEXITY_VALUES,
+    TASK_TYPE_VALUES,
+    UNDECIDED_EXITS,
+    BlockClassification,
+    FamilyPreference,
+    RoutingPhase,
+    TaskComplexity,
+    TaskDecision,
+    TaskMetadata,
+    TaskReview,
+    TaskType,
+    default_review,
+    impact_bounds_refusal,
 )
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
@@ -82,6 +126,15 @@ class ArtifactOwnershipTaskError(TaskError):
     def __init__(self, violation: ArtifactOwnershipViolation) -> None:
         self.violation = violation
         super().__init__("artifact_ownership_violation", violation.message, 3)
+
+
+class SprintReservationUnverifiable(Exception):
+    """The open sprints reserving a project could not be read; `sprint_ref` names the failed read."""
+
+    def __init__(self, sprint_ref: str, cause: TaskError) -> None:
+        super().__init__(cause.message)
+        self.sprint_ref = sprint_ref
+        self.cause = cause
 
 
 class _CommittedWriteError(Exception):
@@ -143,52 +196,10 @@ def _done_retention_request_id(task_id: int, date_moved: int) -> str:
     return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-_STATE_BY_COLUMN = {
-    "Issues": "issues",
-    "Ready": "ready",
-    "In progress": "in_progress",
-    "Validate": "validate",
-    "Assessment": "assessment",
-    "Blocked": "blocked",
-    "Done": "done",
-}
-_KNOWN_METADATA = {
-    "task_type",
-    "project",
-    "blocked_by",
-    "claim",
-    "slug",
-    "base_branch",
-    "seed_ref",
-    "supersedes",
-    "issues",
-    "head",
-    "resolved_head",
-    "review_head",
-    "resolved_review_head",
-    "retry_same",
-    "retry_switch",
-    "retry_heads",
-    "complexity",
-    "family_preference",
-    "routing_reason",
-    "quota_snapshot_at",
-    "codex_launch_mode",
-    "sprint_ref",
-}
-_TASK_TYPES = {"code", "research"}
-_COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
-_FAMILY_PREFERENCES = {"auto", "claude", "codex"}
 # Retired launch modes normalize away rather than silently changing a requested shape.
 _CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
-_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
-_COMMENT_ROLES = _ROLES
-_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
-# Agent roles that may not open an execution card: their only create is a proposal in the
-# board's first column, which a PO later triages into Ready.
-_PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
-_EDIT_ROLES = {"po", "dispatcher", "observer"}
-_EDITABLE_STATES = {"ready", "blocked"}
+# Agent roles that may not open an execution card are represented by
+# PROPOSAL_CREATE_ROLES in the canonical board-role vocabulary.
 _READY_RESET_METADATA = {
     "claim": "",
     "resolved_head": "",
@@ -197,21 +208,8 @@ _READY_RESET_METADATA = {
     "retry_switch": "",
     "retry_heads": "",
 }
-_ROUTING_PHASES = {"worker", "review", "verdict"}
-# Worker blocker classification is evidence for, not the observer's final verdict.
-_BLOCK_CLASSIFICATIONS = ("external_fact", "wrong_task_definition")
-# Persist a parked-card decision before effects; blocked remains the failure escape hatch.
-_DECISION_TARGETS = {"release": "done", "rework": "in_progress", "reslice": "blocked"}
-_DECISIONS = set(_DECISION_TARGETS)
-_DECIDED_TARGETS = {"done", "in_progress"}
-# Only the PO may use these Assessment exits; the dispatcher must record a decision.
-_UNDECIDED_EXITS = {"ready", "validate", "issues"}
 # Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
-_DECISION_BOUND_ROLES = {"dispatcher"}
-# States in which a card holds a workspace, a suspended worker or a running head. `assessment`
-# is one of them: the reviewer is gone, but the worker and its checkout are retained for a
-# rework decision, so a second writer in the same project is as wrong there as in Validate.
-ACTIVE_STATES = frozenset({"in_progress", "validate", "assessment"})
+_DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
@@ -236,76 +234,6 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     payload = event.get("payload")
     return payload if isinstance(payload, dict) else {}
-
-
-def _validate_outcome_round_context(data: dict[str, Any]) -> None:
-    """Validate the compact durable identity hand-off used by outcome freezing."""
-    expected = {
-        "version",
-        "phase",
-        "attempt_id",
-        "attempt",
-        "report_generation",
-        "request_ids",
-        "assessment_visit",
-        "source_event_id",
-    }
-    version = data.get("version")
-    if version == 2:
-        expected = expected | {"round_id", "specification_revision", "marker"}
-    if set(data) != expected or version not in {1, 2}:
-        raise TaskError("validation", "outcome round context has an unsupported field set", 2)
-    phases = (
-        {"worker", "review", "decision"}
-        if version == 1
-        else {"worker", "review", "decision", "report", "verdict"}
-    )
-    if data.get("phase") not in phases:
-        raise TaskError("validation", "outcome round context has an unsupported phase", 2)
-    if version == 2 and (not isinstance(data.get("round_id"), str) or not data["round_id"].strip()):
-        raise TaskError("validation", "outcome round context needs a stable round id", 2)
-    if version == 2:
-        revision = data.get("specification_revision")
-        if revision is not None and (not isinstance(revision, str) or not revision.strip()):
-            raise TaskError(
-                "validation", "outcome round context specification revision must be a string or null", 2
-            )
-        marker = data.get("marker")
-        if not isinstance(marker, str):
-            raise TaskError("validation", "outcome round context marker must be a string", 2)
-        if data["phase"] in {"report", "verdict", "decision"} and not marker:
-            raise TaskError("validation", "source outcome round context needs its marker", 2)
-        if data["phase"] not in {"report", "verdict", "decision"} and marker:
-            raise TaskError("validation", "only source outcome round context has a marker", 2)
-    if not isinstance(data.get("attempt_id"), str) or not data["attempt_id"].strip():
-        raise TaskError("validation", "outcome round context needs an attempt id", 2)
-    for name in ("attempt", "report_generation"):
-        value = data.get(name)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise TaskError("validation", f"outcome round context needs a positive {name}", 2)
-    request_ids = data.get("request_ids")
-    if (
-        not isinstance(request_ids, list)
-        or not request_ids
-        or any(not isinstance(value, str) or not value.strip() for value in request_ids)
-        or len(set(request_ids)) != len(request_ids)
-    ):
-        raise TaskError("validation", "outcome round context needs unique request ids", 2)
-    visit = data.get("assessment_visit")
-    if not isinstance(visit, str):
-        raise TaskError("validation", "outcome round context assessment visit must be a string", 2)
-    if data["phase"] == "decision" and not visit:
-        raise TaskError("validation", "decision outcome round context needs an Assessment visit", 2)
-    if data["phase"] != "decision" and visit:
-        raise TaskError("validation", "only decision outcome round context has an Assessment visit", 2)
-    event_id = data.get("source_event_id")
-    if not isinstance(event_id, str):
-        raise TaskError("validation", "outcome round context source event id must be a string", 2)
-    source_phases = {"decision"} if version == 1 else {"report", "verdict", "decision"}
-    if data["phase"] in source_phases and not event_id:
-        raise TaskError("validation", "source outcome round context needs its source event id", 2)
-    if data["phase"] not in source_phases and event_id:
-        raise TaskError("validation", "only source outcome round context has a source event id", 2)
 
 
 def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
@@ -982,38 +910,7 @@ class TaskReader:
             "state": _STATE_BY_COLUMN[column],
             "closed": _nonnegative_int(card.get("is_active", card.get("status", 1))) == 0,
             "position": _nonnegative_int(card.get("position")),
-            "project": _text(meta.get("project")),
-            "type": _text(meta.get("task_type")),
-            "blocked_by": _null_if_empty(meta.get("blocked_by")),
-            "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
-            "routing": {
-                "complexity": _enum_or_default(meta.get("complexity"), _COMPLEXITIES, "standard"),
-                "family_preference": _enum_or_default(
-                    meta.get("family_preference"), _FAMILY_PREFERENCES, "auto"
-                ),
-                "head_override": _null_if_empty(meta.get("head")),
-                "review_head_override": _null_if_empty(meta.get("review_head")),
-                "resolved_worker_family": None,
-                "resolved_worker_head": _null_if_empty(meta.get("resolved_head")),
-                "resolved_review_family": None,
-                "resolved_review_head": _null_if_empty(meta.get("resolved_review_head")),
-                "routing_reason": _null_if_empty(meta.get("routing_reason")),
-                "quota_snapshot_at": _null_if_empty(meta.get("quota_snapshot_at")),
-                "codex_launch_mode": _enum_or_none(meta.get("codex_launch_mode"), _CODEX_LAUNCH_MODES),
-            },
-            "workspace": {
-                "slug": _null_if_empty(meta.get("slug")),
-                "base_branch": _null_if_empty(meta.get("base_branch")),
-                "seed_ref": _null_if_empty(meta.get("seed_ref")),
-                "supersedes": _null_if_empty(meta.get("supersedes")),
-            },
-            "retry": {
-                "same": _nonnegative_int(meta.get("retry_same")),
-                "switched": _nonnegative_int(meta.get("retry_switch")),
-                "heads": _split_heads(meta.get("retry_heads")),
-            },
-            "sprint": _null_if_empty(meta.get("sprint_ref")),
-            "record_type": _null_if_empty(meta.get("record_type")),
+            **TaskMetadata.from_legacy(meta, codex_modes=_CODEX_LAUNCH_MODES).to_document_fields(),
             "audit": {
                 "created_at": _rfc3339(card.get("date_creation")),
                 "updated_at": _rfc3339(card.get("date_modification")),
@@ -1733,14 +1630,16 @@ class TaskWriter:
         base_branch: str = "",
         seed_ref: str = "",
         supersedes: str = "",
-        complexity: str = "standard",
-        family_preference: str = "auto",
+        complexity: str = TaskComplexity.STANDARD.value,
+        family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
         priority: str = "",
         budget_event: str = "",
         sprint_override: bool = False,
         sprint_override_reason: str = "",
+        review: str = "",
+        live_impact: bool = False,
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
@@ -1769,6 +1668,8 @@ class TaskWriter:
             budget_event=budget_event,
             sprint_override=sprint_override,
             sprint_override_reason=sprint_override_reason,
+            review=review,
+            live_impact=live_impact,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1792,20 +1693,22 @@ class TaskWriter:
         base_branch: str = "",
         seed_ref: str = "",
         supersedes: str = "",
-        complexity: str = "standard",
-        family_preference: str = "auto",
+        complexity: str = TaskComplexity.STANDARD.value,
+        family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
         priority: str = "",
         budget_event: str = "",
         sprint_override: bool = False,
         sprint_override_reason: str = "",
+        review: str = "",
+        live_impact: bool = False,
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
     ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply.
-        self._role(role, _CREATE_ROLES)
+        role = self._role(role, CREATE_ROLES)
         project = project.strip()
         task_type = task_type.strip()
         title = title.strip() if restoring else self._redact_for_board(title.strip())
@@ -1819,8 +1722,8 @@ class TaskWriter:
         base_branch = base_branch.strip()
         seed_ref = seed_ref.strip()
         supersedes = supersedes.strip()
-        complexity = complexity.strip() or "standard"
-        family_preference = family_preference.strip() or "auto"
+        complexity = complexity.strip() or TaskComplexity.STANDARD.value
+        family_preference = family_preference.strip() or FamilyPreference.AUTO.value
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
         priority = priority.strip()
@@ -1832,9 +1735,31 @@ class TaskWriter:
         )
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
-        if task_type not in _TASK_TYPES:
-            known = ", ".join(sorted(_TASK_TYPES))
-            raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
+        try:
+            task_type_value = TaskType(task_type)
+        except ValueError:
+            known = ", ".join(sorted(TASK_TYPE_VALUES))
+            raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2) from None
+        task_type = task_type_value.value
+        # Whether review runs is the review choice; who reviews is the reviewer head and the sprint
+        # pin. The two are resolved independently, and only a caller contradicting itself is refused.
+        review = review.strip()
+        explicit_review_head = review_head
+        if review:
+            try:
+                review_value = TaskReview(review)
+            except ValueError:
+                known = ", ".join(sorted(member.value for member in TaskReview))
+                raise TaskError("validation", f"review must be one of: {known}", 2) from None
+        else:
+            review_value = default_review(task_type_value)
+        review = review_value.value
+        if live_impact and task_type_value is not TaskType.RESEARCH:
+            raise TaskError(
+                "validation", f"--live-impact is a research attribute; a {task_type} card cannot carry it", 2
+            )
+        if live_impact and (bounds_refusal := impact_bounds_refusal(description)):
+            raise TaskError("validation", bounds_refusal, 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
         if target not in {"ready", "issues", "in_progress"}:
@@ -1843,23 +1768,31 @@ class TaskWriter:
             raise TaskError("transition_forbidden", "only a steward report may be created In progress", 3)
         if steward_report and (role != "steward" or target != "in_progress"):
             raise TaskError("role_forbidden", "steward report creation requires steward In progress", 3)
-        if steward_report and (task_type != "research" or not slug or reference or sprint):
+        if steward_report and (task_type != TaskType.RESEARCH.value or not slug or reference or sprint):
             raise TaskError(
                 "validation",
                 "a steward report requires research, a slug, no explicit reference and no sprint",
                 2,
             )
-        if role in _PROPOSAL_CREATE_ROLES:
+        if role in PROPOSAL_CREATE_ROLES:
             if target != "issues":
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
         elif target == "issues":
             raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
-        if complexity not in _COMPLEXITIES:
-            raise TaskError("validation", "complexity must be one of: " + ", ".join(sorted(_COMPLEXITIES)), 2)
-        if family_preference not in _FAMILY_PREFERENCES:
+        try:
+            complexity_value = TaskComplexity(complexity)
+        except ValueError:
             raise TaskError(
-                "validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2
-            )
+                "validation", "complexity must be one of: " + ", ".join(sorted(TASK_COMPLEXITY_VALUES)), 2
+            ) from None
+        complexity = complexity_value.value
+        try:
+            family_preference_value = FamilyPreference(family_preference)
+        except ValueError:
+            raise TaskError(
+                "validation", "family preference must be one of: " + ", ".join(sorted(FAMILY_PREFERENCE_VALUES)), 2
+            ) from None
+        family_preference = family_preference_value.value
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
             # Refuse unknown launch modes before any board call.
             known = ", ".join(sorted(_CODEX_LAUNCH_MODES))
@@ -1911,6 +1844,12 @@ class TaskWriter:
                     sprint=linked_sprint,
                 )
                 head, review_head = pinned_head or "", pinned_review or ""
+            if review_value is TaskReview.SKIPPED:
+                self._refuse_unpinned_reviewer_on_skipped(
+                    sprint_ref=sprint, review_head=explicit_review_head, sprint=linked_sprint
+                )
+        elif review_value is TaskReview.SKIPPED:
+            self._refuse_unpinned_reviewer_on_skipped(sprint_ref="", review_head=explicit_review_head)
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -1929,7 +1868,8 @@ class TaskWriter:
             reference=reference,
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
-        if target == "ready" and not sprint and not restoring and not override_payload:
+        # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
+        if target == "ready" and not sprint and not restoring and not override_payload and role != "po":
             raise TaskError("validation", "task creation requires an open sprint", 2)
         payload: dict[str, Any] = {
             "project": project,
@@ -1948,6 +1888,8 @@ class TaskWriter:
             "codex_launch_mode": codex_launch_mode or None,
             "sprint": sprint or None,
             "budget_event": budget_event or None,
+            "review": review,
+            **({"live_impact": True} if live_impact else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -2032,6 +1974,8 @@ class TaskWriter:
                     family_preference=family_preference,
                     codex_launch_mode=codex_launch_mode,
                     sprint=sprint,
+                    review=review,
+                    live_impact=live_impact,
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -2076,7 +2020,7 @@ class TaskWriter:
             role="steward",
             actor=actor,
             project=project,
-            task_type="research",
+            task_type=TaskType.RESEARCH.value,
             title=title,
             description=description,
             target="in_progress",
@@ -2105,6 +2049,8 @@ class TaskWriter:
         family_preference: str,
         codex_launch_mode: str,
         sprint: str,
+        review: str,
+        live_impact: bool,
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
@@ -2160,7 +2106,10 @@ class TaskWriter:
                     "project": project,
                     "complexity": complexity,
                     "family_preference": family_preference,
+                    "review": review,
                 }
+                if live_impact:
+                    values["live_impact"] = "1"
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:
@@ -2200,7 +2149,7 @@ class TaskWriter:
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, _COMMENT_ROLES)
+        role = self._role(role, COMMENT_ROLES)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
         return self._write(
@@ -2215,6 +2164,15 @@ class TaskWriter:
             ),
             identity=payload,
         )
+
+    def _research_report_refusal(self) -> str:
+        """The research report directory check, over the checkout the worker reports from."""
+        if self.workspace is not None:
+            return research_report_refusal(self.workspace)
+        try:
+            return research_report_refusal(Path.cwd())
+        except OSError:
+            return ""
 
     def _require_committed_workspace(self) -> None:
         """Refuse a done report from a dirty checkout.
@@ -2258,19 +2216,20 @@ class TaskWriter:
         are countable. Its payload is staged as one typed Card occurrence which renders the
         `classification:` line, deliberately not card metadata that could disagree with the event.
         """
-        self._role(role, {"worker"})
+        role = self._role(role, {Role.WORKER})
         body = self._redact_for_board(body)
         if kind not in {"done", "blocked"} or not body.strip():
             raise TaskError("validation", "reports require a non-empty body", 2)
         classification = classification.strip()
-        if kind == "blocked" and classification not in _BLOCK_CLASSIFICATIONS:
+        if kind == "blocked" and classification not in BLOCK_CLASSIFICATION_VALUES:
             raise TaskError(
                 "validation",
-                "blocked reports require --classification, one of " + ", ".join(_BLOCK_CLASSIFICATIONS),
+                "blocked reports require --classification, one of " + ", ".join(BLOCK_CLASSIFICATION_VALUES),
                 2,
             )
         if kind == "done" and classification:
             raise TaskError("validation", "a done report carries no classification", 2)
+        classification_value = BlockClassification(classification) if classification else None
         request_id = request_id or str(uuid.uuid4())
         # Resolve immutable ownership before either fresh admission or a card
         # read.  A replay must stay a pure replay, including when its worker
@@ -2288,13 +2247,24 @@ class TaskWriter:
                 raise
         marker_data = owned.data if owned is not None else {}
         if owned is None and not legacy_owned:
-            if kind == "done":
-                self._require_committed_workspace()
             # This is the writer boundary for a worker report.  Bind the
             # report to the specification it actually answered now, rather
             # than asking a later terminal projection to guess from a mutable
             # card description.
             current = self.reader.show(reference)
+            if kind == "done":
+                if has_candidate(current):
+                    self._require_committed_workspace()
+                elif current.get("type") == "infra":
+                    # A research/infra card has no candidate, so its checkout may hold uncommitted
+                    # artifacts; an infra report carries its completion record instead.
+                    _fields, refusal = infra_report_fields(body)
+                    if refusal:
+                        raise TaskError("validation", refusal, 2)
+                elif current.get("type") == "research":
+                    refusal = self._research_report_refusal()
+                    if refusal:
+                        raise TaskError("validation", refusal, 2)
             revision = specification_revision(self.audit.events(reference), current["description"])
             specification_data = {
                 "description_sha256": _digest(current["description"]),
@@ -2322,7 +2292,7 @@ class TaskWriter:
                 "body": body,
                 "body_sha256": _digest(body),
                 **specification_data,
-                "classification": classification or None,
+                "classification": classification_value.value if classification_value is not None else None,
             },
             fresh_admission=None,
         )
@@ -2330,7 +2300,7 @@ class TaskWriter:
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"reviewer"})
+        role = self._role(role, {Role.REVIEWER})
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
@@ -2376,10 +2346,12 @@ class TaskWriter:
         launched its head for, carried in the head's environment, so the binding rather than the actor
         id distinguishes one sprint's observer from another's.
         """
-        self._role(role, {"observer"})
+        role = self._role(role, {Role.OBSERVER})
         body = self._redact_for_board(body)
-        if kind not in _DECISIONS:
-            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
+        if kind not in DECISION_VALUES:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
+        decision_kind = TaskDecision(kind)
+        kind = decision_kind.value
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
         declared_prerequisites = tuple(protocol_prerequisites)
@@ -2478,7 +2450,7 @@ class TaskWriter:
                     "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
                     "replayed": True,
                 }
-            if kind == "rework":
+            if decision_kind is TaskDecision.REWORK:
                 try:
                     validate_rework_prerequisites(
                         declared_prerequisites,
@@ -2524,11 +2496,14 @@ class TaskWriter:
         mutation. The event still goes through the normal pending/commit path, which makes it idempotent
         per request id and carries it into the recovery checkpoint.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         phase = _text(payload.get("phase"))
-        if phase not in _ROUTING_PHASES:
-            known = ", ".join(sorted(_ROUTING_PHASES))
+        if phase not in ROUTING_PHASE_VALUES:
+            known = ", ".join(sorted(ROUTING_PHASE_VALUES))
             raise TaskError("validation", f"unknown routing phase {phase!r} (known: {known})", 2)
+        routing_phase = RoutingPhase(phase)
+        normalized_payload = dict(payload)
+        normalized_payload["phase"] = routing_phase.value
         heads = payload.get("heads")
         if not isinstance(heads, list) or not heads:
             raise TaskError("validation", "routing requires at least one head record", 2)
@@ -2538,9 +2513,9 @@ class TaskWriter:
             actor,
             reference,
             request_id,
-            dict(payload),
+            normalized_payload,
             lambda task: None,
-            identity=dict(payload),
+            identity=normalized_payload,
         )
 
     def outcome_round_context(
@@ -2549,29 +2524,37 @@ class TaskWriter:
         role: str,
         actor: str,
         reference: str,
-        data: dict[str, Any],
+        data: OutcomeRoundContext | Mapping[str, object],
         request_id: str,
     ) -> dict[str, Any]:
         """Persist one exact forward source identity before its consumer runs.
 
-        This is journal-only.  It is deliberately a typed dispatcher boundary
-        rather than comment prose: recovery reads the request id that names
-        this record and never reconstructs a worker, reviewer, or Assessment
-        identity from card history.
+        This is journal-only. The dispatcher carries the typed value; the
+        historical dictionary exists only at this audit compatibility boundary.
+        Raw mappings remain accepted for released callers and are normalized
+        once through the same model.
         """
-        self._role(role, {"dispatcher"})
-        _validate_outcome_round_context(data)
+        role = self._role(role, {Role.DISPATCHER})
+        try:
+            context = (
+                data
+                if isinstance(data, OutcomeRoundContext)
+                else OutcomeRoundContext.from_data(data)
+            )
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
         if not request_id.strip():
             raise TaskError("validation", "outcome round context needs the request id it owns", 2)
+        payload = context.to_data()
         return self._write(
             "outcome_round_context",
             role,
             actor,
             reference,
             request_id,
-            dict(data),
+            payload,
             lambda task: None,
-            identity=dict(data),
+            identity=payload,
         )
 
     def attempt_usage(
@@ -2602,7 +2585,7 @@ class TaskWriter:
         ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
         moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         if not request_id.strip():
             raise TaskError("validation", "an attempt usage event needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2668,7 +2651,7 @@ class TaskWriter:
         nowhere the tick would otherwise look. A record that cannot be published is left exactly
         where it is and stays owed.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2700,7 +2683,7 @@ class TaskWriter:
         to call it only after the lifecycle owner has confirmed the terminal
         move; a retry can only append the exact staged object.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         if not request_id.strip():
             raise TaskError("validation", "an attempt outcome needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2764,7 +2747,7 @@ class TaskWriter:
 
     def finish_attempt_outcomes(self, *, role: str, reference: str = "") -> int:
         """Append staged outcomes only; it never derives or changes lifecycle facts."""
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2793,7 +2776,7 @@ class TaskWriter:
         cap: int = 3,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         worker = worker.strip()
         if not worker:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
@@ -2906,7 +2889,7 @@ class TaskWriter:
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._role(role, _ROLES)
+        role = self._role(role, BOARD_ROLES)
         reason = self._redact_for_board(reason)
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
@@ -3245,20 +3228,21 @@ class TaskWriter:
         and the dispatcher's own failure paths reach it without anyone deciding, and a card that cannot
         be blocked is a card nothing can rescue. The observer has no exit from Assessment at all.
         """
-        if decision and decision not in _DECISIONS:
-            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
-        if decision and source != "assessment":
+        if decision and decision not in DECISION_VALUES:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
+        decision_kind = TaskDecision(decision) if decision else None
+        if decision_kind is not None and source != "assessment":
             raise TaskError("validation", "a decision is only carried by a move out of Assessment", 2)
-        if decision and _DECISION_TARGETS[decision] != target:
+        if decision_kind is not None and DECISION_TARGETS[decision_kind].value != target:
             raise TaskError(
                 "decision_mismatch",
-                f"a {decision} decision moves the card to {_DECISION_TARGETS[decision]}, not {target}",
+                f"a {decision} decision moves the card to {DECISION_TARGETS[decision_kind].value}, not {target}",
                 3,
             )
         if (
             source == "assessment"
-            and target in _DECIDED_TARGETS
-            and not decision
+            and target in DECIDED_TARGETS
+            and decision_kind is None
             and role in _DECISION_BOUND_ROLES
         ):
             raise TaskError(
@@ -3267,14 +3251,14 @@ class TaskWriter:
                 "`task decide` and pass it as --decision",
                 3,
             )
-        if source == "assessment" and target in _UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
+        if source == "assessment" and target in UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
             raise TaskError(
                 "decision_required",
                 f"{role} may not move a parked card to {target}: that leaves Assessment with "
                 "nothing decided. Decide the card, or have the PO move it",
                 3,
             )
-        if decision and not self._decision_recorded(task["ref"], decision):
+        if decision_kind is not None and not self._decision_recorded(task["ref"], decision_kind.value):
             raise TaskError(
                 "decision_required",
                 f"no {decision} decision is recorded on this card since it entered Assessment",
@@ -3304,7 +3288,7 @@ class TaskWriter:
         Validate) are not editable: the running head works from a TASK.md snapshot, so a mid-flight
         revision must go through preempt/requeue, not a silent spec swap.
         """
-        self._role(role, _EDIT_ROLES)
+        role = self._role(role, EDIT_ROLES)
         title = self._redact_for_board(title) if title is not None else None
         description = self._redact_for_board(description) if description is not None else None
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
@@ -3314,6 +3298,13 @@ class TaskWriter:
         if title is None and description is None and head is None and review_head is None:
             raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
         current = self.reader.show(reference)
+        # The bounds are what makes a live-impact card admissible; an edit cannot remove them.
+        if (
+            description is not None
+            and current.get("live_impact")
+            and (bounds_refusal := impact_bounds_refusal(description))
+        ):
+            raise TaskError("validation", bounds_refusal, 2)
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -3339,6 +3330,11 @@ class TaskWriter:
             head=head,
             review_head=review_head,
         )
+        # A legacy card with no stored choice reads as required and is never refused here.
+        if review_head is not None and current.get("review") == TaskReview.SKIPPED.value:
+            self._refuse_unpinned_reviewer_on_skipped(
+                sprint_ref=str(current.get("sprint") or ""), review_head=review_head.strip()
+            )
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
             "title_sha256_was": _digest(current["title"]) if title is not None else None,
@@ -3354,7 +3350,7 @@ class TaskWriter:
         }
 
         def mutation(task: dict[str, Any]) -> Any:
-            if task["state"] not in _EDITABLE_STATES:
+            if task["state"] not in EDITABLE_STATES:
                 raise TaskError("edit_forbidden", "edit requires a Ready or Blocked card", 3)
             number = _task_number(task)
             update: dict[str, Any] = {}
@@ -3448,6 +3444,28 @@ class TaskWriter:
             requested[role] = profile
         return requested["worker"], requested["reviewer"]
 
+    def _refuse_unpinned_reviewer_on_skipped(
+        self, *, sprint_ref: str, review_head: str, sprint: dict[str, Any] | None = None
+    ) -> None:
+        """Refuse a caller-named reviewer on a card whose review is skipped, unless the sprint pins it.
+
+        The review choice decides whether review runs and the sprint pin decides who reviews, so a
+        skipped card may carry the pinned reviewer, applied by the pin or named explicitly. Only a
+        reviewer the caller chose on its own contradicts `skipped`. The pin is read through
+        `_sprint_executor_pins`, the one door for it.
+        """
+        if not review_head:
+            return
+        _, pinned = self._sprint_executor_pins(
+            sprint_ref=sprint_ref, head=None, review_head="", sprint=sprint
+        )
+        if review_head != (pinned or ""):
+            raise TaskError(
+                "validation",
+                f"--review-head {review_head!r} names a reviewer for a card whose review is skipped",
+                2,
+            )
+
     def _sprint_entity(self, reference: str) -> dict[str, Any]:
         """The sprint a card names, read here only to answer what it pins.
 
@@ -3464,6 +3482,49 @@ class TaskWriter:
                 f"sprint {reference} cannot be read, so its executor pins cannot be checked: {exc.message}",
                 3,
             ) from None
+
+    def open_sprints_reserving(
+        self, project: str, *, linked_sprint: dict[str, Any] | None = None
+    ) -> list[str]:
+        """The open sprints that reserve `project`, each verified against the sprint board.
+
+        One answer for the write guard and the dispatcher's admission. The local index says which
+        sprints to ask about and is seeded from the board when it has never been written; every
+        sprint it names is then read live, and the index follows what was read. Anything that
+        cannot be read raises `SprintReservationUnverifiable` naming the sprint (`""` for the
+        seeding read): both callers fail closed on it, each in its own words.
+        """
+        from secretary.sprints import (
+            SprintReader,
+            active_sprint_projects,
+            refresh_active_sprint_projects,
+            sprint_guard_index_initialized,
+            update_active_sprint_projects,
+        )
+
+        if not sprint_guard_index_initialized(self.data_dir):
+            try:
+                refresh_active_sprint_projects(self.data_dir, SprintReader(self.client))
+            except TaskError as exc:
+                raise SprintReservationUnverifiable("", exc) from exc
+
+        refs = set(active_sprint_projects(self.data_dir).get(project, []))
+        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
+            refs.add(str(linked_sprint["ref"]))
+        held: list[str] = []
+        for sprint_ref in sorted(refs):
+            try:
+                sprint = (
+                    linked_sprint
+                    if linked_sprint and sprint_ref == linked_sprint.get("ref")
+                    else SprintReader(self.client).show(sprint_ref, include_cards=False)
+                )
+            except TaskError as exc:
+                raise SprintReservationUnverifiable(sprint_ref, exc) from exc
+            update_active_sprint_projects(self.data_dir, sprint)
+            if sprint.get("status") == "open" and project in sprint.get("reservations", []):
+                held.append(sprint_ref)
+        return held
 
     def _guard_sprint_write(
         self,
@@ -3482,7 +3543,9 @@ class TaskWriter:
 
         Two questions, in this order. Who is writing: a caller of role `observer` names the sprint it
         was launched for, and a write about any other sprint's card is refused as the identity failure
-        it is. Then what is being written: which open sprint reserves the card's project.
+        it is. Then what is being written: which open sprint reserves the card's project. A PO write
+        of a card linked to no sprint is not the holding sprint's and passes once the index is
+        verified; the dispatcher's admission decides whether such a card runs.
 
         The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
         the observer of, and an unprovable caller is refused rather than admitted.
@@ -3495,56 +3558,25 @@ class TaskWriter:
             request_id=request_id,
             reference=reference,
         )
-        from secretary.sprints import (
-            SprintReader,
-            active_sprint_projects,
-            refresh_active_sprint_projects,
-            sprint_guard_index_initialized,
-            update_active_sprint_projects,
-        )
-
-        if not sprint_guard_index_initialized(self.data_dir):
-            try:
-                refresh_active_sprint_projects(self.data_dir, SprintReader(self.client))
-            except TaskError as exc:
-                self._deny_sprint_write(
-                    code="sprint_guard_unavailable",
-                    message=f"cannot verify open sprints for project {project}; write it through the sprint entity",
-                    role=role,
-                    actor=actor,
-                    project=project,
-                    sprint="",
-                    request_id=request_id,
-                    reference=reference,
-                )
-                raise AssertionError("unreachable") from exc
-
-        refs = set(active_sprint_projects(self.data_dir).get(project, []))
-        if linked_sprint is not None and project in linked_sprint.get("reservations", []):
-            refs.add(str(linked_sprint["ref"]))
-        held: list[str] = []
-        for sprint_ref in sorted(refs):
-            try:
-                sprint = (
-                    linked_sprint
-                    if linked_sprint and sprint_ref == linked_sprint.get("ref")
-                    else SprintReader(self.client).show(sprint_ref, include_cards=False)
-                )
-            except TaskError as exc:
-                self._deny_sprint_write(
-                    code="sprint_guard_unavailable",
-                    message=f"cannot verify sprint {sprint_ref} reserving project {project}; write it through the sprint entity",
-                    role=role,
-                    actor=actor,
-                    project=project,
-                    sprint=sprint_ref,
-                    request_id=request_id,
-                    reference=reference,
-                )
-                raise AssertionError("unreachable") from exc
-            update_active_sprint_projects(self.data_dir, sprint)
-            if sprint.get("status") == "open" and project in sprint.get("reservations", []):
-                held.append(sprint_ref)
+        try:
+            held = self.open_sprints_reserving(project, linked_sprint=linked_sprint)
+        except SprintReservationUnverifiable as exc:
+            message = (
+                f"cannot verify sprint {exc.sprint_ref} reserving project {project}; write it through the sprint entity"
+                if exc.sprint_ref
+                else f"cannot verify open sprints for project {project}; write it through the sprint entity"
+            )
+            self._deny_sprint_write(
+                code="sprint_guard_unavailable",
+                message=message,
+                role=role,
+                actor=actor,
+                project=project,
+                sprint=exc.sprint_ref,
+                request_id=request_id,
+                reference=reference,
+            )
+            raise AssertionError("unreachable") from exc
         if not held:
             return {}
         sprint_ref = card_sprint if card_sprint in held else held[0]
@@ -3571,6 +3603,12 @@ class TaskWriter:
                 reference=reference,
             )
             return {"sprint_override_reason": sprint_override_reason}
+        # A PO card linked to no sprint is not the holding sprint's work, whatever its kind: whether
+        # it runs on a reserved project is the dispatcher's admission (`open_sprints_reserving`
+        # asked before the claim), not this guard. A card linked to a sprint, and a create that
+        # links one, keep the override rule above.
+        if role == "po" and not card_sprint and linked_sprint is None:
+            return {}
         # The caller was already proven to be this card's sprint's observer above; what is left is
         # that the sprint holding the project is the one the card is linked to.
         if role == "observer" and card_sprint in held:
@@ -3786,7 +3824,7 @@ class TaskWriter:
     def archive(
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"po"})
+        role = self._role(role, {Role.PO})
         reason = self._redact_for_board(reason)
         if not reason.strip():
             raise TaskError("validation", "archive requires a non-empty reason", 2)
@@ -4699,9 +4737,14 @@ class TaskWriter:
         )
 
     @staticmethod
-    def _role(role: str, allowed: set[str]) -> None:
-        if role not in allowed:
+    def _role(role: Role | str, allowed: Collection[Role]) -> Role:
+        try:
+            normalized_role = Role(role)
+        except (TypeError, ValueError):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3) from None
+        if normalized_role not in allowed:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        return normalized_role
 
     @staticmethod
     def _check_archivable(task: dict[str, Any]) -> None:
@@ -4736,8 +4779,6 @@ class TaskWriter:
             raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
 
 
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else "" if value is None else str(value)
 
 
 def _target_column_id(columns: dict[int, str], target: str) -> int | None:
@@ -4788,38 +4829,16 @@ def _revision(task: dict[str, Any]) -> str:
     return "updated_at:" + str(task.get("audit", {}).get("updated_at") or "unknown")
 
 
-def _null_if_empty(value: Any) -> str | None:
-    text = _text(value)
-    return text or None
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
 
 
-def _nonnegative_int(value: Any) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
-def _split_heads(value: Any) -> list[str]:
-    return [head for head in _text(value).split(",") if head]
 
 
-def _enum_or_default(value: Any, allowed: set[str], default: str) -> str:
-    candidate = _text(value)
-    return candidate if candidate in allowed else default
 
 
-def _enum_or_none(value: Any, allowed: set[str]) -> str | None:
-    candidate = _text(value)
-    return candidate if candidate in allowed else None
 
 
 def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:
@@ -4859,6 +4878,11 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         "complexity": _text(payload.get("complexity")) or "standard",
         "family_preference": _text(payload.get("family_preference")) or "auto",
     }
+    # A create recorded before the review choice was stored names none, and repairs it as none.
+    if review := _text(payload.get("review")):
+        values["review"] = review
+    if payload.get("live_impact") is True:
+        values["live_impact"] = "1"
     for payload_key, metadata_key in (
         ("blocked_by", "blocked_by"),
         ("head", "head"),

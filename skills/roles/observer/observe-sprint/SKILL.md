@@ -43,8 +43,11 @@ an explicit `--sprint-override` with a reason.
 
 ## Boundaries
 
-- Do not create or move cards outside your sprint's repositories. While the sprint runs there are no
-  cards outside it: anything urgent is added to this sprint through an entry on its entity.
+- Do not create or move cards outside your sprint's repositories, and cut no card outside your sprint:
+  anything urgent for the sprint is added to it through an entry on its entity. The PO may put a card
+  linked to no sprint on your projects; that card is not yours to move. The dispatcher admits it only as
+  `research` or `infra` and blocks a `code` one at admission (`sprint-reservation-blocked`); it may run
+  after the sprint closes.
 - Do not change the goal, Definition of Done, out of scope or stop conditions. They are a contract, not
   a plan.
 - Do not promote existing Issues to Ready. A card is always fresh, cut from current understanding.
@@ -219,8 +222,18 @@ The reviewer comes from a different family than the worker:
 
 If the other family is temporarily unavailable, wait or take another of its profiles. If that blocks the
 sprint for long, an independent reviewer from the same family on a different profile is acceptable;
-record the exception in a resume entry. Do not use `--review-head none` automatically, except for a fully
-mechanical trivial change.
+record the exception in a resume entry.
+
+The reviewer head says who reviews, not whether review runs. That is the card's `review` choice: the
+kind default is `required` for `code` and `skipped` for `research` and `infra`, and `--review skipped`
+or `--review required` at `task create` overrides it. Skip review on a code card only for a fully
+mechanical trivial change; it still runs the gate and merges on release.
+
+A `research` or `infra` card publishes no branch, pull request or CI run. An infra worker's done report
+carries `## What was done` and `## How to verify`, which become the card's completion record. A research
+worker leaves its report in `.secretary-report/report.md` of its workspace; before the card parks in
+Assessment the dispatcher commits that directory to `state/knowledge/reports/<card ref>/` and links it,
+so read the report there when you decide.
 
 A card that pulls changes beyond its own repository is cut into a chain with `--blocked-by`.
 

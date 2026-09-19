@@ -4,7 +4,7 @@ Absent (no file) = running. Present = paused, with internal `mode` stored as `"s
 
 This is the flag the background roles shed on, not the pause the task dispatcher itself obeys.
 `secretary pause` writes the production flag and mirrors it here
-(`secretary/dispatcher_pause.write_legacy_mirror`); `secretary resume` removes the mirror it
+(`secretary/dispatch/pause.write_legacy_mirror`); `secretary resume` removes the mirror it
 wrote. Nothing here writes the file: the mirror is the only writer, and the only live reader is
 runtime/dispatch.py (steward/curator/retro dispatch), through is_paused(). Kept in its own tiny
 module (state.py primitives only, no ops import) so runtime/dispatch.py can read it without

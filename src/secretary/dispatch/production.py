@@ -17,7 +17,8 @@ from secretary.board.terminal_taxonomy import (
     read_terminal_taxonomy,
 )
 from secretary.checkpoint import checkpoint_snapshot
-from secretary.dispatcher_launch import (
+from secretary.dispatch.claim import claim_ready_task
+from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -26,14 +27,14 @@ from secretary.dispatcher_launch import (
     launch_intent,
     stop_launch_intent,
 )
-from secretary.dispatcher_observer import (
+from secretary.dispatch.observer import (
     observer_snapshot,
     reconcile_observers,
     retry_pending_observer_stops,
 )
-from secretary.dispatcher_observer_fence import fenced_task, observer_fence
-from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
-from secretary.dispatcher_state import (
+from secretary.dispatch.observer_fence import fenced_task, observer_fence
+from secretary.dispatch.pause_ops import auto_resume_expired_freeze
+from secretary.dispatch.state import (
     DispatcherRecord,
     close_divergence,
     divergence_is_open,
@@ -43,10 +44,10 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
+from secretary.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.sprints import SprintWriter, budget_thresholds
 from secretary.tasks import ACTIVE_STATES, TaskError
 
@@ -1518,7 +1519,8 @@ def _production_claim_ready(
         resume_workspaces = payload.get("resume_workspaces")
         resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces
         try:
-            outcome = runtime._claim(
+            outcome = claim_ready_task(
+                runtime,
                 task,
                 records,
                 payload,

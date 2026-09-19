@@ -58,6 +58,152 @@ re-check) resolve in Validate and never pass through Assessment. The steward may
 Assessment to Blocked with a reason; workers and reviewers move nothing. A card left in Assessment
 past the steward's stale threshold is reported like any other stuck card.
 
+### Card kinds, live impact and the review choice
+
+`task create --type` takes one of three kinds:
+
+- `code`: a change to a repository, delivered as a candidate branch.
+- `research`: an investigation or experiment; hypotheses and budget live in the description.
+- `infra`: work on hosts or services rather than a repository.
+
+Kind, live-impact flag and review choice are set at create and shown by `task show` and `task list`
+as `type`, `live_impact` and `review`. None of them is editable afterwards.
+
+**Live impact** (`--live-impact`, research only; refused for `code` and `infra`) marks a research
+card that touches live systems. Such a card is refused at create unless its description declares
+bounds, and `task edit` cannot replace the description with one that lacks them:
+
+```markdown
+## Impact bounds
+
+### Allowed
+What may be touched.
+
+### Forbidden
+What must not be touched.
+
+### Cleanup
+How to undo what the card changed.
+```
+
+All three subsections must be present and non-empty inside the `## Impact bounds` section; the
+refusal names what is missing or empty.
+
+**Review choice** is stored on the card as `review: required|skipped`. The default is `required`
+for `code` and `skipped` for `research` and `infra`; `--review required|skipped` overrides it in
+either direction, and a reviewer head never changes it. The review choice decides whether review
+runs; the reviewer head decides who reviews, and a sprint's reviewer pin sets that head exactly as
+for any card, whatever the review choice. A caller-supplied reviewer head with `skipped` is refused,
+at create and at `task edit --review-head`, unless it is the head the sprint pins. A card written
+before the choice was stored reads as `required`. The store keeps the value in `tasks.review` and
+`tasks.live_impact`, and export/restore carries both.
+
+**Lifecycle by kind.** A `code` card delivers a candidate: after `report:done` the dispatcher runs
+the mechanical gate (branch, pull request, CI), then review if required, and Done means the candidate
+was merged. A `research` or `infra` card has no candidate. The worker's checkout need not be committed
+or clean, no branch is published, no pull request is opened, no CI gate or workflow runs, and an
+unchanged HEAD is never rejected as a stale result: every done report of a new round (for example
+after an observer `rework`) is a fresh one. Its path is:
+
+```text
+report:done → Validate → reviewer, only if review: required
+  → Assessment and an observer release/rework/reslice decision, if the sprint parks for decisions;
+    otherwise release at once
+  → completion evidence check → teardown of the workspace and heads → Done
+```
+
+`report:blocked` behaves as for any card.
+
+**Review choice.** `review: skipped` launches no reviewer for any kind, and `review: required` launches
+one for any kind. A `code` card with `skipped` still runs the full mechanical gate and merges on
+release; it only has no reviewer step. A release without a reviewer records the verdict as `missing`.
+
+**Completion evidence.** Every way a card reaches Done (an automatic release outside a parking
+sprint, an observer release from Assessment, and a release replayed after a lost tick) passes one
+dispatcher check. For `code` the evidence is the merge the release performs. For `research` and
+`infra` it is a marked comment on the card written by the dispatcher; a comment from any other role
+that carries the marker is not evidence. Without it the card goes to Blocked, not Done, with the
+reason `completion evidence missing` naming the absent marker, and its workspace is kept.
+
+- `infra`: the worker's done report body must carry two non-empty sections, `## What was done` and
+  `## How to verify` (a command or an observation). `task report --kind done` refuses a body that
+  lacks either. When it accepts the report, the dispatcher writes the completion record, one comment
+  per report round, visible in `task show` and carried by export/restore:
+
+  ```markdown
+  [completion:infra]
+
+  ## What was done
+
+  ...
+
+  ## How to verify
+
+  ...
+  ```
+
+- `research`: a completion link naming the card's report directory:
+
+  ```markdown
+  [completion:research]
+
+  state/knowledge/reports/<card ref>/
+  ```
+
+  The worker puts its report and every artifact (markdown, scripts, data, subdirectories) in one
+  declared directory of its workspace, `.secretary-report/`, with the report itself in a non-empty
+  `.secretary-report/report.md`. The directory is never committed to the project repository; bring-up
+  adds `/.secretary-report/` to the checkout's Git exclude. `task report --kind done` on a research
+  card refuses, with a `validation` error, a workspace without that file.
+
+  After the report is accepted and the review, if required, is done, and before the card parks in
+  Assessment or is released outside a parking sprint, the dispatcher copies `.secretary-report/` to
+  `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
+  --dir`, actor `dispatcher`, one commit naming the card and the report generation), then writes one
+  `[completion:research]` comment whose request id is keyed on the report generation. The observer
+  therefore decides with the report already in knowledge, and a replayed tick commits and comments
+  nothing new. An observer release repeats the transfer, a no-op for a card parked green and the
+  transfer itself for a card parked by a red verdict. A rework round's next report replaces the
+  directory's whole contents and writes a fresh link; git keeps the earlier rounds.
+
+  If the transfer is refused or fails, the card goes to Blocked with the reason `research report
+  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
+  `source_empty`, `special_file` (a symlink, a special file or an entry whose name starts with
+  `.git`), `secret`, `size_cap` or `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
+  still the only check before Done.
+
+### Cards outside a sprint
+
+The PO may create a card of any kind (`code`, `research`, `infra`) with no `--sprint`, in Ready, on
+any project, including one an open sprint reserves, and may move and edit it without
+`--sprint-override` (see [The sprint guard](#the-sprint-guard)). Other roles keep their rules: the
+observer creates only cards of its own sprint, the steward's execution card needs an open sprint, and
+worker, reviewer and retro create only proposals.
+
+Whether such a card runs is decided once, at admission, before the claim. The dispatcher asks the same
+reserved-project index the write guard reads (seeded from the sprints board when it was never written,
+each sprint it names re-read live):
+
+- a card linked to a sprint is that sprint's work and is not asked about;
+- `research` and `infra` are admitted on any project, reserved or not;
+- `code` on a project no open sprint reserves is admitted;
+- `code` on a project an open sprint reserves is refused. It is blocked through the pre-claim refusal
+  of [Bring-up outcomes](#bring-up-outcomes), like `contract-preflight-blocked`: no workspace, head or
+  round exists, the transition carries action token `sprint-reservation-blocked` (class
+  `infrastructure`, so no budget is charged), and the tick outcome has step `sprint-reservation-refused`
+  and a `sprint_reservation` object (`refusal`, `project`, `sprints`, `detail`). The Blocked reason
+  shown by `task show` names `refusal=sprint_reserved`, the project and the reserving sprint, and says
+  the card may run inside that sprint or after it closes. The refusal is not retried; a card the PO
+  moves back to Ready is asked again under a fresh attempt, and after the sprint closes it is admitted;
+- `code` whose project's reservations cannot be verified (the index cannot be seeded or a sprint it
+  names cannot be read) is refused as the claim-skip `sprint-reservation-unverifiable`, refusal
+  `sprint_reservation_unverifiable`. Nothing is written: the Blocked move would meet the same unverifiable
+  index at the write guard. The card stays in Ready and is asked again on the next tick. An unverifiable
+  index never refuses `research` or `infra`.
+
+A card already in progress when a sprint opens is not moved or blocked by this rule.
+
 ## Codex provider-internal fan-out policy
 
 Codex fan-out is a best-effort operational preference, not a lifecycle or security boundary. Every
@@ -511,7 +657,7 @@ Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
 dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
 are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this (its move is the
-escape hatch; on a sprint-reserved project it carries `--sprint-override` and a reason).
+escape hatch; on a card of a sprint that holds its project it carries `--sprint-override` and a reason).
 `assessment -> blocked` takes no decision from anyone (steward escalation and dispatcher failures).
 The observer takes no exit out of Assessment at all, even with a matching decision; its authority is
 `task decide`.
@@ -535,13 +681,14 @@ python3 -P -m secretary task archive --role po --ref PROJECT-N \
 python3 -P -m secretary task edit --role po --ref PROJECT-N \
   --body-file SPEC.md --head codex-terra --review-head claude-opus
 python3 -P -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
-  --sprint-override --sprint-override-reason-file REASON.md
+  --sprint sprint:ID --sprint-override --sprint-override-reason-file REASON.md
 ```
 
-`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields. A
-new execution task requires `--sprint`: the sprint must be open and the project one of its
-reservations (a closed sprint and an unreserved project are separate errors, both before any backend
-write). `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
+`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
+With `--sprint`, the sprint must be open and the project one of its reservations (a closed sprint and
+an unreserved project are separate errors, both before any backend write). Without it, only the PO
+creates an execution task (see [Cards outside a sprint](#cards-outside-a-sprint)); for other roles it
+requires `--sprint`. `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
 roles create only proposals in Issues, which a PO triages to Ready.
 
 Without `--ref`, `task create` allocates `PROJECT-N` from the project's board-wide high-water mark
@@ -1025,12 +1172,19 @@ expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` der
 card metadata. New links are refused after a sprint is closed. `current-task` requires that the card
 already carries this sprint reference.
 
-An open sprint holds every project in its `reservations`: only its observer may create a card there,
-and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards.
-The PO may create, move or edit only with `--sprint-override` plus a non-empty
-`--sprint-override-reason-file` (the reason is stored as its own audit field). Without it the PO gets
-`sprint_write_forbidden`, as do retro, steward and every other role; the refusal names the holding
-sprint.
+An open sprint holds every project in its `reservations`: only its observer may create a card of the
+sprint there, and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit
+linked cards. The PO may create a card linked to the holding sprint, and move or edit a card linked to
+it, only with `--sprint-override` plus a non-empty `--sprint-override-reason-file` (the reason is stored
+as its own audit field). Without it the PO gets `sprint_write_forbidden`, as do retro, steward and
+every other role; the refusal names the holding sprint.
+
+A PO create, move or edit of a card linked to no sprint (and a create that links none) is not refused
+because its project is reserved, for every kind and without an override; running it is decided at
+[admission](#cards-outside-a-sprint). This narrowing is inside the one guard every `create`, `move`
+(including a replayed generic move) and `edit` passes, after the index is verified, so an index that
+cannot be verified still refuses the write as `sprint_guard_unavailable`. An override passed anyway is
+granted and audited as before.
 
 Both guard answers are audited once per request id: a refusal as `sprint_guard_denied`; a granted
 override as `sprint_guard_override` carrying project, holding sprint, override reason and the request id
@@ -1773,7 +1927,7 @@ due-push coordination. Runbooks: [Operations](OPERATIONS.md#pause-or-breakage).
 
 The same pause through the transport-independent layer (`secretary.webproto.pause_ops`,
 `secretary.webproto.pause_reads`): two operations and two reads. Every rule stays in
-`secretary.dispatcher_pause_ops`; the layer adds no rule, flag, lock or store.
+`secretary.dispatch.pause_ops`; the layer adds no rule, flag, lock or store.
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
@@ -1819,7 +1973,7 @@ keeps the original actor and reason. A `pause_resume` of an unpaused pipeline an
 `noop` or `resumed`, `changed` its boolean, and a refusal never reaches a document.
 
 **A command that did something says so even when the state cannot be rendered afterwards.**
-`dispatcher_pause_ops.pause` and `resume` write the flag and then render status through `pause_status`,
+`dispatch.pause_ops.pause` and `resume` write the flag and then render status through `pause_status`,
 which converts every dispatcher record; a semantically corrupt `production-state.json` can make that
 render refuse after the pause took effect. The caller then gets the ordinary `pause_command` document:
 its `action` and `changed`, the render refusal under `warnings`, and the embedded `state` with the
@@ -1827,7 +1981,7 @@ failing source marked unavailable.
 
 That action is the one `dispatcher_pause_ops` decided inside the production tick lock, in the code that
 performed the command, and it travels out with the render failure on
-`dispatcher_pause_ops.PauseCommandCompleted`. It is never inferred from observing the flag: a flag
+`dispatch.pause_ops.PauseCommandCompleted`. It is never inferred from observing the flag: a flag
 observed before and after an unlocked command is not evidence of which command set it (a concurrent
 `resume` and re-drain look identical to a noop). Rendering stays outside the lock.
 
@@ -2958,6 +3112,29 @@ Path segments are ASCII letters, digits, `.`, `_` and `-`; an imported non-ASCII
 `write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock (no
 manual `git commit`). A document containing a secret is rejected with code 2 and nothing reaches disk.
 Rewriting identical content reports `changed: false` and makes no commit.
+
+`write` takes exactly one of `--file` and `--dir`. With `--dir`, `--path` names a directory below
+`state/knowledge` (same segment rules, no `..`, not absolute), and under one writer lock its whole
+contents are replaced by the source directory's, so a file the source no longer has disappears, and
+only that directory's pathspec is committed, in one commit. It is how the dispatcher moves a research
+report into `state/knowledge/reports/<card ref>/`.
+
+```bash
+python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+  --path reports/secretary-1640 --dir REPORT_DIR
+```
+
+Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
+special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
+`.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
+size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
+subdirectories are not kept. If the commit fails the previous directory is put back.
+
+The swap is staged outside `state/knowledge`, in `state/.knowledge-swap/` on the same filesystem: the
+new contents are written there, the previous directory is moved beside them, and a file names the
+target. A crash mid-swap therefore leaves nothing under `state/knowledge` for a knowledge commit to
+pick up. Every knowledge write (`--file` or `--dir`) first recovers interrupted swaps under the state
+repository lock: a previous directory whose target is gone is moved back, and the rest is removed.
 
 ## Secrets
 

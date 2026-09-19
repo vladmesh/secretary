@@ -139,7 +139,7 @@ For the guard, "not dark" means "answered on the most recent reduction".
 
 ### Quiet restart after a nudge
 
-The report nudge (`_prompt_worker_report`) stamps `quiet_since = now`. The head is charged only with
+The report nudge (`dispatch.worker_report.prompt_worker_report`) stamps `quiet_since = now`. The head is charged only with
 silence after it was asked; `last_progress_at` is kept. Records without the field have no restart.
 
 ### Retention
@@ -222,7 +222,7 @@ Not guarded, because they do not act on vitality:
 - operator-initiated stops (`CommandHostRuntime.stop_head` from an explicit operator command);
 - card-lifecycle stops: Done/Blocked transitions, drain, the review bring-up's confirmed worker freeze
   (`_adopt_launch_intent`);
-- launch-recovery stops in `dispatcher_launch.resolve_launch_intent`, which act on durable launch
+- launch-recovery stops in `secretary.dispatch.launch.resolve_launch_intent`, which act on durable launch
   intents and heartbeat identity.
 
 Tests: refusal classes in `tests/test_head_vitality_guard.py`; call-site coverage in
@@ -244,7 +244,7 @@ Rung state persists on the episode (`recovery_rung`, `recovery_span_started_at`,
 |---|---|---|---|
 | — | `Retained` | `observe` | Checked first, before the deterministic-refusal path. Resets the ladder to 0. |
 | 0 | Healthy\*, `Unverifiable`, `Dead` | `observe` | Nothing earned. A recovered suspension clears the ladder here. |
-| 1 | `SuspectedStall` | `nudge` | The wait tick spends the single nudge (`_prompt_worker_report`). |
+| 1 | `SuspectedStall` | `nudge` | The wait tick spends the single nudge (`dispatch.worker_report.prompt_worker_report`). |
 | 2→3 | `Suspended`, new span | `sigcont` | One identity-fenced SIGCONT per span; the response window opens. |
 | 3 | `Suspended`, window running | `observe` | The reduction flips the verdict as soon as the head resumes. |
 | 4 | `Suspended`, window expired | `escalate_operator` | One durable comment; holds for the rest of the span. Never kill. |

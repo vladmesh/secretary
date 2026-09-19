@@ -20,12 +20,12 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher_pause_ops
+from secretary.dispatch import pause_ops as dispatcher_pause_ops
 from secretary.config import validate
-from secretary.dispatcher_pause_ops import PauseCommandCompleted
-from secretary.dispatcher_pause_ops import pause as dispatcher_pause
-from secretary.dispatcher_pause_ops import resume as dispatcher_resume
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatch.pause_ops import PauseCommandCompleted
+from secretary.dispatch.pause_ops import pause as dispatcher_pause
+from secretary.dispatch.pause_ops import resume as dispatcher_resume
+from secretary.dispatch.types import DispatcherError
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
 from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
@@ -765,7 +765,7 @@ class CommandClientTests(PauseProtocolFixture):
         return Namespace(**{**defaults, **kwargs})
 
     def _run(self, handler, **kwargs) -> tuple[int, dict]:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations", return_value=self.pause_ops()),
@@ -780,7 +780,7 @@ class CommandClientTests(PauseProtocolFixture):
         return status, json.loads(written) if written else {}
 
     def test_pause_drain_resume_and_the_two_reads_are_clients_of_the_operations(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
         self.assertEqual(status, 0)
@@ -805,7 +805,7 @@ class CommandClientTests(PauseProtocolFixture):
         The exit status is what a script branches on, so a pause that took must not answer with the
         status of a pause that did not.
         """
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         self.tracked_head(worker_retained_at=1)
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -814,7 +814,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(self.pause_payload()["mode"], DRAIN)
 
     def test_the_conflict_keeps_the_exit_status_it_always_answered_with(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -822,7 +822,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(document["error"]["code"], "owner_conflict")
 
     def test_a_pause_without_a_reason_keeps_its_usage_status(self) -> None:
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain", reason=None)
         self.assertEqual(status, 2)
@@ -837,7 +837,7 @@ class CommandClientTests(PauseProtocolFixture):
         does not validate is `validation` and not `backend_unavailable`. No layer is substituted
         here: these run the real handlers over a real broken installation.
         """
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         broken = self.tmp / "broken-instance"
         broken.mkdir()
@@ -856,7 +856,7 @@ class CommandClientTests(PauseProtocolFixture):
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""
-        from secretary import dispatcher_commands
+        from secretary.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations") as operations,
@@ -870,7 +870,7 @@ class CommandClientTests(PauseProtocolFixture):
 class CompletedCommandTests(PauseProtocolFixture):
     """Criterion 6 where it is hardest: the command did something, and the pipeline cannot be read.
 
-    `dispatcher_pause_ops.pause` and `resume` write the flag and then render the status through
+    `dispatch.pause_ops.pause` and `resume` write the flag and then render the status through
     `pause_status`, which converts every dispatcher record. A production state that no longer
     converts therefore refuses *after* the pause has taken, and the operator most likely to see it
     is the one reaching for a drain because something is already wrong with the pipeline. Reported
@@ -966,7 +966,7 @@ class CompletedCommandTests(PauseProtocolFixture):
         self.tracked_head()
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         with mock.patch(
-            "secretary.dispatcher_pause_ops.pause_status",
+            "secretary.dispatch.pause_ops.pause_status",
             side_effect=DispatcherError("unsupported_legacy_record", "the records do not convert", 1),
         ):
             document = self.pause_ops().pause_resume(actor="operator")
@@ -1117,7 +1117,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         out; this fails the moment the assignment leaves the locked span.
         """
         tree = ast.parse(
-            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatcher_pause_ops.py").read_text(
+            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatch" / "pause_ops.py").read_text(
                 encoding="utf-8"
             )
         )
@@ -1184,7 +1184,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         """
         refused = DispatcherError("unsupported_legacy_record", "the records do not convert", 1)
         with (
-            mock.patch("secretary.dispatcher_pause_ops.pause_status", side_effect=refused),
+            mock.patch("secretary.dispatch.pause_ops.pause_status", side_effect=refused),
             self.assertRaises(PauseCommandCompleted) as completed,
         ):
             dispatcher_pause(self.runtime, mode="drain", actor="operator", reason="host maintenance")

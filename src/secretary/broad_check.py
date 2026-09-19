@@ -21,7 +21,7 @@ whatever editable install the launching head happened to carry (issue:8b39e60e4d
 The runner's verdict is scanned off the stream while it goes past rather than reconstructed from
 the diagnostic tail, because output printed after a summary must not be able to erase it.
 
-This is deliberately not the exact-SHA gate receipt in ``dispatcher_gate_receipt``: that one is
+This is deliberately not the exact-SHA gate receipt in ``dispatch.gate_receipt``: that one is
 machinery-owned attestation that travels downstream, this one is a worker's own note-to-self.
 """
 

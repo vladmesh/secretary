@@ -3,17 +3,17 @@
 `TaskReader` and `TaskWriter` have two implementations since `secretary-1587`: today's Kanboard
 JSON-RPC one, and one over the PostgreSQL board store (`docs/BOARD_STORE.md` §2.2, §6).  Which one
 a process uses is **not** inferred from whether `board-store.env` happens to exist — an
-installation may hold a fully migrated store and still be served by Kanboard, and that is exactly
-the state this card leaves the live installation in.  It is read from one environment name,
-`SECRETARY_CARD_BACKEND`, whose absence means `kanboard`.
+installation may hold a fully migrated store and still be served by Kanboard.  The choice is read
+from one environment name, `SECRETARY_CARD_BACKEND`, and that name must explicitly select a backend.
 
 Three properties the card asks for and this module is where each of them is true:
 
 * **one named place** — `CARD_BACKEND_ENV`, nothing else, and no filesystem probe;
 * **decided once per process** — `card_backend()` caches the first answer, so a mid-run change of
   the environment cannot make one command read one backend and write the other;
-* **an unknown value refuses** — `BoardBackendError`, naming the value and the two it is not,
-  rather than a silent fall back to Kanboard, which would turn a typo into a live-board write.
+* **missing or unknown values refuse** — `BoardBackendError`, naming the allowed values, rather
+  than a silent fall back to Kanboard, which would turn configuration loss or a typo into a
+  live-board write.
 
 Reversibility is the point of keeping the switch this thin.  Nothing here migrates, copies or
 converts anything, so setting the name back to `kanboard` is the whole of the rollback.
@@ -24,44 +24,58 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
 
-#: The one named place.  A card backend is chosen here or it is `kanboard`.
+from secretary.board_transport import BoardTransport
+
+#: The one named place.  A card backend is chosen explicitly here or the process refuses.
 CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 
-KANBOARD = "kanboard"
-POSTGRES = "postgres"
+
+class BoardBackend(StrEnum):
+    """The closed set of implementations that may serve normalized board records."""
+
+    KANBOARD = "kanboard"
+    POSTGRES = "postgres"
+
+
+# Compatibility exports keep the existing import surface while making each value typed.
+KANBOARD = BoardBackend.KANBOARD
+POSTGRES = BoardBackend.POSTGRES
 
 #: The closed vocabulary, in the order diagnostics list it.
-CARD_BACKENDS = (KANBOARD, POSTGRES)
-
-DEFAULT_CARD_BACKEND = KANBOARD
+CARD_BACKENDS: tuple[BoardBackend, ...] = tuple(BoardBackend)
 
 
 class BoardBackendError(RuntimeError):
     """The configured card backend is not one this build knows how to serve."""
 
 
-_decided: str | None = None
+_decided: BoardBackend | None = None
 
 
-def parse_card_backend(value: str | None) -> str:
-    """The vocabulary check on its own, without the per-process memory.
+def parse_card_backend(value: str | None) -> BoardBackend:
+    """Validate one explicit backend selector without the per-process memory.
 
-    An unset or empty value is the default; anything else is either a member of the vocabulary or
-    a refusal.  Whitespace is stripped because an environment file is edited by hand, and case is
-    not folded because the two names are literals of the design, not user prose.
+    Missing and empty values refuse.  Whitespace is stripped because an environment file is edited
+    by hand, and case is not folded because the two names are literals of the design, not user prose.
     """
     if value is None or not value.strip():
-        return DEFAULT_CARD_BACKEND
+        raise BoardBackendError(
+            f"{CARD_BACKEND_ENV} must be set to one of {', '.join(CARD_BACKENDS)}"
+        )
     name = value.strip()
-    if name not in CARD_BACKENDS:
+    try:
+        return BoardBackend(name)
+    except ValueError:
         raise BoardBackendError(
             f"{CARD_BACKEND_ENV} must be one of {', '.join(CARD_BACKENDS)}, not {name!r}"
-        )
-    return name
+        ) from None
 
 
-def card_backend() -> str:
+def card_backend() -> BoardBackend:
     """The backend this process serves cards from, decided once and remembered.
 
     The first call reads the environment; every later call in the same process returns that same
@@ -92,36 +106,39 @@ def reset_card_backend() -> None:
 
 
 def card_backend_status() -> dict[str, object]:
-    """What `secretary status` reports about the switch: the value and where it came from."""
-    raw = os.environ.get(CARD_BACKEND_ENV)
+    """What `secretary status` reports about the explicit backend selector."""
     try:
         backend = card_backend()
     except BoardBackendError as exc:
         return {
             "backend": None,
             "source": CARD_BACKEND_ENV,
-            "default": DEFAULT_CARD_BACKEND,
+            "default": None,
             "findings": [str(exc)],
         }
     return {
         "backend": backend,
-        "source": CARD_BACKEND_ENV if raw and raw.strip() else "default",
-        "default": DEFAULT_CARD_BACKEND,
+        "source": CARD_BACKEND_ENV,
+        "default": None,
         "findings": [],
     }
 
 
-#: What a caller asks the switch to serve.  Only `CARD` has a second implementation today; the
-#: other two are Kanboard boards until their own card builds them, and a `postgres` switch says
-#: so rather than handing back a Kanboard client as if the switch had not been read.
-CARD = "card"
-SPRINT = "sprint"
-PRODUCT_ISSUE = "product/issue"
+class BoardCapability(StrEnum):
+    """A normalized board surface a caller requires from the selected backend."""
 
-#: Which of those the PostgreSQL implementation answers.  A caller that needs anything else is
-#: refused by name, because a silent Kanboard client under a `postgres` switch is the same
-#: "decided by default" defect the switch exists to remove.
-POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
+    CARD = "card"
+    SPRINT = "sprint"
+    PRODUCT_ISSUE = "product/issue"
+
+
+#: Compatibility exports for existing callers.  They are `str`-compatible enum members.
+CARD = BoardCapability.CARD
+SPRINT = BoardCapability.SPRINT
+PRODUCT_ISSUE = BoardCapability.PRODUCT_ISSUE
+
+#: Which normalized surfaces the PostgreSQL implementation answers.
+POSTGRES_SERVES: frozenset[BoardCapability] = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
 
 
 # Every normalized entity shares the integer-addressed board-client vocabulary.  These ranges
@@ -175,7 +192,7 @@ def record_key(kind: str, identifier: str) -> int:
 def record_key_kind(value: object) -> str | None:
     """Return the normalized non-Card kind for a transport key, or None for a Card key."""
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     for kind in RECORD_KINDS:
@@ -188,19 +205,19 @@ def record_key_kind(value: object) -> str | None:
 def card_transport_key(value: object) -> int | None:
     """Return a valid Card transport key, or ``None`` outside the Card namespace."""
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     return number if CARD_KEY_BASE <= number < CARD_KEY_LIMIT else None
 
 
 def board_client(
-    instance_dir: object,
+    instance_dir: str | Path,
     *,
-    serves: tuple[str, ...] = (CARD,),
+    serves: tuple[BoardCapability, ...] = (CARD,),
     role: str = "app",
-    transport: object | None = None,
-):
+    transport: BoardTransport | None = None,
+) -> Any:
     """The board client this process's switch names, built for one installation.
 
     This is the single construction path the two implementations share, and the only place the
@@ -227,7 +244,7 @@ def board_client(
         raise TaskError("backend_error", str(exc), 1) from None
     if backend == KANBOARD:
         if transport is not None:
-            return KanboardClient(transport, instance_dir)
+            return KanboardClient(transport, Path(instance_dir))
         return KanboardClient.for_instance(instance_dir)
     unknown = tuple(entity for entity in serves if entity not in POSTGRES_SERVES)
     if unknown:
@@ -247,12 +264,12 @@ def board_client(
     return SqlCardClient(credentials, instance_dir)
 
 
-def card_client(instance_dir: object, *, role: str = "app"):
+def card_client(instance_dir: str | Path, *, role: str = "app") -> Any:
     """`board_client` for the one entity the PostgreSQL implementation serves."""
     return board_client(instance_dir, serves=(CARD,), role=role)
 
 
-def _store_refusal(exc: Exception):
+def _store_refusal(exc: Exception) -> Exception:
     """A store refusal, in the vocabulary `run_task_command` already prints (`TaskError`).
 
     `BoardStoreError` is a `RuntimeError`, and a `RuntimeError` reaching a CLI handler is a
@@ -316,7 +333,6 @@ __all__ = [
     "CARD_BACKEND_ENV",
     "CARD_KEY_BASE",
     "CARD_KEY_LIMIT",
-    "DEFAULT_CARD_BACKEND",
     "ENTITY_KINDS",
     "KANBOARD",
     "POSTGRES",
@@ -325,7 +341,9 @@ __all__ = [
     "RECORD_KEY_SPAN",
     "RECORD_KINDS",
     "SPRINT",
+    "BoardBackend",
     "BoardBackendError",
+    "BoardCapability",
     "board_client",
     "card_backend",
     "card_backend_status",

@@ -38,9 +38,9 @@ from secretary.dispatch.head_status import (
     head_status,
 )
 from secretary.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_watchdog import pid_file_path
+from secretary.dispatch.heartbeat import run_heartbeat_identity
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.watchdog import pid_file_path
 
 # The measured inventory, in the shape the live CLI returns it: a bare shell, a dropped shell, and
 # the worker's own pty -- all listed, and none of them carrying a word about what is drawn.

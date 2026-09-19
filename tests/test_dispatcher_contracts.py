@@ -33,22 +33,23 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
-from secretary import (
-    dispatcher_launcher,
-    dispatcher_observer,
-    dispatcher_production,
-    dispatcher_review,
-    upgrade,
-)
+from secretary import upgrade
+from secretary.dispatch import claim as dispatcher_claim
+from secretary.dispatch import launcher as dispatcher_launcher
+from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import worker_launch as dispatcher_worker_launch
+from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,
 )
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import production as dispatcher_production
+from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
-from secretary.dispatcher_gate import GateResult
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatch.gate import GateResult
+from secretary.dispatch.state import DispatcherRecord
 from secretary.head_registry import (
     canonical_heads,
     installed_heads,
@@ -89,9 +90,12 @@ from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
     dispatcher_module,
+    dispatcher_claim,
     dispatcher_production,
     dispatcher_review,
     dispatcher_observer,
+    dispatcher_worker_launch,
+    dispatcher_worker_report,
 )
 
 # Attribute owners as they are spelled at the call sites: `self.host` inside DispatcherRuntime,
@@ -1388,7 +1392,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         upgrade turns every persisted provider source into a foreign one and relaunches the heads
         reading them. So the two fingerprints have to be indifferent to it, and this is that.
         """
-        from secretary.dispatcher_worker_lifecycle import head_run_binding
+        from secretary.dispatch.worker_lifecycle import head_run_binding
         from triggered_agents.runtime import codex_preflight
 
         def run_on(runtime: str) -> HeadRun:

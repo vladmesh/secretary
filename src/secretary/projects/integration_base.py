@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-# The namespace the dispatcher publishes one card's candidate under (`dispatcher_helpers.
+# The namespace the dispatcher publishes one card's candidate under (`dispatch.helpers.
 # _legacy_worker_branch`).  A branch in it belongs to a single card and dies with it, so it is a
 # legitimate seed and never an integration target.
 CARD_BRANCH_PREFIX = "pipeline/"

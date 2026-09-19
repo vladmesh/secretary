@@ -15,11 +15,11 @@ from secretary.board.backend import SPRINT, board_client, card_backend_status
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
-from secretary.dispatcher_observer import observer_snapshot
-from secretary.dispatcher_pause import ProductionPause
-from secretary.dispatcher_review import command_terminal_status
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.observer import observer_snapshot
+from secretary.dispatch.pause import ProductionPause
+from secretary.dispatch.review import command_terminal_status
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.types import HostError
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -376,7 +376,7 @@ def _divergences(production: dict[str, Any]) -> dict[str, Any]:
     """Explicit counts and rows, never null, so a reader cannot mistake "we have not looked"
 
     for "there are none". A divergence closes once its card leaves the active dispatcher cycle
-    (`dispatcher_production._reconcile_production`); one still open is either tied to a card
+    (`dispatch.production._reconcile_production`); one still open is either tied to a card
     still in flight or is genuinely unresolved.
     """
     raw = production.get("controlled_divergences")
@@ -404,7 +404,7 @@ def _reconciliation(production: dict[str, Any]) -> dict[str, Any]:
     `last_tick_finished_at` predates reconciliation and is stamped by every tick regardless of
     dispatcher version, so it cannot tell a reconciled host from a pre-deployment one still
     running the old code. `last_reconciled_at` is only ever written by the reconciliation pass
-    itself (`dispatcher_production._reconcile_production`), so it stays null, honestly reporting
+    itself (`dispatch.production._reconcile_production`), so it stays null, honestly reporting
     "unknown", until a tick running the new code has actually completed one.
     """
     records = production.get("records")

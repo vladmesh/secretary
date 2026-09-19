@@ -1,11 +1,12 @@
 """`secretary web-front`: set the password, render the front's configuration, audit it.
 
 Three verbs, and the split between them is the point. `set-password` is the only one that touches a
-plaintext, and it never puts one on a command line or on stdout. `render` reads the *hash* out of
-the secret store and writes the configuration under the data directory, so the repository holds no
-credential and the running front holds no copy of one that the store does not own. `check` reads a
-rendered configuration back and reports every published route it would answer without a password --
-the same predicate `tests/test_web_front.py` runs, available on the host after a hand edit.
+plaintext password, and it never puts one on a command line or on stdout. It also rotates the
+independent browser-session secret, revoking every persistent browser session with the password.
+`render` reads the hash and session secret from the secret store and writes the configuration under
+the data directory. For an installation created before persistent sessions existed, its first
+render creates that random session secret once. `check` reads a rendered configuration back and
+reports every published route it would answer without owner authentication.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from secretary.secret_store import (
     SecretStoreError,
     SecretStoreStateError,
     SecretStoreValidationError,
+    list_secrets,
     read_secret,
     set_secret,
 )
@@ -33,6 +35,8 @@ from secretary.web.app import ROUTES
 from secretary.webfront.caddyfile import (
     HASH_SECRET_ID,
     PASSWORD_SECRET_ID,
+    SESSION_SECRET_BYTES,
+    SESSION_SECRET_ID,
     USERNAME,
     FrontConfig,
     FrontConfigError,
@@ -79,7 +83,7 @@ def add_web_front_subcommands(subparsers) -> None:
     password.set_defaults(handler=run_set_password)
 
     config = commands.add_parser(
-        "render", help="write the front's configuration, taking the hash from the secret store"
+        "render", help="write the front's configuration, taking auth material from the secret store"
     )
     config.add_argument("--instance", required=True)
     config.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
@@ -127,7 +131,18 @@ def run_set_password(args: argparse.Namespace) -> int:
         digest = hash_password(password, executable=args.caddy)
     except FrontConfigError as exc:
         return _fail("set-password", "validation", str(exc))
+    session_secret = pysecrets.token_urlsafe(SESSION_SECRET_BYTES)
     try:
+        # Rotate the bearer first. If a later write fails, a subsequent render fails safer: old
+        # browser sessions are revoked while the last complete password/hash pair still guards it.
+        set_secret(
+            instance_dir,
+            secret_id=SESSION_SECRET_ID,
+            value=session_secret.encode("utf-8"),
+            scope="installation",
+            purpose="web front browser session signing secret, rotated with owner password",
+            actor=args.actor,
+        )
         set_secret(
             instance_dir,
             secret_id=PASSWORD_SECRET_ID,
@@ -162,6 +177,7 @@ def run_set_password(args: argparse.Namespace) -> int:
             "account": USERNAME,
             "password_secret": PASSWORD_SECRET_ID,
             "hash_secret": HASH_SECRET_ID,
+            "session_secret": SESSION_SECRET_ID,
             "generated": bool(args.generate),
             "read_it_back": (
                 f"secretary secret materialize --instance {args.instance} --target file, then read "
@@ -189,9 +205,18 @@ def run_render(args: argparse.Namespace) -> int:
         )
     except (SecretStoreError, StateRepoError) as exc:
         return _fail("render", "runtime", str(exc))
+    try:
+        session_secret = _read_or_create_session_secret(instance_dir)
+    except SecretStoreValidationError as exc:
+        return _fail("render", "validation", str(exc))
+    except SecretStoreStateError as exc:
+        return _fail("render", "state", str(exc))
+    except (SecretStoreError, StateRepoError) as exc:
+        return _fail("render", "runtime", str(exc))
     config = FrontConfig(
         sites=tuple(args.site),
         password_hash=digest,
+        session_secret=session_secret,
         storage=front / STORAGE_NAME,
         bind=tuple(args.bind),
         **({"upstream_port": args.upstream_port} if args.upstream_port else {}),
@@ -251,6 +276,23 @@ def run_check(args: argparse.Namespace) -> int:
 # -- helpers -------------------------------------------------------------------------------------
 
 
+def _read_or_create_session_secret(instance_dir: Path) -> str:
+    """Return the persistent signing secret, migrating an older installation on first render."""
+    entries = list_secrets(instance_dir)
+    if any(entry.get("id") == SESSION_SECRET_ID for entry in entries):
+        return read_secret(instance_dir, SESSION_SECRET_ID).decode("utf-8").strip()
+    value = pysecrets.token_urlsafe(SESSION_SECRET_BYTES)
+    set_secret(
+        instance_dir,
+        secret_id=SESSION_SECRET_ID,
+        value=value.encode("utf-8"),
+        scope="installation",
+        purpose="web front browser session signing secret, rotated with owner password",
+        actor=DEFAULT_ACTOR,
+    )
+    return value
+
+
 def hash_password(password: str, *, executable: str = "caddy") -> str:
     """The bcrypt hash `basicauth` checks, from the same binary that will check it.
 
@@ -284,7 +326,7 @@ def _front_dir(instance_dir: Path, data_dir: str | None) -> Path:
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Write the configuration where only its owner can read it: it carries a password hash."""
+    """Write the configuration where only its owner can read its hash and bearer."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(text)
