@@ -40,7 +40,7 @@ from secretary.checkpoint import (
     verify_analytics_checkpoint,
 )
 from secretary.data import DataExport
-from secretary.dispatcher_production import _coordinate_checkpoint
+from secretary.dispatch.production import _coordinate_checkpoint
 from secretary.routing_journal import attempts
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
