@@ -16,7 +16,6 @@ from secretary.board.completion_evidence import (
     review_required,
 )
 from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
-from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
     TerminalTaxonomyValidationError,
@@ -44,6 +43,7 @@ from secretary.dispatch.attempt_usage import (
 from secretary.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
 )
+from secretary.dispatch.assessment_decision import advance_assessment as _advance_assessment
 from secretary.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
     SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
@@ -65,7 +65,6 @@ from secretary.dispatch.gate_lifecycle import (
 )
 from secretary.dispatch.helpers import (
     _last_marker,
-    _last_marker_body,
     _report_adoption_baseline,
     _review_adoption_baseline,
     _round_report_ids,
@@ -167,7 +166,6 @@ from secretary.dispatch.review import (
 )
 from secretary.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
-    complete_park as _complete_park,
     merge_readiness as _merge_readiness,
     park_green_verdict as _park_green_verdict,
 )
@@ -194,7 +192,7 @@ from secretary.dispatch.types import (
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_REVIEW_VERDICT,
+    STOPPED_BY_REVIEW_VERDICT,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
     GateTransportError,
     HostError,
@@ -208,9 +206,6 @@ from secretary.dispatch.watchdog import (
 )
 from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
-)
-from secretary.dispatch.worker_continuation import (
-    begin_red_transition as _begin_red_transition,
 )
 from secretary.dispatch.worker_continuation import (
     complete_red_transition as _complete_red_transition,
@@ -262,8 +257,6 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
-    _event_payload,
-    assessment_resolution,
     specification_revision,
 )
 from triggered_agents.runtime import head as head_ops
@@ -554,7 +547,7 @@ class DispatcherRuntime:
         if task["state"] == "validate":
             return self._advance_review(task, records, payload, attempt_id)
         if task["state"] == "assessment":
-            return self._advance_assessment(task, records, payload, attempt_id)
+            return _advance_assessment(self, task, records, payload, attempt_id)
         records.pop(ref, None)
         return {
             "status": "ok",
@@ -960,200 +953,6 @@ class DispatcherRuntime:
 
 
 
-
-    def _advance_assessment(
-        self,
-        task: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-    ) -> dict[str, Any]:
-        """A parked card. Nothing here runs a head, reads a gate or merges anything."""
-        ref = task["ref"]
-        record = records.get(ref)
-        if record is None:
-            try:
-                record = self._adopt(task, attempt_id)
-            except HostError as exc:
-                return self._block_unresumable(task, records, payload, attempt_id, "assessment", exc)
-            records[ref] = record
-        continuation = record.worker_continuation
-        if continuation.red_transition_pending:
-            # A rework decision whose move did not commit: finish it before any decision is read.
-            return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
-        if continuation.assessment_pending:
-            # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
-            return _complete_park(self, record, records, payload, attempt_id, ref=ref)
-        if not continuation.parked:
-            # A record lost while parked, or a card an operator parked by hand: the board is the
-            # fact. A session this record cannot prove is held is not held, so it owns no worker.
-            continuation.begin_park(
-                "review", len(task.get("comments") or []), "adopted parked card", "unknown"
-            )
-            continuation.confirm_park()
-            record.state = "assessment"
-            records[ref] = record
-            self.save_records(payload, records)
-        decision, reason, prerequisites = self._recorded_decision(task)
-        if not decision:
-            return {
-                "status": "ok",
-                "step": "assessment",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": "waiting-observer-decision",
-            }
-        visit, recorded = assessment_resolution(self.audit.events(ref))
-        decision_request = str(recorded.get("request_id") or "") if isinstance(recorded, dict) else ""
-        decision_event_id = str(recorded.get("event_id") or "") if isinstance(recorded, dict) else ""
-        if visit and decision_request and decision_event_id:
-            try:
-                self._persist_outcome_round_context(
-                    task,
-                    record,
-                    phase="decision",
-                    assessment_visit=visit,
-                    request_ids={decision_request},
-                    source_event_id=decision_event_id,
-                    marker=f"decision:{decision}",
-                )
-            except (OSError, TaskError, ValueError):
-                # The decision has already committed.  Do not turn a journal
-                # outage into a new lifecycle authority; terminal projection
-                # will retain an explicit missing-decision diagnostic instead.
-                pass
-        if decision == "rework":
-            return self._rework_parked(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                reason=reason,
-                protocol_prerequisites=prerequisites,
-            )
-        if decision == "reslice":
-            return self._reslice_parked(task, record, records, payload, attempt_id, reason=reason)
-        return self._release_parked(task, record, records, payload, attempt_id, reason=reason)
-
-    def _recorded_decision(self, task: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
-        """The current Assessment decision and its registry-validated prerequisite declaration."""
-        events = self.audit.events(task["ref"])
-        _visit, event = assessment_resolution(events)
-        data = _event_payload(event) if isinstance(event, dict) else {}
-        decision = str(data.get("decision") or "")
-        body = data.get("body")
-        if not isinstance(body, str) or not body.strip():
-            body = _last_marker_body(task, f"decision:{decision}") or ""
-        if decision not in {"release", "rework", "reslice"} or not isinstance(body, str) or not body.strip():
-            return "", "", ()
-        # A missing field is the released empty declaration; a present malformed value is never
-        # allowed to turn into an authoritative worker instruction.
-        declared = data.get("protocol_prerequisites", [])
-        if not isinstance(declared, list):
-            return "", "", ()
-        if decision != "rework":
-            return decision, body, ()
-        try:
-            prerequisites = validate_rework_prerequisites(
-                declared,
-                specification_revision=specification_revision(events, str(task.get("description") or ""))
-                or None,
-            )
-        except (ValueError, ArtifactOwnershipViolation):
-            # An invalid declaration is never a worker instruction. The writer rejects it before
-            # commit; this is the recovery fence for a malformed historical audit record.
-            return "", "", ()
-        return decision, body, tuple(artifact.name for artifact in prerequisites)
-
-    def _rework_parked(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        reason: str,
-        protocol_prerequisites: tuple[str, ...],
-    ) -> dict[str, Any]:
-        """A rework decision releases the round the park was holding back."""
-        ref = task["ref"]
-        # A parked card should have no reviewer left; an adopted one may still name a pane nobody
-        # stopped. Either way nothing is woken beside a head the host will not confirm gone.
-        if record.owns_head("review"):
-            unconfirmed = self._end_review_pane_confirmed(
-                record,
-                records,
-                payload,
-                ref,
-                step="assessment",
-                attempt_id=attempt_id,
-                initiator=STOPPED_BY_REVIEW_VERDICT,
-            )
-            if unconfirmed is not None:
-                return unconfirmed
-        # The findings are not repeated in the move: the rework prompt reads the card's last red
-        # verdict directly. The decision is what the round is for, so it is frozen with the round.
-        return _begin_red_transition(self, 
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            phase="review",
-            move_reason=f"Observer decision: rework. {reason}".strip(),
-            verdict_outcome="red",
-            decision="rework",
-            decision_body=reason,
-            decision_protocol_prerequisites=protocol_prerequisites,
-        )
-
-    def _reslice_parked(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        reason: str,
-    ) -> dict[str, Any]:
-        """A reslice decision ends the attempt and leaves the card for a fresh cut."""
-        ref = task["ref"]
-        unconfirmed = self._stop_worker_confirmed(record, ref, step="assessment", attempt_id=attempt_id)
-        if unconfirmed is not None:
-            records[ref] = record
-            self.save_records(payload, records)
-            return unconfirmed
-        self.host.stop(record)
-        self.terminal_effect(
-            task,
-            record,
-            target="blocked",
-            reason=f"Observer decision: reslice. {reason}".strip(),
-            decision="reslice",
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "assessment-reslice", ref),
-            terminal_state="blocked",
-            disposition="reslice",
-            verdict=record.worker_continuation.verdict_outcome
-            if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
-            else "missing",
-            blocked_reason=None,
-        )
-        resume_workspaces = payload.setdefault("resume_workspaces", {})
-        if isinstance(resume_workspaces, dict):
-            resume_workspaces[ref] = record.attempt_id or attempt_id
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {
-            "status": "ok",
-            "step": "assessment",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "to": "blocked",
-            "decision": "reslice",
-        }
 
     def _block_merge_path(
         self,
