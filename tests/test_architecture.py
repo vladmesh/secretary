@@ -216,6 +216,7 @@ class SourceLayoutTests(unittest.TestCase):
         )
         for helper in helpers:
             self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"self.{helper}(", dispatcher_source)
             self.assertNotIn(f"runtime.{helper}(", verdict_source)
         for entry in (
             "advance_review_verdict",
