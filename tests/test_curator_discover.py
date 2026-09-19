@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher_state import request_token
+from secretary.dispatch.state import request_token
 from triggered_agents.agents.curator import discover
 
 
