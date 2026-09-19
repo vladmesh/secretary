@@ -16,7 +16,8 @@ history rewrite. Base-freshness recovery runs first for local/github, so the gat
 post-merge tree; a real textual conflict is a red verdict, never a silent merge.
 
 The gate is host I/O, so it lives behind CommandHostRuntime.gate_check and stays a pure
-function of the host; dispatcher.py turns a GateResult into a board move.
+function of the host; dispatch.gate_lifecycle turns a GateResult into durable board/recovery
+effects while review, Assessment and merge policy stay outside that boundary.
 """
 
 from __future__ import annotations
