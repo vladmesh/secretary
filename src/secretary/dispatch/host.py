@@ -61,7 +61,7 @@ from secretary.dispatch.gate_receipt import (
 from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatcher_helpers import (
     _decision_record_line,
     _last_gate_red_body,
@@ -131,26 +131,26 @@ from secretary.dispatch.state import (
 from secretary.dispatch.state import (
     request_token as _request_token,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_ACCEPTED,
     READINESS_BUSY,
     READINESS_READY,
     TuiDeliveryError,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
 )
-from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import deliver_tui_prompt as _deliver_tui_prompt
+from secretary.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     provider_progress_for_run as _provider_progress_for_run,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatch.types import (
@@ -166,34 +166,34 @@ from secretary.dispatch.types import (
     ReviewLaunch,
     review_pane_label,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     bind_head_heartbeat as _bind_head_heartbeat,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     clear_head_heartbeat as _clear_head_heartbeat,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads

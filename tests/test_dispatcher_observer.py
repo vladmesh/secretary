@@ -21,7 +21,7 @@ from secretary.dispatcher import (
     DispatcherRuntime,
     InstanceCatalog,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatcher_launch import infrastructure_action
 from secretary.dispatch.observer import (
     EVENT_DEFERRED,
@@ -54,7 +54,7 @@ from secretary.dispatch.production import (
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DeliveryEvidence,
     TuiDeliveryError,
     claude_project_dir_name,
@@ -62,7 +62,7 @@ from secretary.dispatcher_tui import (
     provider_progress_for_run,
 )
 from secretary.dispatch.types import HostError
-from secretary.dispatcher_watchdog import initial_output_stall_seconds
+from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads

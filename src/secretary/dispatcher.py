@@ -290,12 +290,12 @@ from secretary.dispatch.state import (
 from secretary.dispatch.state import (
     request_token as _request_token,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     READINESS_BUSY,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
 from secretary.dispatch.types import (
@@ -312,37 +312,37 @@ from secretary.dispatch.types import (
     HostError,
     ProjectGitAccessError,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     reset_idle as _reset_idle,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     reset_wait as _reset_wait,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     stall_seconds as _stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     suspension_response_window_seconds as _suspension_response_window_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatch.worker_lifecycle import (

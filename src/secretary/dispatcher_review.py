@@ -34,7 +34,7 @@ from secretary.dispatcher_launch import (
 )
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_REFUSED,
     READINESS_BLOCKED,
     READINESS_BUSY,
@@ -48,31 +48,31 @@ from secretary.dispatch.types import (
     HostError,
     review_pane_label,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     review_infra_retry_attempts as _review_infra_retry_attempts,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatch.worker_lifecycle import head_run_binding

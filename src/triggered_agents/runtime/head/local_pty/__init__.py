@@ -81,7 +81,7 @@ delivery is unfinished is better than one that cannot be asked.
 There is no second identity scheme. The head's command is wrapped by
 `..command.with_pid_heartbeat`, exactly as an Orca-launched head's is, so the record under
 `head.pid` is written by the head's own process (`$$` plus `exec`) and carries `pid`, `boot_id`,
-`proc_starttime_ticks`, `run_id`, `role` and `task`. `secretary.dispatcher_watchdog`'s reader
+`proc_starttime_ticks`, `run_id`, `role` and `task`. `secretary.dispatch.watchdog`'s reader
 classifies it with no change at all.
 """
 

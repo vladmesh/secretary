@@ -17,10 +17,10 @@ LEGACY_FLAT_MODULES = frozenset(
     backup_policy.py backup_retention.py backup_verify.py board_transport.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py dispatcher.py
-    dispatcher_heartbeat.py dispatcher_helpers.py
+    dispatcher_helpers.py
     dispatcher_launch.py dispatcher_launcher.py
     dispatcher_review.py dispatcher_tui.py
-    dispatcher_watchdog.py gate.py
+    gate.py
     head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
     memory_write.py observer_root.py onboarding.py product_issue_commands.py product_issues.py

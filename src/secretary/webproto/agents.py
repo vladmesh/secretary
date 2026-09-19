@@ -40,7 +40,7 @@ from secretary.dispatch.state import DispatcherRecord
 # The control plane's own seam onto the heartbeat reader and its vocabulary: `dispatcher_watchdog`
 # re-exports every one of these names, so this layer reads process state through the same door the
 # dispatcher does rather than opening a second one onto the runtime package.
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,

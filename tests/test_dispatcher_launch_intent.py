@@ -38,7 +38,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatch.production import _budget_event_type
 from secretary.dispatch.state import (
@@ -56,14 +56,14 @@ from secretary.dispatch.state import (
     PersistedLaunchIntent,
     PersistedRoutingHeadSnapshot,
 )
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DeliveryEvidence,
     TuiDeliveryError,
     claude_project_dir_name,
     provider_progress_for_run,
 )
 from secretary.dispatch.types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
@@ -4105,7 +4105,7 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.host, "_run_json", run_json),
-            mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0),
+            mock.patch("secretary.dispatch.tui.latest_claude_user_turn_for", return_value=1.0),
         ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
@@ -4196,7 +4196,7 @@ class HostLaunchContourTests(unittest.TestCase):
         with (
             mock.patch.object(self.host, "_run_json", run_json),
             mock.patch(
-                "secretary.dispatcher_tui.latest_claude_user_turn_for",
+                "secretary.dispatch.tui.latest_claude_user_turn_for",
                 side_effect=latest_turn,
             ),
         ):

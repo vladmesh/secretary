@@ -21,7 +21,7 @@ from unittest import mock
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary.dispatch.types import HostError
-from secretary.dispatcher_watchdog import idle_stall_seconds, stall_seconds
+from secretary.dispatch.watchdog import idle_stall_seconds, stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 
@@ -337,7 +337,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         self.host.worker_status_error = HostError("orca terminal list failed")
 
     def test_ceiling_elapsed_escalates_to_the_operator_without_touching_the_head(self) -> None:
-        from secretary.dispatcher_watchdog import stall_seconds
+        from secretary.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()  # stamps the fresh waiting window
@@ -379,7 +379,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
     def test_disabling_the_escalation_is_caught(self) -> None:
         """Mutation check: deleting the bound returns an unobservable head to silence."""
-        from secretary.dispatcher_watchdog import stall_seconds
+        from secretary.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()
@@ -400,7 +400,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
     def test_a_turning_the_escalation_destructive_is_caught(self) -> None:
         """The escalation may not grow a stop: any host call fails this test."""
-        from secretary.dispatcher_watchdog import stall_seconds
+        from secretary.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()

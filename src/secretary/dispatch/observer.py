@@ -55,14 +55,14 @@ from typing import Any
 from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.dispatcher_launch import merge_launch_head_run
 from secretary.dispatch.state import now_rfc3339, request_token
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     READINESS_BUSY,
     delivery_readiness_state,
 )
 from secretary.dispatch.types import HostError
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_run_process_status,
     heartbeat_is_dead,
     heartbeat_is_live_match,

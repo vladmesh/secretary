@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
     head_process_status,

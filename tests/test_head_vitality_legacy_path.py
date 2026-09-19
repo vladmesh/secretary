@@ -414,7 +414,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         observed.
         """
         from secretary.dispatch.gate import GateResult
-        from secretary.dispatcher_watchdog import suspension_response_window_seconds
+        from secretary.dispatch.watchdog import suspension_response_window_seconds
 
         self.start_dispatcher()
         self.host.gate_results = [

@@ -23,7 +23,7 @@ addressable afterwards. It does four things and refuses to do a fifth:
 
 The head's identity is not this process's business either. The head's command is wrapped by
 `with_pid_heartbeat`, so the record under `head.pid` is written by the head's own process and is
-the same launch identity `secretary.dispatcher_watchdog` already reads.
+the same launch identity `secretary.dispatch.watchdog` already reads.
 """
 
 from __future__ import annotations
@@ -258,7 +258,7 @@ class Supervisor:
         no head. A supervisor killed with `SIGKILL` leaves its head running and orphaned, and the
         one thing a restart must never do is bring a second head up under the same run id in
         silence. The check reads the head's own launch identity — the same record
-        `secretary.dispatcher_watchdog` reads — and refuses only on the full triple, so a recycled
+        `secretary.dispatch.watchdog` reads — and refuses only on the full triple, so a recycled
         pid cannot fence a run out.
         """
         alive = _live_head(self.pid_file, self.run_id)

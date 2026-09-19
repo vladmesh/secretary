@@ -25,7 +25,7 @@ from secretary.dispatcher import (
     DispatcherRuntime,
     HostError,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_review import (
     recover_review_launch,
 )
@@ -39,7 +39,7 @@ from secretary.dispatch.types import (
     HeadPaneNotReady,
     review_pane_label,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     WORKER_REPORT_STALL_DEFAULT,
     bind_head_heartbeat,
     head_process_status,

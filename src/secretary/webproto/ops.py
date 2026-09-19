@@ -263,7 +263,7 @@ class OperationLayer(ProtocolBoundary):
         """
         if self._runtime_factory is not None:
             return self._runtime_factory(data_dir)
-        from secretary.dispatcher_watchdog import head_process_status
+        from secretary.dispatch.watchdog import head_process_status
 
         return build_head_runtime(
             LOCAL_PTY_RUNTIME,

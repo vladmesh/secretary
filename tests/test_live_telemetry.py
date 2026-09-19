@@ -41,7 +41,7 @@ from secretary.dispatch.production import (
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
-from secretary.dispatcher_watchdog import idle_stall_seconds
+from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter

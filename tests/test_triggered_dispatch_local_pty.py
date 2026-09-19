@@ -33,7 +33,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher_watchdog import head_process_status
+from secretary.dispatch.watchdog import head_process_status
 from triggered_agents.agents.pipeline import heads as pipeline_heads
 from triggered_agents.agents.pipeline import health as pipeline_health
 from triggered_agents.runtime import dispatch

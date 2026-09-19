@@ -17,7 +17,7 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.dispatcher_watchdog import head_process_status
+from secretary.dispatch.watchdog import head_process_status
 from triggered_agents.runtime.head import HeadSpec, TaskRef
 from triggered_agents.runtime.head.local_pty import protocol
 from triggered_agents.runtime.head.local_pty.client import SupervisorClient, spawn_head
