@@ -26,7 +26,7 @@ from secretary.dispatcher import (
     HostError,
 )
 from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     recover_review_launch,
 )
 from secretary.dispatch.state import (
@@ -1764,7 +1764,7 @@ class ReviewLivenessTests(unittest.TestCase):
         runtime.host = host
 
         status = host.review_status(self.task, record)
-        with mock.patch("secretary.dispatcher_review.start_review") as start_review:
+        with mock.patch("secretary.dispatch.review.start_review") as start_review:
             outcome = recover_review_launch(
                 runtime,
                 self.task,

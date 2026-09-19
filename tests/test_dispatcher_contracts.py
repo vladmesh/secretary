@@ -33,11 +33,9 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
-from secretary import (
-    dispatcher_launcher,
-    dispatcher_review,
-    upgrade,
-)
+from secretary import upgrade
+from secretary.dispatch import launcher as dispatcher_launcher
+from secretary.dispatch import review as dispatcher_review
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,

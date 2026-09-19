@@ -222,7 +222,7 @@ Not guarded, because they do not act on vitality:
 - operator-initiated stops (`CommandHostRuntime.stop_head` from an explicit operator command);
 - card-lifecycle stops: Done/Blocked transitions, drain, the review bring-up's confirmed worker freeze
   (`_adopt_launch_intent`);
-- launch-recovery stops in `dispatcher_launch.resolve_launch_intent`, which act on durable launch
+- launch-recovery stops in `secretary.dispatch.launch.resolve_launch_intent`, which act on durable launch
   intents and heartbeat identity.
 
 Tests: refusal classes in `tests/test_head_vitality_guard.py`; call-site coverage in

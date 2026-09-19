@@ -60,7 +60,7 @@ from secretary.dispatch.gate import (
     _pr_digest,
 )
 from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
     _round_record_line,
@@ -68,7 +68,7 @@ from secretary.dispatcher_helpers import (
     _task_doc_protocol_prerequisites,
     red_review_count,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
     CAUSE_PANE_NEVER_READY,
@@ -78,13 +78,13 @@ from secretary.dispatcher_launch import (
     bring_up_failure_class,
     classify_bring_up_failure,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
 from secretary.dispatch.production import _budget_event_type, production_adopt_attempt_id
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     start_review as start_reviewer,
 )
 from secretary.dispatch.state import (
@@ -11560,7 +11560,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             card = {"routing": {"review_head_override": "claude-default"}}
             probe = (
                 f"PYTHONPATH={shlex.quote(str(repo / 'src'))} python3 -c 'import json,sys;"
-                "from secretary.dispatcher_launcher import claude_launch_model;"
+                "from secretary.dispatch.launcher import claude_launch_model;"
                 'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
                 + shlex.quote(str(workspace))
             )
@@ -11837,7 +11837,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_claude_workspace_ready("/ws/x", config)
             after_first = json.loads(config.read_text(encoding="utf-8"))
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_claude_workspace_ready("/ws/x", config)
 
         self.assertEqual(after_first["theme"], "light")
@@ -11863,7 +11863,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_claude_workspace_ready("/ws/new", config)
             after_first = json.loads(config.read_text(encoding="utf-8"))
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_claude_workspace_ready("/ws/new", config)
 
         self.assertEqual(after_first["theme"], "dark")
@@ -11894,7 +11894,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             config.write_text(json.dumps(original), encoding="utf-8")
 
             with mock.patch(  # noqa: SIM117
-                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+                "secretary.dispatch.launcher.os.replace", side_effect=OSError("boom")
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
                     ensure_claude_workspace_ready("/ws/x", config)
@@ -11946,7 +11946,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             ensure_codex_workspace_trusted({"adapter": "codex", "codex_home": str(home)}, str(workspace))
             after_first = config.read_text(encoding="utf-8")
-            with mock.patch("secretary.dispatcher_launcher.os.replace") as replace:
+            with mock.patch("secretary.dispatch.launcher.os.replace") as replace:
                 ensure_codex_workspace_trusted({"adapter": "codex", "codex_home": str(home)}, str(workspace))
 
         data = tomllib.loads(after_first)
@@ -12012,7 +12012,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             config.write_text(original, encoding="utf-8")
 
             with mock.patch(  # noqa: SIM117
-                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+                "secretary.dispatch.launcher.os.replace", side_effect=OSError("boom")
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update codex config"):
                     ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)

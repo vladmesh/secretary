@@ -53,7 +53,7 @@ from enum import Enum
 from typing import Any
 
 from secretary.codex_provider_events import CodexProviderSourceError
-from secretary.dispatcher_launch import merge_launch_head_run
+from secretary.dispatch.launch import merge_launch_head_run
 from secretary.dispatch.state import now_rfc3339, request_token
 from secretary.dispatch.tui import (
     COMPOSER_EMPTY,

@@ -22,7 +22,7 @@ from secretary.dispatcher import (
     InstanceCatalog,
 )
 from secretary.dispatch.heartbeat import heartbeat_identity
-from secretary.dispatcher_launch import infrastructure_action
+from secretary.dispatch.launch import infrastructure_action
 from secretary.dispatch.observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,

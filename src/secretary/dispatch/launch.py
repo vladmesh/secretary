@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.dispatch.heartbeat import intent_heartbeat_identity
-from secretary.dispatcher_helpers import scrub_host_output
+from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, LaunchIntent
 from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_ACCEPTED,
@@ -960,7 +960,7 @@ def resolve_launch_intent(
         return None
     if role == REVIEW_ROLE and undelivered_launch_delivery(intent):
         # Delayed import avoids the dispatcher_review launch-intent cycle.
-        from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
+        from secretary.dispatch.review import retry_busy_reviewer_launch_delivery
 
         deferred = retry_busy_reviewer_launch_delivery(runtime, task, records, payload, record, intent, step)
         if deferred is not None:
@@ -1011,7 +1011,7 @@ def stop_launch_intent(
         if role == REVIEW_ROLE and named:
             # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
             # intent through this module, and a top-level import either way would be a cycle.
-            from secretary.dispatcher_review import end_review_pane
+            from secretary.dispatch.review import end_review_pane
 
             end_review_pane(runtime.host, record, STOPPED_BY_LAUNCH_RECOVERY)
         elif named:

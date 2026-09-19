@@ -14,13 +14,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import dispatcher_launch, dispatcher_review
+from secretary.dispatch import launch as dispatcher_launch
+from secretary.dispatch import review as dispatcher_review
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     confirm_launch_intent,

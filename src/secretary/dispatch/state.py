@@ -139,7 +139,7 @@ class PersistedGateReceipt(dict[str, Any]):
     __slots__ = ("_receipt",)
 
     def __init__(self, value: Any = None) -> None:
-        # Lazy to avoid dispatch.state -> gate_receipt -> dispatcher_helpers -> dispatch.state
+        # Lazy to avoid dispatch.state -> gate_receipt -> dispatch.helpers -> dispatch.state
         # at module import time. By the time a record is instantiated the modules are fully loaded.
         from secretary.dispatch.gate_receipt import GateReceipt
 

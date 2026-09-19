@@ -28,8 +28,8 @@ import time
 from typing import Any
 
 from secretary._fsutil import file_lock
-from secretary.dispatcher_helpers import _last_marker
-from secretary.dispatcher_launch import (
+from secretary.dispatch.helpers import _last_marker
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     clear_launch_intent,
@@ -56,7 +56,7 @@ from secretary.dispatch.pause import (
     pause_payload,
     write_legacy_mirror,
 )
-from secretary.dispatcher_review import end_review_pane, start_review
+from secretary.dispatch.review import end_review_pane, start_review
 from secretary.dispatch.state import DispatcherRecord, now_rfc3339
 from secretary.dispatch.types import (
     STOPPED_BY_OPERATOR,

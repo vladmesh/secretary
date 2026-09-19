@@ -814,7 +814,7 @@ class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase)
         Only the two host reads are stubbed -- the Orca inventory and the /proc heartbeat probe.
         Everything that decides the shape is the production function.
         """
-        from secretary import dispatcher_review
+        from secretary.dispatch import review as dispatcher_review
 
         record = self._live_record()
         pane = mock.Mock()

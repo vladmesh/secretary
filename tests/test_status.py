@@ -271,7 +271,7 @@ class StatusCliTests(unittest.TestCase):
                     return_value=subprocess.CompletedProcess([], 0, terminal_list, ""),
                 ) as run,
                 mock.patch(
-                    "secretary.dispatcher_review._head_run_process_status", return_value={"known": False}
+                    "secretary.dispatch.review._head_run_process_status", return_value={"known": False}
                 ),
                 mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
             ):

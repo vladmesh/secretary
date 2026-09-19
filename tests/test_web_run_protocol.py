@@ -1913,7 +1913,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
         """
         triggered_agents.runtime.orca_rpc triggered_agents.runtime.pane_host
         triggered_agents.runtime.orca_legacy_head triggered_agents.runtime.tui_delivery
-        secretary.dispatch.head_status secretary.dispatch.host secretary.dispatcher_review
+        secretary.dispatch.head_status secretary.dispatch.host secretary.dispatch.review
         orca
         """.split()
     )

@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from secretary.dispatcher_helpers import safe_one_line
+from secretary.dispatch.helpers import safe_one_line
 
 _EXACT_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")

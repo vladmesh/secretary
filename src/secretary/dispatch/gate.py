@@ -38,7 +38,7 @@ from secretary.candidate_history import (
 )
 from secretary.dispatch.gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatch.state import GatePrAuthorship, GatePublishedRef
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     _last_marker_body,
     _legacy_worker_branch,
     _tail,

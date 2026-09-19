@@ -17,7 +17,7 @@ from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.dispatch.observer import observer_snapshot
 from secretary.dispatch.pause import ProductionPause
-from secretary.dispatcher_review import command_terminal_status
+from secretary.dispatch.review import command_terminal_status
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.host import (

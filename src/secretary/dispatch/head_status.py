@@ -48,7 +48,7 @@ from secretary.dispatch.head_vitality import (
     snapshots_from_status,
 )
 from secretary.dispatch.head_vitality_episode import recovery_outlook
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     command_terminal_status,
     orca_workspace_inventory,
     pane_matcher,
