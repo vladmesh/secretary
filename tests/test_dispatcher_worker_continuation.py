@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatch import worker_continuation as continuation_module
-from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from secretary.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
@@ -149,6 +149,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.runtime._stop_worker_confirmed.assert_not_called()
 
     def test_red_move_replay_keeps_its_request_and_reserved_generation(self) -> None:
+        self.record.gate_attestation = PersistedGateReceipt({"previous_round": "receipt"})
         snapshots = []
         self.runtime.save_records.side_effect = lambda *_: snapshots.append(
             (self.record.worker_continuation.stage, self.record.report_generation)
@@ -161,6 +162,8 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         ):
             self.begin()
         self.assertEqual(snapshots[0], (WorkerContinuationStage.RED_TRANSITION_PENDING, 3))
+        self.assertIsInstance(self.record.gate_attestation, PersistedGateReceipt)
+        self.assertEqual(self.record.gate_attestation.to_json(), {})
         first_request = self.runtime.terminal_effect.call_args.kwargs["request_id"]
         self.assertEqual(self.record.report_generation, 4)
         with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={"ok": True}):

@@ -17,7 +17,7 @@ from secretary.dispatch.host import _record_worker_delivery_evidence
 from secretary.dispatch.launch import STAGE_REWORK, WORKER_ROLE
 from secretary.dispatch.launch import clear_launch_intent as _clear_launch_intent
 from secretary.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from secretary.dispatch.state import DispatcherRecord, now_rfc3339
+from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt, now_rfc3339
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.tui import COMPOSER_EMPTY, COMPOSER_UNKNOWN, READINESS_BUSY
 from secretary.dispatch.tui import delivery_readiness_state as _delivery_readiness_state
@@ -230,7 +230,7 @@ def complete_red_transition(
     record.report_protocol_prerequisites = continuation.decision_protocol_prerequisites
     record.gate_state = ""
     record.gate_pending_since = 0.0
-    record.gate_attestation = {}
+    record.gate_attestation = PersistedGateReceipt()
     record.gate_transport_failures = 0
     record.gate_transport_error = ""
     runtime._reset_infrastructure_reruns(record)
