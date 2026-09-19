@@ -20,9 +20,9 @@ from secretary.dispatch.helpers import (
     _last_review_red_body,
     red_review_count as _red_review_count,
     safe_one_line as _safe_one_line,
-    scrub_host_output,
 )
 from secretary.dispatch.launch import REVIEW_ROLE
+from secretary.dispatch import release_lifecycle
 from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
@@ -151,52 +151,6 @@ def parks_for_decision(runtime: Any, task: dict[str, Any]) -> bool:
     return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
 
 
-def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> str:
-    """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
-    state; merging a different one lands work nobody reviewed. Returns the operator message for the
-    bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
-    the gate's failure to report, not a silent bounce.
-    """
-    if not record.review_commit:
-        return ""
-    current = runtime.host.head_commit(record)
-    if not current or current == record.review_commit:
-        return ""
-    if runtime.host.is_instance_publish_recovery(task, record, record.review_commit, current):
-        return ""
-    return (
-        f"The review was given for commit `{record.review_commit[:12]}` while the working copy "
-        f"is now on `{current[:12]}`: the verdict describes a different state of the code. The "
-        f"card is back in In progress; rework it and report again."
-    )
-
-
-def merge_readiness(
-    runtime: Any, task: dict[str, Any], record: DispatcherRecord
-) -> tuple[str, GateResult | None, str]:
-    """Everything that must hold before this checkout may be merged, read once.
-
-    Returns one of "drift", "transport", "failed", "pending", "red" or "green". Both sides of the
-    seam ask it: Validate before parking a green verdict, and the release again immediately before
-    the merge. "transport" is deliberately not "failed" — a backend that could not be reached says
-    nothing about the checkout, so the caller retries rather than deciding the card on silence.
-    """
-    drift = review_drift(runtime, task, record)
-    if drift:
-        return "drift", None, drift
-    try:
-        result = runtime.host.gate_check(task, record)
-    except GateTransportError as exc:
-        return "transport", None, str(exc)
-    except HostError as exc:
-        return "failed", None, scrub_host_output(str(exc))
-    if result.status == "green":
-        return "green", result, ""
-    if result.status == "pending":
-        return "pending", result, ""
-    return "red", result, ""
-
-
 def park_green_verdict(
     runtime: Any,
     task: dict[str, Any],
@@ -223,7 +177,7 @@ def park_green_verdict(
             return gated
     else:
         # Before the park or the release: the observer decides with the report in knowledge.
-        refused = runtime._transfer_research_report(
+        refused = release_lifecycle.transfer_research_report(runtime,
             task, record, records, payload, attempt_id, step="review"
         )
         if refused is not None:
@@ -231,7 +185,7 @@ def park_green_verdict(
     parks = parks_for_decision(runtime, task)
     if not parks:
         # No observer to release it, so the green verdict merges on its own tick.
-        return runtime._release_effect(
+        return release_lifecycle.release_effect(runtime,
             task,
             record,
             records,
@@ -287,7 +241,7 @@ def merge_ready_for_park(
 ) -> dict[str, Any] | None:
     """Re-read the merge gate before a candidate is parked or released; None when it is green."""
     ref = task["ref"]
-    kind, result, detail = merge_readiness(runtime, task, record)
+    kind, result, detail = release_lifecycle.merge_readiness(runtime, task, record)
     if kind == "transport":
         retry = _gate_transport_retry(runtime, 
             task,
@@ -316,7 +270,7 @@ def merge_ready_for_park(
         )
     _gate_answered(runtime, ref, record, records, payload)
     if kind == "failed":
-        return runtime._block_merge_path(
+        return release_lifecycle.block_merge_path(runtime,
             task,
             record,
             records,
@@ -329,7 +283,7 @@ def merge_ready_for_park(
         )
     if kind == "pending":
         if result is None:
-            return runtime._block_merge_path(
+            return release_lifecycle.block_merge_path(runtime,
                 task,
                 record,
                 records,
@@ -352,7 +306,7 @@ def merge_ready_for_park(
         )
     if kind != "green":
         if result is None:
-            return runtime._block_merge_path(
+            return release_lifecycle.block_merge_path(runtime,
                 task,
                 record,
                 records,
@@ -367,7 +321,7 @@ def merge_ready_for_park(
             task, record, records, payload, attempt_id, result, phase="merge-gate"
         )
     if result is None:
-        return runtime._block_merge_path(
+        return release_lifecycle.block_merge_path(runtime,
             task,
             record,
             records,
@@ -478,7 +432,7 @@ def block_red_review_ceiling(
     checkout and the branch stay where the last round left them.
     """
     runtime._record_verdict_routing(task["ref"], record, "red")
-    return runtime._block_merge_path(
+    return release_lifecycle.block_merge_path(runtime,
         task,
         record,
         records,
