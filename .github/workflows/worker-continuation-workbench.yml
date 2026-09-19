@@ -1,0 +1,48 @@
+name: worker-continuation-workbench
+
+on:
+  push:
+    branches: [work/worker-continuation-extraction]
+
+permissions:
+  contents: write
+
+jobs:
+  workbench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply scoped extraction when present
+        run: |
+          if test -f .workbench/extract_continuation.py; then
+            python3 .workbench/extract_continuation.py
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src tests pyproject.toml docs
+            if ! git diff --cached --quiet; then
+              git commit -m "refactor: extract retained worker continuation lifecycle"
+              git push origin HEAD:work/worker-continuation-extraction
+            fi
+          fi
+      - name: Archive tracked candidate without Git credentials
+        if: always()
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/continuation-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: continuation-source-${{ github.sha }}
+          path: ${{ runner.temp }}/continuation-source.tar.gz
+          retention-days: 3
+      - name: Install development checks
+        if: hashFiles('.workbench/extract_continuation.py') != ''
+        run: python3 -m pip install -e '.[memory,ci,typecheck,dev]'
+      - name: Check extracted boundary
+        if: hashFiles('.workbench/extract_continuation.py') != ''
+        env:
+          TA_SECRETARY_REPO: ${{ github.workspace }}
+        run: |
+          python3 -m mypy
+          python3 -m unittest tests.test_dispatcher_worker_continuation
