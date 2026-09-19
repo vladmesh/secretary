@@ -1241,7 +1241,7 @@ def record_divergence(
         "actual": actual,
         "details": details,
         # Opening rule: every divergence starts open. Closing rule lives with the
-        # production tick (see `_reconcile_production` in dispatcher_production.py):
+        # production tick (see `_reconcile_production` in dispatch/production.py):
         # a divergence closes once its card leaves the active dispatcher cycle
         # (in_progress/validate), whatever state it lands in. A divergence with no
         # "status" is a pre-existing record from before this field existed and is
