@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from secretary.dispatcher_helpers import scrub_host_output
-from secretary.dispatcher_launch import (
+from secretary.dispatch.helpers import scrub_host_output
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     STAGE_REVIEW,
     WORKER_ROLE,

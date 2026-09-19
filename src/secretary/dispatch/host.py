@@ -62,7 +62,7 @@ from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
 from secretary.dispatch.heartbeat import heartbeat_identity
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     _decision_record_line,
     _last_gate_red_body,
     _legacy_worker_branch,
@@ -71,34 +71,34 @@ from secretary.dispatcher_helpers import (
     _tail,
     scrub_host_output,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     CAUSE_BASE_BRANCH_CONTRACT,
     CAUSE_WORKSPACE_CONTRACT,
     REVIEW_ROLE,
     WORKER_ROLE,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     infrastructure_action as _infrastructure_action,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     pane_state_label as _pane_state_label,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     HeadLaunchError,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     claude_launch_model as _claude_launch_model,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
 )
-from secretary.dispatcher_launcher import (
+from secretary.dispatch.launcher import (
     role_launch_env as _role_launch_env,
 )
 from secretary.dispatch.observer import (
@@ -116,7 +116,7 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
 from secretary.dispatch.state import (

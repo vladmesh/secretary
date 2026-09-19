@@ -125,7 +125,7 @@ from secretary.dispatch.gate import (
 from secretary.dispatch.gate_receipt import (
     AcceptedGreenGate,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
     _last_marker,
@@ -144,13 +144,13 @@ from secretary.dispatcher_helpers import (
     _worker_id,
     scrub_host_output,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     red_review_count as _red_review_count,
 )
-from secretary.dispatcher_helpers import (
+from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     REVIEW_ROLE,
     STAGE_CLAIM,
     STAGE_RESPAWN,
@@ -158,67 +158,67 @@ from secretary.dispatcher_launch import (
     WORKER_ROLE,
     BringUpFailure,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     clear_launch_intent as _clear_launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     confirm_launch_intent as _confirm_launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     forget_role_head as _forget_role_head,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     head_stop_unconfirmed as _head_stop_unconfirmed,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     keep_reserved_round as _keep_reserved_round,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_aborted as _launch_aborted,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_deferred as _launch_deferred,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_delivery_receipt as _launch_delivery_receipt,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_intent as _launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_intent_unwritable as _launch_intent_unwritable,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_left_a_head as _launch_left_a_head,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     launch_pid_file as _launch_pid_file,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     mark_launch_aborted as _mark_launch_aborted,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     merge_launch_head_run as _merge_launch_head_run,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     reset_launch_attempts as _reset_launch_attempts,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     resolve_launch_intent as _resolve_launch_intent,
 )
-from secretary.dispatcher_launch import (
+from secretary.dispatch.launch import (
     write_launch_intent as _write_launch_intent,
 )
 from secretary.dispatch.pause import ProductionPause
@@ -246,13 +246,13 @@ from secretary.dispatch.production import (
 from secretary.dispatch.production import (
     production_tick as _production_tick,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     end_review_pane as _end_review_pane,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     recover_review_launch as _recover_review_launch,
 )
-from secretary.dispatcher_review import (
+from secretary.dispatch.review import (
     start_review as _start_review,
 )
 from secretary.dispatch.state import (
