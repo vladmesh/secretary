@@ -24,7 +24,7 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
+from secretary.dispatch.state import DispatcherRecord, now_rfc3339
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
@@ -283,7 +283,7 @@ class Issue3e7abdf9LegacyBusyReadinessTests(LegacyPathTests):
         turns into ``worker-launch-deferred``: the card keeps its claim and the identical
         bring-up is retried next tick. No head is stopped and nothing is replaced.
         """
-        from secretary.dispatcher_types import HeadPaneNotReady
+        from secretary.dispatch.types import HeadPaneNotReady
 
         self.start_dispatcher()
         self.host.fail_prepare_error = HeadPaneNotReady(

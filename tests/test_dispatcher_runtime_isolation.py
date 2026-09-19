@@ -16,8 +16,8 @@ from secretary.broad_check import load_receipt, receipt_path, run_broad_check
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
 from secretary.dispatch.gate import GateResult
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.types import HostError
 
 
 def _observation(classification: str = "valid") -> RuntimeProvenance:

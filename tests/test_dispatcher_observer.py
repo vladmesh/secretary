@@ -61,9 +61,9 @@ from secretary.dispatcher_tui import (
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.types import HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import (
