@@ -60,7 +60,7 @@ from secretary.dispatch.worker_report import prompt_worker_report as _prompt_wor
 
 
 def wait_watchdog(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -108,7 +108,7 @@ def wait_watchdog(
             setattr(record, f"{kind}_progress_at", progress_at)
             runtime.save_records(payload, records)
     now = time.time()
-    episode = reduce_and_store_vitality_episode(runtime, 
+    episode = reduce_and_store_vitality_episode(runtime,
         task, record, records, payload, status, kind=kind, now=now
     )
     # THE DECISION IS THE VERDICT (S1-4): the persisted episode -- reduced from this
@@ -118,7 +118,7 @@ def wait_watchdog(
     # taken only when the reduction actually saw death (``Dead``), and a terminal
     # that vanished while the heartbeat stays live is decided by evidence, not by
     # the inventory.
-    return _decide_wait_by_verdict(runtime, 
+    return _decide_wait_by_verdict(runtime,
         task,
         record,
         records,
@@ -135,7 +135,7 @@ def wait_watchdog(
 
 
 def _decide_wait_by_verdict(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -200,7 +200,7 @@ def _decide_wait_by_verdict(
     if verdict is VitalityVerdict.DEAD:
         # The heartbeat names a gone process: the existing not-live handling, from
         # the same evidence the reduction used.
-        return _trigger_wait_watchdog(runtime, 
+        return _trigger_wait_watchdog(runtime,
             task,
             record,
             records,
@@ -220,14 +220,14 @@ def _decide_wait_by_verdict(
             # destructive, exactly as the idle ladder did -- but only when the
             # episode itself says the head is stalled.
             prompted, reason = _prompt_worker_report(
-                self,
+                runtime,
                 task, record, records, payload, attempt_id, trigger=reason
             )
             if prompted is not None:
                 return prompted
         # Degraded, not ok: an `ok` bounce would write healthy telemetry over the
         # one signal that says this card needs looking at before it reaches Blocked.
-        return _trigger_wait_watchdog(runtime, 
+        return _trigger_wait_watchdog(runtime,
             task,
             record,
             records,
@@ -243,7 +243,7 @@ def _decide_wait_by_verdict(
         suspicion_basis = episode.reason or "strong quiet past the suspect threshold"
         if kind == "worker":
             prompted, trigger = _prompt_worker_report(
-                self,
+                runtime,
                 task,
                 record,
                 records,
@@ -284,7 +284,7 @@ def _decide_wait_by_verdict(
         # policy still rides along to clear any rung a past suspension span left behind,
         # and the role's wait clock is renewed because a retained head is not late: it is
         # not being waited on at all.
-        _run_recovery_policy(runtime, 
+        _run_recovery_policy(runtime,
             task,
             record,
             records,
@@ -309,7 +309,7 @@ def _decide_wait_by_verdict(
         # The recovery policy owns this arm (S1-5): one identity-fenced SIGCONT per
         # suspension span, then a bounded response window, then operator escalation --
         # never a stop. The comment is keyed per span so it cannot flood.
-        return execute_recovery_intent(runtime, 
+        return execute_recovery_intent(runtime,
             task,
             record,
             records,
@@ -324,7 +324,7 @@ def _decide_wait_by_verdict(
         # path may act against what the evidence calls alive. A recovered suspension
         # lands here too; the policy's rung reset rides the same recovery decision,
         # persisted back onto this same role's episode slot.
-        _run_recovery_policy(runtime, 
+        _run_recovery_policy(runtime,
             task,
             record,
             records,
@@ -350,7 +350,7 @@ def _decide_wait_by_verdict(
     # Before the ceilings speak, the policy gets its say: an authoritative
     # deterministic refusal riding this tick's unavailable snapshot (the 1194 class)
     # escalates after N identical sightings instead of waiting out any ceiling.
-    policy_outcome = recovery_policy_outcome(runtime, 
+    policy_outcome = recovery_policy_outcome(runtime,
         task,
         record,
         records,
@@ -373,7 +373,7 @@ def _decide_wait_by_verdict(
         and float(activity) <= started_at
         and now - started_at > _initial_output_stall_seconds()
     ):
-        return _trigger_wait_watchdog(runtime, 
+        return _trigger_wait_watchdog(runtime,
             task,
             record,
             records,
@@ -383,7 +383,7 @@ def _decide_wait_by_verdict(
             trigger=f"no terminal output since launch for {int(now - started_at)}s",
         )
     if progress_at and now - progress_at > stall:
-        return _trigger_wait_watchdog(runtime, 
+        return _trigger_wait_watchdog(runtime,
             task,
             record,
             records,
@@ -398,7 +398,7 @@ def _decide_wait_by_verdict(
         return plain_wait()
     unobserved_for = now - waiting_since
     if unobserved_for >= stall:
-        return _escalate_unobservable_wait(runtime, 
+        return _escalate_unobservable_wait(runtime,
             task,
             record,
             attempt_id,
@@ -411,7 +411,7 @@ def _decide_wait_by_verdict(
 
 
 def _escalate_unobservable_wait(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     attempt_id: str,
@@ -466,7 +466,7 @@ def _escalate_unobservable_wait(
     }
 
 
-def _recovery_thresholds(self) -> Any:
+def _recovery_thresholds(runtime: Any) -> Any:
     """This installation's recovery-policy thresholds, read per call.
 
     The response window comes from the watchdog's env knob so operations can tighten it
@@ -479,7 +479,7 @@ def _recovery_thresholds(self) -> Any:
 
 
 def _recovery_policy_decision(
-    runtime,
+    runtime: Any,
     episode: Any,
     *,
     kind: str,
@@ -505,7 +505,7 @@ def _recovery_policy_decision(
 
 
 def _store_recovery_episode(
-    runtime,
+    runtime: Any,
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
@@ -521,7 +521,7 @@ def _store_recovery_episode(
 
 
 def recovery_policy_outcome(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -542,7 +542,7 @@ def recovery_policy_outcome(
         return None
     decision, updated = asked
     if updated is not episode:
-        _store_recovery_episode(runtime, 
+        _store_recovery_episode(runtime,
             record,
             records,
             payload,
@@ -552,7 +552,7 @@ def recovery_policy_outcome(
         )
     if decision.intent is not _RecoveryIntent.ESCALATE_OPERATOR:
         return None
-    return _escalate_recovery_to_operator(runtime, 
+    return _escalate_recovery_to_operator(runtime,
         task,
         record,
         attempt_id,
@@ -563,7 +563,7 @@ def recovery_policy_outcome(
 
 
 def _run_recovery_policy(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -593,7 +593,7 @@ def _run_recovery_policy(
         return
     _, updated = asked
     if updated is not episode:
-        _store_recovery_episode(runtime, 
+        _store_recovery_episode(runtime,
             record,
             records,
             payload,
@@ -604,7 +604,7 @@ def _run_recovery_policy(
 
 
 def execute_recovery_intent(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -678,7 +678,7 @@ def execute_recovery_intent(
             "recovery": decision.to_json(),
         }
     if decision.intent is _RecoveryIntent.ESCALATE_OPERATOR:
-        _escalate_suspended_head(runtime, 
+        _escalate_suspended_head(runtime,
             task,
             record,
             attempt_id,
@@ -707,7 +707,7 @@ def execute_recovery_intent(
 
 
 def _sigcont_head(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     *,
@@ -763,7 +763,7 @@ def _sigcont_head(
 
 
 def _escalate_suspended_head(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     attempt_id: str,
@@ -797,7 +797,7 @@ def _escalate_suspended_head(
 
 
 def _escalate_recovery_to_operator(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     attempt_id: str,
@@ -846,7 +846,7 @@ def _escalate_recovery_to_operator(
 
 
 def _vitality_guard_decision(
-    runtime,
+    runtime: Any,
     record: DispatcherRecord,
     *,
     kind: str,
@@ -861,7 +861,7 @@ def _vitality_guard_decision(
         time.time(),
         current_run_id=current_run_id
         or str(
-            ((record.review_head_run if kind == "review" else record.worker_head_run) or {}).get("run_id")
+            (record.review_head_run if kind == "review" else record.worker_head_run).get("run_id")
             or ""
         ),
         pid_only_outer_ceiling_seconds=float(_stall_seconds(kind)),
@@ -869,7 +869,7 @@ def _vitality_guard_decision(
 
 
 def _guard_or_wait(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -890,7 +890,7 @@ def _guard_or_wait(
     outcome carries it, and the durable comment is written once per cycle (keyed on
     the wait-cycle token, like every other watchdog comment).
     """
-    decision = _vitality_guard_decision(runtime, 
+    decision = _vitality_guard_decision(runtime,
         record,
         kind=kind,
         action=action,
@@ -932,7 +932,7 @@ def _guard_or_wait(
 
 
 def reduce_and_store_vitality_episode(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -968,7 +968,7 @@ def reduce_and_store_vitality_episode(
     field_name = f"{kind}_vitality_episode"
     previous = getattr(record, field_name)
     run_payload = record.review_head_run if kind == "review" else record.worker_head_run
-    run_id = str((run_payload or {}).get("run_id") or "")
+    run_id = str(run_payload.get("run_id") or "")
     if not run_id:
         # Without a durable run identity there is nothing an episode may bind to. Leaving any
         # stale episode in place would misattribute it to a head nobody can name, so it is
@@ -1089,18 +1089,18 @@ def reduce_and_store_vitality_episode(
 
 
 def _trigger_wait_watchdog(
-    runtime,
-    task,
-    record,
-    records,
-    payload,
-    attempt_id,
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
     *,
     kind: str,
     trigger: str,
     stall: int | None = None,
     degraded: bool = False,
-):
+) -> dict[str, Any]:
     """The verdict-driven recovery entry point (S1-4): respawn once, then escalate.
 
     Reached ONLY from decisions the persisted vitality episode drove -- a ``Dead``
@@ -1113,7 +1113,7 @@ def _trigger_wait_watchdog(
     action = (
         f"{kind}-escalate" if int(getattr(record, f"{kind}_respawns") or 0) >= 1 else f"{kind}-respawn"
     )
-    return _guard_or_wait(runtime, 
+    return _guard_or_wait(runtime,
         task,
         record,
         records,
@@ -1123,7 +1123,7 @@ def _trigger_wait_watchdog(
         now=time.time(),
         action=action,
         proceed=lambda: (
-            _respawn_wait(runtime, 
+            _respawn_wait(runtime,
                 task,
                 record,
                 records,
@@ -1135,7 +1135,7 @@ def _trigger_wait_watchdog(
                 degraded=degraded,
             )
             if action == f"{kind}-respawn"
-            else _escalate_wait(runtime, 
+            else _escalate_wait(runtime,
                 task,
                 record,
                 records,
@@ -1150,7 +1150,7 @@ def _trigger_wait_watchdog(
 
 
 def _respawn_wait(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
@@ -1180,7 +1180,7 @@ def _respawn_wait(
             return unconfirmed
         # One bring-up path for the reviewer, shared with the normal launch and the recovery path.
         outcome = _start_review(
-            self, task, records, record, attempt_id, action="review-respawned", payload=payload
+            runtime, task, records, record, attempt_id, action="review-respawned", payload=payload
         )
         if outcome.get("status") != "ok":
             runtime.save_records(payload, records)
@@ -1190,7 +1190,7 @@ def _respawn_wait(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
-        failure = _write_worker_relaunch_intent(self, payload, records, ref, record, action="worker-respawn")
+        failure = _write_worker_relaunch_intent(runtime, payload, records, ref, record, action="worker-respawn")
         if failure is not None:
             return _launch_intent_unwritable(
                 step=step,
@@ -1199,7 +1199,7 @@ def _respawn_wait(
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        launched, failed = _bring_up_worker_head(self, 
+        launched, failed = _bring_up_worker_head(runtime,
             task,
             record,
             records,
@@ -1268,7 +1268,7 @@ def _respawn_wait(
 
 
 def _escalate_wait(
-    runtime,
+    runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],

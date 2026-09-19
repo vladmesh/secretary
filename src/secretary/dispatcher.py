@@ -117,6 +117,10 @@ from secretary.dispatch.host import (
     LaunchedHead as LaunchedHead,  # Compatibility re-export.
 )
 from secretary.dispatch.launch import (
+    REVIEW_ROLE,
+    WORKER_ROLE,
+)
+from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
 )
 from secretary.dispatch.launch import (
@@ -194,6 +198,18 @@ from secretary.dispatch.state import (
 )
 from secretary.dispatch.state import (
     request_token as _request_token,
+)
+from secretary.dispatch.types import (
+    STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_REPLACEMENT,
+    STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_REVIEW_VERDICT,
+    STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
+    GateTransportError,
+    HostError,
+    ProjectGitAccessError,
 )
 from secretary.dispatch.types import DispatcherError as DispatcherError
 from secretary.dispatch.watchdog import (
