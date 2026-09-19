@@ -31,6 +31,7 @@ from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import review_verdict as dispatcher_review_verdict
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
@@ -12695,7 +12696,8 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             # The card carries no sprint, so the green verdict merges on its own tick: the
             # entry point moved with the seam, what it does on this path did not.
-            result = runtime._park_green_verdict(
+            result = dispatcher_review_verdict.park_green_verdict(
+                runtime,
                 TaskReader(board).show("secretary-510-pilot"),  # type: ignore[arg-type]
                 record,
                 records,
