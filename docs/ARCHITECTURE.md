@@ -44,6 +44,15 @@ src/secretary/
   schemas/             packaged data contracts
 ```
 
+The dispatcher is being split by lifecycle ownership. `dispatch.worker_continuation` owns
+retained/red continuation: durable rework intent, replayable board move, delivery and its bounded
+provider-progress recovery, and the confirmed-stop handoff to `dispatch.worker_launch`. Durable
+models stay in `dispatch.worker_lifecycle`. In `_advance_worker`, red-transition replay runs before
+report lookup; delivery recovery runs after `worker_report_marker` but before `handle_worker_report`.
+This ordering lets a report prove a prior delivery without resending its prompt. Gate/review decisions,
+Assessment parking, and shared wait/watchdog/vitality policy are outside this boundary. There are no
+implementation callbacks into the dispatcher for the extracted continuation methods.
+
 Dependency rules:
 
 - Dependencies point inward, from entry points to feature APIs. CLI and automation modules call

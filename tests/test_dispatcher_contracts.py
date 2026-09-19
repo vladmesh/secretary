@@ -33,23 +33,24 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
-from secretary import upgrade
-from secretary.dispatch import claim as dispatcher_claim
-from secretary.dispatch import launcher as dispatcher_launcher
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch import worker_launch as dispatcher_worker_launch
-from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,
 )
+from secretary import upgrade
 from secretary.board_transport import ensure as ensure_board_transport
+from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatch import production as dispatcher_production
+from secretary.dispatch import launcher as dispatcher_launcher
 from secretary.dispatch import observer as dispatcher_observer
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
+from secretary.dispatch import production as dispatcher_production
+from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
+from secretary.dispatch import worker_launch as dispatcher_worker_launch
+from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.head_registry import (
     canonical_heads,
     installed_heads,
@@ -95,6 +96,7 @@ _RUNTIME_MODULES = (
     dispatcher_review,
     dispatcher_observer,
     dispatcher_worker_launch,
+    dispatcher_worker_continuation,
     dispatcher_worker_report,
 )
 
