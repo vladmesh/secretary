@@ -65,17 +65,22 @@ class WorkerReportBoundaryTests(unittest.TestCase):
 
                 self.runtime._capture_outcome_source.side_effect = fail_source
                 with (
-                    mock.patch.object(dispatcher_worker_report, "_round_report_ids", return_value={"report-id"}),
+                    mock.patch.object(
+                        dispatcher_worker_report, "_round_report_ids", return_value={"report-id"}
+                    ),
                     mock.patch.object(dispatcher_worker_report, "_round_report_marker", return_value=marker),
                     self.assertRaisesRegex(RuntimeError, "source unavailable"),
                 ):
                     dispatcher_worker_report.worker_report_marker(
                         self.runtime, self.task, self.record, self.records, self.payload, "tick-attempt"
                     )
-                self.assertEqual(events, [
-                    ("save", OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT),
-                    ("source", OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT),
-                ])
+                self.assertEqual(
+                    events,
+                    [
+                        ("save", OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT),
+                        ("source", OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT),
+                    ],
+                )
                 self.assertIs(self.records["sample-1"], self.record)
 
     def test_no_terminal_marker_does_not_freeze_an_outcome_path(self) -> None:
@@ -139,10 +144,15 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.runtime.writer.comment.side_effect = fail_comment
         with self.assertRaisesRegex(RuntimeError, "comment unavailable"):
             self.prompt()
-        self.assertEqual(events, [
-            ("save", "pending"), ("send", "pending"),
-            ("save", "delivered"), ("comment", "delivered"),
-        ])
+        self.assertEqual(
+            events,
+            [
+                ("save", "pending"),
+                ("send", "pending"),
+                ("save", "delivered"),
+                ("comment", "delivered"),
+            ],
+        )
         self.assertEqual(self.prompt(), (None, "idle"))
         self.runtime.host.prompt_worker_report.assert_called_once()
 
