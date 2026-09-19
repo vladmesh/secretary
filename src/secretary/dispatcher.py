@@ -300,6 +300,7 @@ from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
     launch_worker_after_claim as _launch_worker_after_claim,
     resolve_headless_worker as _resolve_headless_worker,
     write_worker_relaunch_intent as _write_worker_relaunch_intent,
@@ -1387,7 +1388,7 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        launched, failed = self._bring_up_worker_head(
+        launched, failed = _bring_up_worker_head(self, 
             moved,
             record,
             records,
@@ -2774,7 +2775,7 @@ class DispatcherRuntime:
                     role=WORKER_ROLE,
                     reason=failure,
                 )
-            launched, failed = self._bring_up_worker_head(
+            launched, failed = _bring_up_worker_head(self, 
                 task,
                 record,
                 records,
@@ -4046,7 +4047,7 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
                 reason=failure,
             )
-        launched, failed = self._bring_up_worker_head(
+        launched, failed = _bring_up_worker_head(self, 
             task,
             record,
             records,
