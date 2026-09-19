@@ -34,6 +34,7 @@ from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
+from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
@@ -9538,8 +9539,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("worker-respawned", with_vitality)
 
         with mock.patch.object(
-            type(self.runtime),
-            "_reduce_and_store_vitality_episode",
+            dispatcher_wait_vitality,
+            "reduce_and_store_vitality_episode",
             lambda *args, **kwargs: None,
         ):
             without_vitality = drive()
@@ -9554,7 +9555,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._head_at_its_prompt()
 
         with mock.patch.object(
-            dispatcher_module,
+            dispatcher_wait_vitality,
             "_reduce_vitality",
             side_effect=RuntimeError("reducer exploded"),
         ):
