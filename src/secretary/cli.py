@@ -1017,7 +1017,7 @@ def production_runtime_provenance_finding(
 def _divergence_findings(production: dict[str, object]) -> list[str]:
     """Every controlled divergence still open in the production state snapshot.
 
-    Reconciliation (`secretary/dispatcher_production.py`) closes a divergence once its card leaves
+    Reconciliation (`secretary/dispatch/production.py`) closes a divergence once its card leaves
     the active dispatcher cycle, so one still open here is either tied to a card still in flight or
     is genuinely stuck and needs an operator.
     """

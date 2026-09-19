@@ -2,7 +2,7 @@
 
 The dispatcher that actually moves cards on this host is `secretary dispatcher production-tick`.
 It records how each terminal tick ended under `tick_telemetry` in its own state file — see
-`secretary.dispatcher_production.record_tick_telemetry` for the writer and the field meanings.
+`secretary.dispatch.production.record_tick_telemetry` for the writer and the field meanings.
 
 Both readers of that record live outside the dispatcher's process: `runtime/health.py` and the
 steward's `signals.py`. They share this module so there is one place that knows where the file is
@@ -147,7 +147,7 @@ class TickTelemetry:
     # The open incident (one continuous run of unhealthy ticks) or {} when the pipeline is not in
     # one, and the last closed one with the healthy tick that ended it. The counters next to them
     # are monotonic within a generation, so a reader can dedupe on them the way it dedupes on
-    # `unhealthy_total` — see `secretary.dispatcher_production._record_incident`.
+    # `unhealthy_total` — see `secretary.dispatch.production._record_incident`.
     incident: dict = field(default_factory=dict)
     incident_total: int = 0
     recovery: dict = field(default_factory=dict)

@@ -49,7 +49,7 @@ from secretary.dispatch.observer import (
     stop_observer_head,
 )
 from secretary.dispatch.observer_fence import EVENT_CLEARED, EVENT_FENCED
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     _budget_event_type,
     _production_claim_ready,
     _reconcile_sprint_budget,
@@ -3324,7 +3324,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 side_effect=accept_while_ready,
             ),
             mock.patch(
-                "secretary.dispatcher_production._reconcile_sprint_budget",
+                "secretary.dispatch.production._reconcile_sprint_budget",
                 return_value=[],
             ),
         ):
@@ -3761,7 +3761,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {"ref": "claimable", "sprint": None, "type": "code", "project": "three"},
         ]
         with (
-            mock.patch("secretary.dispatcher_production._production_tasks", side_effect=[[], ready]),
+            mock.patch("secretary.dispatch.production._production_tasks", side_effect=[[], ready]),
             mock.patch.object(
                 self.runtime.sprints,
                 "show",

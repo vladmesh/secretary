@@ -231,19 +231,19 @@ from secretary.dispatch.pause_ops import (
 from secretary.dispatch.pause_ops import (
     resume as _resume_pipeline,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     ProductionState,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_observe as _production_observe,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_probe as _production_probe,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_run as _production_run,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     production_tick as _production_tick,
 )
 from secretary.dispatcher_review import (
@@ -450,7 +450,7 @@ def _headless_episode_token(record: DispatcherRecord) -> str:
 
     A card with no dispatcher record does not get a minted attempt id: production ticks it under the
     constant `production_adopt_attempt_id(ref)`, the same string for that card forever
-    (`dispatcher_production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
+    (`dispatch/production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
     second episode would replay the first episode's committed event instead of moving the board —
     the tick reporting a transition that did not happen (secretary-1544 round 5).
 

@@ -83,7 +83,7 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
-from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
+from secretary.dispatch.production import _budget_event_type, production_adopt_attempt_id
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
@@ -2093,7 +2093,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.runtime.production_tick = blocked_tick  # type: ignore[method-assign]
 
-        with mock.patch("secretary.dispatcher_production.time.sleep") as sleep:
+        with mock.patch("secretary.dispatch.production.time.sleep") as sleep:
             result = self.runtime.production_run(
                 interval_seconds=1,
                 max_interval_seconds=10,

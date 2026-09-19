@@ -35,7 +35,7 @@ from secretary.dispatch.observer import (
     ObserverRecord,
     put_observers,
 )
-from secretary.dispatcher_production import (
+from secretary.dispatch.production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_ERRORS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
@@ -209,7 +209,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         over exactly this is the round-3 blocker.
         """
         return mock.patch(
-            "secretary.dispatcher_production._reconcile_production",
+            "secretary.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "degraded",
@@ -372,7 +372,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         finish does that.
         """
         with mock.patch(
-            "secretary.dispatcher_production._reconcile_production",
+            "secretary.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "blocked",
@@ -401,7 +401,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatcher_production._production_tasks",
+                "secretary.dispatch.production._production_tasks",
                 side_effect=TaskError("backend_unavailable", "board is down", 1),
             ),
             self.assertRaises(TaskError),
@@ -434,7 +434,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         outage = mock.patch(
-            "secretary.dispatcher_production._production_tasks",
+            "secretary.dispatch.production._production_tasks",
             side_effect=TaskError("backend_unavailable", "board is down", 1),
         )
         with contextlib.ExitStack() as stack:
@@ -513,7 +513,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatcher_production._reconcile_production",
+                "secretary.dispatch.production._reconcile_production",
                 side_effect=RuntimeError("host is gone"),
             ),
             self.assertRaises(RuntimeError),

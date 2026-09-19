@@ -2,7 +2,7 @@
 #
 # `pipeline` is not a scheduled agent: it has no LLM head and no tick of its own. The spec exists
 # so the role gets its own worktree and shows up in the agent inventory alongside the heads. Task
-# dispatch is secretary/dispatcher_production.py, on secretary-dispatcher-production.timer.
+# dispatch is secretary/dispatch/production.py, on secretary-dispatcher-production.timer.
 
 name = "pipeline"
 dispatcher = true          # no skill, no head: `secretary upgrade` provisions no Orca automation
