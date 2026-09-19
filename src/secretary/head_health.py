@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_json
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.types import HostError
 
 PROBE_TTL_SECONDS = 300
 PROBE_TIMEOUT_SECONDS = 20

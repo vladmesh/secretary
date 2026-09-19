@@ -32,8 +32,8 @@ from secretary.dispatcher_launch import (
     undelivered_launch_delivery,
     write_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatcher_tui import (
     DELIVERY_RECEIPT_REFUSED,
     READINESS_BLOCKED,
@@ -42,7 +42,7 @@ from secretary.dispatcher_tui import (
     delivery_readiness_state,
     terminal_readiness,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     HeadLaunchAborted,
     HostError,
@@ -75,7 +75,7 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     PaneHostError,

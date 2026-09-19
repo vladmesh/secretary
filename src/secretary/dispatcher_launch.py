@@ -52,7 +52,7 @@ from typing import Any
 
 from secretary.dispatcher_heartbeat import intent_heartbeat_identity
 from secretary.dispatcher_helpers import scrub_host_output
-from secretary.dispatcher_state import DispatcherRecord, LaunchIntent
+from secretary.dispatch.state import DispatcherRecord, LaunchIntent
 from secretary.dispatcher_tui import (
     DELIVERY_RECEIPT_ACCEPTED,
     DELIVERY_RECEIPT_REFUSED,
@@ -65,7 +65,7 @@ from secretary.dispatcher_tui import (
     delivery_readiness_state,
     delivery_receipt_state,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_LAUNCH_RECOVERY,
     HeadLaunchAborted,
     HeadPaneNotReady,

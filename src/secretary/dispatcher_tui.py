@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     ContinuationProviderCondition,
     head_run_binding,
 )
