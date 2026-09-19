@@ -37,6 +37,7 @@ from secretary import upgrade
 from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import launcher as dispatcher_launcher
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,
@@ -92,6 +93,7 @@ _RUNTIME_MODULES = (
     dispatcher_production,
     dispatcher_review,
     dispatcher_observer,
+    dispatcher_worker_launch,
 )
 
 # Attribute owners as they are spelled at the call sites: `self.host` inside DispatcherRuntime,
