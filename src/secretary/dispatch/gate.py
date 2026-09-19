@@ -16,7 +16,8 @@ history rewrite. Base-freshness recovery runs first for local/github, so the gat
 post-merge tree; a real textual conflict is a red verdict, never a silent merge.
 
 The gate is host I/O, so it lives behind CommandHostRuntime.gate_check and stays a pure
-function of the host; dispatcher.py turns a GateResult into a board move.
+function of the host; dispatch.gate_lifecycle turns a GateResult into durable board/recovery
+effects while review, Assessment and merge policy stay outside that boundary.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from secretary.candidate_history import (
     repair_message,
 )
 from secretary.dispatch.gate_receipt import is_exact_sha, mint_gate_receipt
-from secretary.dispatch.state import GatePrAuthorship, GatePublishedRef
+from secretary.dispatch.state import DispatcherRecord, GatePrAuthorship, GatePublishedRef
 from secretary.dispatch.helpers import (
     _last_marker_body,
     _legacy_worker_branch,
@@ -59,6 +60,16 @@ GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPOR
 GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS = max(
     1, int(os.environ.get("SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS", "2"))
 )
+
+
+def reset_infrastructure_reruns(record: DispatcherRecord) -> None:
+    """Clear the per-SHA bounded infrastructure-rerun and rerun-transport state."""
+    record.gate_infrastructure_reruns_sha = ""
+    record.gate_infrastructure_reruns = 0
+    record.gate_infrastructure_rerun_run_id = ""
+    record.gate_infrastructure_rerun_reason = ""
+    record.gate_rerun_transport_failures = 0
+    record.gate_rerun_transport_error = ""
 
 PR_BODY_SECTION_CHARS = int(os.environ.get("SECRETARY_PR_BODY_SECTION_CHARS", "4000"))
 

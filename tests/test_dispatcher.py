@@ -37,6 +37,7 @@ from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.gate import (
+    GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     PR_BODY_SECTION_CHARS,
     GateResult,
@@ -4607,7 +4608,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "merge-gate-pending")
         payload = self.runtime.production_state.load()
         record = payload["records"]["secretary-510-pilot"]
-        record["gate_pending_since"] = time.time() - dispatcher_module.GATE_PENDING_STALL_SECONDS - 1
+        record["gate_pending_since"] = time.time() - GATE_PENDING_STALL_SECONDS - 1
         self.runtime.production_state.save(payload)
 
         stalled = self.tick()
@@ -4639,7 +4640,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "merge-gate-pending")
         payload = self.runtime.production_state.load()
         record = payload["records"]["secretary-510-pilot"]
-        record["gate_pending_since"] = time.time() - dispatcher_module.GATE_PENDING_STALL_SECONDS - 1
+        record["gate_pending_since"] = time.time() - GATE_PENDING_STALL_SECONDS - 1
         self.runtime.production_state.save(payload)
 
         stalled = self.tick()

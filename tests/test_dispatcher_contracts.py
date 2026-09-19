@@ -40,6 +40,7 @@ from secretary import (
 from secretary import upgrade
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import claim as dispatcher_claim
+from secretary.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import launcher as dispatcher_launcher
 from secretary.dispatch import observer as dispatcher_observer
@@ -93,6 +94,7 @@ from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 _RUNTIME_MODULES = (
     dispatcher_module,
     dispatcher_claim,
+    dispatcher_gate_lifecycle,
     dispatcher_production,
     dispatcher_review,
     dispatcher_observer,
