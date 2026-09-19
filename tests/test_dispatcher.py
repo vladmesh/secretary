@@ -32,6 +32,7 @@ from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
+from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
@@ -3922,7 +3923,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         records = self.runtime.production_state.records(payload)
         recovered = records["secretary-510-pilot"]
         recovered.rejected_done_reports = 1
-        blocked = self.runtime._block_repeated_infrastructure_done(
+        blocked = dispatcher_worker_report._block_repeated_infrastructure_done(
+            self.runtime,
             self.reader.show("secretary-510-pilot"),
             recovered,
             records,

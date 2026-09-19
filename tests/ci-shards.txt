@@ -50,6 +50,7 @@ integration-board tests/test_dispatcher_review_lifecycle.py
 integration-board tests/test_dispatcher_no_candidate.py
 integration-board tests/test_dispatcher_sprint_admission.py
 integration-board tests/test_dispatcher_contracts.py
+unit tests/test_dispatcher_worker_report.py
 integration-board tests/test_dispatcher_gate_receipt.py
 integration-board tests/test_dispatcher_launch_intent.py
 integration-board tests/test_dispatcher_observer.py

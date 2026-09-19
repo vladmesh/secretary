@@ -126,6 +126,38 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("def launch_worker_after_claim(", worker_launch_source)
         self.assertIn("def resolve_headless_worker(", worker_launch_source)
 
+    def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        report_source = (ROOT / "src" / "secretary" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
+        for helper in (
+            "_record_infra_completion", "_accept_stale_infrastructure_done",
+            "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"self.{helper}(", dispatcher_source)
+            self.assertNotIn(f"runtime.{helper}(", report_source)
+        runtime_tree = ast.parse(dispatcher_source)
+        advance = next(node for node in ast.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
+        advance_source = ast.get_source_segment(dispatcher_source, advance)
+        self.assertIn("_worker_report_marker(", advance_source)
+        self.assertIn("_handle_worker_report(", advance_source)
+        self.assertNotIn("verify_worker_result(", advance_source)
+        self.assertLess(
+            advance_source.index("_worker_report_marker("),
+            advance_source.index("if continuation.delivery_pending:"),
+        )
+        self.assertLess(
+            advance_source.index("if continuation.delivery_confirmed:"),
+            advance_source.index("_handle_worker_report("),
+        )
+        self.assertLess(
+            advance_source.index("_handle_worker_report("),
+            advance_source.index("self._wait_watchdog("),
+        )
+        for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
+            self.assertIn(f"def {entry}(", report_source)
+        self.assertNotIn("from secretary.dispatcher import", report_source)
+
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
         imports: set[tuple[str, str]] = set()
