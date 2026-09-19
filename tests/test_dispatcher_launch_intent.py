@@ -27,15 +27,10 @@ from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
-from secretary.dispatch import launch as dispatcher_launch
 from secretary._fsutil import file_lock
 from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatcher import (
-    CommandHostRuntime,
-    DispatcherRuntime,
-    InstanceCatalog,
-    LaunchedHead,
-)
+from secretary.dispatch import launch as dispatcher_launch
+from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
@@ -72,12 +67,19 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
+from secretary.dispatcher import (
+    CommandHostRuntime,
+    DispatcherRuntime,
+    InstanceCatalog,
+    LaunchedHead,
+)
 from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
 from secretary.projects.integration_base import resolve_integration_base
-from secretary.routing_journal import RoutingHeadSnapshot, attempts as routing_attempts
+from secretary.routing_journal import RoutingHeadSnapshot
+from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
@@ -1508,7 +1510,7 @@ class LaunchIntentTests(unittest.TestCase):
         def die(*_args, **_kwargs):
             raise OSError("dispatcher died after the delivery checkpoint")
 
-        return mock.patch.object(self.runtime, "_finish_retained_worker_resume", die)
+        return mock.patch.object(dispatcher_worker_continuation, "_finish_retained_worker_resume", die)
 
     def test_a_confirmed_gate_red_delivery_is_finished_by_the_next_tick(self) -> None:
         self.host.fail_resume_worker_reason = ""
