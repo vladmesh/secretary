@@ -153,7 +153,7 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _watchdog_kind,
 )
 from secretary.dispatch.host import (
-    LaunchedHead as LaunchedHead,  # noqa: F401  # Compatibility re-export.
+    LaunchedHead as LaunchedHead,  # Compatibility re-export.
 )
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
