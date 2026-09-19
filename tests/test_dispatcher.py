@@ -31,6 +31,7 @@ from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch.bootstrap import default_data_dir
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
@@ -15550,13 +15551,13 @@ class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._returned_to_in_progress()
         # The episode stamp as the refusing tick persisted it, before it popped the record.
         stamped: list[dict] = []
-        original = type(self.runtime)._refuse_headless_worker
+        original = dispatcher_worker_launch._refuse_headless_worker
 
         def capture(runtime, task, record, records, payload, attempt_id, recovery_error):
             stamped.append(dict(record.worker_headless))
             return original(runtime, task, record, records, payload, attempt_id, recovery_error)
 
-        with mock.patch.object(type(self.runtime), "_refuse_headless_worker", capture):
+        with mock.patch.object(dispatcher_worker_launch, "_refuse_headless_worker", capture):
             first = self._production_tick()
 
         # The record a tick dying between the board move and its own bookkeeping leaves behind:
