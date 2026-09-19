@@ -199,6 +199,38 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
         self.assertNotIn("from secretary.dispatcher import", gate_source)
 
+    def test_dispatcher_review_verdict_parking_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        verdict_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "review_verdict.py"
+        ).read_text(encoding="utf-8")
+        helpers = (
+            "_parks_for_decision",
+            "_merge_readiness",
+            "_park_green_verdict",
+            "_merge_ready_for_park",
+            "_begin_park",
+            "_complete_park",
+            "_block_red_review_ceiling",
+            "_review_drift",
+        )
+        for helper in helpers:
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"runtime.{helper}(", verdict_source)
+        for entry in (
+            "advance_review_verdict",
+            "merge_readiness",
+            "park_green_verdict",
+            "merge_ready_for_park",
+            "begin_park",
+            "complete_park",
+        ):
+            self.assertIn(f"def {entry}(", verdict_source)
+        self.assertIn("_advance_review_verdict(self, task, record, records, payload, attempt_id)", dispatcher_source)
+        self.assertIn("\n    def _advance_assessment(", dispatcher_source)
+        self.assertIn("\n    def _release_parked(", dispatcher_source)
+        self.assertNotIn("from secretary.dispatcher import", verdict_source)
+
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         wait_source = (
