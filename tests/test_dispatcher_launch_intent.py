@@ -40,7 +40,7 @@ from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
-from secretary.dispatcher_production import _budget_event_type
+from secretary.dispatch.production import _budget_event_type
 from secretary.dispatcher_state import (
     DispatcherRecord,
     GatePrAuthorship,
