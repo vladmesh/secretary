@@ -228,9 +228,34 @@ class SourceLayoutTests(unittest.TestCase):
         ):
             self.assertIn(f"def {entry}(", verdict_source)
         self.assertIn("_advance_review_verdict(self, task, record, records, payload, attempt_id)", dispatcher_source)
-        self.assertIn("\n    def _advance_assessment(", dispatcher_source)
+        self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
+        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
         self.assertIn("\n    def _release_parked(", dispatcher_source)
         self.assertNotIn("from secretary.dispatcher import", verdict_source)
+
+    def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        decision_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "assessment_decision.py"
+        ).read_text(encoding="utf-8")
+        for helper in (
+            "_advance_assessment",
+            "_recorded_decision",
+            "_rework_parked",
+            "_reslice_parked",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        for entry in (
+            "advance_assessment",
+            "recorded_decision",
+            "rework_parked",
+            "reslice_parked",
+        ):
+            self.assertIn(f"def {entry}(", decision_source)
+        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
+        self.assertIn("runtime._release_parked(", decision_source)
+        self.assertIn("\n    def _release_parked(", dispatcher_source)
+        self.assertNotIn("from secretary.dispatcher import", decision_source)
 
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
