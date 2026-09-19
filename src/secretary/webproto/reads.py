@@ -27,8 +27,8 @@ from typing import Any
 
 from secretary.board.backend import CARD, board_client
 from secretary.config import InstanceReport, validate_instance
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.types import HostError
 from secretary.status import collect_status
 from secretary.tasks import TaskError, TaskReader, task_audit_for
 from secretary.webproto import agents as agent_reads

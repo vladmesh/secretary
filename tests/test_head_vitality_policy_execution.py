@@ -23,7 +23,7 @@ from unittest import mock
 
 import secretary.dispatcher as secretary_dispatcher
 from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatcher_watchdog import (
     head_process_status,
     suspension_response_window_seconds,

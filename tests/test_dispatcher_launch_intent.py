@@ -41,7 +41,7 @@ from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatch.production import _budget_event_type
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     DispatcherRecord,
     GatePrAuthorship,
     GatePublishedRef,
@@ -62,13 +62,13 @@ from secretary.dispatcher_tui import (
     claude_project_dir_name,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
+from secretary.dispatch.types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
 from secretary.dispatcher_watchdog import (
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )

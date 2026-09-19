@@ -21,9 +21,9 @@ from unittest import mock
 from secretary._fsutil import file_lock
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
 from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
+from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
 from secretary.dispatcher_watchdog import idle_stall_seconds
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeSprints
 from tests.fanout_fixtures import accepted_transport_run

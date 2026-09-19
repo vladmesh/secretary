@@ -20,7 +20,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.dispatcher_state import HeadlessRecoveryEpisode
+from secretary.dispatch.state import HeadlessRecoveryEpisode
 
 
 def headless_worker(record: dict[str, Any]) -> dict[str, Any] | None:

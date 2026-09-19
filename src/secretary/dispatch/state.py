@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any
 from triggered_agents.runtime.head import HeadRun
 from triggered_agents.runtime.tui_delivery import DeliveryEvidence
 
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatch.types import DispatcherError
 from secretary.routing_journal import RoutingHeadSnapshot
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationLiveness,
     WorkerReportNudge,
@@ -139,7 +139,7 @@ class PersistedGateReceipt(dict[str, Any]):
     __slots__ = ("_receipt",)
 
     def __init__(self, value: Any = None) -> None:
-        # Lazy to avoid dispatcher_state -> gate_receipt -> dispatcher_helpers -> dispatcher_state
+        # Lazy to avoid dispatch.state -> gate_receipt -> dispatcher_helpers -> dispatch.state
         # at module import time. By the time a record is instantiated the modules are fully loaded.
         from secretary.dispatch.gate_receipt import GateReceipt
 

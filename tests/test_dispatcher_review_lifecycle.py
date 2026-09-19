@@ -29,12 +29,12 @@ from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_ide
 from secretary.dispatcher_review import (
     recover_review_launch,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     DispatcherRecord,
 )
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     HeadLaunchAborted,
     HeadPaneNotReady,
     review_pane_label,
@@ -46,7 +46,7 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
     head_run_binding,

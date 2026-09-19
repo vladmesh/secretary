@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord
 
 # The control plane's own seam onto the heartbeat reader and its vocabulary: `dispatcher_watchdog`
 # re-exports every one of these names, so this layer reads process state through the same door the

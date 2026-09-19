@@ -25,7 +25,7 @@ from secretary.config import validate
 from secretary.dispatch.pause_ops import PauseCommandCompleted
 from secretary.dispatch.pause_ops import pause as dispatcher_pause
 from secretary.dispatch.pause_ops import resume as dispatcher_resume
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatch.types import DispatcherError
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
 from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer

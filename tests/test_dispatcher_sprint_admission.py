@@ -18,7 +18,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
 from secretary.dispatch.production import _budget_event_type, _reconcile_sprint_budget
-from secretary.dispatcher_state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
+from secretary.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
 from secretary.tasks import TaskAudit, TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture

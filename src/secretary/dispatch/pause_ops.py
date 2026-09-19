@@ -57,8 +57,8 @@ from secretary.dispatch.pause import (
     write_legacy_mirror,
 )
 from secretary.dispatcher_review import end_review_pane, start_review
-from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
-from secretary.dispatcher_types import (
+from secretary.dispatch.state import DispatcherRecord, now_rfc3339
+from secretary.dispatch.types import (
     STOPPED_BY_OPERATOR,
     DispatcherError,
     HeadLaunchAborted,

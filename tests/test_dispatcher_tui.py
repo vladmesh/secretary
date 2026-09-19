@@ -44,7 +44,7 @@ from secretary.dispatcher_tui import (
     terminal_turn_started,
     turn_started_confirm,
 )
-from secretary.dispatcher_worker_lifecycle import ContinuationProviderCondition
+from secretary.dispatch.worker_lifecycle import ContinuationProviderCondition
 from tests.fakes.observer import (
     BLOCKED_PANE_WAIT_BODY,
     STALE_HANDLE_WAIT_FAILURE,
@@ -144,7 +144,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 encoding="utf-8",
             )
             from secretary.codex_provider_events import _range_digest, _read_source
-            from secretary.dispatcher_worker_lifecycle import head_run_binding
+            from secretary.dispatch.worker_lifecycle import head_run_binding
 
             parsed = _read_source(codex_path)
             self.assertIsNotNone(parsed)

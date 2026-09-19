@@ -48,7 +48,7 @@ from secretary.dispatch import production as dispatcher_production
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatch.gate import GateResult
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord
 from secretary.head_registry import (
     canonical_heads,
     installed_heads,
@@ -1388,7 +1388,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         upgrade turns every persisted provider source into a foreign one and relaunches the heads
         reading them. So the two fingerprints have to be indifferent to it, and this is that.
         """
-        from secretary.dispatcher_worker_lifecycle import head_run_binding
+        from secretary.dispatch.worker_lifecycle import head_run_binding
         from triggered_agents.runtime import codex_preflight
 
         def run_on(runtime: str) -> HeadRun:

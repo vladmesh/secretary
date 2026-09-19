@@ -66,7 +66,7 @@ from secretary.dispatch.bootstrap import runtime_from_args
 from secretary.dispatch.pause_ops import PauseCommandCompleted
 from secretary.dispatch.pause_ops import pause as _pause
 from secretary.dispatch.pause_ops import resume as _resume
-from secretary.dispatcher_types import DispatcherError, HostError
+from secretary.dispatch.types import DispatcherError, HostError
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import OwnerConflict, RuntimeUnavailable, ValidationRefused

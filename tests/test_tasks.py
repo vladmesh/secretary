@@ -28,7 +28,7 @@ from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
 from secretary.data import export_board, init_layout
-from secretary.dispatcher_state import claim_mismatch
+from secretary.dispatch.state import claim_mismatch
 from secretary.restore import import_normalized_board
 from secretary.routing_journal import (
     HeadRun,

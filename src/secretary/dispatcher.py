@@ -255,7 +255,7 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_review import (
     start_review as _start_review,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
@@ -266,28 +266,28 @@ from secretary.dispatcher_state import (
     OutcomeTerminalPath,
     now_rfc3339,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     claim_actual as _claim_actual,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     claim_mismatch as _claim_mismatch,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     new_attempt_id as _new_attempt_id,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     outcome_terminal_path as _outcome_terminal_path,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     record_attempt as _record_attempt,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     record_divergence as _record_divergence,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     request_token as _request_token,
 )
 from secretary.dispatcher_tui import (
@@ -298,7 +298,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -345,7 +345,7 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
-from secretary.dispatcher_worker_lifecycle import (
+from secretary.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,

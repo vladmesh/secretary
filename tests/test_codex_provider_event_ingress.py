@@ -38,10 +38,10 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatcher_tui import provider_progress_for_run
-from secretary.dispatcher_types import HostError
-from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
+from secretary.dispatch.types import HostError
+from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
 from secretary.head_health import HeadReadiness
 from secretary.projects.contract import (
     ContractVerdict,

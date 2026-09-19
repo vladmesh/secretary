@@ -15,7 +15,7 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.dispatcher import DispatcherRuntime
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatch.types import DispatcherError
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 
 

@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.gate import GateResult, _impossible_trigger_reason, gate_check
 from secretary.dispatcher_launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
-from secretary.dispatcher_types import HostError
+from secretary.dispatch.types import HostError
 from secretary.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
 from secretary.projects.integration_base import (
     IntegrationBaseError,

@@ -119,16 +119,16 @@ from secretary.dispatch.observer import (
 from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
     GatePrAuthorship,
     GatePublishedRef,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
-from secretary.dispatcher_state import (
+from secretary.dispatch.state import (
     request_token as _request_token,
 )
 from secretary.dispatcher_tui import (
@@ -153,7 +153,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
-from secretary.dispatcher_types import (
+from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
