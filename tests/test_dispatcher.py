@@ -8528,7 +8528,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
         self.assertEqual(
-            dispatcher_assessment_decision.recorded_decision(\n                self.runtime, self.reader.show("secretary-510-pilot")\n            ),
+            dispatcher_assessment_decision.recorded_decision(
+                self.runtime, self.reader.show("secretary-510-pilot")
+            ),
             ("rework", "repair the legacy path", ()),
         )
 
@@ -8557,7 +8559,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
         self.assertEqual(
-            dispatcher_assessment_decision.recorded_decision(\n                self.runtime, self.reader.show("secretary-510-pilot")\n            ),
+            dispatcher_assessment_decision.recorded_decision(
+                self.runtime, self.reader.show("secretary-510-pilot")
+            ),
             ("rework", raw_body, ()),
         )
 
