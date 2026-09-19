@@ -191,7 +191,7 @@ def launch_worker_after_claim(
     # The workspace is asked of the host rather than taken from its answer: with it and the pid
     # file the next tick can stop a head whose handle a tick dying mid-launch never recorded.
     failure = _write_launch_intent(
-        self,
+        runtime,
         payload,
         records,
         ref,
@@ -302,7 +302,7 @@ def launch_worker_after_claim(
     # The delivery receipt goes with them, because a recovery of this launch has to be able to
     # tell a worker that received its TASK pointer from one whose composer swallowed it.
     _confirm_launch_intent(
-        self,
+        runtime,
         payload,
         records,
         ref,
@@ -378,7 +378,7 @@ def _worker_launch_aborted(
     attempt_id: str,
 ) -> dict[str, Any]:
     """A worker bring-up that failed with its terminal already open."""
-    _mark_launch_aborted(self, payload, records, ref, record, exc)
+    _mark_launch_aborted(runtime, payload, records, ref, record, exc)
     return _launch_aborted(
         step=step,
         ref=ref,
@@ -473,7 +473,7 @@ def bring_up_worker_head(
         if deferred is not None:
             # A rework reserved its round before the host call, and that round is over whether
             # or not its head lived: the deferred relaunch belongs to the round the rework opened.
-            _keep_reserved_round(self, record, intent)
+            _keep_reserved_round(runtime, record, intent)
             # Nothing of this launch is running and the record names no head, so the next tick retries.
             records[ref] = record
             runtime.save_records(payload, records)
@@ -494,7 +494,7 @@ def bring_up_worker_head(
     # The head is up. Its pane, launch configuration and own run go into the intent before
     # anything else, so an adoption gets the run that launched rather than a fresh identity.
     _confirm_launch_intent(
-        self,
+        runtime,
         payload,
         records,
         ref,
@@ -528,7 +528,7 @@ def write_worker_relaunch_intent(
 ) -> str | None:
     """Fix a rework or respawn bring-up on disk before `restart_worker` is called."""
     return _write_launch_intent(
-        self,
+        runtime,
         payload,
         records,
         ref,
