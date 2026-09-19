@@ -21,8 +21,8 @@ from secretary.dispatch.helpers import (
     red_review_count as _red_review_count,
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatch.launch import REVIEW_ROLE
 from secretary.dispatch import release_lifecycle
+from secretary.dispatch.launch import REVIEW_ROLE
 from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
