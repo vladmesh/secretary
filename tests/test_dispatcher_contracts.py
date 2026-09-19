@@ -45,6 +45,7 @@ from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import launcher as dispatcher_launcher
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatch import production as dispatcher_production
+from secretary.dispatch import release_lifecycle as dispatcher_release_lifecycle
 from secretary.dispatch import review as dispatcher_review
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
@@ -96,6 +97,7 @@ _RUNTIME_MODULES = (
     dispatcher_claim,
     dispatcher_gate_lifecycle,
     dispatcher_production,
+    dispatcher_release_lifecycle,
     dispatcher_review,
     dispatcher_observer,
     dispatcher_worker_launch,
