@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch import release_lifecycle
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -22,7 +23,6 @@ from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infras
 from secretary.dispatch.gate import validation_ci as _validation_ci
 from secretary.dispatch.gate_receipt import AcceptedGreenGate
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.dispatch import release_lifecycle
 from secretary.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
