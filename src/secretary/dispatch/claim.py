@@ -2,8 +2,8 @@
 
 This module owns the decision-making that happens before a worker launch: head selection,
 sprint admission, broad-check and Git-access preflights, the durable board claim, and the
-post-claim handoff. Worker bring-up/recovery remains on DispatcherRuntime for now; the typed
-ClaimHandoff is the seam for extracting that lifecycle separately.
+post-claim handoff. Worker bring-up/recovery is owned by `dispatch.worker_launch`; the typed
+ClaimHandoff is the seam between the committed claim and that lifecycle.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from secretary.dispatch.state import (
     new_attempt_id as _new_attempt_id,
     record_attempt as _record_attempt,
 )
+from secretary.dispatch.worker_launch import launch_worker_after_claim
 from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, HostError
 from secretary.head_health import HeadChoice, resolve_head_chain
 from secretary.infra.github_credential import ProjectGitAccess
@@ -750,7 +751,8 @@ def claim_ready_task(
     )
     if not isinstance(prepared, ClaimHandoff):
         return prepared
-    return runtime._launch_worker_after_claim(
+    return launch_worker_after_claim(
+        runtime,
         prepared.claimed,
         prepared.record,
         records,
