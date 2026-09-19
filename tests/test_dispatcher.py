@@ -29,6 +29,7 @@ from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
+from secretary.dispatch import assessment_decision as dispatcher_assessment_decision
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import review_verdict as dispatcher_review_verdict
@@ -8527,7 +8528,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
         self.assertEqual(
-            self.runtime._recorded_decision(self.reader.show("secretary-510-pilot")),
+            dispatcher_assessment_decision.recorded_decision(\n                self.runtime, self.reader.show("secretary-510-pilot")\n            ),
             ("rework", "repair the legacy path", ()),
         )
 
@@ -8556,7 +8557,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
         self.assertEqual(
-            self.runtime._recorded_decision(self.reader.show("secretary-510-pilot")),
+            dispatcher_assessment_decision.recorded_decision(\n                self.runtime, self.reader.show("secretary-510-pilot")\n            ),
             ("rework", raw_body, ()),
         )
 
