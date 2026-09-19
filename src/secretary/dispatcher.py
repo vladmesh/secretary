@@ -932,15 +932,6 @@ class DispatcherRuntime:
 
 
 
-    def _reset_infrastructure_reruns(record: DispatcherRecord) -> None:
-        record.gate_infrastructure_reruns_sha = ""
-        record.gate_infrastructure_reruns = 0
-        record.gate_infrastructure_rerun_run_id = ""
-        record.gate_infrastructure_rerun_reason = ""
-        record.gate_rerun_transport_failures = 0
-        record.gate_rerun_transport_error = ""
-
-
 
     def _block_unresumable(
         self,
