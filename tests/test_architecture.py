@@ -159,6 +159,46 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("from secretary.dispatcher import", report_source)
 
 
+    def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        gate_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "gate_lifecycle.py"
+        ).read_text(encoding="utf-8")
+        gate_domain_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "gate.py"
+        ).read_text(encoding="utf-8")
+        helpers = (
+            "_run_gate",
+            "_accept_green_gate",
+            "_block_missing_gate_receipt",
+            "_gate_red_to_worker",
+            "_retry_infrastructure_gate",
+            "_reset_infrastructure_reruns",
+            "_block_infrastructure_reruns_exhausted",
+            "_block_infrastructure_rerun_unavailable",
+            "_gate_answered",
+            "_gate_transport_retry",
+            "_gate_rerun_transport_retry",
+            "_block_gate_transport",
+            "_gate_pending",
+            "_worker_vitality_for_gate",
+        )
+        for helper in helpers:
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+            self.assertNotIn(f"runtime.{helper}(", gate_source)
+        for entry in (
+            "run_gate",
+            "accept_green_gate",
+            "gate_red_to_worker",
+            "gate_transport_retry",
+            "block_gate_transport",
+            "gate_answered",
+            "gate_pending",
+        ):
+            self.assertIn(f"def {entry}(", gate_source)
+        self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
+        self.assertNotIn("from secretary.dispatcher import", gate_source)
+
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         wait_source = (
