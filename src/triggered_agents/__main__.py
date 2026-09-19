@@ -77,7 +77,7 @@ def main(argv=None) -> int:
     if rest and rest[0] == "dispatch":
         # Every dispatchable agent here is an LLM head driven by the generic singleton terminal
         # driver, which keeps one warm claude terminal per agent. Task dispatch itself is not one
-        # of them: it lives in `secretary/dispatcher_production.py`, on its own timer.
+        # of them: it lives in `secretary/dispatch/production.py`, on its own timer.
         dispatch_args = rest[1:]
         parsed = parse_dispatch_arguments(dispatch_args)
         from .runtime import dispatch
