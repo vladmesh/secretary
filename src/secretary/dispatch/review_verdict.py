@@ -134,7 +134,7 @@ def advance_review_verdict(
     )
 
 
-def _parks_for_decision(runtime, task: dict[str, Any]) -> bool:
+def parks_for_decision(runtime: Any, task: dict[str, Any]) -> bool:
     """Whether a substantive verdict on this card waits for a decision, or acts at once."""
     reference = str(task.get("sprint") or "")
     if not reference:
@@ -151,7 +151,7 @@ def _parks_for_decision(runtime, task: dict[str, Any]) -> bool:
     return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
 
 
-def _review_drift(runtime, task: dict[str, Any], record: DispatcherRecord) -> str:
+def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> str:
     """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
     state; merging a different one lands work nobody reviewed. Returns the operator message for the
     bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
