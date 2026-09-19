@@ -50,6 +50,7 @@ from secretary.dispatch.launch import (
 from secretary.dispatch.state import (
     DispatcherRecord,
     HeadlessRecoveryEpisode,
+    PersistedHeadlessRecoveryEpisode,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
     claim_mismatch as _claim_mismatch,
@@ -190,7 +191,7 @@ def launch_worker_after_claim(
         }
     # The workspace is asked of the host rather than taken from its answer: with it and the pid
     # file the next tick can stop a head whose handle a tick dying mid-launch never recorded.
-    failure = _write_launch_intent(
+    intent_failure = _write_launch_intent(
         runtime,
         payload,
         records,
@@ -201,15 +202,15 @@ def launch_worker_after_claim(
         head=record.head,
         workspace=runtime.host.restore_workspace(claimed, record.worker),
     )
-    if failure is not None:
-        if failure.startswith("codex-fanout-policy:"):
+    if intent_failure is not None:
+        if intent_failure.startswith("codex-fanout-policy:"):
             # No terminal was created. This is policy evidence, not a transient failure worth
             # retrying: a later tick with the same schema is the same prohibited launch.
             runtime.terminal_effect(
                 claimed,
                 record,
                 target="blocked",
-                reason=f"Codex provider fan-out policy refused worker preflight: {failure}",
+                reason=f"Codex provider fan-out policy refused worker preflight: {intent_failure}",
                 request_id=_attempt_request_id(record.attempt_id, "codex-fanout-blocked", ref),
                 terminal_state="blocked",
                 disposition="blocked",
@@ -223,10 +224,14 @@ def launch_worker_after_claim(
                 "pilot_ref": ref,
                 "attempt_id": record.attempt_id,
                 "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
-                "reason": failure,
+                "reason": intent_failure,
             }
         return _launch_intent_unwritable(
-            step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
+            step="claim",
+            ref=ref,
+            attempt_id=record.attempt_id,
+            role=WORKER_ROLE,
+            reason=intent_failure,
         )
     # The launch intent already contains the exact preflight HeadRun. Bind its provider source
     # before `prepare_worker` can create a pane, not after TASK.md has been delivered.
@@ -246,7 +251,7 @@ def launch_worker_after_claim(
             require_existing_workspace=require_existing_workspace,
             generation=record.report_generation,
             failover=bool(record.preferred_head),
-            heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
+            heartbeat_run_id=str(dict(record.launch_intent).get("run_id") or ""),
         )
     except (HeadLaunchAborted, HostError) as exc:
         aborted = _worker_launch_failure(runtime,
@@ -452,7 +457,7 @@ def bring_up_worker_head(
             reference=ref,
         )
         launched = runtime.host.restart_worker(
-            task, record, heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or "")
+            task, record, heartbeat_run_id=str(dict(record.launch_intent).get("run_id") or "")
         )
     except Exception as exc:  # noqa: BLE001 — classified by what it left running, not by type
         aborted = _worker_launch_failure(runtime,
@@ -576,7 +581,7 @@ def resolve_headless_worker(
     ref = task["ref"]
     if not _headless_worker(record):
         if record.worker_headless:
-            record.worker_headless = {}
+            record.worker_headless = PersistedHeadlessRecoveryEpisode()
             records[ref] = record
             runtime.save_records(payload, records)
         return None
@@ -586,8 +591,9 @@ def resolve_headless_worker(
     live = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
     state = runtime.host.retained_workspace_state(task, record)
     prior_headless = record.worker_headless.episode
-    record.worker_headless = HeadlessRecoveryEpisode(
-        since=(prior_headless.since if prior_headless is not None else 0.0) or time.time(),
+    record.worker_headless = PersistedHeadlessRecoveryEpisode(
+        HeadlessRecoveryEpisode(
+            since=(prior_headless.since if prior_headless is not None else 0.0) or time.time(),
         # Where the card stood when this episode opened. Read once and carried, so it is the
         # episode's own discriminator rather than whatever the board says on a later tick.
         comment_baseline=(
@@ -603,8 +609,9 @@ def resolve_headless_worker(
         expected_branch=str(state.get("expected_branch") or ""),
         dirty=state.get("dirty") if isinstance(state.get("dirty"), bool) else None,
         candidate_sha=str(state.get("sha") or ""),
-        report_generation=record.report_generation,
-        recovery_error="",
+            report_generation=record.report_generation,
+            recovery_error="",
+        )
     )
     if live.get("known") and live.get("alive"):
         record.worker_headless["recovery_error"] = "orphan_heartbeat_unbound"
@@ -699,7 +706,7 @@ def _relaunch_headless_worker(
     runtime.record_worker_routing(task, record, launched.run)
     _clear_launch_intent(record)
     headless = dict(record.worker_headless)
-    record.worker_headless = {}
+    record.worker_headless = PersistedHeadlessRecoveryEpisode()
     records[ref] = record
     runtime.save_records(payload, records)
     runtime.writer.comment(
