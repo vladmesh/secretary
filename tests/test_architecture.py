@@ -206,13 +206,11 @@ class SourceLayoutTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         helpers = (
             "_parks_for_decision",
-            "_merge_readiness",
             "_park_green_verdict",
             "_merge_ready_for_park",
             "_begin_park",
             "_complete_park",
             "_block_red_review_ceiling",
-            "_review_drift",
         )
         for helper in helpers:
             self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
@@ -220,7 +218,6 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertNotIn(f"runtime.{helper}(", verdict_source)
         for entry in (
             "advance_review_verdict",
-            "merge_readiness",
             "park_green_verdict",
             "merge_ready_for_park",
             "begin_park",
@@ -230,7 +227,7 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("_advance_review_verdict(self, task, record, records, payload, attempt_id)", dispatcher_source)
         self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
         self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertIn("\n    def _release_parked(", dispatcher_source)
+        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
         self.assertNotIn("from secretary.dispatcher import", verdict_source)
 
     def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
@@ -253,9 +250,59 @@ class SourceLayoutTests(unittest.TestCase):
         ):
             self.assertIn(f"def {entry}(", decision_source)
         self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertIn("runtime._release_parked(", decision_source)
-        self.assertIn("\n    def _release_parked(", dispatcher_source)
+        self.assertIn("release_lifecycle.release_parked(", decision_source)
+        self.assertNotIn("runtime._release_parked(", decision_source)
+        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
         self.assertNotIn("from secretary.dispatcher import", decision_source)
+
+
+    def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        release_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "release_lifecycle.py"
+        ).read_text(encoding="utf-8")
+        gate_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "gate_lifecycle.py"
+        ).read_text(encoding="utf-8")
+        verdict_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "review_verdict.py"
+        ).read_text(encoding="utf-8")
+        decision_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "assessment_decision.py"
+        ).read_text(encoding="utf-8")
+
+        for helper in (
+            "_block_merge_path",
+            "_release_parked",
+            "_release_effect",
+            "_require_completion_evidence",
+            "_transfer_research_report",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        for helper in ("_released_verdict", "_merge_terminal_reason"):
+            self.assertNotIn(f"\ndef {helper}(", dispatcher_source)
+        for entry in (
+            "block_merge_path",
+            "release_parked",
+            "release_effect",
+            "require_completion_evidence",
+            "transfer_research_report",
+            "review_drift",
+            "merge_readiness",
+        ):
+            self.assertIn(f"def {entry}(", release_source)
+
+        self.assertNotIn("def review_drift(", verdict_source)
+        self.assertNotIn("def merge_readiness(", verdict_source)
+        self.assertIn("release_lifecycle.merge_readiness(runtime,", verdict_source)
+        self.assertIn("release_lifecycle.release_effect(runtime,", verdict_source)
+        self.assertIn("release_lifecycle.release_parked(", decision_source)
+        self.assertIn("release_lifecycle.block_merge_path(runtime,", gate_source)
+        self.assertNotIn("runtime._block_merge_path(", gate_source)
+        self.assertNotIn("runtime._block_merge_path(", verdict_source)
+        self.assertNotIn("runtime._release_effect(", verdict_source)
+        self.assertNotIn("runtime._release_parked(", decision_source)
+        self.assertNotIn("from secretary.dispatcher import", release_source)
 
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
