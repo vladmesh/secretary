@@ -167,6 +167,7 @@ from secretary.dispatch.review import (
 )
 from secretary.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
+    complete_park as _complete_park,
     merge_readiness as _merge_readiness,
     park_green_verdict as _park_green_verdict,
 )
@@ -982,7 +983,7 @@ class DispatcherRuntime:
             return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
         if continuation.assessment_pending:
             # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
-            return self._complete_park(record, records, payload, attempt_id, ref=ref)
+            return _complete_park(self, record, records, payload, attempt_id, ref=ref)
         if not continuation.parked:
             # A record lost while parked, or a card an operator parked by hand: the board is the
             # fact. A session this record cannot prove is held is not held, so it owns no worker.
