@@ -6,7 +6,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
+from secretary.dispatch.claim import claim_ready_task as _claim_ready_task
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
@@ -96,7 +97,6 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     DispatcherHeadTransport,
     InstanceCatalog,
     LaunchedHead,
-    _blocked_actions_and_their_infrastructure_twins,
     _body_file_instructions,
     _body_file_path,
     _continuation_note,
@@ -256,10 +256,6 @@ from secretary.dispatch.review import (
     start_review as _start_review,
 )
 from secretary.dispatch.state import (
-    CLAIM_SKIP_FAILOVER_COLLAPSE,
-    CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
-    CLAIM_SKIP_RESOURCE_NOT_READY,
-    CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
     HeadlessRecoveryEpisode,
@@ -276,13 +272,7 @@ from secretary.dispatch.state import (
     claim_mismatch as _claim_mismatch,
 )
 from secretary.dispatch.state import (
-    new_attempt_id as _new_attempt_id,
-)
-from secretary.dispatch.state import (
     outcome_terminal_path as _outcome_terminal_path,
-)
-from secretary.dispatch.state import (
-    record_attempt as _record_attempt,
 )
 from secretary.dispatch.state import (
     record_divergence as _record_divergence,
@@ -354,22 +344,11 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuationLiveness,
 )
 from secretary.head_health import (
-    HeadChoice,
     HeadHealth,
     HeadReadiness,
-    resolve_head_chain,
 )
 from secretary.infra.github_credential import ProjectGitAccess
 from secretary.knowledge_write import KnowledgeError, KnowledgeValidationError, write_knowledge_directory
-from secretary.projects.contract import (
-    CONTRACT_FIT,
-    CONTRACT_REFUSED,
-    CONTRACT_UNDECIDABLE,
-    UNDECIDABLE_NO_REGISTERED_PROJECT,
-    UNDECIDABLE_PROJECT_UNAVAILABLE,
-    ContractUnusable,
-    ContractVerdict,
-)
 from secretary.routing_journal import (
     MODEL_UNKNOWN,
     REVIEWER,
@@ -391,7 +370,6 @@ from secretary.routing_journal import (
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.state_repo import StateRepoError
 from secretary.tasks import (
-    SprintReservationUnverifiable,
     TaskAudit,
     TaskError,
     TaskReader,
@@ -492,30 +470,6 @@ def _headless_worker(record: DispatcherRecord) -> bool:
     )
 
 
-#: The action token of a card refused at admission because an open sprint reserves its project.
-SPRINT_RESERVATION_BLOCKED_ACTION = "sprint-reservation-blocked"
-#: A `code` card outside every sprint, on a project an open sprint reserves.
-SPRINT_RESERVATION_RESERVED = "sprint_reserved"
-#: A `code` card outside every sprint, whose project's reservations could not be verified.
-SPRINT_RESERVATION_UNVERIFIABLE = "sprint_reservation_unverifiable"
-
-
-@dataclass(frozen=True)
-class SprintAdmissionRefusal:
-    """Why a card linked to no sprint is not admitted on its project."""
-
-    code: str
-    project: str
-    sprints: tuple[str, ...]
-    detail: str
-
-    def evidence(self) -> dict[str, Any]:
-        return {
-            "refusal": self.code,
-            "project": self.project,
-            "sprints": list(self.sprints),
-            "detail": self.detail,
-        }
 
 
 def _usage_fallback_snapshot(
@@ -581,27 +535,6 @@ class DispatcherRuntime:
 
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)
-
-    def _head_fallback(self, head: str) -> list[str] | None:
-        """`head`'s fallback chain, or None when the registry does not describe it at all.
-
-        None is not an empty chain. The existence question is answered here as one lookup and never
-        put to a readiness probe, whose `HostError` for an undescribed head would escape the walk and
-        take the tick's Ready pass with it.
-        """
-        try:
-            return self.catalog.head_fallback(head)
-        except HostError:
-            return None
-
-    def resolve_head(self, preferred: str) -> HeadChoice:
-        """The head to actually launch for `preferred`, walking the canon's fallback chain.
-
-        Substitution follows only the chain the canon writes down, and only at claim, where the
-        decision is recorded on the card. When nothing in the chain is launchable the answer is an
-        empty head: the caller claim-skips and the card waits in Ready.
-        """
-        return resolve_head_chain(preferred, self.head_readiness, self._head_fallback)
 
     def _require_head_ready(self, head: str) -> None:
         readiness = self.head_readiness(head)
@@ -795,7 +728,8 @@ class DispatcherRuntime:
         if task["state"] == "ready":
             resume_workspaces = payload.get("resume_workspaces")
             resume_workspace = isinstance(resume_workspaces, dict) and ref in resume_workspaces
-            return self._claim(
+            return _claim_ready_task(
+                self,
                 task,
                 records,
                 payload,
@@ -817,629 +751,6 @@ class DispatcherRuntime:
             "pilot_ref": ref,
             "attempt_id": attempt_id,
         }
-
-    def _failover_collapse(self, worker: HeadChoice, review: HeadChoice) -> dict[str, Any] | None:
-        """The refusal when a failover would hand both roles to one head, else None.
-
-        Only a failover can collapse the pair here: two roles pointed at one head by the canon itself
-        is an installation's own decision and is not overruled.
-        """
-        if not review.resolved or review.head != worker.head:
-            return None
-        if not (worker.substituted or review.substituted):
-            return None
-        return {
-            "status": "skipped",
-            "step": "head-preflight",
-            "action": CLAIM_SKIP_FAILOVER_COLLAPSE,
-            "head": worker.head,
-            "review_head": review.head,
-            "readiness": worker.readiness.to_json(),
-            "reason": (
-                f"failover would run worker and reviewer on the same head {worker.head}: "
-                f"worker {worker.reason}; reviewer {review.reason}"
-            ),
-            "failover": {"worker": worker.to_json(), "review": review.to_json()},
-        }
-
-    def _comment_head_failover(
-        self, ref: str, attempt_id: str, worker: HeadChoice, review: HeadChoice
-    ) -> None:
-        """Write the substitution onto the card, once per claim, or do nothing."""
-        lines = [
-            f"{role} head {choice.head} instead of {choice.preferred}: {choice.reason}"
-            for role, choice in (("Worker", worker), ("Reviewer", review))
-            if choice.substituted
-        ]
-        if not lines:
-            return
-        self.writer.comment(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            body="Head failover at claim. " + " ".join(lines),
-            request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
-        )
-
-    def _broad_check_contract_verdict(self, task: dict[str, Any]) -> ContractVerdict:
-        """This card's broad-check contract, as one of the three named states (secretary-1458).
-
-        Offline and cheap: the binding and the adapter beside it, read before anything is claimed.
-        Every way of not getting an answer is a named state rather than a fall-through, because a
-        fall-through is what "nothing came back, so the card may go" was made of. A card that names
-        no registered project, and a project this installation cannot look up at all, are open
-        questions about the registry — the paths that need the binding fail on it in their own
-        words — and they are returned as such, not as approval.
-        """
-        project = str(task.get("project") or "")
-        if not project:
-            return ContractVerdict.as_undecidable(
-                UNDECIDABLE_NO_REGISTERED_PROJECT,
-                "",
-                f"card {task.get('ref')!r} names no registered project, so it has no adapter and "
-                "no broad-check contract to judge",
-            )
-        try:
-            return self.catalog.broad_check_verdict(project)
-        except HostError as exc:
-            return ContractVerdict.as_undecidable(
-                UNDECIDABLE_PROJECT_UNAVAILABLE,
-                "",
-                f"registered project {project!r} could not be read: {exc}",
-            )
-
-    def _contract_preflight_decision(
-        self,
-        task: dict[str, Any],
-        verdict: ContractVerdict,
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-    ) -> tuple[BringUpFailure, str, ContractUnusable] | None:
-        """What the verdict buys this card: the outcome that stops it, or None to issue it.
-
-        Exhaustive over the three states by name, with no default branch that lets an unrecognised
-        answer through as permission. Which state buys what is `projects.contract`'s decision and
-        is only carried out here:
-
-        * `refused` stops the card before it is issued — that is the guarantee the card exists for;
-        * `undecidable` issues it, because the open question is a documented compatibility promise
-          (a relative interpreter is resolved from a workspace that does not exist yet) and the
-          side that will hold that tree answers it there. It is a decision with a name, not the
-          absence of one;
-        * `fit` issues it, as always.
-        """
-        if verdict.state == CONTRACT_REFUSED and verdict.refusal is not None:
-            failure, reason = self._contract_preflight_outcome(
-                task,
-                attempt_id=attempt_id,
-                head=head,
-                review_head=review_head,
-                refusal=verdict.refusal,
-            )
-            return failure, reason, verdict.refusal
-        if verdict.state in (CONTRACT_FIT, CONTRACT_UNDECIDABLE):
-            return None
-        raise HostError(f"unreadable broad-check contract verdict {verdict.state!r}")
-
-    def _contract_preflight_outcome(
-        self,
-        task: dict[str, Any],
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-        refusal: ContractUnusable,
-    ) -> tuple[BringUpFailure, str]:
-        """The typed infrastructure outcome for a card nobody can broad-check, decided before claim.
-
-        Pure: it turns the refusal the preflight already read off the registry into the class, the
-        evidence and the card's Blocked reason, and touches neither the board, the host nor the
-        filesystem. That is what lets the claim and the transition it is the door to stand next to
-        each other with nothing that can fail in between.
-
-        This is the same outcome a bring-up that produced no head carries, made by the same
-        classifier and written with the same durable action token: an installation whose registry
-        cannot supply a usable contract is a failure of the host, not a verdict about the card. The
-        two properties the card must have follow from that token alone rather than from anything
-        here — the sprint budget reads it and counts the block as uncharged, and a block is not a
-        retry, so no new attempt is opened and nothing is scheduled to come back.
-        """
-        detail = (
-            f"the broad-check contract of registered project {task.get('project')!r} cannot "
-            f"attest this card: {refusal.detail()}"
-        )
-        failure = self._unclaimed_preflight_failure(
-            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-        )
-        reason = (
-            "the card was not given to a worker: this project's broad-check contract cannot "
-            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
-        )
-        return failure, reason
-
-    def _unclaimed_preflight_failure(
-        self, task: dict[str, Any], *, attempt_id: str, head: str, review_head: str, detail: str
-    ) -> BringUpFailure:
-        """A pre-claim refusal as the bring-up taxonomy names it: infrastructure, never retried."""
-        # The card has no record and will get none. The classifier reads one only to count the
-        # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
-        # own identity is what the outcome carries.
-        unclaimed = DispatcherRecord(
-            worker=_worker_id(task),
-            workspace="",
-            handle="",
-            head=head,
-            review_head=review_head,
-            attempt_id=attempt_id,
-            comment_baseline=0,
-            review_baseline=0,
-            state="",
-            claimed_at=0.0,
-        )
-        return _classify_bring_up_failure(
-            None,
-            unclaimed,
-            WORKER_ROLE,
-            stage=STAGE_CLAIM,
-            attempt_id=attempt_id,
-            detail=detail,
-        )
-
-    def _sprint_admission_refusal(self, task: dict[str, Any]) -> SprintAdmissionRefusal | None:
-        """Why a card outside every sprint may not run on its project now, or None to admit it.
-
-        The single admission question about sprint reservations (secretary-1641). The write guard
-        lets the PO cut a card of any kind outside a sprint; this is where that card's running is
-        decided. A card linked to a sprint is that sprint's work and is not asked about. A card with
-        no candidate (`research`, `infra`) touches no branch a sprint owns and is always admitted,
-        so the board is not read for it. A `code` card is asked about through the same verified
-        reservation index the write guard reads, and an index that cannot be verified refuses it
-        rather than letting it race a sprint nobody could see.
-        """
-        if str(task.get("sprint") or "") or not has_candidate(task):
-            return None
-        project = str(task.get("project") or "")
-        try:
-            held = self.writer.open_sprints_reserving(project)
-        except SprintReservationUnverifiable as exc:
-            return SprintAdmissionRefusal(
-                SPRINT_RESERVATION_UNVERIFIABLE,
-                project,
-                (exc.sprint_ref,) if exc.sprint_ref else (),
-                f"the open sprints reserving project {project!r} could not be verified "
-                f"({exc.cause.code}: {exc.cause.message}), so a code card outside a sprint is not "
-                "admitted there until they can be",
-            )
-        if not held:
-            return None
-        sprints = ", ".join(held)
-        return SprintAdmissionRefusal(
-            SPRINT_RESERVATION_RESERVED,
-            project,
-            tuple(held),
-            f"project {project!r} is reserved by open sprint {sprints}; this code card is linked "
-            f"to no sprint, so it may run inside {sprints} (as a card of that sprint) or after "
-            "that sprint closes, when it can be moved back to Ready",
-        )
-
-    def _sprint_admission_blocked(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-        refusal: SprintAdmissionRefusal,
-    ) -> dict[str, Any]:
-        """Write the sprint admission refusal decided before the claim, immediately after it."""
-        failure = self._unclaimed_preflight_failure(
-            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=refusal.detail
-        )
-        reason = (
-            "the card was not given to a worker: it was refused at admission, so no workspace and "
-            f"no head were created. [sprint admission: refusal={refusal.code}, "
-            f"project={refusal.project}, sprint={', '.join(refusal.sprints) or '(unknown)'}] "
-            f"{refusal.detail}\n{failure.clause()}"
-        )
-        self._write_claim_preflight_block(
-            task,
-            ref,
-            records,
-            payload,
-            attempt_id=attempt_id,
-            action=SPRINT_RESERVATION_BLOCKED_ACTION,
-            failure=failure,
-            reason=reason,
-        )
-        return {
-            "status": "blocked",
-            "step": "sprint-reservation-refused",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "code card outside a sprint refused on a reserved project",
-            "sprint_reservation": refusal.evidence(),
-            **failure.outcome_fields(reason),
-        }
-
-    def _project_git_access(self, task: dict[str, Any]) -> ProjectGitAccess:
-        """The registered project's remote Git access, asked before anything is claimed."""
-        try:
-            return self.host.project_git_access(str(task.get("project") or ""))
-        except HostError as exc:
-            # The host could not even ask. That is silence about the credential, not a refusal.
-            return ProjectGitAccess(
-                "unreachable", "unknown", "none", "host", scrub_host_output(str(exc))[:240]
-            )
-
-    def _git_access_preflight_outcome(
-        self,
-        task: dict[str, Any],
-        access: ProjectGitAccess,
-        *,
-        attempt_id: str,
-        head: str,
-        review_head: str,
-    ) -> tuple[BringUpFailure, str]:
-        """The typed outcome for a card whose project's remote Git access was refused by name.
-
-        Pure, like `_contract_preflight_outcome`: it names the project, the refusal code, the
-        transport and the fixed-vocabulary reason, and touches neither board nor host. A refused
-        credential is a determinate host condition, so the card is blocked uncharged and no
-        attempt is scheduled to come back; it is not the transport class the gate retries.
-        """
-        detail = (
-            f"registered project {task.get('project')!r} refused remote Git access "
-            f"(refusal={access.code}, transport={access.transport}): {access.reason}"
-        )
-        failure = self._unclaimed_preflight_failure(
-            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-        )
-        reason = (
-            "the card was not given to a worker: this project's remote Git access was refused "
-            f"before the claim, so no workspace and no head were created. {detail}\n{failure.clause()}"
-        )
-        return failure, reason
-
-    def _git_access_preflight_blocked(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        access: ProjectGitAccess,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Write the Git access refusal decided before the claim, immediately after it."""
-        self._write_claim_preflight_block(
-            task,
-            ref,
-            records,
-            payload,
-            attempt_id=attempt_id,
-            action="git-access-preflight-blocked",
-            failure=failure,
-            reason=reason,
-        )
-        return {
-            "status": "blocked",
-            "step": "git-access-preflight",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "project Git access preflight refused",
-            "git_access": {"project": str(task.get("project") or ""), **access.to_json()},
-            **failure.outcome_fields(reason),
-        }
-
-    def _contract_preflight_blocked(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        refusal: ContractUnusable,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Write the outcome decided before the claim, immediately after it."""
-        self._write_claim_preflight_block(
-            task,
-            ref,
-            records,
-            payload,
-            attempt_id=attempt_id,
-            action="contract-preflight-blocked",
-            failure=failure,
-            reason=reason,
-        )
-        return {
-            "status": "blocked",
-            "step": "contract-preflight",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "broad-check contract preflight failed",
-            "contract_refusal": refusal.evidence(),
-            **failure.outcome_fields(reason),
-        }
-
-    def _write_claim_preflight_block(
-        self,
-        task: dict[str, Any],
-        ref: str,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        *,
-        attempt_id: str,
-        action: str,
-        failure: BringUpFailure,
-        reason: str,
-    ) -> None:
-        """Nothing is computed here and nothing is read: the transition is the first statement made
-        about the claimed card, and the dispatcher's own bookkeeping only follows it.
-        """
-        self.terminal_effect(
-            task,
-            DispatcherRecord(
-                worker=_worker_id(task),
-                workspace="",
-                handle="",
-                head="",
-                review_head="",
-                attempt_id=attempt_id,
-                attempt_round=self._journal_round(ref) + 1,
-                comment_baseline=0,
-                review_baseline=0,
-                state="",
-                claimed_at=0.0,
-            ),
-            target="blocked",
-            reason=reason,
-            request_id=_attempt_request_id(
-                attempt_id,
-                _bring_up_blocked_action(action, failure),
-                ref,
-            ),
-            terminal_state="blocked",
-            disposition="blocked",
-            blocked_reason=_bring_up_terminal_reason(failure),
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-
-    def _claim(
-        self,
-        task: dict[str, Any],
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        resume_workspace: bool = False,
-    ) -> dict[str, Any]:
-        ref = task["ref"]
-        # Both heads are decided here, before anything is claimed, and both may be decided against
-        # the card's preference. Nothing launchable at the end of either walk is a claim-skip: the
-        # card stays in Ready and the outcome below names the dead resource.
-        worker_choice = self.resolve_head(self.catalog.worker_head(task))
-        if not worker_choice.resolved:
-            return {
-                "status": "skipped",
-                "step": "head-preflight",
-                "action": CLAIM_SKIP_RESOURCE_NOT_READY,
-                "pilot_ref": ref,
-                "head": worker_choice.preferred,
-                "readiness": worker_choice.readiness.to_json(),
-                "reason": worker_choice.reason,
-                "failover": {"worker": worker_choice.to_json()},
-            }
-        review_choice = self.resolve_head(self.catalog.review_head(task))
-        collapse = self._failover_collapse(worker_choice, review_choice)
-        if collapse is not None:
-            return dict(collapse, pilot_ref=ref)
-        head = worker_choice.head
-        review_head = review_choice.head or review_choice.preferred
-        # Sprint admission is asked first: a card that may not run on its project now is refused for
-        # that, and the registry and the host are not asked about it.
-        sprint_refusal = self._sprint_admission_refusal(task)
-        if sprint_refusal is not None and sprint_refusal.code == SPRINT_RESERVATION_UNVERIFIABLE:
-            # Refused, but not blocked: the dispatcher's own Blocked move meets the same index at the
-            # write guard and would fail closed on it after the claim. The card stays in Ready and
-            # is asked again on the next tick, when the index can answer.
-            return {
-                "status": "skipped",
-                "step": "sprint-admission",
-                "action": CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
-                "pilot_ref": ref,
-                "sprint_reservation": sprint_refusal.evidence(),
-                "reason": sprint_refusal.detail,
-            }
-        contract_verdict = None if sprint_refusal is not None else self._broad_check_contract_verdict(task)
-        # Project Git access is a separate preflight at the same boundary. It is asked only when the
-        # contract does not already refuse the card, so that refusal stays what it was: decided off
-        # the registry with the host untouched. An unanswered probe leaves the card in Ready.
-        git_access = (
-            None
-            if contract_verdict is None or contract_verdict.state == CONTRACT_REFUSED
-            else self._project_git_access(task)
-        )
-        if git_access is not None and git_access.state == "unreachable":
-            return {
-                "status": "skipped",
-                "step": "git-access-preflight",
-                "action": CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
-                "pilot_ref": ref,
-                "git_access": {"project": str(task.get("project") or ""), **git_access.to_json()},
-                "reason": (
-                    f"project {task.get('project')!r} remote gave the Git access preflight no answer: "
-                    f"{git_access.reason or git_access.code}"
-                ),
-            }
-        # A card the dispatcher still holds a record for, back in Ready with its claim already
-        # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
-        # the record, so the claim would replay idempotently, return the old event and leave the card
-        # Ready: every re-run gets a fresh identity before claiming. A committed claim with no record
-        # is a genuine board divergence and still fails closed below.
-        active = records.get(ref)
-        requeued = active is not None
-        retry_after_block = resume_workspace or any(
-            self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-            for action in _blocked_actions_and_their_infrastructure_twins(
-                "bringup-blocked",
-                "worker-result-blocked",
-                "worker-blocked",
-                "worker-respawn-blocked",
-                "worker-wait-stall",
-                "rework-blocked",
-                "contract-preflight-blocked",
-                "git-access-preflight-blocked",
-                "gate-blocked",
-                "gate-red-blocked",
-                "gate-pending-stall",
-                "merge-gate-blocked",
-                "merge-gate-red-blocked",
-                "merge-blocked",
-                "release-drift-blocked",
-                "release-failed-blocked",
-                "review-blocked",
-                "review-freeze-red-blocked",
-                "review-inventory-blocked",
-                "review-wait-stall",
-                "stale-done-rework-blocked",
-            )
-        )
-        # A card refused at admission never had a workspace, so coming back to Ready is a fresh
-        # attempt that creates one rather than a retry that expects the last one's checkout.
-        refused_at_admission = any(
-            self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-            for action in _blocked_actions_and_their_infrastructure_twins(SPRINT_RESERVATION_BLOCKED_ACTION)
-        )
-        if requeued and active is not None:
-            # The preempted head can still be in the workspace the next round claims, and it is
-            # stopped through the workspace, not the handle: an adopted head has no handle on record.
-            if active.owns_head("review"):
-                # A preempt out of Validate leaves the worker pane closed by `start_review` but the
-                # reviewer up; left alone its verdict would land on the new attempt.
-                unconfirmed = self._end_review_pane_confirmed(
-                    active,
-                    records,
-                    payload,
-                    ref,
-                    step="claim",
-                    attempt_id=attempt_id,
-                    initiator=STOPPED_BY_REPLACEMENT,
-                )
-                if unconfirmed is not None:
-                    return unconfirmed
-            if active.needs_settling():
-                unconfirmed = self._stop_worker_confirmed(active, ref, step="claim", attempt_id=attempt_id)
-                if unconfirmed is not None:
-                    return unconfirmed
-        if retry_after_block or requeued or refused_at_admission:
-            attempt_id = _new_attempt_id()
-            _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
-            payload["attempt_id"] = attempt_id
-        claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
-        worker_id = _worker_id(task)
-        # Claim is the only board transition that can record a Ready refusal.
-        contract_outcome = (
-            None
-            if contract_verdict is None
-            else self._contract_preflight_decision(
-                task,
-                contract_verdict,
-                attempt_id=attempt_id,
-                head=head,
-                review_head=review_head,
-            )
-        )
-        git_access_outcome = (
-            self._git_access_preflight_outcome(
-                task, git_access, attempt_id=attempt_id, head=head, review_head=review_head
-            )
-            if contract_outcome is None and git_access is not None and git_access.state == "refused"
-            else None
-        )
-        self.writer.claim(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            worker=worker_id,
-            resolved_head=head,
-            resolved_review_head=review_head,
-            slug=task.get("workspace", {}).get("slug") or "",
-            base_branch=task.get("workspace", {}).get("base_branch") or "",
-            request_id=claim_request_id,
-        )
-        if sprint_refusal is not None:
-            return self._sprint_admission_blocked(
-                task,
-                ref,
-                records,
-                payload,
-                attempt_id=attempt_id,
-                head=head,
-                review_head=review_head,
-                refusal=sprint_refusal,
-            )
-        if contract_outcome is not None:
-            failure, blocked_reason, refusal = contract_outcome
-            return self._contract_preflight_blocked(
-                task,
-                ref,
-                records,
-                payload,
-                attempt_id=attempt_id,
-                refusal=refusal,
-                failure=failure,
-                reason=blocked_reason,
-            )
-        if git_access_outcome is not None and git_access is not None:
-            failure, blocked_reason = git_access_outcome
-            return self._git_access_preflight_blocked(
-                task,
-                ref,
-                records,
-                payload,
-                attempt_id=attempt_id,
-                access=git_access,
-                failure=failure,
-                reason=blocked_reason,
-            )
-        self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
-        claimed = self.reader.show(ref)
-        record = DispatcherRecord(
-            worker=worker_id,
-            workspace="",
-            handle="",
-            head=head,
-            review_head=review_head,
-            attempt_id=attempt_id,
-            comment_baseline=len(claimed.get("comments") or []),
-            review_baseline=0,
-            report_generation=1,
-            state="claim_verified",
-            claimed_at=time.time(),
-            preferred_head=worker_choice.preferred if worker_choice.substituted else "",
-            preferred_review_head=(review_choice.preferred if review_choice.substituted else ""),
-        )
-        self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._launch_worker_after_claim(
-            claimed,
-            record,
-            records,
-            payload,
-            require_existing_workspace=retry_after_block,
-        )
 
     def _launch_worker_after_claim(
         self,
