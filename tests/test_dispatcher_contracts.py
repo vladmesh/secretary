@@ -34,6 +34,7 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import upgrade
+from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import launcher as dispatcher_launcher
 from secretary.dispatch import review as dispatcher_review
 from secretary import role_env as head_role_env
@@ -87,6 +88,7 @@ from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
     dispatcher_module,
+    dispatcher_claim,
     dispatcher_production,
     dispatcher_review,
     dispatcher_observer,
