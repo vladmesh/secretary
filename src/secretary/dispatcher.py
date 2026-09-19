@@ -110,6 +110,7 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _gate_attestation_for_prompt,
     _head_runtime_name,
     _legacy_worker_branch,
+    _record_worker_delivery_evidence,
     _report_nudge_prompt,
     _same_repo,
     _watchdog_kind,
@@ -156,11 +157,16 @@ from secretary.dispatch.helpers import (
 )
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
+    STAGE_RESPAWN,
     STAGE_REWORK,
     WORKER_ROLE,
     BringUpFailure,
 )
 from secretary.dispatch.launch import (
+    bring_up_blocked_action as _bring_up_blocked_action,
+    bring_up_blocked_reason as _bring_up_blocked_reason,
+    bring_up_terminal_reason as _bring_up_terminal_reason,
+    classify_bring_up_failure as _classify_bring_up_failure,
     clear_launch_intent as _clear_launch_intent,
 )
 from secretary.dispatch.launch import (
@@ -180,6 +186,8 @@ from secretary.dispatch.launch import (
 )
 from secretary.dispatch.launch import (
     launch_intent as _launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+    launch_pid_file as _launch_pid_file,
 )
 from secretary.dispatch.launch import (
     merge_launch_head_run as _merge_launch_head_run,
@@ -232,6 +240,7 @@ from secretary.dispatch.state import (
 )
 from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
+    claim_mismatch as _claim_mismatch,
 )
 from secretary.dispatch.state import (
     outcome_terminal_path as _outcome_terminal_path,
@@ -268,6 +277,7 @@ from secretary.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
 )
 from secretary.dispatch.watchdog import (
+    head_process_status as _head_process_status,
     head_run_process_status as _head_run_process_status,
 )
 from secretary.dispatch.watchdog import (
@@ -277,6 +287,7 @@ from secretary.dispatch.watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
 from secretary.dispatch.watchdog import (
+    reset_idle as _reset_idle,
     reset_wait as _reset_wait,
 )
 from secretary.dispatch.watchdog import (
