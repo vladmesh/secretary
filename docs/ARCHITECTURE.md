@@ -59,8 +59,11 @@ blocking and the bounded unobservable-head escalation. `DispatcherRuntime` calls
 entry points from worker/review/gate orchestration; the module calls back only for the existing
 worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects. Mechanical gate
 verdict, transport retry, bounded infrastructure rerun and pending-CI policy are package-owned by
-`secretary.dispatch.gate_lifecycle`; review verdict, Assessment and merge policy remain in the
-runtime for later bounded extractions.
+`secretary.dispatch.gate_lifecycle`. `dispatch.review_verdict` owns durable review-verdict
+acceptance and Assessment parking: marker consumption, reviewer-stop handoff, green/red bookkeeping,
+the no-observer red ceiling, pre-park merge readiness, and park intent/replay. Reviewer launch/wait
+orchestration stays in `DispatcherRuntime`; Assessment decision execution, release/merge effects and
+completion-evidence policy remain later bounded extractions.
 
 Dependency rules:
 
