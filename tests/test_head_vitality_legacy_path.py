@@ -23,6 +23,7 @@ from unittest import mock
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
+from secretary.dispatch.gate import GATE_PENDING_STALL_SECONDS
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.state import DispatcherRecord, now_rfc3339
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
