@@ -49,7 +49,7 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
     def _with_refusing_guard(self):
         """Patch the dispatcher's guard symbol to refuse everything."""
         return mock.patch.object(
-            dispatcher_module,
+            wait_vitality_module,
             "_assert_destructive_allowed",
             side_effect=_refuse_everything,
         )
@@ -191,7 +191,7 @@ class TheGuardReallyFiresTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._rewind_idle()
 
         with mock.patch.object(
-            dispatcher_module,
+            wait_vitality_module,
             "_assert_destructive_allowed",
             wraps=wait_vitality_module._assert_destructive_allowed,
         ) as guard:
@@ -215,7 +215,7 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
         # The operator's explicit command path: the host's stop_head with no vitality
         # history on file. It must not be fenced by the guard.
         with mock.patch.object(
-            dispatcher_module,
+            wait_vitality_module,
             "_assert_destructive_allowed",
             side_effect=AssertionError("the guard must not be consulted"),
         ):
@@ -231,7 +231,7 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
         # The lifecycle stop goes through its own confirmed-stop path, which the guard
         # never sees; the assertion is that it completes without one.
         with mock.patch.object(
-            dispatcher_module,
+            wait_vitality_module,
             "_assert_destructive_allowed",
             side_effect=AssertionError("the guard must not be consulted"),
         ):

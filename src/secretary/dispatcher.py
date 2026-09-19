@@ -92,6 +92,9 @@ from secretary.dispatch.helpers import (
 from secretary.dispatch.helpers import (
     red_review_count as _red_review_count,
 )
+from secretary.dispatch.helpers import (
+    safe_one_line as _safe_one_line,
+)
 from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     DESTRUCTIVE_VERDICTS,
     HEAD_STOP_GRACE_SECONDS,

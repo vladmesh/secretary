@@ -755,7 +755,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
                 answer_owed_since=answer_owed_since,
             )
 
-        with mock.patch("secretary.dispatcher._reduce_vitality", spy):
+        with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
             self._head_at_its_prompt()
             self.tick()
 
