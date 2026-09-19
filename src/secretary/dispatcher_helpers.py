@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_state import attempt_request_id, request_token
+from secretary.dispatch.state import attempt_request_id, request_token
 
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
 _BLOB_RE = re.compile(r"\b[A-Za-z0-9+=_-]{40,}\b")
