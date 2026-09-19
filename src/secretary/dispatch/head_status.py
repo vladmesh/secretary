@@ -54,9 +54,9 @@ from secretary.dispatcher_review import (
     pane_matcher,
 )
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatcher_tui import provider_progress_for_persisted_run
+from secretary.dispatch.tui import provider_progress_for_persisted_run
 from secretary.dispatch.types import HostError
-from secretary.dispatcher_watchdog import head_run_process_status, pid_file_path
+from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
 from triggered_agents.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can

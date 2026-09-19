@@ -50,10 +50,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_heartbeat import intent_heartbeat_identity
+from secretary.dispatch.heartbeat import intent_heartbeat_identity
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, LaunchIntent
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_ACCEPTED,
     DELIVERY_RECEIPT_REFUSED,
     DELIVERY_RECEIPT_UNOBSERVED,
@@ -71,7 +71,7 @@ from secretary.dispatch.types import (
     HeadPaneNotReady,
     HostError,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     bind_head_heartbeat,
     bring_up_defer_attempts,
     head_process_status,

@@ -9,7 +9,7 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
-from secretary.dispatcher_tui import (
+from secretary.dispatch.tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
     DELIVERY_RECEIPT_ACCEPTED,

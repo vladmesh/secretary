@@ -19,7 +19,7 @@ The evidence is three files this product owns, and nothing else — no pane, no 
 manager, and no inventory of any kind:
 
   1. the head's **launch identity**, read through the product's one reader for it
-     (`secretary.dispatcher_watchdog.head_process_status`, the same door
+     (`secretary.dispatch.watchdog.head_process_status`, the same door
      :mod:`secretary.webproto.agents` reads liveness through). The expectation is the shape the
      local-pty backend itself writes and compares — run id, role and the task string the supervisor
      was given — so this asks the head the same question its own backend asks;
@@ -51,7 +51,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,

@@ -77,7 +77,7 @@ from secretary.dispatch.head_vitality import (
     TurnState,
     VitalitySnapshot,
 )
-from secretary.dispatcher_watchdog import IDLE_STALL_DEFAULT
+from secretary.dispatch.watchdog import IDLE_STALL_DEFAULT
 
 # Serialisation version of ``VitalityEpisode``. Strictly coupled to SNAPSHOT_VERSION's discipline:
 # a schema change bumps this and answers for old payloads explicitly instead of reinterpreting

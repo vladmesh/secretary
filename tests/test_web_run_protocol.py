@@ -1395,7 +1395,7 @@ class RealHeadFixture(ProductRuntimeFixture):
 
     def real_backend(self):
         """The real supervised backend, over this fixture's own data directory, reaped afterwards."""
-        from secretary.dispatcher_watchdog import head_process_status
+        from secretary.dispatch.watchdog import head_process_status
         from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
 
         root = self.data_dir / "webproto" / "heads"
@@ -1469,7 +1469,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
     """
 
     def test_a_real_head_is_stopped_by_a_record_recovered_from_the_store(self) -> None:
-        from secretary.dispatcher_watchdog import (
+        from secretary.dispatch.watchdog import (
             HEARTBEAT_DEAD,
             HEARTBEAT_LIVE_MATCH,
             head_process_status,
@@ -1992,7 +1992,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
             with self.assertRaises(RuntimeUnavailable):
                 call["session"]()
             # And liveness is the product's one launch-identity reader, not a scheme of its own.
-            from secretary.dispatcher_watchdog import head_process_status
+            from secretary.dispatch.watchdog import head_process_status
 
             self.assertIs(call["identity"], head_process_status)
 

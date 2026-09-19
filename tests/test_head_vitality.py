@@ -28,7 +28,7 @@ from secretary.dispatch.head_vitality import (
     TurnState,
     VitalitySnapshot,
 )
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
     head_process_status,

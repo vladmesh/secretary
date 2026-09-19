@@ -22,9 +22,9 @@ from pathlib import Path
 from unittest import mock
 
 import secretary.dispatcher as secretary_dispatcher
-from secretary.dispatcher_heartbeat import heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatcher_watchdog import (
+from secretary.dispatch.watchdog import (
     head_process_status,
     suspension_response_window_seconds,
 )

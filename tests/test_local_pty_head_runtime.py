@@ -38,7 +38,7 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.dispatcher_watchdog import clear_head_heartbeat, head_process_status
+from secretary.dispatch.watchdog import clear_head_heartbeat, head_process_status
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from triggered_agents.runtime.head import (
     EXITED,
