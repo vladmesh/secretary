@@ -73,7 +73,7 @@ from secretary.dispatch.pause import (
     on_resume_text,
 )
 from secretary.dispatch.pause_ops import head_lines
-from secretary.dispatcher_production import ProductionState
+from secretary.dispatch.production import ProductionState
 from secretary.sprints import SprintReader
 from secretary.tasks import _TYPED_RECORD_TYPES
 from secretary.webproto import sources
