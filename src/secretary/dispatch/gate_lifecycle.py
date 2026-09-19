@@ -25,7 +25,7 @@ from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
-from secretary.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
+from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, GateTransportError, HostError, ProjectGitAccessError
 from secretary.dispatch.wait_vitality import execute_recovery_intent as _execute_recovery_intent
 from secretary.dispatch.wait_vitality import recovery_policy_outcome as _recovery_policy_outcome
 from secretary.dispatch.wait_vitality import (
@@ -88,7 +88,7 @@ def run_gate(
         )
         records.pop(ref, None)
         runtime.save_records(payload, records)
-        outcome = {
+        outcome: dict[str, Any] = {
             "status": "blocked",
             "step": "gate",
             "pilot_ref": ref,
@@ -302,7 +302,7 @@ def gate_red_to_worker(
     if unconfirmed is not None:
         return unconfirmed
     # The round ends with no reviewer verdict: the outcome names the gate, not a reviewer.
-    return _begin_red_transition(self, 
+    return _begin_red_transition(runtime, 
         task,
         record,
         records,
@@ -434,9 +434,6 @@ def _retry_infrastructure_gate(
         "action": "gate-infrastructure-rerun",
         "reason": result.failure_reason,
     }
-
-
-@staticmethod
 
 
 def _block_infrastructure_reruns_exhausted(
@@ -728,7 +725,7 @@ def gate_pending(
             # ceiling below is untouched: it bounds the CI rollup, not the head.
             pass
         elif episode.verdict is VitalityVerdict.SUSPENDED:
-            return _execute_recovery_intent(self, 
+            return _execute_recovery_intent(runtime, 
                 task,
                 record,
                 records,
@@ -741,7 +738,7 @@ def gate_pending(
         else:
             # Any other verdict still rides the policy once: a deterministic refusal on
             # file escalates fast even mid-gate, and a recovered suspension resets its rung.
-            outcome = _recovery_policy_outcome(self, 
+            outcome = _recovery_policy_outcome(runtime, 
                 task,
                 record,
                 records,
@@ -813,7 +810,7 @@ def _worker_vitality_for_gate(
         # Nothing was observed: no honest episode exists for this tick.
         return record.worker_vitality_episode
     try:
-        return _reduce_and_store_vitality_episode(self, 
+        return _reduce_and_store_vitality_episode(runtime, 
             task,
             record,
             records,
