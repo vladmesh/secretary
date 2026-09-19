@@ -15,7 +15,7 @@ from unittest import mock
 
 from secretary.cli import main as secretary_main
 from secretary.dispatch.runtime_provenance import ProductionRuntime
-from secretary.dispatcher_production import record_tick_telemetry
+from secretary.dispatch.production import record_tick_telemetry
 from triggered_agents.agents.steward import signals as steward_signals
 from triggered_agents.runtime import health, production_telemetry
 from triggered_agents.runtime.role_env import runtime_env
