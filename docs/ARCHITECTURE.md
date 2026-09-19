@@ -61,10 +61,12 @@ worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects
 verdict, transport retry, bounded infrastructure rerun and pending-CI policy are package-owned by
 `secretary.dispatch.gate_lifecycle`. `dispatch.review_verdict` owns durable review-verdict
 acceptance and Assessment parking: marker consumption, reviewer-stop handoff, green/red bookkeeping,
-the no-observer red ceiling, pre-park merge readiness, and park intent/replay. `dispatch.assessment_decision`
-owns Assessment decision intake/replay plus rework/reslice execution, delegating only release back to
-the separate release/merge state machine. Reviewer launch/wait, release/merge effects and
-completion-evidence policy remain in `DispatcherRuntime` for later bounded extraction.
+the no-observer red ceiling, pre-park gate handoff, and park intent/replay. `dispatch.assessment_decision`
+owns Assessment decision intake/replay plus rework/reslice execution. `dispatch.release_lifecycle`
+owns the shared merge-readiness check, research-report publication, release replay/gate re-check,
+merge-path blocking, merge/teardown, completion-evidence enforcement and the final transition to
+Done. Reviewer launch/wait and the generic terminal/outcome bookkeeping remain in
+`DispatcherRuntime` as separate boundaries.
 
 Dependency rules:
 
