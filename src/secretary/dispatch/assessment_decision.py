@@ -8,8 +8,8 @@ from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
 )
-from secretary.dispatch.helpers import _last_marker_body
 from secretary.dispatch import release_lifecycle
+from secretary.dispatch.helpers import _last_marker_body
 from secretary.dispatch.review_verdict import complete_park as _complete_park
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import STOPPED_BY_REVIEW_VERDICT, HostError
