@@ -3767,12 +3767,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 "show",
                 side_effect=TaskError("backend_error", "sprint board is down", 1),
             ) as show,
-            mock.patch.object(self.runtime, "_claim", return_value={"action": "claimed"}) as claim,
+            mock.patch(
+                "secretary.dispatch.production.claim_ready_task",
+                return_value={"action": "claimed"},
+            ) as claim,
         ):
             result = _production_claim_ready(self.runtime, {}, {})
 
         self.assertEqual(show.call_count, 1)
-        self.assertEqual(claim.call_args.args[0]["ref"], "claimable")
+        self.assertIs(claim.call_args.args[0], self.runtime)
+        self.assertEqual(claim.call_args.args[1]["ref"], "claimable")
         self.assertEqual([item["ref"] for item in result["skipped_ready"]], ["broken-1", "broken-2"])
 
     def test_unreadable_sprint_board_never_stops_a_live_head(self) -> None:

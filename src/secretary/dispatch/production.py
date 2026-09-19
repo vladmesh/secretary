@@ -17,6 +17,7 @@ from secretary.board.terminal_taxonomy import (
     read_terminal_taxonomy,
 )
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatch.claim import claim_ready_task
 from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
@@ -1518,7 +1519,8 @@ def _production_claim_ready(
         resume_workspaces = payload.get("resume_workspaces")
         resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces
         try:
-            outcome = runtime._claim(
+            outcome = claim_ready_task(
+                runtime,
                 task,
                 records,
                 payload,
