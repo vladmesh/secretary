@@ -261,7 +261,24 @@ class WebApp:
         handler is chosen and therefore before any operation of the layer can run -- which is the
         whole of it: a rule written per route is a rule the next route forgets, and the two routes
         that already start heads would have been exactly the ones nobody went back to.
+
+        The bottom bar's source is fed here for the same reason and in the same one place: every
+        page rendered under this call, refusals included, draws the providers' limits from it, and
+        it is a callable rather than a document, so a JSON route -- which renders no page -- costs
+        no provider read. It is unset again when the request ends, so nothing is held between two.
         """
+        with pages.limits_source(self._limits_section):
+            return self._handle(method, path, query=query, body=body, headers=headers)
+
+    def _handle(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: str = "",
+        body: bytes = b"",
+        headers: Any = None,
+    ) -> Response:
         route, params = self.match(method, path)
         if route is None:
             return self._refuse(
@@ -468,7 +485,7 @@ class WebApp:
         snapshot = self.reads.system_snapshot()
         pause = self._or_reason(self.pause_reads.pause_state)
         sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
-        limits = self._or_reason(self.provider_usage.usage_snapshot) if self.provider_usage else None
+        limits = self._limits_section()
         # Only a number, so it needs no token; a PO store that does not answer hides it, nothing more.
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
         return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, limits=limits, po=po))
@@ -514,6 +531,17 @@ class WebApp:
             200,
             pages.commands(self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))),
         )
+
+    def _limits_section(self) -> dict[str, Any] | None:
+        """The provider limits for a page, or `None` when this process was built without them.
+
+        The one read behind both the dashboard's panel and the bottom bar of every page. It is the
+        cached layer's own call and nothing else: the cache decides when a provider is actually
+        asked, so rendering a hundred pages inside one cache window asks each provider once.
+        """
+        if self.provider_usage is None:
+            return None
+        return self._or_reason(self.provider_usage.usage_snapshot)
 
     def _or_reason(self, read: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         """A section's document, or the reason it has none, for a page made of several reads."""

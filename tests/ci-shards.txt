@@ -161,6 +161,7 @@ unit tests/test_web_front_cookie_order.py
 unit tests/test_web_transport.py
 unit tests/test_web_dashboard_transport.py
 unit tests/test_web_po_transport.py
+unit tests/test_web_status_bar.py
 unit tests/test_web_markdown.py
 unit tests/test_po_token.py
 unit tests/test_provider_usage.py

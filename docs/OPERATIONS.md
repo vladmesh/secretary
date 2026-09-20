@@ -1550,8 +1550,28 @@ The dashboard (`/`) has four parts that fail apart:
 
 Card pages carry a comment and a move with reason (a second reason past the sprint's reservation); sprint
 pages carry a comment and, when open, the close. All post to the routes in
-[Protocols](PROTOCOLS.md#routes) as role `po`, actor `web`. There is no browser `decide`. The page reloads
-every 30 seconds unless something is being typed; a checkbox turns that off.
+[Protocols](PROTOCOLS.md#routes) as role `po`, actor `web`. There is no browser `decide`. Every page reloads
+every 30 seconds unless a field has focus or holds typed text — a half-written `/po` message is never
+discarded by it; a checkbox turns the reload off, and the one in the bottom bar and the one on the
+dashboard are the same switch.
+
+### The bottom status bar
+
+Every HTML page the transport serves — the dashboard, sprints, projects, cards, `/history`, the sprint
+form, `/po` and its sessions, and refusal pages too — ends in one bar fixed to the bottom of the viewport.
+It shows what each provider subscription has left: for Claude and for Codex, every usage window the
+provider reported, its remaining percentage and when it resets. A provider whose reading is stale or
+unavailable is shown with that word, the reason, and no percentage at all: on a bar a number is read as
+what is left *now*, so no reading is drawn as words rather than as a figure. An available reading taken a
+while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it
+covers nothing, the `/po` composer included.
+
+Its data is the cached provider layer (`secretary.web.provider_usage`, a five-minute in-process cache) —
+the same document the dashboard's `Usage limits` panel draws. **Rendering a page never adds a provider
+call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
+each provider once, and JSON routes, which render no page, ask nothing. A process built without the
+provider layer, and a read that refuses, both still serve every page; the bar then carries the reason
+where the numbers would be.
 
 ### Running a card through the installed service
 

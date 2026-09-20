@@ -24,6 +24,9 @@ on the screen exactly as they typed it.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from html import escape
 from typing import Any
 from urllib.parse import quote
@@ -278,6 +281,23 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 .bad-field { color: var(--bad); font-size: .85rem; }
 .refused, .pending { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: .5rem .75rem; margin: .5rem 0; border-radius: 0 4px 4px 0; }
 .launch { font-weight: 600; }
+
+/* the shared bottom bar: what each provider has left, on every page.
+   Its height is reserved on the body rather than overlaid, so nothing a page draws -- the /po
+   composer least of all -- ends up underneath it. The row never wraps: it scrolls sideways
+   instead, which is what keeps the reserved height true at phone width as well as at desktop. */
+:root { --bar-height: 2.4rem; }
+body { padding-bottom: var(--bar-height); }
+.statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; height: var(--bar-height); background: var(--surface); border-top: 1px solid var(--line); }
+.statusbar .row { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 100%; display: flex; align-items: center; gap: 1.1rem; white-space: nowrap; overflow-x: auto; font-size: .78rem; color: var(--muted); }
+.statusbar .provider { display: inline-flex; align-items: baseline; gap: .4rem; }
+.statusbar .provider > b { color: var(--ink); font-weight: 600; }
+.statusbar .window { font-family: var(--mono); color: var(--ink); }
+.statusbar .window .resets { color: var(--muted); }
+.statusbar .reason, .statusbar .age { font-size: inherit; }
+.statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
+.statusbar .bar-refresh input { margin: 0; }
+@media (max-width: 600px) { .statusbar .row { padding: 0 12px; gap: .8rem; } }
 @media (prefers-reduced-motion: no-preference) { .light::before { transition: background .2s; } }
 """
 
@@ -295,6 +315,119 @@ NAV: tuple[tuple[str, str, str], ...] = (
 )
 
 FONTS = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+
+
+# -- the bottom status bar ------------------------------------------------------------------------
+#
+# The bar belongs to the shell, not to any page: it is rendered once, inside :func:`_page`, so a
+# page function added tomorrow gets it without knowing it exists and cannot grow a provider read of
+# its own. What it draws is handed in by the transport, which is the only thing here that may talk
+# to a layer -- and it is handed in *lazily*, as a callable, so a JSON route that never renders a
+# page never causes a provider read at all.
+#
+# The value is a context variable and not module state: it is set for the span of one request and
+# reset when that span ends, so two requests answered on two threads never see each other's.
+
+#: The read the bar draws, for the span of one request: a `{"available", "reason", "document"}`
+#: section, or `None` when this process was built without the provider usage layer.
+_LIMITS_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
+    "secretary.web.limits_source", default=None
+)
+
+#: Said when nothing fed the bar: no provider layer was built into this process at all.
+LIMITS_NOT_BUILT = "this web process was built without the provider usage layer"
+#: Said when the reading came back but carries nothing about this provider.
+LIMITS_NOT_IN_READING = "this reading carried nothing about this provider"
+
+#: The providers the bar always keeps a place for, in this order, whatever a reading holds.
+BAR_PROVIDERS: tuple[tuple[str, str], ...] = (("claude", "Claude"), ("codex", "Codex"))
+
+
+@contextmanager
+def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
+    """Feed the bottom bar for the span of one request, and stop feeding it when that span ends."""
+    token = _LIMITS_SOURCE.set(read)
+    try:
+        yield
+    finally:
+        _LIMITS_SOURCE.reset(token)
+
+
+def _limits_bar() -> str:
+    """The bar, from whatever the transport is feeding it -- which may be nothing at all."""
+    read = _LIMITS_SOURCE.get()
+    section = read() if read is not None else None
+    return _limits_bar_of(section)
+
+
+def _limits_bar_of(section: dict[str, Any] | None) -> str:
+    """The bar for one section, kept apart from where the section comes from so a test can hand one in.
+
+    Three things are never confused here, in the same way :func:`_limits_panel` keeps them apart on
+    the dashboard: a current reading, a reading that is not current, and no reading at all. Only the
+    first draws a percentage, because a number on a bar is read as what is left *now*.
+    """
+    document = (
+        section.get("document") if isinstance(section, dict) and section.get("available") else None
+    )
+    document = document if isinstance(document, dict) else None
+    if document is not None:
+        refused = LIMITS_NOT_IN_READING
+    elif isinstance(section, dict):
+        refused = str(section.get("reason") or "provider usage was not read")
+    else:
+        refused = LIMITS_NOT_BUILT
+    carried: dict[str, dict[str, Any]] = {}
+    for provider in (document or {}).get("providers") or []:
+        if isinstance(provider, dict) and provider.get("id") is not None:
+            carried[str(provider["id"])] = provider
+    named = {key for key, _ in BAR_PROVIDERS}
+    parts = [_bar_provider(label, carried.get(key), refused) for key, label in BAR_PROVIDERS]
+    parts += [
+        _bar_provider(str(provider.get("label") or key), provider, refused)
+        for key, provider in carried.items()
+        if key not in named
+    ]
+    parts.append(
+        '<label class="bar-refresh" title="reload this page every 30 s while nobody is typing">'
+        '<input type="checkbox" data-refresh-toggle> auto</label>'
+    )
+    return (
+        '<footer class="statusbar" id="status-bar" aria-label="provider usage limits">'
+        f'<div class="row">{"".join(parts)}</div></footer>'
+    )
+
+
+def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> str:
+    """One provider's place on the bar: its windows, or why there is no current reading."""
+    if provider is None:
+        return f'<span class="provider"><b>{escape(label)}</b>{_bar_no_reading(refused)}</span>'
+    shown = escape(str(provider.get("label") or label))
+    status = str(provider.get("status") or "unavailable")
+    age = provider.get("age_seconds")
+    old = "" if age in (None, 0, 0.0) else f' <span class="age">{_age(age)} old</span>'
+    if status != "available":
+        reason = str(provider.get("reason") or "no reason was recorded")
+        mark = _chip(status, "warn")
+        return f'<span class="provider"><b>{shown}</b>{mark}{_bar_no_reading(reason)}{old}</span>'
+    windows = [window for window in provider.get("windows") or [] if isinstance(window, dict)]
+    if not windows:
+        return (
+            f'<span class="provider"><b>{shown}</b>'
+            f'{_bar_no_reading("this reading carried no usage window")}{old}</span>'
+        )
+    drawn = "".join(
+        f'<span class="window">{escape(str(window.get("name") or "window"))} '
+        f'<b>{escape(str(window.get("remaining_percent", "—")))}%</b> '
+        f'<span class="resets">resets {escape(str(window.get("resets_at") or "—"))}</span></span>'
+        for window in windows
+    )
+    return f'<span class="provider"><b>{shown}</b>{drawn}{old}</span>'
+
+
+def _bar_no_reading(reason: str) -> str:
+    """The stand-in for a percentage. It is words, never a number: no reading is not a low reading."""
+    return f'<span class="reason">no current reading — {escape(reason)}</span>'
 
 
 def _page(
@@ -347,6 +480,7 @@ def _page(
             "<main>",
             body,
             "</main>",
+            _limits_bar(),
             """<script>(() => {
   const button = document.getElementById('theme-toggle');
   function currentTheme() {
@@ -370,7 +504,9 @@ def _page(
   });
   showTheme();
 })();</script>""",
-            f"<script>{script}</script>" if script else "",
+            # The refresh is the shell's, like the bar it keeps current, so every page has it and
+            # every page obeys the one rule: nothing reloads while a form holds typed text.
+            f"<script>{script}{_REFRESH_SCRIPT}</script>",
             "</body></html>",
         ]
     )
@@ -517,7 +653,7 @@ def dashboard(
         [
             '<div class="lead"><h1>Dashboard</h1>',
             f'<span class="age">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span>',
-            '<label class="refresh"><input type="checkbox" id="auto-refresh"> refresh every 30 s</label></div>',
+            '<label class="refresh"><input type="checkbox" id="auto-refresh" data-refresh-toggle> refresh every 30 s</label></div>',
             '<section class="panel">',
             _pipeline_strip(pause, installation),
             '<div class="body" id="pause-feedback-holder"><p id="pause-feedback" class="feedback"></p></div>',
@@ -539,7 +675,7 @@ def dashboard(
             "</div></div>",
         ]
     )
-    return _page("Dashboard", body, script=_ACTIONS_SCRIPT + _REFRESH_SCRIPT, nav="dashboard")
+    return _page("Dashboard", body, script=_ACTIONS_SCRIPT, nav="dashboard")
 
 
 def _sprint_items(section: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1795,19 +1931,31 @@ for (const form of document.querySelectorAll('form.pause')) form.addEventListene
 """
 
 _REFRESH_SCRIPT = """
-// Reload every 30 s while nobody is typing. The choice is this browser's and is remembered.
-const box = document.getElementById('auto-refresh');
-if (box) {
-  try { box.checked = localStorage.getItem('secretary.web.refresh') !== 'off'; } catch (error) { box.checked = true; }
-  box.addEventListener('change', () => { try { localStorage.setItem('secretary.web.refresh', box.checked ? 'on' : 'off'); } catch (error) {} });
+// Reload every 30 s while nobody is typing, which is what keeps the bottom bar's numbers current
+// on a page nobody touches. Every switch carrying data-refresh-toggle is the same switch -- the
+// bar has one on every page, the dashboard keeps its own -- and the choice is this browser's and is
+// remembered. The guard is the point and is never loosened: focus in a field, or any field holding
+// text, cancels the reload, so a half-written /po message is never discarded by it.
+(() => {
+  const boxes = Array.from(document.querySelectorAll('input[data-refresh-toggle]'));
+  let on = true;
+  try { on = localStorage.getItem('secretary.web.refresh') !== 'off'; } catch (error) { on = true; }
+  for (const box of boxes) {
+    box.checked = on;
+    box.addEventListener('change', () => {
+      on = box.checked;
+      for (const other of boxes) other.checked = on;
+      try { localStorage.setItem('secretary.web.refresh', on ? 'on' : 'off'); } catch (error) {}
+    });
+  }
   window.setInterval(() => {
-    if (!box.checked) return;
+    if (!on) return;
     const active = document.activeElement;
     if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.tagName === 'SELECT')) return;
     for (const field of document.querySelectorAll('textarea, input[type=text], input:not([type])')) if (field.value) return;
     window.location.reload();
   }, 30000);
-}
+})();
 """
 
 _TASK_SCRIPT = """
