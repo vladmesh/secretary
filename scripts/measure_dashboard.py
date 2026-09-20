@@ -53,8 +53,12 @@ CONCURRENT_ROUTE = "/"
 PO_OVERVIEW = "/po"
 PO_SESSION_JSON = "/po/api/sessions/{session}"
 
-#: Every request this script is able to make, as a reviewer reads it: method and route, nothing else.
+#: Every request this script is able to make, as a reviewer reads it: method and route, nothing
+#: else. It is the complete surface, verbs included — the reachability probe is a HEAD and is on
+#: this list for that reason, and `tests.test_measurement_script` checks a whole run's request log
+#: against these pairs, so a request that is not here fails there.
 READ_REQUESTS = (
+    ("HEAD", "/"),
     ("GET", "/"),
     ("GET", "/sprints"),
     ("GET", "/projects"),
@@ -74,6 +78,18 @@ WARM_REQUESTS = 20
 #: real operator leaves open keeps polling its session.
 CONCURRENT_REQUESTS = 4
 POLL_INTERVAL_SECONDS = 3.0
+#: How many times that scenario is repeated. One round of it is not a measurement: the first
+#: baseline taken with this script came out 17 s, 27–29 s and 38–41 s on three runs of the same
+#: unchanged installation, a factor of 2.4, and a later card cannot close or refuse a 2.0 s item on
+#: one sample from an instrument with that spread. Three rounds, every one of them printed, and the
+#: threshold judged on the worst: the DoD says *each* request answers within 2.0 s, so a scenario
+#: that breaches it in one round of three has not met it.
+CONCURRENT_ROUNDS = 3
+
+#: How long the poll is given to complete its first successful read before the rounds begin. The
+#: scenario is "four requests while a poll is in flight", and a poll that has not started yet is
+#: not in flight — so the rounds wait for it rather than racing it.
+POLL_READY_TIMEOUT_SECONDS = 30.0
 
 #: The Definition of Done, in milliseconds. Warm p95 is judged per route; each of the four
 #: concurrent requests is judged on its own, because a browser that waits is a browser that waits.
@@ -103,6 +119,12 @@ class Sample:
     route: str
     status: int
     duration_ms: float
+    body: bytes = b""
+
+    @property
+    def ok(self) -> bool:
+        """Whether the installation answered this read, as opposed to refusing it or missing it."""
+        return 200 <= self.status < 300
 
 
 @dataclass
@@ -127,8 +149,13 @@ class Report:
     poll_target: str
     poll_explanation: str
     warm: list[dict[str, Any]] = field(default_factory=list)
-    concurrent: list[Sample] = field(default_factory=list)
+    #: One entry per round of the concurrent scenario, each holding its four samples.
+    concurrent: list[list[Sample]] = field(default_factory=list)
+    #: Which of those rounds the threshold was judged on: the one with the slowest request in it.
+    worst_round: int = 0
     measurements: list[Measurement] = field(default_factory=list)
+    #: Polls of the selected session that answered 2xx. Only these are counted, so the line cannot
+    #: report a scenario that never ran.
     poll_requests: int = 0
 
 
@@ -146,14 +173,19 @@ def fetch(base_url: str, route: str, *, method: str = "GET", cookie: str = "") -
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            response.read()
+            payload = response.read()
             status = int(response.status)
     except urllib.error.HTTPError as exc:
-        exc.read()
+        payload = exc.read()
         status = int(exc.code)
     except (urllib.error.URLError, OSError) as exc:
         raise Unmeasurable(f"{method} {route} on {base_url} could not be made: {exc}") from None
-    return Sample(route=route, status=status, duration_ms=(time.perf_counter() - started) * 1000.0)
+    return Sample(
+        route=route,
+        status=status,
+        duration_ms=(time.perf_counter() - started) * 1000.0,
+        body=payload,
+    )
 
 
 def p95(values: list[float]) -> float:
@@ -197,29 +229,62 @@ class SessionPoll:
     A read, every three seconds, on the one route the PO page polls. It runs beside the four
     concurrent requests rather than being measured itself: what is being measured is what the
     dashboard costs while that poll is in flight.
+
+    Which is why a poll that does not answer ends the run. The scenario named in the DoD is four
+    requests *while a session is being polled*, so a poll that 404s or cannot be made has not
+    measured that scenario — it has measured a quieter one and would report it under the same
+    heading. The first round is therefore not allowed to start until one poll has actually
+    succeeded (`ready`), and a failure at any point is kept and raised by :meth:`check`.
     """
 
     def __init__(self, base_url: str, route: str, cookie: str) -> None:
         self.base_url = base_url
         self.route = route
         self.cookie = cookie
-        self.requests = 0
+        #: Polls that answered 2xx. This is what the output reports, so the printed count cannot
+        #: include a poll that failed.
+        self.successes = 0
+        self.failure: Unmeasurable | None = None
+        self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="po-poll", daemon=True)
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                fetch(self.base_url, self.route, cookie=self.cookie)
-            except Unmeasurable:
-                # The poll is the scenario, not the measurement: a poll that fails mid-run is
-                # reported by its count being short, and does not fail the four requests.
-                pass
-            self.requests += 1
+                sample = fetch(self.base_url, self.route, cookie=self.cookie)
+                if not sample.ok:
+                    raise Unmeasurable(
+                        f"GET {self.route} answered {sample.status}; the concurrent scenario is "
+                        f"four requests while this session is polled, and that poll did not answer"
+                    )
+            except Unmeasurable as exc:
+                # Recorded, not swallowed: the run is over, and `check` is where it is reported on
+                # the caller's thread. Polling stops, because every further attempt would fail the
+                # same way and the measurement is already void.
+                self.failure = exc
+                self._ready.set()
+                return
+            self.successes += 1
+            self._ready.set()
             self._stop.wait(POLL_INTERVAL_SECONDS)
+
+    def check(self) -> None:
+        """Raise whatever the poll thread hit, on the caller's thread."""
+        if self.failure is not None:
+            raise self.failure
 
     def __enter__(self) -> Self:
         self._thread.start()
+        if not self._ready.wait(POLL_READY_TIMEOUT_SECONDS):
+            self.__exit__()
+            raise Unmeasurable(
+                f"GET {self.route} did not answer within {POLL_READY_TIMEOUT_SECONDS:.0f} s, so the "
+                f"concurrent requests would not have been measured against a live poll"
+            )
+        if self.failure is not None:
+            self.__exit__()
+            self.check()
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -288,15 +353,20 @@ def choose_poll_target(base_url: str, cookie: str) -> tuple[str, str]:
     """
     if not cookie:
         return "", ""
-    try:
-        overview = urllib.request.Request(base_url.rstrip("/") + PO_OVERVIEW, method="GET")
-        overview.add_header("Cookie", cookie)
-        with urllib.request.urlopen(overview, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            markup = response.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, OSError) as exc:
-        return "", f"{PO_OVERVIEW} could not be read: {exc}"
-    found = _SESSION_LINK.search(markup)
+    # A transport failure raises out of `fetch` and ends the run; a non-2xx answer ends it here.
+    # Neither is the no-session case, and the distinction is the whole point: a `/po` that is
+    # missing, refused or broken is an installation this script cannot measure as specified, and
+    # reporting it as "no session to poll" would hand back a green result for a run that never
+    # took the measurement it claims.
+    overview = fetch(base_url, PO_OVERVIEW, cookie=cookie)
+    if not overview.ok:
+        raise Unmeasurable(
+            f"GET {PO_OVERVIEW} answered {overview.status}; the poll target is chosen from that "
+            f"page, so this installation cannot be measured as specified"
+        )
+    found = _SESSION_LINK.search(overview.body.decode("utf-8", "replace"))
     if not found:
+        # The product's own no-session state: the page answered, and there is nothing to poll.
         return "", f"{PO_OVERVIEW} lists no session to poll"
     session = found.group(1)
     return PO_SESSION_JSON.format(session=session), (
@@ -335,15 +405,29 @@ def run(base_url: str, data_dir: Path | None) -> Report:
         )
 
     if poll_target:
+        # `__enter__` waits for one successful poll and raises if the poll cannot be made, so the
+        # rounds below can never run against a scenario that is not the one being reported.
         with SessionPoll(base_url, poll_target, cookie) as poll:
-            report.concurrent = measure_concurrent(base_url)
-        report.poll_requests = poll.requests
+            report.concurrent = [measure_concurrent(base_url) for _ in range(CONCURRENT_ROUNDS)]
+        poll.check()
+        report.poll_requests = poll.successes
     else:
-        report.concurrent = measure_concurrent(base_url)
-    for index, sample in enumerate(report.concurrent, start=1):
+        report.concurrent = [measure_concurrent(base_url) for _ in range(CONCURRENT_ROUNDS)]
+
+    # The judged round is the one holding the slowest single request: the DoD asks that *each* of
+    # the four answers within 2.0 s, so a scenario that breaches it once in three rounds has not
+    # met it, and judging the best or the average would report that it had.
+    report.worst_round = max(
+        range(len(report.concurrent)),
+        key=lambda index: max(sample.duration_ms for sample in report.concurrent[index]),
+    )
+    for index, sample in enumerate(report.concurrent[report.worst_round], start=1):
         report.measurements.append(
             Measurement(
-                label=f"concurrent GET {CONCURRENT_ROUTE} #{index} of {CONCURRENT_REQUESTS}",
+                label=(
+                    f"concurrent GET {CONCURRENT_ROUTE} #{index} of {CONCURRENT_REQUESTS} "
+                    f"(worst of {CONCURRENT_ROUNDS} rounds)"
+                ),
                 value_ms=sample.duration_ms,
                 threshold_ms=CONCURRENT_THRESHOLD_MS,
             )
@@ -359,7 +443,7 @@ def render(report: Report) -> list[str]:
     if report.poll_target:
         lines.append(f"/po poll: GET {report.poll_target} every {POLL_INTERVAL_SECONDS:.0f} s")
         lines.append(f"  chosen as {report.poll_explanation}")
-        lines.append(f"  polled {report.poll_requests} time(s) during the concurrent requests")
+        lines.append(f"  polled successfully {report.poll_requests} time(s) during the concurrent rounds")
     else:
         lines.append(f"/po poll: none — {report.poll_explanation}")
         lines.append("  the concurrency numbers below were measured WITHOUT the poll")
@@ -369,15 +453,32 @@ def render(report: Report) -> list[str]:
         f"after {WARMUP_REQUESTS} discarded warm-up request"
     )
     width = max(len(measurement.label) for measurement in report.measurements)
-    for measurement in report.measurements:
-        verdict = "MEETS" if measurement.met else "EXCEEDS"
-        line = (
-            f"  {measurement.label:<{width}}  {measurement.value_ms:8.0f} ms  "
-            f"threshold {measurement.threshold_ms:.0f} ms  {verdict}"
-        )
-        if measurement.detail:
-            line = f"{line}\n  {'':<{width}}  ({measurement.detail})"
-        lines.append(line)
+
+    def rows(measurements: list[Measurement]) -> list[str]:
+        written: list[str] = []
+        for measurement in measurements:
+            verdict = "MEETS" if measurement.met else "EXCEEDS"
+            line = (
+                f"  {measurement.label:<{width}}  {measurement.value_ms:8.0f} ms  "
+                f"threshold {measurement.threshold_ms:.0f} ms  {verdict}"
+            )
+            if measurement.detail:
+                line = f"{line}\n  {'':<{width}}  ({measurement.detail})"
+            written.append(line)
+        return written
+
+    warm_count = len(report.warm)
+    lines.extend(rows(report.measurements[:warm_count]))
+    lines.append("")
+    lines.append(
+        f"concurrent: {CONCURRENT_REQUESTS} requests at once, {CONCURRENT_ROUNDS} rounds, "
+        f"judged on the worst round"
+    )
+    for index, samples in enumerate(report.concurrent, start=1):
+        marker = " <- judged" if index - 1 == report.worst_round else ""
+        durations = ", ".join(f"{sample.duration_ms:.0f}" for sample in samples)
+        lines.append(f"  round {index}: {durations} ms{marker}")
+    lines.extend(rows(report.measurements[warm_count:]))
     exceeded = [measurement for measurement in report.measurements if not measurement.met]
     lines.append("")
     if exceeded:
@@ -395,7 +496,8 @@ def as_json(report: Report) -> dict[str, Any]:
         "poll_explanation": report.poll_explanation,
         "poll_requests": report.poll_requests,
         "warm": report.warm,
-        "concurrent_ms": [sample.duration_ms for sample in report.concurrent],
+        "concurrent_rounds_ms": [[sample.duration_ms for sample in samples] for samples in report.concurrent],
+        "concurrent_worst_round": report.worst_round + 1,
         "measurements": [
             {
                 "label": measurement.label,

@@ -484,22 +484,36 @@ It makes no POST and starts no head.
 It prints, with the Definition of Done threshold beside each number and whether that number meets it:
 
 - **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up request,
-  then twenty timed ones per route. The judged number is p95 (nearest rank, so over twenty samples
-  it is the second-slowest request); min, median and max are printed beside it. Threshold: 1.0 s.
-- **four concurrent** `GET /` while a `/po/api/sessions/{session}` poll runs every three seconds,
-  with each of the four durations. Threshold: 2.0 s for each request.
+  then twenty timed ones per route. The judged number is the **p95 by nearest rank**, which over
+  twenty samples is the second-slowest of the twenty: one request that actually happened, so two
+  runs compare the same way every time. Min, median and max are printed beside it, and the warm-up
+  is discarded because the first request after a deploy pays for import and cache warming that no
+  later request pays again. Threshold: 1.0 s.
+- **four concurrent** `GET /`, all four held at a barrier so they are genuinely in flight at once,
+  while a `/po/api/sessions/{session}` poll runs every three seconds. The scenario is repeated
+  **three rounds**; every round's four durations are printed, and the threshold is judged on the
+  **worst round** — the one holding the slowest single request. One round is not a measurement:
+  the same unchanged installation produced 17 s, 27 s and 38 s on three runs of the first version
+  of this script, and the DoD says *each* of the four answers within 2.0 s, so a scenario that
+  breaches that in one round of three has not met it. Threshold: 2.0 s for each request of the
+  worst round.
 
-The output names the base URL it measured and how it chose the poll target. If the installation has
-no PO session to poll, it says so and reports the concurrency numbers without the poll, rather than
-measuring a quieter scenario under the same heading.
+The output names the base URL it measured and how it chose the poll target, and reports how many
+polls of that session **succeeded** during the rounds.
+
+If the installation has no PO session to poll — a `/po` that answers and lists none — the script
+says so and reports the concurrency numbers without the poll, rather than measuring a quieter
+scenario under the same heading. That is different from a `/po`, or a selected session, that does
+not answer: a non-2xx there is not a measurement, it is a missing one, and the command exits 2. The
+rounds never begin until one poll has actually succeeded.
 
 Exit status: `0` when every number is at or under its threshold, `1` when one exceeds it (the full
 table is still printed), `2` when there was nothing to measure — the installation was unreachable,
-or a route it needs is missing.
+a route it needs is missing, or the PO poll the scenario is defined by could not be made.
 
 The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
-command as the runtime user. Without it the script reports why and measures the concurrency without
-the poll.
+command as the runtime user. Without a readable token the script reports why and measures the
+concurrency without the poll.
 
 ## Record reconciliation and controlled divergences
 

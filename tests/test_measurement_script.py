@@ -17,6 +17,7 @@ import ast
 import contextlib
 import importlib.util
 import io
+import re
 import sys
 import threading
 import time
@@ -65,9 +66,7 @@ class _Stub(BaseHTTPRequestHandler):
     def _answer(self, *, head: bool) -> None:
         plan = self.server.plan  # type: ignore[attr-defined]
         path = self.path.partition("?")[0]
-        self.server.seen.append((self.command, path))  # type: ignore[attr-defined]
-        status, body = plan(path)
-        delay = self.server.delays.get(path, 0.0)  # type: ignore[attr-defined]
+        status, body, delay = plan(self.command, path)
         if delay:
             time.sleep(delay)
         payload = body.encode("utf-8")
@@ -100,20 +99,41 @@ class MeasurementScriptTests(unittest.TestCase):
         *,
         missing: tuple[str, ...] = (),
         sessions: bool = True,
+        session_status: int = 200,
+        overview_status: int = 200,
         delays: dict[str, float] | None = None,
+        slow_get_after: tuple[str, int, float] | None = None,
     ) -> str:
-        def plan(path: str) -> tuple[int, str]:
+        """A dashboard with a decided answer, and a decided cost, for every route.
+
+        `slow_get_after` is `(path, nth, seconds)`: that path's GETs become slow from the nth one
+        on. It is how a case makes one *round* of the concurrent scenario slow while the earlier
+        one stays fast, which is the only way to see which round the threshold is judged on.
+        """
+        seen: list[tuple[str, str]] = []
+        lock = threading.Lock()
+
+        def plan(method: str, path: str) -> tuple[int, str, float]:
+            with lock:
+                seen.append((method, path))
+                counted = sum(1 for verb, seen_path in seen if verb == "GET" and seen_path == path)
+            delay = (delays or {}).get(path, 0.0)
+            if slow_get_after is not None:
+                slow_path, nth, seconds = slow_get_after
+                if method == "GET" and path == slow_path and counted >= nth:
+                    delay = seconds
             if path in missing:
-                return 404, "no such route"
+                return 404, "no such route", delay
             if path == measure.PO_OVERVIEW:
                 link = f'<a class="ref" href="/po/sessions/{self.SESSION}">session</a>' if sessions else ""
-                return 200, f"<html>{link}</html>"
-            return 200, "<html>dashboard</html>"
+                return overview_status, f"<html>{link}</html>", delay
+            if path.startswith("/po/api/sessions/"):
+                return session_status, '{"session": {}}', delay
+            return 200, "<html>dashboard</html>", delay
 
         server = StubDashboard(("127.0.0.1", 0), _Stub)
         server.plan = plan  # type: ignore[attr-defined]
-        server.seen = []  # type: ignore[attr-defined]
-        server.delays = delays or {}  # type: ignore[attr-defined]
+        server.seen = seen  # type: ignore[attr-defined]
         self.server = server
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -136,17 +156,20 @@ class MeasurementScriptTests(unittest.TestCase):
 
     # -- read-only ---------------------------------------------------------------------------
 
-    def test_every_request_it_can_make_is_a_get_on_a_read_route_of_this_product(self) -> None:
+    def test_every_request_it_can_make_is_a_read_on_a_read_route_of_this_product(self) -> None:
         """Criterion 8, confirmed from the request list rather than from a run.
 
         Each entry is checked against the product's own route table, so a route that later became
         a write, or a pattern that stopped existing, fails here instead of on a live installation.
+        A HEAD is checked against the GET route it is served by, because that is how the transport
+        answers one (`_Handler.do_HEAD`) — there is no separate HEAD row to match.
         """
         installed = {(route.method, route.pattern) for route in ROUTES}
         for method, route in measure.READ_REQUESTS:
-            with self.subTest(route=route):
-                self.assertEqual(method, "GET")
-                self.assertIn((method, route), installed)
+            with self.subTest(method=method, route=route):
+                self.assertIn(method, measure.READ_METHODS)
+                self.assertIn(("GET", route), installed)
+        self.assertIn(("HEAD", "/"), measure.READ_REQUESTS, "the reachability probe is a request too")
 
     def test_the_fetcher_refuses_any_verb_that_is_not_a_read(self) -> None:
         self.assertEqual(set(measure.READ_METHODS), {"GET", "HEAD"})
@@ -164,20 +187,23 @@ class MeasurementScriptTests(unittest.TestCase):
         for forbidden in ("POST", "PUT", "PATCH", "DELETE"):
             self.assertNotIn(forbidden, verbs, f"{forbidden} appears as a literal in the script")
 
-    def test_a_run_asks_for_nothing_but_the_routes_on_the_list(self) -> None:
+    def test_a_run_asks_for_nothing_but_the_method_and_route_pairs_on_the_list(self) -> None:
+        """Pairs, not paths: `HEAD /` must not pass because `GET /` happens to be listed."""
         self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             self.run_main(base)
 
-        allowed = {route for _method, route in measure.READ_REQUESTS}
+        listed = set(measure.READ_REQUESTS)
+        observed = set()
         for method, path in self.server.seen:  # type: ignore[attr-defined]
-            with self.subTest(path=path):
-                self.assertIn(method, measure.READ_METHODS)
-                self.assertTrue(
-                    path in allowed or path.startswith("/po/api/sessions/"),
-                    f"{method} {path} is not on the request list",
-                )
+            # The one templated route: the session id is chosen at run time, so the observed path
+            # is folded back onto the template it came from rather than matched literally.
+            canonical = measure.PO_SESSION_JSON if path.startswith("/po/api/sessions/") else path
+            observed.add((method, canonical))
+        self.assertEqual(observed - listed, set(), "a request was made that the inventory omits")
+        # And the inventory is not padded either: every pair on it was actually asked for.
+        self.assertEqual(listed - observed, set(), "the inventory lists a request the run never made")
 
     # -- the numbers -------------------------------------------------------------------------
 
@@ -242,6 +268,98 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertIn("concurrent GET / #4 of 4", text)
         polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
         self.assertEqual(polled, [])
+
+    def test_the_concurrent_scenario_is_repeated_and_every_round_is_printed(self) -> None:
+        self.cookie()
+        base = self.serve()
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertEqual(measure.CONCURRENT_ROUNDS, 3)
+        for round_number in range(1, measure.CONCURRENT_ROUNDS + 1):
+            self.assertIn(f"  round {round_number}: ", text)
+        # Exactly one round is the judged one, and the four judged rows say which.
+        self.assertEqual(text.count("<- judged"), 1)
+        self.assertIn(f"(worst of {measure.CONCURRENT_ROUNDS} rounds)", text)
+
+    def test_the_threshold_is_judged_on_the_worst_round_not_the_first(self) -> None:
+        """A scenario that breaches 2.0 s in one round of three has not met it.
+
+        The observer's finding on the first submission: the same unchanged installation produced
+        17 s, 27 s and 38 s on three runs, so a single round could have reported either verdict.
+        Here round one is fast and the later rounds are slow, and the run must come out red.
+        """
+        self.cookie()
+        warm = 2
+        # Requests on `/`: one warm-up, then `warm` timed ones, then four per round. Slowing the
+        # eighth GET onwards leaves the warm phase and round one fast and makes round two slow.
+        first_slow = 1 + warm + measure.CONCURRENT_REQUESTS + 1
+        base = self.serve(slow_get_after=("/", first_slow, (measure.CONCURRENT_THRESHOLD_MS + 200) / 1000.0))
+        with mock.patch.object(measure, "WARM_REQUESTS", warm):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_EXCEEDED, text)
+        rounds = re.findall(r"^  round (\d+): (.*?) ms( <- judged)?$", text, re.MULTILINE)
+        self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
+        fastest = max(float(value) for value in rounds[0][1].split(", "))
+        self.assertLess(fastest, measure.CONCURRENT_THRESHOLD_MS, "round one was meant to be fast")
+        self.assertNotEqual(rounds[0][2], " <- judged", "the fast first round must not be the judged one")
+        for index in range(1, measure.CONCURRENT_REQUESTS + 1):
+            self.assertIn(f"concurrent GET / #{index} of {measure.CONCURRENT_REQUESTS}", text)
+        self.assertIn("EXCEEDS", text)
+
+    def test_a_po_overview_that_does_not_answer_is_unmeasurable_not_no_session(self) -> None:
+        """The reviewer's first reproduction: a 404 from `/po` used to exit 0 as "no session"."""
+        self.cookie()
+        base = self.serve(missing=(measure.PO_OVERVIEW,))
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn(measure.PO_OVERVIEW, text)
+        self.assertIn("404", text)
+        self.assertNotIn("MEETS", text)
+        self.assertNotIn("WITHOUT the poll", text)
+
+    def test_a_selected_session_that_does_not_answer_is_unmeasurable(self) -> None:
+        """The reviewer's second reproduction: `/po` lists a session whose JSON then 404s.
+
+        The four requests would still have been made, and would still have produced numbers — but
+        not the numbers this scenario is defined as, because nothing was being polled beside them.
+        """
+        self.cookie()
+        base = self.serve(session_status=404)
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn("/po/api/sessions/", text)
+        self.assertIn("404", text)
+        self.assertNotIn("MEETS", text)
+
+    def test_the_rounds_never_start_before_one_poll_has_succeeded(self) -> None:
+        """An explicit readiness signal, not a started thread: the poll has to be in flight."""
+        self.cookie()
+        base = self.serve()
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        seen = self.server.seen  # type: ignore[attr-defined]
+        polls = [index for index, (_method, path) in enumerate(seen) if path.startswith("/po/api/")]
+        concurrent = [
+            index
+            for index, (method, path) in enumerate(seen)
+            if method == "GET" and path == "/" and index > polls[0]
+        ]
+        self.assertTrue(polls, "the selected session was never polled")
+        self.assertTrue(concurrent, "no concurrent request followed the first poll")
+        self.assertLess(polls[0], concurrent[0], "a round started before the first poll")
+        # And the printed count is of successful polls only.
+        count = re.search(r"polled successfully (\d+) time\(s\)", text)
+        self.assertIsNotNone(count, text)
+        self.assertGreaterEqual(int(count.group(1)), 1)
 
     # -- what it cannot measure --------------------------------------------------------------
 
