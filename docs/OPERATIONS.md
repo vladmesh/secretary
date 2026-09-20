@@ -498,22 +498,41 @@ It prints, with the Definition of Done threshold beside each number and whether 
   breaches that in one round of three has not met it. Threshold: 2.0 s for each request of the
   worst round.
 
-The output names the base URL it measured and how it chose the poll target, and reports how many
-polls of that session **succeeded** during the rounds.
+  Each round's line also carries `[N poll(s) in flight]`: how many session polls genuinely
+  overlapped that round's timed window, counted from the recorded start and end of each poll. The
+  round and one poll are released from the same barrier, so the overlap is produced rather than
+  hoped for, and a round no poll overlapped is not the specified scenario — the command refuses to
+  judge it and exits 2.
 
-If the installation has no PO session to poll — a `/po` that answers and lists none — the script
-says so and reports the concurrency numbers without the poll, rather than measuring a quieter
-scenario under the same heading. That is different from a `/po`, or a selected session, that does
-not answer: a non-2xx there is not a measurement, it is a missing one, and the command exits 2. The
-rounds never begin until one poll has actually succeeded.
+The output names the base URL it measured, the data directory it resolved and by which rule, how
+it chose the poll target, and how many polls of that session **succeeded** during the rounds.
 
-Exit status: `0` when every number is at or under its threshold, `1` when one exceeds it (the full
-table is still printed), `2` when there was nothing to measure — the installation was unreachable,
-a route it needs is missing, or the PO poll the scenario is defined by could not be made.
+### What it refuses to report
+
+The rule the whole script is built around: **no number is judged MEETS unless it came from exactly
+the scenario the DoD names.** So the exit statuses are
+
+- `0` — every request answered 2xx, the whole specified scenario ran, and every judged number is at
+  or under its threshold;
+- `1` — the same, except that a judged number is over its threshold. A red number is still a real
+  number, and the full table is printed;
+- `2` — everything else.
+
+Everything else includes: the installation is unreachable; any request on any route answers
+non-2xx (a missing route, a refusal, or the transport's contained 500 under the load being
+measured); the data directory or the PO token cannot be resolved or read; a round ran with no poll
+overlapping it; and the installation has **no open PO session**. That last one is not a fault of
+the installation — `/po` answered and simply lists nothing — but the concurrent half of the DoD
+cannot be reproduced without it, and measuring four requests against an idle dashboard instead
+would be a different scenario under the same heading. The command prints the warm numbers it did
+take, marks every one of them `NOT JUDGED`, says plainly what could not be measured, and exits 2.
+Open a PO session and run it again.
 
 The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
-command as the runtime user. Without a readable token the script reports why and measures the
-concurrency without the poll.
+command as the runtime user. The data directory is resolved the way the product resolves it:
+`--data-dir`, then `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the instance the CLI
+itself defaults to. That last step is what makes the one command above work in an ordinary checkout
+shell, which does not inherit the service unit's environment.
 
 ## Record reconciliation and controlled divergences
 

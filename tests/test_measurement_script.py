@@ -17,8 +17,10 @@ import ast
 import contextlib
 import importlib.util
 import io
+import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -103,12 +105,17 @@ class MeasurementScriptTests(unittest.TestCase):
         overview_status: int = 200,
         delays: dict[str, float] | None = None,
         slow_get_after: tuple[str, int, float] | None = None,
+        status_after: tuple[str, int, int] | None = None,
     ) -> str:
         """A dashboard with a decided answer, and a decided cost, for every route.
 
         `slow_get_after` is `(path, nth, seconds)`: that path's GETs become slow from the nth one
         on. It is how a case makes one *round* of the concurrent scenario slow while the earlier
         one stays fast, which is the only way to see which round the threshold is judged on.
+
+        `status_after` is `(path, nth, status)` and does the same to the *status*: the route answers
+        cleanly for the warm phase and then starts failing, which is the reviewer's reproduction of
+        a dashboard that breaks under the load being measured.
         """
         seen: list[tuple[str, str]] = []
         lock = threading.Lock()
@@ -122,6 +129,10 @@ class MeasurementScriptTests(unittest.TestCase):
                 slow_path, nth, seconds = slow_get_after
                 if method == "GET" and path == slow_path and counted >= nth:
                     delay = seconds
+            if status_after is not None:
+                failing_path, nth, status = status_after
+                if method == "GET" and path == failing_path and counted >= nth:
+                    return status, "not an answer", delay
             if path in missing:
                 return 404, "no such route", delay
             if path == measure.PO_OVERVIEW:
@@ -143,10 +154,19 @@ class MeasurementScriptTests(unittest.TestCase):
         return f"http://127.0.0.1:{server.server_address[1]}"
 
     def cookie(self, value: str = "secretary_po=deadbeef") -> None:
-        """Stand in for the installation's PO token, which no hermetic test may read from a host."""
-        patch = mock.patch.object(measure, "po_cookie", return_value=(value, ""))
-        patch.start()
-        self.addCleanup(patch.stop)
+        """Stand in for the installation this run would otherwise resolve off the host.
+
+        Both of the product-facing steps are replaced, because a hermetic test may read neither a
+        real instance nor a real `po-web-token`. What they resolve to is exercised on its own in
+        :class:`DataDirectoryResolutionTests`.
+        """
+        for target, result in (
+            ("resolve_data_dir", (Path("/nonexistent/data"), "a test fixture")),
+            ("po_cookie", value),
+        ):
+            patch = mock.patch.object(measure, target, return_value=result)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def run_main(self, base_url: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -186,6 +206,79 @@ class MeasurementScriptTests(unittest.TestCase):
         }
         for forbidden in ("POST", "PUT", "PATCH", "DELETE"):
             self.assertNotIn(forbidden, verbs, f"{forbidden} appears as a literal in the script")
+
+    def test_response_validity_lives_in_fetch_and_no_call_site_re_implements_it(self) -> None:
+        """The structural half of the rule: a new request path cannot bypass it.
+
+        Three rounds of review found three different call sites of the same missing status check,
+        because the rule lived at call sites. It now lives in `fetch`, and this test is what keeps
+        it there: the only `urlopen` in the file is inside `fetch`, the only `Sample` is built
+        inside `fetch`, and no code outside it reads a status off a response. A seventh call site
+        added next month is therefore a request that went through the rule, or a red test here.
+        """
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
+        fetch = next(
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "fetch"
+        )
+        inside_fetch = set(map(id, ast.walk(fetch)))
+
+        def calls(name: str) -> list[ast.Call]:
+            return [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and (
+                    (isinstance(node.func, ast.Attribute) and node.func.attr == name)
+                    or (isinstance(node.func, ast.Name) and node.func.id == name)
+                )
+            ]
+
+        opens = calls("urlopen")
+        self.assertEqual(len(opens), 1, "a second urlopen would be a request outside the one rule")
+        self.assertIn(id(opens[0]), inside_fetch, "the only urlopen must be the one inside fetch")
+
+        built = calls("Sample")
+        self.assertEqual(len(built), 1, "a Sample built elsewhere is a response nothing validated")
+        self.assertIn(id(built[0]), inside_fetch)
+
+        # `status` is read exactly where it is decided. Anywhere else is a call site quietly
+        # making its own judgement about a response again.
+        outside = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr in {"status", "ok"}
+            and id(node) not in inside_fetch
+        ]
+        self.assertEqual(
+            [ast.unparse(node) for node in outside],
+            [],
+            "response status is judged in fetch and nowhere else",
+        )
+
+    def test_every_request_the_run_makes_is_refused_when_it_does_not_answer(self) -> None:
+        """The behavioural half: each route on the inventory, made to 404, must exit 2.
+
+        Sweeping every route rather than the two the reviewer happened to reproduce, because the
+        defect this round closes was never about a particular route — it was about which call site
+        remembered to look.
+        """
+        cases = {
+            "/": "the warm and concurrent route",
+            "/sprints": "a warm route",
+            "/projects": "a warm route",
+            measure.PO_OVERVIEW: "where the poll target is chosen",
+        }
+        for route, why in cases.items():
+            with self.subTest(route=route, why=why):
+                self.cookie()
+                base = self.serve(missing=(route,))
+                with mock.patch.object(measure, "WARM_REQUESTS", 2):
+                    code, text = self.run_main(base)
+                self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+                self.assertIn("404", text)
+                self.assertNotIn("MEETS", text)
+                self.doCleanups()
 
     def test_a_run_asks_for_nothing_but_the_method_and_route_pairs_on_the_list(self) -> None:
         """Pairs, not paths: `HEAD /` must not pass because `GET /` happens to be listed."""
@@ -254,18 +347,30 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertIn(f"/po poll: GET /po/api/sessions/{self.SESSION}", text)
         self.assertIn(f"the first session /po lists ({self.SESSION})", text)
 
-    def test_no_session_is_said_out_loud_and_the_concurrency_numbers_still_come(self) -> None:
-        """Criterion 7: a different scenario is never measured quietly under the same heading."""
+    def test_no_session_prints_the_warm_half_judges_nothing_and_exits_two(self) -> None:
+        """The concurrent scenario cannot be reproduced without a session, so it is not reported.
+
+        An installation with no open PO session is not broken, and the warm numbers taken from it
+        are real — so they are printed. What cannot happen is a verdict: four requests against an
+        idle dashboard are a different scenario, and reporting them under the same heading, green,
+        is the hole this whole round is about. Round 1's decision allowed it; round 3's withdrew it.
+        """
         self.cookie()
         base = self.serve(sessions=False)
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
-        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
         self.assertIn("/po poll: none", text)
-        self.assertIn("lists no session to poll", text)
-        self.assertIn("WITHOUT the poll", text)
-        self.assertIn("concurrent GET / #4 of 4", text)
+        self.assertIn("lists no open session to poll", text)
+        self.assertIn("NOT MEASURED", text)
+        self.assertNotIn("MEETS", text)
+        self.assertNotIn("EXCEEDS", text)
+        # The warm half is still there, unjudged, and no concurrent round was taken at all.
+        for route in measure.WARM_ROUTES:
+            self.assertIn(f"warm p95 GET {route}", text)
+        self.assertIn("NOT JUDGED", text)
+        self.assertNotIn("concurrent GET /", text)
         polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
         self.assertEqual(polled, [])
 
@@ -300,7 +405,9 @@ class MeasurementScriptTests(unittest.TestCase):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_EXCEEDED, text)
-        rounds = re.findall(r"^  round (\d+): (.*?) ms( <- judged)?$", text, re.MULTILINE)
+        rounds = re.findall(
+            r"^  round (\d+): (.*?) ms \[\d+ poll\(s\) in flight\]( <- judged)?$", text, re.MULTILINE
+        )
         self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
         fastest = max(float(value) for value in rounds[0][1].split(", "))
         self.assertLess(fastest, measure.CONCURRENT_THRESHOLD_MS, "round one was meant to be fast")
@@ -338,28 +445,84 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertIn("404", text)
         self.assertNotIn("MEETS", text)
 
-    def test_the_rounds_never_start_before_one_poll_has_succeeded(self) -> None:
-        """An explicit readiness signal, not a started thread: the poll has to be in flight."""
+    def test_every_round_overlaps_a_poll_and_says_how_many(self) -> None:
+        """Overlap, not precedence — the guarantee the readiness gate got wrong.
+
+        A gate that waits for a *completed* poll deterministically puts that poll *before* the
+        round, so a fast installation could report a poll that overlapped nothing. The round and
+        the poll now leave one barrier together, and the count printed per round is computed from
+        the recorded windows, so the output proves the overlap instead of asserting it.
+        """
         self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_MET, text)
-        seen = self.server.seen  # type: ignore[attr-defined]
-        polls = [index for index, (_method, path) in enumerate(seen) if path.startswith("/po/api/")]
-        concurrent = [
-            index
-            for index, (method, path) in enumerate(seen)
-            if method == "GET" and path == "/" and index > polls[0]
-        ]
-        self.assertTrue(polls, "the selected session was never polled")
-        self.assertTrue(concurrent, "no concurrent request followed the first poll")
-        self.assertLess(polls[0], concurrent[0], "a round started before the first poll")
-        # And the printed count is of successful polls only.
-        count = re.search(r"polled successfully (\d+) time\(s\)", text)
-        self.assertIsNotNone(count, text)
-        self.assertGreaterEqual(int(count.group(1)), 1)
+        counts = [int(value) for value in re.findall(r"\[(\d+) poll\(s\) in flight\]", text)]
+        self.assertEqual(len(counts), measure.CONCURRENT_ROUNDS, text)
+        # Every round, not just the judged one: a round no poll overlapped may not even compete to
+        # be the worst, or a quieter measurement could set the number the thresholds judge.
+        for index, count in enumerate(counts, start=1):
+            with self.subTest(round=index):
+                self.assertGreaterEqual(count, 1, text)
+        # This stub answers instantly, which is the case the previous mechanism failed on.
+        polled = re.search(r"polled successfully (\d+) time\(s\)", text)
+        self.assertIsNotNone(polled, text)
+        self.assertGreaterEqual(int(polled.group(1)), measure.CONCURRENT_ROUNDS)
+
+    def test_the_overlap_rule_itself_refuses_a_round_no_poll_was_in_flight_for(self) -> None:
+        """The rule, tested apart from the mechanism that satisfies it."""
+        sample = measure.Sample(route="/", status=200, started_at=10.0, ended_at=11.0)
+        overlapped = measure.Round(samples=[sample], overlapping_polls=1)
+        barren = measure.Round(samples=[sample], overlapping_polls=0)
+
+        measure.require_overlap([overlapped, overlapped])
+        with self.assertRaises(measure.Unmeasurable) as refused:
+            measure.require_overlap([overlapped, barren, overlapped])
+        self.assertIn("round(s) 2", str(refused.exception))
+
+    def test_a_poll_counts_as_in_flight_only_while_it_actually_was(self) -> None:
+        """Interval overlap, from recorded windows: started before the end, ended after the start."""
+        poll = measure.SessionPoll("http://127.0.0.1:1", "/po/api/sessions/x", "c")
+        poll.windows = [(0.0, 1.0), (5.0, 6.0), (9.5, 10.5), (20.0, 21.0)]
+
+        # A round from 10.0 to 12.0: the third poll was still in flight when it began.
+        self.assertEqual(poll.overlapping(10.0, 12.0), 1)
+        # One that finished before the round started does not count, nor one that began after it.
+        self.assertEqual(poll.overlapping(7.0, 9.0), 0)
+        self.assertEqual(poll.overlapping(0.5, 21.0), 4)
+
+    def test_a_late_404_on_the_concurrent_reads_exits_two_after_clean_warm_reads(self) -> None:
+        """The reviewer's reproduction: 21 clean warm reads, then 404 on every concurrent read.
+
+        `measure_concurrent` was the one call site that never had the status rule at all, so those
+        four failures were recorded as four very fast durations and judged as a green result.
+        """
+        self.cookie()
+        warm = 2
+        base = self.serve(status_after=("/", 1 + warm + 1, 404))
+        with mock.patch.object(measure, "WARM_REQUESTS", warm):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn("404", text)
+        self.assertNotIn("MEETS", text)
+        # The warm half did succeed, and is shown — with no verdict beside it.
+        self.assertIn("warm p95 GET /", text)
+        self.assertIn("NOT JUDGED", text)
+
+    def test_a_late_contained_500_on_the_concurrent_reads_exits_two(self) -> None:
+        """The other half of the same reproduction: the transport's own contained 500."""
+        self.cookie()
+        warm = 2
+        base = self.serve(status_after=("/", 1 + warm + 1, 500))
+        with mock.patch.object(measure, "WARM_REQUESTS", warm):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn("500", text)
+        self.assertNotIn("MEETS", text)
 
     # -- what it cannot measure --------------------------------------------------------------
 
@@ -379,6 +542,66 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
         self.assertIn("/projects", text)
         self.assertIn("404", text)
+
+
+class DataDirectoryResolutionTests(unittest.TestCase):
+    """Where the documented command finds the installation, with nothing in the environment.
+
+    The reviewer ran `python3 scripts/measure_dashboard.py` in an ordinary checkout shell on this
+    host. That shell does not inherit the service unit's `SECRETARY_DATA_DIR` or
+    `SECRETARY_INSTANCE`, so the script resolved no data directory, could not read the PO token,
+    and measured the concurrency without the poll while an open session existed. It now falls
+    through to the instance the CLI itself defaults to, read with the product's own resolution.
+    """
+
+    def instance(self) -> tuple[Path, Path]:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        data = root / "data"
+        data.mkdir()
+        instance = root / "instance"
+        instance.mkdir()
+        (instance / "instance.yaml").write_text(
+            "version: 1\nname: test\n"
+            f"data_dir: {data}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        return instance, data
+
+    def test_with_neither_variable_set_it_falls_through_to_the_default_instance(self) -> None:
+        instance, data = self.instance()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("secretary.onboarding.DEFAULT_INSTANCE", str(instance)),
+        ):
+            resolved, source = measure.resolve_data_dir(None)
+
+        self.assertEqual(resolved, data)
+        self.assertIn("the default instance", source)
+        self.assertIn(str(instance), source)
+
+    def test_the_documented_order_is_the_argument_then_the_two_variables(self) -> None:
+        instance, data = self.instance()
+        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True):
+            resolved, source = measure.resolve_data_dir(None)
+            self.assertEqual(resolved, data)
+            self.assertIn("SECRETARY_INSTANCE", source)
+
+        with mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": "/from/env"}, clear=True):
+            self.assertEqual(measure.resolve_data_dir(None), (Path("/from/env"), "SECRETARY_DATA_DIR"))
+            # The argument still wins over both.
+            self.assertEqual(measure.resolve_data_dir("/from/flag"), (Path("/from/flag"), "--data-dir"))
+
+    def test_an_unresolvable_installation_is_refused_rather_than_silently_dropped(self) -> None:
+        """`except Exception: return None` was the same quiet downgrade a third time."""
+        with (
+            mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": "/nowhere/at/all"}, clear=True),
+            self.assertRaises(measure.Unmeasurable) as refused,
+        ):
+            measure.resolve_data_dir(None)
+
+        self.assertIn("/nowhere/at/all", str(refused.exception))
+        self.assertIn("--data-dir", str(refused.exception))
 
 
 class MeasurementScriptDocumentationTests(unittest.TestCase):
