@@ -142,6 +142,15 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .po-entry .md pre { white-space:pre; max-width:100%; min-width:0; overflow-x:auto; overflow-wrap:normal; word-break:normal; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:.5rem .7rem; }
 .po-entry .md pre code { background:none; border:0; padding:0; font-size:inherit; overflow-wrap:normal; word-break:normal; }
 .po-mark { font-size:.85rem; color:var(--muted); }
+/* The composer's one row of controls. `send` opens it; everything that is not `send` is pushed to
+   the far end, so the hand reaching for `send` never lands on `close` -- which cannot be undone,
+   a closed session is never reopened. The row wraps rather than overflows, and it is in the normal
+   flow: the bottom bar's reserved height still keeps the composer clear of the bar at phone width. */
+.po-controls { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-top:.6rem; }
+.po-controls .aside { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-left:auto; }
+.po-controls .aside button { font-weight:400; }
+.po-controls .aside .po-close button { border-color:var(--line-strong); color:var(--muted); }
+.po-controls .aside .po-close button:hover { border-color:var(--warn); color:var(--warn); filter:none; }
 @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 
 /* panels: one surface per subject */
@@ -299,10 +308,19 @@ body { padding-bottom: var(--bar-height); }
 .lamp-green { color: var(--ok); background: var(--ok-soft); }
 .lamp-yellow { color: var(--warn); background: var(--warn-soft); }
 .lamp-red { color: var(--bad); background: var(--bad-soft); }
-.statusbar .provider { display: inline-flex; align-items: baseline; gap: .4rem; }
-.statusbar .provider > b { color: var(--ink); font-weight: 600; }
-.statusbar .window { font-family: var(--mono); color: var(--ink); }
-.resets { color: var(--muted); }
+/* One provider is one group: a heading set apart from its windows the way a panel's heading is
+   (uppercase and tracked, like h2), a rule between one provider and the next, and each window a
+   chip of its own so the eye never has to guess where a window ends and the next one begins. */
+.statusbar .provider { display: inline-flex; align-items: baseline; gap: .45rem; }
+.statusbar .provider + .provider { border-left: 1px solid var(--line-strong); padding-left: 1.1rem; }
+.statusbar .provider > b { color: var(--ink); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
+.statusbar .window { display: inline-flex; align-items: baseline; gap: .35rem; font-family: var(--mono); color: var(--ink); background: var(--raised); border-radius: 999px; padding: .05rem .5rem; }
+.statusbar .window .win-name { color: var(--muted); }
+/* The chips sit side by side on one line, so a fixed column for the percentage only opens a hole
+   between a window's name and its figure: the figure follows the name at the chip's own gap. */
+.statusbar .window > b { font-variant-numeric: tabular-nums; }
+.statusbar .window .dot { color: var(--faint); }
+.resets { color: var(--muted); font-variant-numeric: tabular-nums; }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
 .statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
 .statusbar .bar-refresh input { margin: 0; }
@@ -516,9 +534,9 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
             f'{_bar_no_reading("this reading carried no usage window")}{old}</span>'
         )
     drawn = "".join(
-        f'<span class="window">{escape(str(window.get("name") or "window"))} '
-        f'<b>{escape(str(window.get("remaining_percent", "—")))}%</b> '
-        f'{_reset(window.get("resets_at"))}</span>'
+        f'<span class="window"><span class="win-name">{escape(str(window.get("name") or "window"))}</span>'
+        f'<b>{_percent(window.get("remaining_percent"))}</b>'
+        f'<span class="dot">·</span>{_reset(window.get("resets_at"))}</span>'
         for window in windows
     )
     return f'<span class="provider"><b>{shown}</b>{drawn}{old}</span>'
@@ -732,14 +750,16 @@ def _time_left(seconds: float) -> str:
         return "reset already passed"
     if total < 60:
         return "less than a minute left"
+    # A unit belongs to the number in front of it: `1h 6m`, never `1 h 6 m`, where the spaces make
+    # four things out of two and the reader has to pair them up again.
     minutes = total // 60
     if minutes < 60:
-        return f"{minutes} m left"
+        return f"{minutes}m left"
     hours, minutes = divmod(minutes, 60)
     if hours < 24:
-        return f"{hours} h {minutes} m left"
+        return f"{hours}h {minutes}m left"
     days, hours = divmod(hours, 24)
-    return f"{days} d {hours} h left"
+    return f"{days}d {hours}h left"
 
 
 def _reset(resets_at: Any) -> str:
@@ -764,6 +784,20 @@ def _reset(resets_at: Any) -> str:
         now = now.replace(tzinfo=UTC)
     left = _time_left((moment - now).total_seconds())
     return f'<span class="resets" title="{escape(str(resets_at))}">{escape(left)}</span>'
+
+
+def _percent(remaining: Any) -> str:
+    """A usage window's percentage, drawn once for both the bar and the dashboard panel.
+
+    The reading is rounded to a tenth by the layer, and a tenth that is zero is noise beside a
+    countdown: it is drawn as `73%`. A reading that really is fractional keeps its one digit rather
+    than being rounded away here, because the layer's precision is not this module's to drop.
+    A value that is no number at all is a dash and never a `0%`, for the reason a missing countdown
+    is words: nothing is not zero.
+    """
+    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
+        return "—"
+    return f"{remaining:.1f}".removesuffix(".0") + "%"
 
 
 def _rows(headers: list[str], rows: list[list[str]]) -> str:
@@ -1033,7 +1067,7 @@ def _limits_panel(section: dict[str, Any] | None) -> str:
         windows = provider.get("windows") or []
         remaining = "<br>".join(
             f"{escape(str(window.get('name') or 'window'))}: "
-            f"<b>{escape(str(window.get('remaining_percent', '—')))}%</b> · {_reset(window.get('resets_at'))}"
+            f"<b>{_percent(window.get('remaining_percent'))}</b> · {_reset(window.get('resets_at'))}"
             for window in windows
             if isinstance(window, dict)
         )
@@ -3037,6 +3071,31 @@ def _po_close_form(session_id: str) -> str:
     )
 
 
+def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str:
+    """Open another session from the one being read, with this session's CLI and model.
+
+    It is the `/po` form's own route and its own three fields (`POST /po/sessions` with a request id,
+    a CLI and a model), reduced to hidden inputs: there is no second way of creating a session, and
+    nothing about the session being read changes. The pair is copied from that session because it is
+    the pair the owner chose; an installation that no longer offers it refuses the create the way the
+    `/po` form's does, on `/po`, with the list of what it does offer to pick from.
+
+    The request id is the page's own with a suffix. One page mints one id and an id belongs to one
+    operation for good (`po_requests`), so a page whose message was sent must not offer the same id
+    again for a create — that would be `request_conflict` rather than a new session.
+    """
+    cli, model = str(session.get("cli") or "").strip(), str(session.get("model") or "").strip()
+    if not cli or not model:
+        return ""
+    return (
+        '<form class="po-new" method="post" action="/po/sessions">'
+        f'<input type="hidden" name="request_id" value="{escape(request_id)}-new-session">'
+        f'<input type="hidden" name="cli" value="{escape(cli)}">'
+        f'<input type="hidden" name="model" value="{escape(model)}">'
+        '<button class="quiet" type="submit">new session</button></form>'
+    )
+
+
 #: How many characters of a session's first owner message its row on `/po` shows, ellipsis included.
 PO_FIRST_MESSAGE_CHARS = 80
 
@@ -3097,7 +3156,12 @@ def po_session(
 ) -> str:
     """One session: its newest-first feed, the message box, turn state, stop while running, close otherwise.
 
-    A closed session stays readable: its feed and who closed it when, with no message box and no close.
+    The feed runs newest first and the message box sits above it, so every control the owner needs
+    belongs to the box and not to the end of the feed: `send`, and at the far end of the same row
+    `stop turn` while a turn runs, `close` while none does, and `new session` always.
+
+    A closed session stays readable: its feed and who closed it when, with no message box and no
+    close, but with `new session` — that is what the owner does next, and it touches nothing here.
     """
     session = document.get("session") or {}
     session_id = str(session.get("session_id") or "")
@@ -3125,6 +3189,16 @@ def po_session(
         else ""
     )
     close = _po_close_form(session_id) if not running and not closed else ""
+    # `send` belongs to the message form and the other three are forms of their own; HTML has no
+    # nested form, so the row holds them side by side and `send` reaches its form by `form=`.
+    controls = "".join(
+        [
+            '<div class="po-controls">',
+            "" if closed else '<button type="submit" form="po-send">send</button>',
+            f'<div class="aside">{stop}{_po_new_session_form_for(session, request_id=request_id)}{close}</div>',
+            "</div>",
+        ]
+    )
     message = "\n".join(
         [
             f'<form class="sprint" id="po-send" method="post" action="{base}/messages">',
@@ -3132,7 +3206,6 @@ def po_session(
             '<div class="field"><label for="po-text">message</label>',
             f'<textarea id="po-text" name="text" required>{escape(draft)}</textarea>',
             f'<p class="hint">{escape(PO_SEND_HINT)}</p></div>',
-            '<button type="submit">send</button>',
             "</form>",
         ]
     )
@@ -3156,8 +3229,8 @@ def po_session(
                 if closed
                 else ""
             ),
-            "" if closed else _panel("Send", message + '<p class="feedback" id="po-status"></p>'),
-            _panel("Feed", feed + stop + close, more='<a class="more" href="/po">all sessions</a>'),
+            controls if closed else _panel("Send", message + controls + '<p class="feedback" id="po-status"></p>'),
+            _panel("Feed", feed, more='<a class="more" href="/po">all sessions</a>'),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
@@ -3232,7 +3305,9 @@ const draft = document.getElementById('po-text');
 // Enter sends through the form's own submit path, Shift+Enter keeps the newline. A form goes out once:
 // a refusal renders a fresh page, where sending works again.
 const form = document.getElementById('po-send');
-const button = form ? form.querySelector('button[type="submit"]') : null;
+// The send button sits in the composer's control row, outside the form it submits through `form=`,
+// so it is looked up by that association and not only inside the form.
+const button = document.querySelector('button[form="po-send"]');
 let submitted = false;
 if (form) {
   form.addEventListener('submit', (event) => {

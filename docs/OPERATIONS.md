@@ -349,12 +349,21 @@ entry), CLI, model, state, whether a turn runs, the short session id and a `clos
 links to `closed sessions (N)`, `/po?closed=1`, which lists closed sessions the same way with their
 `closed_at` instead of state and turn, and links back to the open ones. A session page shows the owner's messages, the PO
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
-reason), a message box (Enter sends, Shift+Enter inserts a newline; the form goes out once until the
-page reloads), `stop turn` while a turn runs and `close` while none does. `close` posts to
+reason), newest first, under a message box (Enter sends, Shift+Enter inserts a newline; the form goes
+out once until the page reloads). **Every control is one row under that box, never at the end of the
+feed**, which the newest-first order puts behind the whole scroll: `send` opens the row, and at its far
+end, set apart from `send`, come `stop turn` while a turn runs, `close` while none does, and `new
+session` always. `close` and `new session` are forms of their own and HTML has no nested form, so they
+stand beside the message form and `send` reaches it by `form="po-send"`. `close` posts to
 `/po/sessions/ID/close` as actor `owner` and returns to `/po`; pressed while a turn runs (from a list row)
-it renders the session refused (409) and closes nothing. A closed session's page stays readable, says
-`closed AT by owner`, and has no message box and no close; a message posted to it anyway is refused (409
-`session_closed`). The running-turn count counts turns, whatever their session's state. The PO head's answers are rendered
+it renders the session refused (409) and closes nothing. `new session` posts the `/po` form's own route,
+`POST /po/sessions`, with the CLI and the model of the session being read and the page's request id
+suffixed `-new-session` (one id belongs to one operation, so the create never takes the id the message
+box carries); it opens a second session and leaves this one exactly as it was — sessions run side by
+side, and nothing here closes one. A pair the installation no longer offers is refused the way the `/po`
+form's create is, on `/po`, with the list of what it does offer. A closed session's page stays readable, says
+`closed AT by owner`, and has no message box, no `send` and no `close` — only `new session`; a message
+posted to it anyway is refused (409 `session_closed`). The running-turn count counts turns, whatever their session's state. The PO head's answers are rendered
 server-side as a safe Markdown subset (headings, emphasis, code, lists, quotes, rules, `http(s)`/`mailto`
 links; the text is escaped first, so raw HTML shows as text); the owner's messages are shown as typed.
 While a turn runs the page polls
@@ -1562,10 +1571,14 @@ all, because reloading one is the browser offering to send the submission again.
 Every HTML page the transport serves — the dashboard, sprints, projects, cards, `/history`, the sprint
 form, `/po` and its sessions, and refusal pages too — ends in one bar fixed to the bottom of the viewport.
 It shows what each provider subscription has left: for Claude and for Codex, every usage window the
-provider reported, its remaining percentage and **how long is left until it resets** — `2 d 12 h left`,
-`6 h 45 m left`, `42 m left`, `less than a minute left`, or, for a reading whose moment has gone by,
+provider reported, its remaining percentage and **how long is left until it resets** — `2d 12h left`,
+`6h 45m left`, `42m left`, `less than a minute left`, or, for a reading whose moment has gone by,
 `reset already passed`; a window whose reading carries no moment says `no reset time recorded` rather
-than showing a dash. The exact moment is not lost: it is the hover title of that element, as the ISO
+than showing a dash. One provider is one group and reads as one: its name is the group's heading, a
+rule separates it from the next provider, each window is a chip of its own (`5-hour 73% · 1h 6m left`),
+and the percentage follows the window's name at the chip's own gap. A percentage is drawn as the layer
+rounded it, with a trailing `.0` dropped: `73%`, and `95.4%` when the reading really is fractional.
+The exact moment is not lost: it is the hover title of that element, as the ISO
 UTC string the reading carried. The time left is counted from when the page was drawn, not from when
 the reading was taken, so a reading served from the cache does not overstate what is left. The
 dashboard's `Usage limits` panel says it the same way, from the same renderer. A provider whose reading is stale or

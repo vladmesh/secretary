@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -752,6 +753,123 @@ class PoWebOperationTests(unittest.TestCase):
                     connection.execute(statement, (session_id,))
                 self.assertEqual(raised.exception.diag.constraint_name, "po_session_closed_iff_audited")
         self.assertEqual(self.store.session(session_id).state, po_store.SESSION_OPEN)
+
+    # --- the composer's control row -----------------------------------------------------------
+
+    def control_row(self, page: str) -> str:
+        """The one `po-controls` row of a session page; a second one would be a duplicated button."""
+        self.assertEqual(page.count('<div class="po-controls">'), 1, "one control row, not two")
+        start = page.index('<div class="po-controls">')
+        return page[start : page.index("</div></div>", start) + len("</div></div>")]
+
+    def new_session_form(self, page: str) -> list[tuple[str, str]]:
+        """The fields the `new session` form on a session page would post, in the order it lists them."""
+        form = page[page.index('<form class="po-new"') : page.index("</form>", page.index('<form class="po-new"'))]
+        self.assertIn('action="/po/sessions"', form)
+        return re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', form)
+
+    def test_close_and_new_session_sit_by_send_and_no_longer_under_the_feed(self) -> None:
+        """The feed runs newest first, so a control at its end is a control behind the whole scroll."""
+        session_id = self.create()
+        self.assertEqual(self.send(session_id, "hello", "message-1").status, 303)
+        self.settle(session_id)
+
+        page = self.page(session_id)
+        row = self.control_row(page)
+        self.assertIn('<button type="submit" form="po-send">send</button>', row)
+        self.assertIn("new session", row)
+        self.assertIn(f'action="/po/sessions/{session_id}/close"', row)
+        # Everything that is not `send` is at the far end of the row, behind `send` in the markup.
+        self.assertLess(row.index(">send<"), row.index('<div class="aside">'))
+        # The close is the page's only one and it is above the feed, not after it.
+        self.assertEqual(page.count("/close"), 1)
+        self.assertLess(page.index("/close"), page.index('<ol class="po-feed"'))
+        self.assertLess(page.index('<div class="po-controls">'), page.index('<ol class="po-feed"'))
+        # The feed panel is the feed and nothing else: no form trails it.
+        self.assertNotIn("<form", page[page.index('<ol class="po-feed"') :])
+
+    def test_stop_turn_is_in_the_same_row_while_a_turn_runs_and_close_is_not_offered(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.send(session_id, "SLEEP please", "message-1").status, 303)
+        self.spawned(1)
+
+        row = self.control_row(self.page(session_id))
+
+        self.assertIn(f'action="/po/sessions/{session_id}/stop"', row)
+        self.assertIn("stop turn", row)
+        self.assertNotIn("/close", row)
+        self.assertIn("new session", row)
+
+    def test_the_send_button_reaches_its_form_from_outside_it_because_a_form_holds_no_form(self) -> None:
+        """`close` and `new session` are forms of their own, so `send` is bound by `form=` instead."""
+        from secretary.web.pages import _PO_SESSION_SCRIPT
+
+        page = self.page(self.create())
+        send = page[page.index('<form class="sprint" id="po-send"') : page.index("</form>")]
+        self.assertNotIn("<button", send, "the submit button is in the control row, not in the form")
+        # The message form is closed before the row begins: the other forms are its siblings.
+        self.assertLess(page.index("</form>"), page.index('<div class="po-controls">'))
+        self.assertIn('<button type="submit" form="po-send">send</button>', page)
+        # The script still finds the button to disable it, now by that association.
+        self.assertIn("const button = document.querySelector('button[form=\"po-send\"]');", _PO_SESSION_SCRIPT)
+
+    def test_a_new_session_from_a_session_page_reuses_its_cli_and_model_and_leaves_it_open(self) -> None:
+        """`new session` posts the `/po` form's own route; the session being read is not touched."""
+        session_id = self.create("codex", "gpt-5.6-sol", request_id="create-codex")
+        self.assertEqual(self.send(session_id, "hello", "message-1").status, 303)
+        self.settle(session_id)
+        fields = self.new_session_form(self.page(session_id))
+        self.assertEqual([name for name, _ in fields], ["request_id", "cli", "model"])
+        self.assertEqual(dict(fields)["cli"], "codex")
+        self.assertEqual(dict(fields)["model"], "gpt-5.6-sol")
+
+        opened = self.post("/po/sessions", fields)
+
+        self.assertEqual(opened.status, 303)
+        other = opened.headers["Location"].rsplit("/", 1)[1]
+        self.assertNotEqual(other, session_id)
+        fresh = self.store.session(other)
+        self.assertEqual((fresh.cli, fresh.model), ("codex", "gpt-5.6-sol"))
+        # Nothing happened to the session the owner was reading: both are open and both are listed.
+        self.assertEqual(self.store.session(session_id).state, po_store.SESSION_OPEN)
+        self.assertEqual(fresh.state, po_store.SESSION_OPEN)
+        self.assertEqual(self.store.session_count(po_store.SESSION_CLOSED), 0)
+        overview = self.get("/po").body.decode()
+        for listed in (session_id, other):
+            self.assertIn(listed[:8], overview)
+        # Pressed twice, the same page opens one session: the create carries a request id like any other.
+        self.assertEqual(self.post("/po/sessions", fields).headers["Location"].rsplit("/", 1)[1], other)
+        self.assertEqual(len(self.store.sessions()), 2)
+
+    def test_the_new_session_id_is_not_the_id_the_message_box_already_spent(self) -> None:
+        """One page mints one id, and an id belongs to one operation: the create takes its own."""
+        session_id = self.create()
+        page = self.page(session_id)
+        sent = re.search(r'id="po-send".*?name="request_id" value="([^"]+)"', page, re.DOTALL).group(1)
+        fields = dict(self.new_session_form(page))
+        self.assertEqual(fields["request_id"], f"{sent}-new-session")
+
+        self.assertEqual(self.send(session_id, "hello", sent).status, 303)
+        self.settle(session_id)
+        opened = self.post("/po/sessions", list(fields.items()))
+
+        self.assertEqual(opened.status, 303, opened.body.decode())
+        self.assertEqual(len(self.store.sessions()), 2)
+
+    def test_a_closed_session_still_offers_a_new_one_and_never_a_close(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.close(session_id).status, 303)
+
+        page = self.page(session_id)
+        row = self.control_row(page)
+
+        self.assertNotIn("/close", page)
+        self.assertNotIn(">send<", row)
+        self.assertNotIn('id="po-send"', page)
+        self.assertIn("new session", row)
+        opened = self.post("/po/sessions", self.new_session_form(page))
+        self.assertEqual(opened.status, 303)
+        self.assertNotEqual(opened.headers["Location"].rsplit("/", 1)[1], session_id)
 
 
 if __name__ == "__main__":
