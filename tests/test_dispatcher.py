@@ -30,6 +30,7 @@ from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointW
 from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import assessment_decision as dispatcher_assessment_decision
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import review_verdict as dispatcher_review_verdict
@@ -3485,7 +3486,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             session_totals=attempt_usage_module.TokenTotals(input=3, output=2),
             baseline=attempt_usage_module.TokenTotals(input=0, output=0),
         )
-        with mock.patch.object(dispatcher_module, "_collect_usage", return_value=collected):
+        with mock.patch.object(attempt_accounting, "_collect_usage", return_value=collected):
             self._run_worker_to_validate()
             self.assertEqual(self.tick()["action"], "review-started")
             self.writer.verdict(
