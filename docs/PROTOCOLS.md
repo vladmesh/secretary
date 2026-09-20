@@ -2937,6 +2937,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
 | GET | `/history` | `command_reads.command_history` | the whole command history as a page, newest first; `?cursor=C&limit=N` |
+| GET | `/doctor` | `doctor.doctor_snapshot` | the problems behind the bottom bar's doctor lamp, each with its code, grouped by the severity that decides the colour; recorded state only, and health that could not be read is said as itself rather than as an empty list |
 | GET | `/api/pause` | `pause_reads.pause_state` | whether the pipeline is paused, in what mode, since when, and the heads behind its cards |
 | GET | `/api/pause/scope` | `pause_reads.pause_scope` | what a pause would reach: the open sprints, their cards, the running heads |
 | POST | `/api/pause/drain` | `pause_ops.pause_drain` | drain the pipeline (no new claims; running heads finish); body `{reason}`, actor `web` |

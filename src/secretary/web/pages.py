@@ -33,6 +33,8 @@ from typing import Any
 from urllib.parse import quote
 
 from secretary.web import markdown
+from secretary.web.doctor import DOCTOR_NOT_BUILT
+from secretary.web.doctor import unreadable as doctor_unreadable
 
 TITLE = "secretary"
 
@@ -291,10 +293,16 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 body { padding-bottom: var(--bar-height); }
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; height: var(--bar-height); background: var(--surface); border-top: 1px solid var(--line); }
 .statusbar .row { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 100%; display: flex; align-items: center; gap: 1.1rem; white-space: nowrap; overflow-x: auto; font-size: .78rem; color: var(--muted); }
+.statusbar .lamp { display: inline-flex; align-items: center; gap: .4rem; padding: .1rem .55rem; border-radius: 999px; font-weight: 600; border: 1px solid transparent; }
+.statusbar .lamp::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+.statusbar .lamp:hover { text-decoration: none; filter: brightness(1.08); }
+.lamp-green { color: var(--ok); background: var(--ok-soft); }
+.lamp-yellow { color: var(--warn); background: var(--warn-soft); }
+.lamp-red { color: var(--bad); background: var(--bad-soft); }
 .statusbar .provider { display: inline-flex; align-items: baseline; gap: .4rem; }
 .statusbar .provider > b { color: var(--ink); font-weight: 600; }
 .statusbar .window { font-family: var(--mono); color: var(--ink); }
-.statusbar .window .resets { color: var(--muted); }
+.resets { color: var(--muted); }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
 .statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
 .statusbar .bar-refresh input { margin: 0; }
@@ -335,6 +343,13 @@ _LIMITS_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = Context
     "secretary.web.limits_source", default=None
 )
 
+#: The doctor reading the lamp draws, for the span of one request: a `{"available", "reason",
+#: "document"}` section, or `None` when this process was built without the doctor layer. Fed the
+#: same way and for the same reason as the limits: lazily, per request, and never module state.
+_DOCTOR_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
+    "secretary.web.doctor_source", default=None
+)
+
 #: Said when nothing fed the bar: no provider layer was built into this process at all.
 LIMITS_NOT_BUILT = "this web process was built without the provider usage layer"
 #: Said when the reading came back but carries nothing about this provider.
@@ -365,6 +380,16 @@ def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[
 
 
 @contextmanager
+def doctor_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
+    """Feed the doctor lamp for the span of one request, and stop feeding it when that span ends."""
+    token = _DOCTOR_SOURCE.set(read)
+    try:
+        yield
+    finally:
+        _DOCTOR_SOURCE.reset(token)
+
+
+@contextmanager
 def render_clock(now: Callable[[], datetime] | None) -> Iterator[None]:
     """Fix the clock this render measures a countdown against, so a test can assert one exactly."""
     token = _RENDER_CLOCK.set(now)
@@ -387,11 +412,14 @@ def from_post(value: bool) -> Iterator[None]:
 def _limits_bar() -> str:
     """The bar, from whatever the transport is feeding it -- which may be nothing at all."""
     read = _LIMITS_SOURCE.get()
-    section = read() if read is not None else None
-    return _limits_bar_of(section)
+    doctor_read = _DOCTOR_SOURCE.get()
+    return _limits_bar_of(
+        read() if read is not None else None,
+        doctor=doctor_read() if doctor_read is not None else None,
+    )
 
 
-def _limits_bar_of(section: dict[str, Any] | None) -> str:
+def _limits_bar_of(section: dict[str, Any] | None, *, doctor: dict[str, Any] | None = None) -> str:
     """The bar for one section, kept apart from where the section comes from so a test can hand one in.
 
     Three things are never confused here, in the same way :func:`_limits_panel` keeps them apart on
@@ -413,7 +441,8 @@ def _limits_bar_of(section: dict[str, Any] | None) -> str:
         if isinstance(provider, dict) and provider.get("id") is not None:
             carried[str(provider["id"])] = provider
     named = {key for key, _ in BAR_PROVIDERS}
-    parts = [_bar_provider(label, carried.get(key), refused) for key, label in BAR_PROVIDERS]
+    parts = [_doctor_lamp(doctor)]
+    parts += [_bar_provider(label, carried.get(key), refused) for key, label in BAR_PROVIDERS]
     parts += [
         _bar_provider(str(provider.get("label") or key), provider, refused)
         for key, provider in carried.items()
@@ -424,8 +453,47 @@ def _limits_bar_of(section: dict[str, Any] | None) -> str:
         '<input type="checkbox" data-refresh-toggle> auto</label>'
     )
     return (
-        '<footer class="statusbar" id="status-bar" aria-label="provider usage limits">'
+        '<footer class="statusbar" id="status-bar" aria-label="installation health and provider usage limits">'
         f'<div class="row">{"".join(parts)}</div></footer>'
+    )
+
+
+#: The lamp's three colours, and what each one says when a person hovers it. There is no fourth:
+#: health that could not be read is red, because a lamp cannot say "unknown" in a colour without
+#: somebody reading that colour as "fine". See :data:`secretary.webproto.reads.PROBLEM_SEVERITY`.
+LAMP_WORDS: dict[str, str] = {
+    "green": "no problem is recorded for this installation",
+    "yellow": "this installation runs, but something wants a person's eye",
+    "red": "this installation cannot be trusted to run work, or its health is unknown",
+}
+
+
+def _doctor_lamp(section: dict[str, Any] | None) -> str:
+    """The lamp: one colour out of the recorded health, and a link to the problems behind it.
+
+    It is a link from every page and not a panel on one, so the colour is never a dead end: what
+    makes it red is one click away wherever a person happens to be.
+    """
+    document = (
+        section.get("document") if isinstance(section, dict) and section.get("available") else None
+    )
+    if not isinstance(document, dict):
+        reason = (
+            str(section.get("reason") or "installation health was not read")
+            if isinstance(section, dict)
+            else DOCTOR_NOT_BUILT
+        )
+        document = doctor_unreadable(reason)
+    colour = str(document.get("colour") or "red")
+    colour = colour if colour in LAMP_WORDS else "red"
+    problems = [problem for problem in document.get("problems") or [] if isinstance(problem, dict)]
+    count = f' <span class="lamp-count">{len(problems)}</span>' if problems else ""
+    title = LAMP_WORDS[colour]
+    if problems:
+        title = f"{title}: {problems[0].get('message') or ''}"
+    return (
+        f'<a class="lamp lamp-{colour}" href="/doctor" title="{escape(title)}" '
+        f'aria-label="{escape("installation health: " + colour)}">doctor{count}</a>'
     )
 
 
@@ -1243,6 +1311,98 @@ def _entity_link(entity: dict[str, Any]) -> str:
     if ref.startswith(("issue:", "product:")):
         return escape(ref)
     return _link(ref)
+
+
+#: How a severity is spoken on the doctor page, and the order the groups are read in: what makes
+#: the lamp red first, because that is what the page is opened for.
+SEVERITY_GROUPS: tuple[tuple[str, str], ...] = (
+    ("red", "Red — the installation cannot be trusted to run work"),
+    ("yellow", "Yellow — running, but a person should look"),
+)
+
+
+def doctor(section: dict[str, Any] | None) -> str:
+    """The page behind the lamp: what is wrong, by code, grouped by what it does to the colour.
+
+    Three answers and never two: problems, no problem at all, or health that could not be read --
+    which is said as itself, with the reason, rather than drawn as an empty list. An unreadable
+    installation showing "nothing is wrong" is the one failure this page exists to prevent.
+    """
+    document = (
+        section.get("document") if isinstance(section, dict) and section.get("available") else None
+    )
+    if not isinstance(document, dict):
+        reason = (
+            str(section.get("reason") or "installation health was not read")
+            if isinstance(section, dict)
+            else DOCTOR_NOT_BUILT
+        )
+        document = doctor_unreadable(reason)
+    colour = str(document.get("colour") or "red")
+    colour = colour if colour in LAMP_WORDS else "red"
+    problems = [problem for problem in document.get("problems") or [] if isinstance(problem, dict)]
+    parts = [
+        '<div class="lead"><h1>Doctor</h1>',
+        f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
+        (
+            f'<div class="strip"><span class="light light-{escape(_LIGHT_OF[colour])}" '
+            f'title="{escape(LAMP_WORDS[colour])}">{escape(colour)}</span>'
+            f'<span class="facts">{escape(LAMP_WORDS[colour])}</span></div>'
+        ),
+    ]
+    if not document.get("readable"):
+        parts.append(
+            '<p class="unavailable"><b>this installation\'s health could not be read.</b> '
+            f'{escape(str(document.get("reason") or "no reason was recorded"))}<br>'
+            "An unread installation is not a healthy one, so this is red and not green.</p>"
+        )
+    if isinstance(document.get("source"), dict):
+        parts.append(_source_block(document["source"], what="whether this installation is healthy"))
+    if problems:
+        for severity, heading in SEVERITY_GROUPS:
+            group = [problem for problem in problems if problem.get("severity") == severity]
+            if group:
+                parts.append(_panel(heading, _doctor_list(group), open_=True, count=len(group)))
+        other = [
+            problem
+            for problem in problems
+            if problem.get("severity") not in {severity for severity, _ in SEVERITY_GROUPS}
+        ]
+        if other:
+            parts.append(
+                _panel(
+                    "Classified as neither — and so not green either",
+                    _doctor_list(other),
+                    open_=True,
+                    count=len(other),
+                )
+            )
+    elif document.get("readable"):
+        parts.append(
+            '<p class="empty">no problem is recorded for this installation: '
+            "every check this installation records answered, and none of them is a finding.</p>"
+        )
+    parts.append(
+        '<p class="muted">This page reads recorded state only. It runs no <code>secretary doctor</code>, '
+        "opens no SSH and touches no provider.</p>"
+    )
+    return _page("Doctor", "\n".join(part for part in parts if part), nav="")
+
+
+#: The lamp's colour, said in the stylesheet's own words for the light on the page.
+_LIGHT_OF = {"green": "ok", "yellow": "attention", "red": "bad"}
+
+
+def _doctor_list(problems: list[dict[str, Any]]) -> str:
+    """One problem per line: the code it is known by, then the sentence a person reads."""
+    rows = [
+        [
+            f'<code>{escape(str(problem.get("code") or "—"))}</code>',
+            escape(str(problem.get("message") or "")),
+        ]
+        for problem in problems
+    ]
+    return _rows(["", ""], rows)
 
 
 def commands(document: dict[str, Any]) -> str:

@@ -105,6 +105,9 @@ ROUTES: tuple[Route, ...] = (
     # what the owner says to them, the command feed, and the owner's two writes on a card. Each is
     # one operation of a layer that already existed and had no route; none is a new rule.
     Route("GET", "/history", "commands_page", "command_reads.command_history", page=True),
+    # The page behind the lamp on the bottom bar (secretary-1647): the problems the installation
+    # has recorded, by code, and which of them make the lamp red.
+    Route("GET", "/doctor", "doctor_page", "doctor.doctor_snapshot", page=True),
     Route("GET", "/api/pause", "pause", "pause_reads.pause_state"),
     Route("GET", "/api/pause/scope", "pause_scope", "pause_reads.pause_scope"),
     Route("POST", "/api/pause/drain", "pause_drain", "pause_ops.pause_drain"),
@@ -226,6 +229,7 @@ class WebApp:
         command_reads: Any,
         card_ops: Any,
         provider_usage: Any | None = None,
+        doctor: Any | None = None,
         *,
         po_auth: Any | None = None,
         po: Any | None = None,
@@ -239,6 +243,10 @@ class WebApp:
         self.command_reads = command_reads
         self.card_ops = card_ops
         self.provider_usage = provider_usage
+        #: The cached recorded-health reading behind the doctor lamp and the doctor page. Optional
+        #: in the same way and for the same reason the provider layer is: a process built without
+        #: it still serves every page, and the lamp says health is unknown -- which is red.
+        self.doctor = doctor
         #: The PO token check and the PO sessions. Optional: a process built without them does not
         #: serve /po at all, and the dashboard omits the indicator.
         self.po_auth = po_auth
@@ -267,11 +275,19 @@ class WebApp:
         it is a callable rather than a document, so a JSON route -- which renders no page -- costs
         no provider read. It is unset again when the request ends, so nothing is held between two.
 
+        The doctor lamp's reading is fed here too, by the same mechanism and under the same rules:
+        one context variable holding a callable, set for the span of this request, so a JSON route
+        costs no health collection and two requests never see each other's reading.
+
         Whether this request is a POST is marked here for the same span and the same reason: a page
         rendered as the answer to a submission -- a refusal, normally -- must not reload itself,
         because a reload of a POST result is the browser offering to send the submission again.
         """
-        with pages.limits_source(self._limits_section), pages.from_post(method == "POST"):
+        with (
+            pages.limits_source(self._limits_section),
+            pages.doctor_source(self._doctor_section),
+            pages.from_post(method == "POST"),
+        ):
             return self._handle(method, path, query=query, body=body, headers=headers)
 
     def _handle(
@@ -530,6 +546,9 @@ class WebApp:
         markup = pages.project_page(snapshot, project_id=params["project"], sprints=sprints)
         return _html(200, markup)
 
+    def _doctor_page(self, _params, _query, _body) -> Response:
+        return _html(200, pages.doctor(self._doctor_section()))
+
     def _commands_page(self, _params, query, _body) -> Response:
         return _html(
             200,
@@ -546,6 +565,18 @@ class WebApp:
         if self.provider_usage is None:
             return None
         return self._or_reason(self.provider_usage.usage_snapshot)
+
+    def _doctor_section(self) -> dict[str, Any] | None:
+        """The recorded health for a page, or `None` when this process was built without it.
+
+        The one read behind both the lamp on the bar and the doctor page, and it is the cached
+        layer's own call: the cache decides when health is actually collected, so a walk over
+        every page inside one window collects once. A JSON route renders no page and so makes no
+        call at all.
+        """
+        if self.doctor is None:
+            return None
+        return self._or_reason(self.doctor.doctor_snapshot)
 
     def _or_reason(self, read: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         """A section's document, or the reason it has none, for a page made of several reads."""
