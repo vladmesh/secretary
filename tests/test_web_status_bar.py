@@ -261,8 +261,8 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 bar = bar_of(self.get(path))
                 self.assertIn("<b>Claude</b>", bar)
                 self.assertIn("<b>Codex</b>", bar)
-                self.assertIn("74.0%", bar)
-                self.assertIn("91.0%", bar)
+                self.assertIn("74%", bar)
+                self.assertIn("91%", bar)
 
     def test_every_page_carries_one_doctor_lamp_and_it_links_to_the_doctor_page(self) -> None:
         for route in self.page_routes():
@@ -313,6 +313,28 @@ class BarLayoutTests(RouteFixture):
         self.assertLess(page.index("</main>"), page.index('<footer class="statusbar"'))
         self.assertNotIn("position: fixed", re.search(r"form\.sprint \{[^}]*\}", pages.STYLE).group(0))
 
+    def test_a_provider_is_a_group_the_eye_can_find_on_a_single_line(self) -> None:
+        """The bar is one line, so the grouping is drawn rather than spelled with newlines."""
+        heading = re.search(r"\.statusbar \.provider > b \{([^}]*)\}", pages.STYLE)
+        assert heading is not None
+        # The heading is set apart from the windows the way a panel heading is: see `h2`.
+        self.assertIn("text-transform: uppercase", heading.group(1))
+        self.assertIn("letter-spacing", heading.group(1))
+        # One provider is separated from the next by a rule and not only by a gap.
+        rule = re.search(r"\.statusbar \.provider \+ \.provider \{([^}]*)\}", pages.STYLE)
+        assert rule is not None
+        self.assertIn("border-left: 1px solid", rule.group(1))
+
+    def test_a_window_is_one_chip_and_its_figure_sits_next_to_its_name(self) -> None:
+        chip = re.search(r"\.statusbar \.window \{([^}]*)\}", pages.STYLE)
+        assert chip is not None
+        self.assertIn("background: var(--raised)", chip.group(1))
+        figure = re.search(r"\.statusbar \.window > b \{([^}]*)\}", pages.STYLE)
+        assert figure is not None
+        # No fixed column: it would open a hole between the window's name and its percentage.
+        self.assertNotIn("min-width", figure.group(1))
+        self.assertIn("font-variant-numeric: tabular-nums", figure.group(1))
+
 
 # -- criterion 3 and 5: a reading, a reading that is not current, and no reading at all ----------
 
@@ -342,13 +364,25 @@ class BarReadingTests(RouteFixture):
         )
         claude, codex = provider_places(bar)[:2]
         self.assertIn("5-hour", claude)
-        self.assertIn("74.0%", claude)
+        self.assertIn("74%", claude)
         # The reset is the time left until it, and the moment itself is the hover title.
-        self.assertIn('<span class="resets" title="2026-09-20T18:00:00Z">6 h 0 m left</span>', claude)
+        self.assertIn('<span class="resets" title="2026-09-20T18:00:00Z">6h 0m left</span>', claude)
         self.assertIn("weekly", claude)
-        self.assertIn("91.0%", claude)
-        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4 d 12 h left</span>', claude)
-        self.assertIn("41.0%", codex)
+        self.assertIn("91%", claude)
+        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4d 12h left</span>', claude)
+        self.assertIn("41%", codex)
+
+    def test_a_window_is_drawn_as_one_group_of_name_percentage_and_countdown(self) -> None:
+        """What belongs to one window is inside one element, in that order and with one separator."""
+        bar = self.bar(
+            self.section([provider("claude", "Claude", windows=[window("5-hour", 73.0, "2026-09-20T13:06:00Z")])])
+        )
+        self.assertIn(
+            '<span class="window"><span class="win-name">5-hour</span><b>73%</b>'
+            '<span class="dot">·</span>'
+            '<span class="resets" title="2026-09-20T13:06:00Z">1h 6m left</span></span>',
+            bar,
+        )
 
     def test_an_available_reading_that_is_not_new_says_how_old_it_is(self) -> None:
         bar = self.bar(
@@ -479,8 +513,8 @@ class BarCostsNoExtraReadTests(RouteFixture):
         for _ in range(5):
             for path in paths:
                 bar = bar_of(self.get(path, app=app))
-                self.assertIn("74.0%", bar)
-                self.assertIn("41.0%", bar)
+                self.assertIn("74%", bar)
+                self.assertIn("41%", bar)
         self.assertEqual(len(paths) * 5, 55, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
@@ -508,7 +542,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
         # Both presentations of the same document are on the page: the panel and the bar.
         self.assertIn("Usage limits", page)
-        self.assertIn("74.0%", bar_of(page))
+        self.assertIn("74%", bar_of(page))
 
 
 # -- criterion 6: what keeps the bar current never discards what somebody is typing --------------
@@ -572,18 +606,18 @@ class ResetRenderingTests(unittest.TestCase):
 
     def test_more_than_a_day_away_is_whole_days_and_hours(self) -> None:
         drawn = self.left("2026-09-22T23:30:00Z")
-        self.assertIn(">2 d 11 h left<", drawn)
+        self.assertIn(">2d 11h left<", drawn)
 
     def test_under_a_day_is_hours_and_minutes(self) -> None:
-        self.assertIn(">6 h 45 m left<", self.left("2026-09-20T18:45:00Z"))
+        self.assertIn(">6h 45m left<", self.left("2026-09-20T18:45:00Z"))
 
     def test_under_an_hour_is_minutes(self) -> None:
-        self.assertIn(">42 m left<", self.left("2026-09-20T12:42:00Z"))
+        self.assertIn(">42m left<", self.left("2026-09-20T12:42:00Z"))
 
     def test_under_a_minute_is_said_as_less_than_a_minute_and_never_as_zero(self) -> None:
         drawn = self.left("2026-09-20T12:00:40Z")
         self.assertIn(">less than a minute left<", drawn)
-        self.assertNotIn("0 m left", drawn)
+        self.assertNotIn("0m left", drawn)
 
     def test_a_moment_already_past_is_said_as_past_and_never_as_a_negative_or_a_zero(self) -> None:
         drawn = self.left("2026-09-20T11:00:00Z")
@@ -611,11 +645,29 @@ class ResetRenderingTests(unittest.TestCase):
         A cached reading can be up to `CACHE_SECONDS` old, so counting from its `observed_at` would
         keep repeating the time that was left when it was observed.
         """
-        self.assertIn(">6 h 0 m left<", self.left("2026-09-20T18:00:00Z"))
-        self.assertIn(">5 h 0 m left<", self.left("2026-09-20T18:00:00Z", minutes=60))
+        self.assertIn(">6h 0m left<", self.left("2026-09-20T18:00:00Z"))
+        self.assertIn(">5h 0m left<", self.left("2026-09-20T18:00:00Z", minutes=60))
 
     def test_a_moment_without_an_offset_is_read_as_utc_rather_than_as_local_time(self) -> None:
-        self.assertIn(">6 h 0 m left<", self.left("2026-09-20T18:00:00"))
+        self.assertIn(">6h 0m left<", self.left("2026-09-20T18:00:00"))
+
+
+class PercentRenderingTests(unittest.TestCase):
+    """A percentage is drawn once for both places too, and a tenth that is zero is not drawn at all."""
+
+    def test_a_whole_reading_carries_no_trailing_tenth(self) -> None:
+        self.assertEqual(pages._percent(73.0), "73%")
+        self.assertEqual(pages._percent(100.0), "100%")
+        self.assertEqual(pages._percent(72), "72%")
+
+    def test_a_reading_that_really_is_fractional_keeps_its_one_digit(self) -> None:
+        self.assertEqual(pages._percent(95.4), "95.4%")
+        self.assertEqual(pages._percent(0.5), "0.5%")
+
+    def test_no_reading_is_a_dash_and_never_a_zero_or_a_bare_per_cent_sign(self) -> None:
+        for absent in (None, "", "74", True):
+            with self.subTest(absent=absent):
+                self.assertEqual(pages._percent(absent), "—")
 
 
 class BothPlacesDrawTheSameResetTests(RouteFixture):
@@ -623,11 +675,11 @@ class BothPlacesDrawTheSameResetTests(RouteFixture):
 
     def test_the_bar_and_the_panel_render_the_reset_identically(self) -> None:
         page = self.get("/")
-        drawn = '<span class="resets" title="2026-09-20T18:00:00Z">6 h 0 m left</span>'
+        drawn = '<span class="resets" title="2026-09-20T18:00:00Z">6h 0m left</span>'
         self.assertIn(drawn, bar_of(page))
         panel = page[page.index("Usage limits") : page.index('<footer class="statusbar"')]
         self.assertIn(drawn, panel)
-        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4 d 12 h left</span>', panel)
+        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4d 12h left</span>', panel)
 
     def test_neither_place_prints_an_iso_moment_as_the_text_of_the_reset(self) -> None:
         page = self.get("/")
@@ -705,7 +757,7 @@ class APostResultDoesNotReloadItselfTests(RouteFixture):
 class BarSourceIsPerRequestTests(RouteFixture):
     def test_the_source_is_unset_again_once_the_request_is_answered(self) -> None:
         app = self.app()
-        self.assertIn("74.0%", bar_of(self.get("/", app=app)))
+        self.assertIn("74%", bar_of(self.get("/", app=app)))
         # Rendered outside any request, the same shell says it was fed nothing rather than
         # repeating what the last request happened to see.
         self.assertIn(pages.LIMITS_NOT_BUILT, bar_of(pages.error(404, "not_found", "no route here")))
