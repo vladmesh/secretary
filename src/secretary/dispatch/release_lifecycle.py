@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
     has_candidate,
@@ -14,6 +13,7 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id

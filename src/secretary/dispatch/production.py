@@ -9,7 +9,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
 from secretary.board.terminal_taxonomy import (
@@ -18,6 +17,7 @@ from secretary.board.terminal_taxonomy import (
     read_terminal_taxonomy,
 )
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.claim import claim_ready_task
 from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,

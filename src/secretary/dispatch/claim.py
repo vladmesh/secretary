@@ -12,8 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import has_candidate
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from secretary.dispatch.helpers import _worker_id, scrub_host_output
 from secretary.dispatch.launch import (

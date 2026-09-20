@@ -11,8 +11,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.dispatch import release_lifecycle
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,

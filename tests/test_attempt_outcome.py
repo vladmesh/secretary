@@ -7,10 +7,10 @@ import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.state import OutcomeTerminalPath
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.types import HostError
