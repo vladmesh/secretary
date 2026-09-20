@@ -42,7 +42,7 @@ committed audit journal and the dispatcher's production state are read once each
 | `installation` | `instance.yaml`, validated | where this installation keeps its data, and its own budget thresholds |
 | `sprints` | the sprint board, one pass with batched metadata | which sprints exist, and everything on their rows |
 | `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
-| `journal` | `board/events.ndjson`, the committed audit | when the last significant event of an open sprint's cards happened |
+| `journal` | `board/events.ndjson`, the committed audit | when the last significant event of an open sprint's cards happened, and when its current card last moved |
 | `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
 
 The journal is a source of its own and not a corner of the sprint board, even though
@@ -103,6 +103,7 @@ import json
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,7 @@ from secretary.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import task_audit_for
+from secretary.tasks import recorded_card_transition, task_audit_for
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
@@ -206,6 +207,26 @@ CHECKS_UNKNOWN = "unknown"
 CHECKS_NOT_APPLICABLE = "not_applicable"
 
 CHECK_STATES = (CHECKS_GREEN, CHECKS_NOT_GREEN, CHECKS_UNKNOWN, CHECKS_NOT_APPLICABLE)
+
+#: Whether the committed audit dates the board state of a sprint's current card. `recorded` is a
+#: transition of that card on the journal, and the only one of the four that carries a moment.
+#: `absent` is the journal's own answer that it holds no transition for this card -- a card created
+#: and never moved, or a history that simply does not have one -- and it is never spelled as a zero
+#: age, which would read as a card that moved just now. `not_applicable` is a sprint with no current
+#: card, or one whose card is where the sprint ended and is therefore not standing anywhere. And
+#: `unknown` is the journal or the Pipeline listing nobody could read, which is the opposite of all
+#: three.
+TRANSITION_RECORDED = "recorded"
+TRANSITION_ABSENT = "absent"
+TRANSITION_NOT_APPLICABLE = "not_applicable"
+TRANSITION_UNKNOWN = "unknown"
+
+TRANSITION_STATES = (
+    TRANSITION_RECORDED,
+    TRANSITION_ABSENT,
+    TRANSITION_NOT_APPLICABLE,
+    TRANSITION_UNKNOWN,
+)
 
 #: Where a sprint stands: something is being worked on, something is waited for, something is
 #: blocked, the sprint has ended, or the source that would say could not be read.
@@ -416,6 +437,97 @@ class SprintSections(SectionSet):
         return read.decide(
             rule(SOURCE_SPRINTS, from_row),
             blank={"ref": None, "live": False, "reason": None},
+        )
+
+    def current_card_state(self, read: SourceSet, current: Section, *, now: float) -> Section:
+        """Where the sprint's current card stands, and since when -- from the two sources that say.
+
+        A section of its own rather than two more fields of `current_task`, because it is answered
+        by other sources: the board state is the Pipeline listing's, the moment is the committed
+        audit's, and `current_task` is the sprint row's alone. Folding them together would make a
+        journal nobody could read blank the card's reference and the sprint's row with it, which is
+        precisely the failure `decision.freshness` exists apart from `decision` to avoid.
+
+        **The moment is the card's last state transition and nothing else.** Not `updated_at`, which
+        moves for a comment, a report or any other edit of the card; not the newest event of any
+        kind, for the same reason. `_last_transition` walks the one journal this document already
+        read, backwards, and takes the first event that moved *this* card, in either shape history
+        holds (:func:`secretary.tasks.recorded_card_transition`).
+
+        Whether a card is standing anywhere at all is not re-derived here: it is `current_task.live`,
+        decided once by the section that owns it. A closed or stopped sprint's card is where the
+        sprint ended, so this answers `not_applicable` for it and carries no age that could tick.
+        """
+        card = current.fields.get("ref")
+        live = bool(current.fields.get("live"))
+
+        def from_row(sprint: _Sprint) -> dict[str, Any] | None:
+            reference, status, _current = _subject(sprint)
+            if sprint[1] is None:
+                return None
+            if card is None:
+                return {
+                    **_STANDING_BLANK,
+                    "transition": TRANSITION_NOT_APPLICABLE,
+                    "reason": f"{reference} has no current card, so no card of it is standing anywhere",
+                }
+            if not live:
+                return {
+                    **_STANDING_BLANK,
+                    "card": card,
+                    "transition": TRANSITION_NOT_APPLICABLE,
+                    "reason": (
+                        f"{reference} is {status}: {card} is the card it ended on, so nothing about "
+                        "where it stands is still running"
+                    ),
+                }
+            return None
+
+        def from_journal(
+            sprint: _Sprint, linked: dict[str, list[dict[str, Any]]], events: list[dict[str, Any]]
+        ) -> dict[str, Any] | None:
+            if sprint[1] is None or card is None or not live:
+                return None
+            _reference, entry = _card_of(sprint, linked)
+            state = str((entry or {}).get("state") or "") or None
+            event = _last_transition(events, card)
+            if event is None:
+                return {
+                    "card": card,
+                    "state": state,
+                    "since": None,
+                    "age_seconds": None,
+                    "transition": TRANSITION_ABSENT,
+                    "reason": (
+                        f"the committed audit records no state transition of {card}, so nothing "
+                        f"here says when it entered {state or 'the column it stands in'}"
+                    ),
+                }
+            moment = str(event.get("occurred_at") or "") or None
+            return {
+                "card": card,
+                "state": state,
+                "since": moment,
+                "age_seconds": _elapsed(moment, now),
+                "transition": TRANSITION_RECORDED,
+                "reason": (
+                    f"{card} stands in {state or 'a column the Pipeline listing does not name'} "
+                    f"and the committed audit dates its last transition to {moment or 'no moment'}"
+                ),
+            }
+
+        return read.decide(
+            rule(SOURCE_SPRINTS, from_row),
+            Rule(SOURCE_JOURNAL, (SOURCE_SPRINTS, SOURCE_CARDS, SOURCE_JOURNAL), from_journal),
+            blank=dict(_STANDING_BLANK),
+            # `card` is which card the answer would have been about, not a claim about where it
+            # stands: it is the sprint row's own field, carried exactly as `checks` carries it.
+            narrates=("reason", "card"),
+            unresolved=lambda reading: {
+                **_STANDING_BLANK,
+                "card": card,
+                "reason": reading.source.reason,
+            },
         )
 
     def decision(self, read: SourceSet, freshness: Section) -> Section:
@@ -1121,7 +1233,7 @@ class SprintReadLayer(ProtocolBoundary):
             return [
                 {
                     **_identity(row, view),
-                    **self._work(read.replacing(SOURCE_SPRINTS, (row, view))),
+                    **self._work(read.replacing(SOURCE_SPRINTS, (row, view)), now=now),
                     "observer": self._observer(read.replacing(SOURCE_SPRINTS, (row, view))),
                 }
                 for row, view in zip(rows, views, strict=True)
@@ -1152,9 +1264,9 @@ class SprintReadLayer(ProtocolBoundary):
         answer from an observer that is provably not running.
 
         `work` is the same object one item of :meth:`sprint_list` carries, built by the same call:
-        what the sprint's current card is and whether it is live, the last observer decision and
-        its freshness, the state of the current card's mandatory checks, and what the sprint is
-        waiting on.
+        what the sprint's current card is and whether it is live, where that card stands and since
+        when, the last observer decision and its freshness, the state of the current card's
+        mandatory checks, and what the sprint is waiting on.
         """
         now = self._clock()
         reference = str(ref or "")
@@ -1174,7 +1286,7 @@ class SprintReadLayer(ProtocolBoundary):
                 "ref": reference,
                 "sprint": SECTIONS.sprint(sprint),
                 "observer": self._observer(sprint),
-                "work": self._work(sprint),
+                "work": self._work(sprint, now=now),
                 **self._marks(read),
             }
         )
@@ -1276,10 +1388,12 @@ class SprintReadLayer(ProtocolBoundary):
 
     # -- assembly ----------------------------------------------------------------------------
 
-    def _work(self, sprint: SourceSet) -> dict[str, Any]:
+    def _work(self, sprint: SourceSet, *, now: float) -> dict[str, Any]:
         """What one sprint is doing, in the sections a listing and a watched page both carry."""
+        current = SECTIONS.current_task(sprint)
         return {
-            "current_task": SECTIONS.current_task(sprint),
+            "current_task": current,
+            "current_card_state": SECTIONS.current_card_state(sprint, current, now=now),
             "decision": SECTIONS.decision(sprint, SECTIONS.freshness(sprint)),
             "cards": SECTIONS.cards(sprint),
             "degraded_cards": SECTIONS.degraded_cards(sprint),
@@ -1811,6 +1925,60 @@ def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:
     )
 
 
+#: What the current card's standing says when nothing established it: every claim field at the value
+#: that claims nothing. Declared once because four branches answer with it -- a sprint with no
+#: current card, a sprint that ended, a journal nobody could read, and the section's own blank.
+_STANDING_BLANK: dict[str, Any] = {
+    "card": None,
+    "state": None,
+    "since": None,
+    "age_seconds": None,
+    "transition": TRANSITION_UNKNOWN,
+    "reason": None,
+}
+
+
+def _last_transition(events: list[dict[str, Any]], card: str) -> dict[str, Any] | None:
+    """The last event that moved this card, over the one journal this document already read.
+
+    Backwards, because the committed stream is append-ordered -- which is what `_event_position`
+    already stands on -- so the first transition found walking back is the last one made. Only a
+    transition counts: a comment, a report, a verdict or an observer decision appended afterwards
+    leaves the card exactly where the move put it, and dating the state from one of those would
+    report an age that has nothing to do with the column the card is in.
+
+    Both shapes are read, and the reading of them is
+    `secretary.tasks.recorded_card_transition` rather than a second spelling here.
+    """
+    if not card:
+        return None
+    for event in reversed(events):
+        if str(event.get("ref") or "") != card:
+            continue
+        if recorded_card_transition(event) is not None:
+            return event
+    return None
+
+
+def _elapsed(moment: str | None, now: float) -> float | None:
+    """How long ago a journal moment was, in seconds, or `None` when nothing here can date it.
+
+    `None` and never `0` for a moment this process cannot parse: a zero age is the claim that the
+    card moved as the document was read, which is the one thing an undated transition does not say.
+    """
+    if not moment:
+        return None
+    try:
+        parsed = datetime.fromisoformat(moment)
+    except ValueError:
+        return None
+    # The journal writes UTC (`sources.isoformat`); a moment with no offset is read as UTC rather
+    # than as this host's local time, which would shift the age by the offset.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return max(0.0, round(now - parsed.timestamp(), 3))
+
+
 #: What the close section says when nothing established it: every claim field at the value that
 #: claims nothing. Declared once because three branches answer with it -- the journal's own "no such
 #: close", a journal nobody could read, and the section's blank -- and a branch that spelled one of
@@ -2162,6 +2330,11 @@ __all__ = [
     "SOURCE_JOURNAL",
     "SOURCE_LIVENESS",
     "SOURCE_SPRINTS",
+    "TRANSITION_ABSENT",
+    "TRANSITION_NOT_APPLICABLE",
+    "TRANSITION_RECORDED",
+    "TRANSITION_STATES",
+    "TRANSITION_UNKNOWN",
     "WAITING_BLOCKED",
     "WAITING_ENDED",
     "WAITING_STATES",

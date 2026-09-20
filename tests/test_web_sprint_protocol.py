@@ -71,6 +71,10 @@ from secretary.webproto.sprint_reads import (
     OBSERVER_NOT_STARTED,
     OBSERVER_RUNNING,
     OBSERVER_UNAVAILABLE,
+    TRANSITION_ABSENT,
+    TRANSITION_NOT_APPLICABLE,
+    TRANSITION_RECORDED,
+    TRANSITION_UNKNOWN,
     SprintReadLayer,
 )
 from secretary.webproto.sprint_requests import SprintRequestStore
@@ -774,6 +778,221 @@ class SprintWorkFixture(SprintProtocolFixture):
         SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance).set_current_task(
             role="observer", actor="observer", reference=sprint, task_reference=card
         )
+
+class CurrentCardStateTests(SprintWorkFixture):
+    """Where a sprint's current card stands, and since when, in both documents.
+
+    The moment is the card's **last state transition** on the committed audit and nothing else. The
+    journal a real installation keeps is mostly not transitions -- comments, reports, review
+    verdicts, observer decisions and every other edit that moves `updated_at` -- so a card whose age
+    were taken from the newest event of any kind would read as having just moved every time anybody
+    said anything about it. The cases below drive exactly that journal.
+
+    The events are appended to the committed audit directly, because what is under test is a read of
+    a journal in the states this installation's history really holds it in: both event shapes, a
+    card with no transition at all, and transitions of a card this sprint is not on.
+    """
+
+    #: Before the fixture's clock (2026-09-06T00:00:00Z), in the journal's own UTC spelling.
+    FIRST = "2026-09-05T09:00:00Z"
+    SECOND = "2026-09-05T18:00:00Z"
+    LAST = "2026-09-05T21:30:00Z"
+    AFTER = "2026-09-05T23:59:00Z"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.reference = self.reference_of(self.create())
+        self.card = self._card(self.reference)
+        self._current_task(self.reference, self.card)
+        self._move(self.card, "In progress")
+
+    # -- the journal, in the shapes history holds ----------------------------------------------
+
+    def _append(self, event: dict[str, Any]) -> None:
+        path = self.data_dir / "board" / "events.ndjson"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+    def _typed_move(self, at: str, source: str, target: str, *, ref: str | None = None) -> None:
+        """A typed protocol event, which carries `transition.source` and `transition.target`."""
+        self._append(
+            {
+                "event_id": f"board-event-{at}-{target}",
+                "schema_version": 1,
+                "record_type": TaskAudit._PROTOCOL_EVENT_RECORD_TYPE,
+                "kind": "card.moved",
+                "ref": ref or self.card,
+                "occurred_at": at,
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "transition": {"source": source, "target": target},
+            }
+        )
+
+    def _legacy_move(self, at: str, source: str, target: str, *, ref: str | None = None) -> None:
+        """A legacy event, which is `moved` with `payload.from` and `payload.to`."""
+        self._append(
+            {
+                "event_id": f"evt_{at}_{target}",
+                "schema_version": 1,
+                "kind": "moved",
+                "outcome": "success",
+                "ref": ref or self.card,
+                "occurred_at": at,
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "payload": {"from": source, "to": target},
+            }
+        )
+
+    def _noise(self, at: str) -> None:
+        """Everything a journal holds that is not a transition, after the last one that is.
+
+        A comment, a worker report, a review verdict and the observer's own decision. Every one of
+        them moves the card's `updated_at` and none of them moves the card.
+        """
+        for kind, role, payload in (
+            ("commented", "po", {"body": "is this still going?"}),
+            ("reported", "worker", {"kind": "done"}),
+            ("reviewed", "reviewer", {"verdict": "red"}),
+            ("decided", "observer", {"decision": "rework"}),
+        ):
+            self._append(
+                {
+                    "event_id": f"evt_{at}_{kind}",
+                    "schema_version": 1,
+                    "kind": kind,
+                    "outcome": "success",
+                    "ref": self.card,
+                    "occurred_at": at,
+                    "actor": {"role": role, "id": role},
+                    "payload": payload,
+                }
+            )
+
+    # -- what both documents say ---------------------------------------------------------------
+
+    def _standing(self, reference: str | None = None) -> dict[str, Any]:
+        """The section, asserted to be the same object in the listing and on the watched page."""
+        subject = reference or self.reference
+        layer = self.reads()
+        watched = layer.sprint_state(subject)["work"]["current_card_state"]
+        listed = self._entry(layer.sprint_list(), subject)["current_card_state"]
+        self.assertEqual(listed, watched, "the listing and the page answer this differently")
+        return watched
+
+    # -- the cases -----------------------------------------------------------------------------
+
+    def test_the_moment_is_the_last_transition_and_not_the_newest_event(self) -> None:
+        """Criteria 1, 3 and 7: several transitions, then everything that is not one."""
+        self._typed_move(self.FIRST, "ready", "in_progress")
+        self._typed_move(self.SECOND, "in_progress", "validate")
+        self._typed_move(self.LAST, "validate", "in_progress")
+        self._noise(self.AFTER)
+
+        standing = self._standing()
+
+        self.assertEqual(standing["transition"], TRANSITION_RECORDED)
+        self.assertEqual(standing["card"], self.card)
+        self.assertEqual(standing["state"], "in_progress")
+        self.assertEqual(standing["since"], self.LAST)
+        self.assertEqual(standing["age_seconds"], 9000.0)
+        self.assertEqual(standing["source"]["name"], "journal")
+
+    def test_a_legacy_moved_event_is_read_as_the_transition_it_is(self) -> None:
+        """Criterion 3's other shape, and the two mixed: the last one wins whichever shape it is."""
+        self._typed_move(self.FIRST, "ready", "in_progress")
+        self._legacy_move(self.LAST, "in_progress", "validate")
+        self._noise(self.AFTER)
+
+        legacy_last = self._standing()
+        self.assertEqual(legacy_last["since"], self.LAST)
+
+        self._typed_move(self.AFTER, "validate", "in_progress")
+        self.assertEqual(self._standing()["since"], self.AFTER)
+
+    def test_the_updated_card_is_never_what_dates_it(self) -> None:
+        """A journal of nothing but edits leaves the state undated rather than fresh."""
+        self._noise(self.AFTER)
+
+        standing = self._standing()
+
+        self.assertEqual(standing["transition"], TRANSITION_ABSENT)
+        self.assertIsNone(standing["since"])
+        self.assertIsNone(standing["age_seconds"])
+
+    def test_a_card_with_no_transition_says_so_rather_than_showing_a_zero(self) -> None:
+        """Criterion 6: a card created and never moved is undated, and says which card it is."""
+        standing = self._standing()
+
+        self.assertEqual(standing["transition"], TRANSITION_ABSENT)
+        self.assertEqual(standing["card"], self.card)
+        self.assertEqual(standing["state"], "in_progress")
+        self.assertIsNone(standing["since"])
+        self.assertIsNone(standing["age_seconds"])
+        self.assertIn("no state transition", standing["reason"])
+
+    def test_another_card_is_never_what_dates_this_one(self) -> None:
+        """The journal is one installation's, so a transition is matched to its own card."""
+        other = self._card(self.reference)
+        self._typed_move(self.LAST, "ready", "in_progress", ref=other)
+
+        self.assertEqual(self._standing()["transition"], TRANSITION_ABSENT)
+
+    def test_a_sprint_that_ended_shows_no_ticking_age(self) -> None:
+        """Criterion 5, decided from `current_task.live` and not re-derived here."""
+        self._typed_move(self.LAST, "ready", "in_progress")
+        ended = self.add_sprint_row("sprint:1001", status="closed", current_task=self.card)
+
+        standing = self._standing(ended)
+
+        self.assertEqual(standing["transition"], TRANSITION_NOT_APPLICABLE)
+        self.assertEqual(standing["card"], self.card)
+        self.assertIsNone(standing["since"])
+        self.assertIsNone(standing["age_seconds"])
+        self.assertIn("the card it ended on", standing["reason"])
+        # And the card's reference is still the sprint's own, which this section may not take away.
+        watched = self.reads().sprint_state(ended)["work"]
+        self.assertEqual(watched["current_task"]["ref"], self.card)
+        self.assertFalse(watched["current_task"]["live"])
+
+    def test_a_sprint_with_no_current_card_says_so(self) -> None:
+        """Criterion 4, in the same words the rest of the document says it in."""
+        empty = self.add_sprint_row("sprint:1002", status="open")
+
+        standing = self._standing(empty)
+
+        self.assertEqual(standing["transition"], TRANSITION_NOT_APPLICABLE)
+        self.assertIsNone(standing["card"])
+        self.assertIsNone(standing["state"])
+        self.assertIsNone(standing["age_seconds"])
+        self.assertIn("no current card", standing["reason"])
+
+    def test_a_journal_nobody_can_read_takes_away_this_and_nothing_else(self) -> None:
+        """Criterion 2: the new part is unavailable, and the card's own fields still stand."""
+        self._typed_move(self.LAST, "ready", "in_progress")
+        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit denied")):
+            watched = self.reads().sprint_state(self.reference)
+            listed = self._entry(self.reads().sprint_list(), self.reference)
+
+        for work in (watched["work"], listed):
+            standing = work["current_card_state"]
+            self.assertEqual(standing["source"]["state"], "unavailable")
+            self.assertEqual(standing["transition"], TRANSITION_UNKNOWN)
+            self.assertIsNone(standing["since"])
+            self.assertIsNone(standing["age_seconds"])
+            # The narration still names which card the answer would have been about.
+            self.assertEqual(standing["card"], self.card)
+            # And nothing of the card's own row was taken away with it.
+            self.assertEqual(work["current_task"]["ref"], self.card)
+            self.assertEqual(work["current_task"]["source"]["state"], "available")
+        self.assertEqual(listed["ref"], self.reference)
+
+    def test_both_documents_validate_with_the_section_on_them(self) -> None:
+        self._typed_move(self.LAST, "ready", "in_progress")
+        layer = self.reads()
+        for document in (layer.sprint_list(), layer.sprint_state(self.reference)):
+            with self.subTest(kind=document["kind"]):
+                self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+
 
 class SprintListTests(SprintWorkFixture):
     """The listing: every sprint at once, and no sprint described as something it is not.
@@ -1972,6 +2191,7 @@ class SectionSeamTests(SprintProtocolFixture):
         watched = self.reads().sprint_state(reference)
         work = {
             "current_task",
+            "current_card_state",
             "decision",
             "decision.freshness",
             "cards",
@@ -2038,6 +2258,7 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
     #: Which section of the work document is asserted, and the field that carries its claim.
     CLAIMS: ClassVar[dict[str, str]] = {
         "current_task": "ref",
+        "current_card_state": "transition",
         "decision": "entry",
         "cards": "states",
         "degraded_cards": "items",
@@ -2174,6 +2395,10 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
             "source:liveness": ("liveness", "available"),
             "source:installation": ("installation", "available"),
             "current_task": ("sprints", "available", self.card),
+            # The fixture's card was put in its column on the board directly, which is a state this
+            # installation really has: the journal holds no transition for it, and that is the
+            # journal's own answer rather than a zero age.
+            "current_card_state": ("journal", "available", sprint_reads_module.TRANSITION_ABSENT),
             "decision": ("sprints", "available", None),
             "decision.freshness": ("journal", "available", True),
             "cards": ("cards", "available", {"in_progress": [self.card]}),
@@ -2196,6 +2421,11 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
             self._sections(
                 **{
                     "source:journal": ("journal", "unavailable"),
+                    "current_card_state": (
+                        "journal",
+                        "unavailable",
+                        sprint_reads_module.TRANSITION_UNKNOWN,
+                    ),
                     "decision.freshness": ("journal", "unavailable", False),
                 },
             ),
@@ -2208,6 +2438,11 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
                 cards=("cards", "unavailable", None),
                 **{
                     "source:cards": ("cards", "unavailable"),
+                    "current_card_state": (
+                        "cards",
+                        "unavailable",
+                        sprint_reads_module.TRANSITION_UNKNOWN,
+                    ),
                     "decision.freshness": ("cards", "unavailable", False),
                 },
             ),
@@ -2243,6 +2478,11 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
                 **{
                     "source:journal": ("journal", "unavailable"),
                     "source:liveness": ("liveness", "unavailable"),
+                    "current_card_state": (
+                        "journal",
+                        "unavailable",
+                        sprint_reads_module.TRANSITION_UNKNOWN,
+                    ),
                     "decision.freshness": ("journal", "unavailable", False),
                     "observer.launch": ("liveness", "unavailable", OBSERVER_UNAVAILABLE),
                 },
@@ -2261,6 +2501,11 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
                 **{
                     "source:cards": ("cards", "unavailable"),
                     "source:liveness": ("liveness", "unavailable"),
+                    "current_card_state": (
+                        "cards",
+                        "unavailable",
+                        sprint_reads_module.TRANSITION_UNKNOWN,
+                    ),
                     "decision.freshness": ("cards", "unavailable", False),
                     "observer.launch": ("liveness", "unavailable", OBSERVER_UNAVAILABLE),
                 },
@@ -2291,6 +2536,7 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
             {
                 **marks,
                 "current_task": (*refused, None),
+                "current_card_state": (*refused, sprint_reads_module.TRANSITION_UNKNOWN),
                 "decision": (*refused, None),
                 "decision.freshness": (*refused, False),
                 "cards": (*refused, None),

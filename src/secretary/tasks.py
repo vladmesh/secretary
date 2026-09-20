@@ -323,6 +323,30 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
     return str(payload.get("decision") or "")
 
 
+def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
+    """The board-state transition one audit event records, or `None` when it records none.
+
+    History holds two shapes of the same fact and a reader of the journal has to know both: a typed
+    protocol event carries `transition.source` and `transition.target`, and a legacy one is
+    `moved` with `payload.from` and `payload.to`. They are read in one place so that a caller asking
+    "did this event move the card, and where to" cannot learn only one of them.
+
+    Nothing about *who* moved the card or *why* is decided here: this is the shape and no filter.
+    The one thing it does refuse is a legacy event whose outcome is not `success`, because an event
+    recording a move that did not happen is not a transition at all -- which is the same reason
+    :func:`is_significant_card_event`, the caller this shape was lifted out of, has always asked.
+    """
+    if TaskAudit._is_protocol_event(event):
+        typed = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        target = str(typed.get("target") or "")
+        return (str(typed.get("source") or ""), target) if target else None
+    if str(event.get("kind") or "") != "moved" or str(event.get("outcome") or "") != "success":
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    target = str(payload.get("to") or "")
+    return (str(payload.get("from") or ""), target) if target else None
+
+
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
     """Whether a card transition needs a new observer decision.
 
@@ -338,16 +362,10 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     if str(actor.get("role") or "") == "observer":
         return False
-    if typed:
-        payload = event.get("transition") if isinstance(event.get("transition"), dict) else {}
-        source = str(payload.get("source") or "")
-        target = str(payload.get("target") or "")
-    else:
-        if str(event.get("kind") or "") != "moved":
-            return False
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        source = str(payload.get("from") or "")
-        target = str(payload.get("to") or "")
+    moved = recorded_card_transition(event)
+    if moved is None:
+        return False
+    source, target = moved
     # Assessment requires a decision; Blocked requires classification.
     if target in {"assessment", "blocked", "done"}:
         return True

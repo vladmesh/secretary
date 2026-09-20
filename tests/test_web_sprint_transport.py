@@ -153,6 +153,7 @@ def sprint_document(
     reason: str = "the sprint is saved and the production tick holds no observer for it yet",
     resume: dict[str, Any] | None = None,
     current_task: str | None = None,
+    work: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A `sprint_state` document, as the read layer publishes one."""
 
@@ -169,6 +170,7 @@ def sprint_document(
         "kind": "sprint",
         "observed_at": "2026-09-06T00:00:00Z",
         "ref": reference,
+        **({"work": work} if work else {}),
         "sprint": {
             "source": available(),
             "value": {
@@ -763,6 +765,68 @@ class SprintPageTests(SprintTransportFixture):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, markup)
+
+    def test_the_page_says_where_the_current_card_stands_and_since_when(self) -> None:
+        """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""
+        markup = self.page(
+            sprint_document(
+                current_task="secretary-1570",
+                work={
+                    "current_task": {
+                        "source": available(),
+                        "ref": "secretary-1570",
+                        "live": True,
+                        "reason": "the observer has it as the current card",
+                    },
+                    "current_card_state": {
+                        "source": available(),
+                        "card": "secretary-1570",
+                        "state": "validate",
+                        "since": "2026-09-05T21:30:00Z",
+                        "age_seconds": 9000.0,
+                        "transition": "recorded",
+                        "reason": "secretary-1570 stands in validate",
+                    },
+                },
+            )
+        )
+        self.assertIn('title="2026-09-05T21:30:00Z"', markup)
+        self.assertIn("2h in this state", markup)
+        self.assertIn(">validate<", markup)
+
+    def test_the_page_never_shows_an_age_for_a_card_no_transition_dates(self) -> None:
+        """Criteria 5 and 6 on the page: words where a duration would be, and never a zero."""
+        for transition, reason, said in (
+            ("absent", "the committed audit records no state transition", "no transition recorded"),
+            ("not_applicable", "sprint:1 is closed: it is the card it ended on", "the card it ended on"),
+            ("unknown", "the committed audit journal could not be read", "could not be read"),
+        ):
+            with self.subTest(transition=transition):
+                markup = self.page(
+                    sprint_document(
+                        current_task="secretary-1570",
+                        work={
+                            "current_task": {
+                                "source": available(),
+                                "ref": "secretary-1570",
+                                "live": transition != "not_applicable",
+                                "reason": reason,
+                            },
+                            "current_card_state": {
+                                "source": available(),
+                                "card": "secretary-1570",
+                                "state": None,
+                                "since": None,
+                                "age_seconds": None,
+                                "transition": transition,
+                                "reason": reason,
+                            },
+                        },
+                    )
+                )
+                self.assertIn(said, markup)
+                self.assertIn("secretary-1570", markup)
+                self.assertNotIn("in this state", markup)
 
     def test_the_three_launch_states_are_told_apart_in_words(self) -> None:
         """Criterion 6: the words differ, so the page reads the same without colour."""

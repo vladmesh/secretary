@@ -1164,6 +1164,9 @@ def _sprint_work(item: dict[str, Any]) -> str:
         rows.append(
             ["current card", f'<span class="empty">{escape(str(current.get("reason") or "none"))}</span>']
         )
+    standing = _card_standing(item)
+    if standing:
+        rows.append(["card state", standing])
     observer = item.get("observer") if isinstance(item.get("observer"), dict) else {}
     launch = observer.get("launch") or {}
     if launch:
@@ -1228,6 +1231,39 @@ def _sprint_work(item: dict[str, Any]) -> str:
     if not rows:
         return '<p class="empty">nothing about this sprint\'s work could be read.</p>'
     return _rows(["", ""], rows)
+
+
+#: Said where a duration would be when the committed audit dates no transition of the current card.
+#: Words, and never a zero age: "0s" beside a board state reads as a card that moved as the page was
+#: drawn, which is the opposite of a card nothing has moved at all.
+NO_TRANSITION_RECORDED = "no transition recorded"
+
+
+def _card_standing(item: dict[str, Any]) -> str:
+    """Where a sprint's current card stands and how long it has stood there, drawn once.
+
+    Both surfaces that show it -- the row of `/sprints` and the work panel of `/sprints/{ref}` --
+    are this one function, so they cannot say it differently. The wording follows `_reset`: the
+    duration is what a reader wants in the text, and the exact ISO moment is the hover title of the
+    element carrying it. An answer with no moment carries no title at all rather than a misleading
+    one, and a sprint that has ended carries no duration at all: its card is where the sprint
+    stopped, not something that is still ageing.
+    """
+    carried = item.get("current_card_state")
+    section = carried if isinstance(carried, dict) else {}
+    if not section:
+        return ""
+    transition = str(section.get("transition") or "")
+    state = str(section.get("state") or "")
+    column = _state_chip(state) if state else ""
+    if transition == "recorded":
+        since = str(section.get("since") or "")
+        age = _age(section.get("age_seconds"))
+        return f'{column} <span class="age" title="{escape(since)}">{escape(age)} in this state</span>'
+    if transition == "absent":
+        return f'{column} <span class="empty">{escape(NO_TRANSITION_RECORDED)}</span>'
+    said = _short(section.get("reason"), 140) or "nothing said where this card stands"
+    return f'{column} <span class="empty">{escape(said)}</span>'
 
 
 def _short(text: Any, chars: int) -> str:
@@ -1457,7 +1493,7 @@ def sprints_page(
                 _sprint_status_chip(item),
                 escape(", ".join(_sprint_projects(item)) or str(item.get("product") or "—")),
                 escape(goal if len(goal) <= 110 else goal[:107].rstrip() + "…"),
-                _link(str(current["ref"])) if current.get("ref") else "—",
+                _current_card_cell(item, current),
                 (
                     f'<span class="state state-{escape(str(launch.get("state") or ""))}">{escape(str(launch.get("state") or "—"))}</span>'
                     if launch
@@ -1497,6 +1533,15 @@ def sprints_page(
         ]
     )
     return _page("Sprints", body, nav="sprints")
+
+
+def _current_card_cell(item: dict[str, Any], current: dict[str, Any]) -> str:
+    """The listing's `current card` column: which card, and where it has been standing since when."""
+    standing = _card_standing(item)
+    if not current.get("ref"):
+        return f'<div class="reason">{standing}</div>' if standing else "—"
+    said = _link(str(current["ref"]))
+    return said + (f'<div class="reason">{standing}</div>' if standing else "")
 
 
 def _sprint_projects(item: dict[str, Any]) -> list[str]:

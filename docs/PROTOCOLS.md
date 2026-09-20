@@ -2708,7 +2708,7 @@ Pinned by `tests/test_web_sprint_protocol.py` (`SectionSeamTests`, `SourceIsolat
 | `installation` | `instance.yaml`, validated | where this installation keeps its data, and its own budget thresholds |
 | `sprints` | the sprint board, one pass with batched metadata | which sprints exist, and everything on their rows |
 | `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
-| `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened |
+| `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened, and when the current card last moved |
 | `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
 
 The journal is its own source, read once and handed to `SprintReader.status_views`. Both documents carry
@@ -2724,6 +2724,7 @@ A listing item and the watched sprint's `work` are built by the same call over t
 | --- | --- | --- |
 | `sprint` (watched) / `sprints` (listing) | `sprints` | `value: null` / `items: null` — never an empty listing, which would claim this installation holds no sprints |
 | `current_task` | `sprints` | `ref: null`, `live: false`, sourced `sprints` |
+| `current_card_state` | `sprints` for `not_applicable`; `journal` otherwise, which also needs `cards` | `unknown` with `state`, `since` and `age_seconds` null, sourced by whichever of `sprints`, `cards`, `journal` was missing first; `card` still names the current card wherever the row answered |
 | `decision` | `sprints` | `entry: null`, sourced `sprints` |
 | `decision.freshness` | `sprints` for a closed or stopped sprint (its record is frozen); `journal` for an open one, which also needs `cards` | `value: null`, sourced by whichever of `sprints`, `cards`, `journal` was missing first |
 | `cards` | `cards` | `states: null`, never `{}` |
@@ -2761,6 +2762,19 @@ current card, never under an unavailable production state.
 `current_task.live` qualifies a finished sprint's current card as the record of an ended sprint rather
 than work in progress. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
 source is unreadable.
+
+**`current_card_state`** is where the current card stands and since when, and it is a section of its own
+because `current_task` is the sprint row's alone: a journal or a Pipeline listing that could not be read
+marks this section and never blanks the card's reference or the sprint's row. `state` is the column the
+Pipeline listing holds the card in. `since` is the card's **last state transition** on the committed
+audit -- read in both shapes history holds, a typed event's `transition.source`/`transition.target` and a
+legacy `moved` event's `payload.from`/`payload.to` (`secretary.tasks.recorded_card_transition`) -- and never
+`updated_at`, which moves for a comment, a report or any other edit, and never the newest event of any
+kind. `age_seconds` is how old that moment was when the document was read. `transition` is `recorded`
+when the journal holds one, `absent` when it answered and holds none for this card (which is never
+spelled as a zero age), `not_applicable` for a sprint with no current card or one whose card is where it
+ended -- decided from `current_task.live` rather than by re-deriving the rule -- and `unknown` for a
+source nobody could read. The journal is walked once for the whole document, as every other source is.
 
 `checks` is the mechanical gate as the dispatcher record holds it; nothing is re-run and no CI backend is
 called. `gate` carries only the recorded `state`, attested SHA, whether a run is pending, last transport
