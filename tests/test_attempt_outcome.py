@@ -7,6 +7,7 @@ import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
+from secretary.dispatch import attempt_accounting
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
@@ -170,7 +171,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_malformed_taxonomy_does_not_gate_the_lifecycle_effect(self) -> None:
         _payload, record = self._start_worker_round()
 
-        self.runtime.terminal_effect(
+        attempt_accounting.terminal_effect(self.runtime, 
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -188,11 +189,11 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         """A failed observational handoff cannot veto the lifecycle transaction."""
         _payload, record = self._start_worker_round()
         with mock.patch.object(
-            self.runtime,
-            "_persist_outcome_round_context",
+            attempt_accounting,
+            "persist_outcome_round_context",
             side_effect=TaskError("audit_pending", "context journal unavailable", 4),
         ) as persist:
-            effect = self.runtime.terminal_effect(
+            effect = attempt_accounting.terminal_effect(self.runtime, 
                 self.reader.show(CARD_REF),
                 record,
                 target="blocked",
@@ -259,7 +260,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         payload = self.runtime.production_state.load()
         record = self.runtime.production_state.records(payload)[CARD_REF]
-        self.runtime.terminal_effect(
+        attempt_accounting.terminal_effect(self.runtime, 
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -328,7 +329,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_committed_obligations_retire_before_the_next_tick(self) -> None:
         _payload, record = self._start_worker_round()
-        effect = self.runtime.terminal_effect(
+        effect = attempt_accounting.terminal_effect(self.runtime, 
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -341,9 +342,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         canon = self.writer.board_host.canon
         self.assertEqual(canon.attempt_outcome_effects(), ())
 
-        with mock.patch.object(self.runtime, "_finish_attempt_outcome") as finish:
-            self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
-            self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
+        with mock.patch.object(attempt_accounting, "_finish_attempt_outcome") as finish:
+            self.assertEqual(attempt_accounting.publish_pending_attempt_outcomes(self.runtime), [])
+            self.assertEqual(attempt_accounting.publish_pending_attempt_outcomes(self.runtime), [])
         finish.assert_not_called()
         self.assertEqual(self._outcomes()[0].event.data["source_event_ids"]["effect"], effect["event_id"])
 
@@ -354,7 +355,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             "_commit_attempt_outcome",
             side_effect=TaskError("audit_pending", "append interrupted", 4),
         ):
-            effect = self.runtime.terminal_effect(
+            effect = attempt_accounting.terminal_effect(self.runtime, 
                 self.reader.show(CARD_REF),
                 record,
                 target="blocked",
@@ -367,7 +368,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertTrue(self._outcomes()[0].pending)
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
-        self.runtime.publish_pending_attempt_outcomes()
+        attempt_accounting.publish_pending_attempt_outcomes(self.runtime)
         occurrence = self._outcomes()[0]
         self.assertFalse(occurrence.pending)
         self.assertEqual(occurrence.event.data["source_event_ids"]["effect"], effect["event_id"])
@@ -461,7 +462,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         ):
             self.assertEqual(self.tick()["action"], "rework-started")
         self.assertEqual(len(self._outcomes()), 1)
-        self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
+        self.assertEqual(attempt_accounting.publish_pending_attempt_outcomes(self.runtime), [])
 
         outcomes = self._outcomes()
         self.assertEqual(len(outcomes), 2)
@@ -573,7 +574,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIs(record.outcome_terminal_path, OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT)
         for terminal in ("review-launch", "review-wait", "post-gate"):
             with self.subTest(terminal=terminal):
-                obligation = self.runtime._attempt_outcome_obligation(
+                obligation = attempt_accounting._attempt_outcome_obligation(self.runtime, 
                     self.reader.show(CARD_REF),
                     record,
                     terminal_state="blocked",
@@ -587,7 +588,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertIsNone(obligation["source_event_ids"]["report"])
                 self.assertEqual(obligation["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
 
-        self.runtime.terminal_effect(
+        attempt_accounting.terminal_effect(self.runtime, 
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -661,7 +662,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         ):
             self.tick()
         self.assertEqual(self._outcomes(), ())
-        self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
+        self.assertEqual(attempt_accounting.publish_pending_attempt_outcomes(self.runtime), [])
 
         outcome = self._outcomes()[0].event.data
         self.assertIsNone(outcome["source_event_ids"]["report"])
@@ -681,7 +682,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             "attempt_outcome",
             side_effect=TaskError("audit_pending", "append refused", 4),
         ):
-            effect = self.runtime.terminal_effect(
+            effect = attempt_accounting.terminal_effect(self.runtime, 
                 task,
                 record,
                 target="blocked",
@@ -701,7 +702,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.production_state.put_records(payload, records)
         self.runtime.production_state.save(payload)
 
-        recovered = self.runtime.publish_pending_attempt_outcomes()
+        recovered = attempt_accounting.publish_pending_attempt_outcomes(self.runtime)
 
         self.assertEqual(recovered, [])
         occurrences = self.writer.board_host.canon.attempt_outcome_occurrences(ref=CARD_REF)
