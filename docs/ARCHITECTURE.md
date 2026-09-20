@@ -57,7 +57,8 @@ dispatcher for the extracted continuation methods.
 recovery-policy rungs, suspension SIGCONT/operator escalation, guarded one-shot respawn, second-stall
 blocking and the bounded unobservable-head escalation. `DispatcherRuntime` calls its four package
 entry points from worker/review/gate orchestration; the module calls back only for the existing
-worker/reviewer confirmed-stop lifecycle boundaries and routing/terminal effects. Mechanical gate
+worker/reviewer confirmed-stop lifecycle boundaries and routing; terminal effects go directly through
+`dispatch.attempt_accounting`. Mechanical gate
 verdict, transport retry, bounded infrastructure rerun and pending-CI policy are package-owned by
 `secretary.dispatch.gate_lifecycle`. `dispatch.review_verdict` owns durable review-verdict
 acceptance and Assessment parking: marker consumption, reviewer-stop handoff, green/red bookkeeping,
@@ -65,8 +66,10 @@ the no-observer red ceiling, pre-park gate handoff, and park intent/replay. `dis
 owns Assessment decision intake/replay plus rework/reslice execution. `dispatch.release_lifecycle`
 owns the shared merge-readiness check, research-report publication, release replay/gate re-check,
 merge-path blocking, merge/teardown, completion-evidence enforcement and the final transition to
-Done. Reviewer launch/wait and the generic terminal/outcome bookkeeping remain in
-`DispatcherRuntime` as separate boundaries.
+Done. `dispatch.attempt_accounting` owns the shared attempt-usage/outcome boundary: durable
+round/source handoff, phase usage accounting and publication, terminal outcome obligations, and the
+generic terminal board effect. Reviewer launch/wait, confirmed-stop/adoption, routing bookkeeping and
+provider ingress remain separate runtime boundaries.
 
 Dependency rules:
 

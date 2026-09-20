@@ -304,6 +304,52 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._release_parked(", decision_source)
         self.assertNotIn("from secretary.dispatcher import", release_source)
 
+    def test_dispatcher_attempt_accounting_is_package_owned(self) -> None:
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        accounting_source = (
+            ROOT / "src" / "secretary" / "dispatch" / "attempt_accounting.py"
+        ).read_text(encoding="utf-8")
+        for helper in (
+            "pending_attempt_usage",
+            "_attempt_outcome_obligation",
+            "_outcome_lineage_sources",
+            "_outcome_round_context_request_id",
+            "_persist_outcome_round_context",
+            "_capture_outcome_source",
+            "_outcome_round_context",
+            "_outcome_usage_source",
+            "_finish_attempt_outcome",
+            "terminal_effect",
+            "publish_pending_attempt_outcomes",
+            "publish_pending_attempt_usage",
+            "record_attempt_usage",
+            "_write_attempt_usage",
+        ):
+            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
+        for entry in (
+            "persist_outcome_round_context",
+            "capture_outcome_source",
+            "terminal_effect",
+            "publish_pending_attempt_outcomes",
+            "publish_pending_attempt_usage",
+            "record_attempt_usage",
+        ):
+            self.assertIn(f"def {entry}(", accounting_source)
+        for path in (ROOT / "src" / "secretary" / "dispatch").glob("*.py"):
+            if path.name == "attempt_accounting.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            for legacy_call in (
+                "runtime.terminal_effect(",
+                "runtime._persist_outcome_round_context(",
+                "runtime._capture_outcome_source(",
+                "runtime.record_attempt_usage(",
+                "runtime.publish_pending_attempt_outcomes(",
+                "runtime.publish_pending_attempt_usage(",
+            ):
+                self.assertNotIn(legacy_call, source, path.name)
+        self.assertNotIn("from secretary.dispatcher import", accounting_source)
+
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         wait_source = (
