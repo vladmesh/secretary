@@ -12,12 +12,12 @@ import time
 from dataclasses import replace
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import (
     has_candidate,
     infra_report_fields,
     render_infra_completion_record,
 )
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import (

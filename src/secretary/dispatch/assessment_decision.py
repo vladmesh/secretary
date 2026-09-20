@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
 )
 from secretary.dispatch import release_lifecycle
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import _last_marker_body
 from secretary.dispatch.review_verdict import complete_park as _complete_park
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id

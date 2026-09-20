@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import has_candidate
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_lifecycle import (
     accept_green_gate as _accept_green_gate,
