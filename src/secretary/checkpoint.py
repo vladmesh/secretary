@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -346,6 +346,10 @@ class CheckpointResult:
     commit: str = ""
     board_cards: int = 0
     run_records: int = 0
+    #: How long the run that produced this result took, in milliseconds. Filled by
+    #: :meth:`CheckpointWriter.write`, which is the one entry point that spans a whole run;
+    #: 0.0 on a result built by hand, which took no time because it never ran.
+    duration_ms: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -354,6 +358,7 @@ class CheckpointResult:
             "commit": self.commit,
             "board_cards": self.board_cards,
             "run_records": self.run_records,
+            "duration_ms": self.duration_ms,
         }
 
 
@@ -398,11 +403,19 @@ class CheckpointWriter:
             ) from None
 
     def write(self) -> CheckpointResult:
+        """One checkpoint run, and how long it took.
+
+        The clock starts before the state-repo lock, because waiting for another writer is part of
+        what a checkpoint run costs an operator, and every outcome the method can produce leaves
+        through here — committed, unchanged, and the blocked one the gate raises.
+        """
+        started = time.perf_counter()
         try:
             with state_repo.state_repo_lock(self.instance_dir):
-                return self._write()
+                result = self._write()
         except CheckpointBlocked as exc:
-            return CheckpointResult(status="blocked", reason=str(exc))
+            result = CheckpointResult(status="blocked", reason=str(exc))
+        return replace(result, duration_ms=round((time.perf_counter() - started) * 1000.0, 3))
 
     def _write(self) -> CheckpointResult:
         client, audit_owner = self._audit_owner()
@@ -979,6 +992,10 @@ def checkpoint_snapshot(
         "last_checkpoint_prepared_status": successful_status,
         "last_checkpoint_prepared_commit": str(write.get("last_success_commit") or ""),
         "last_checkpoint_prepared_age_minutes": successful_age,
+        # How long the run that `checkpoint_status` describes took. It is overwritten by every
+        # outcome the coordinator records, including the cheap not-due decision, so it can never be
+        # the previous run's cost carried forward under this run's status.
+        "checkpoint_duration_ms": _float_field(write, "duration_ms"),
         "checkpoint_attempted_at": str(write.get("attempted_at") or ""),
         "checkpoint_attempted_epoch": _float_field(write, "attempted_epoch"),
         "checkpoint_skipped_at": skipped_at,
@@ -1083,6 +1100,7 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
             else ""
         ),
         f"checkpoint: {snapshot.get('checkpoint_status') or 'pending'}"
+        + f" in {snapshot.get('checkpoint_duration_ms') or 0.0:.0f} ms"
         + (" (retry pending)" if snapshot.get("checkpoint_retry_pending") else ""),
         f"last push: {snapshot.get('last_push_at') or '(never)'}",
         f"last push attempt: {snapshot.get('push_attempted_at') or '(never)'}"

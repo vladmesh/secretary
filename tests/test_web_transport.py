@@ -21,6 +21,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 from http.client import HTTPConnection
 from pathlib import Path
@@ -1324,6 +1325,143 @@ class InstalledRouteTests(TransportFixture):
         """The list above is not a second route table: every path in it is one of the real ones."""
         installed = {route.pattern for route in ROUTES if route.method == "GET"}
         self.assertTrue(set(self.ROUTES_UNDER_TEST) <= installed)
+
+
+class RequestDurationLineTests(TransportFixture):
+    """The one line per request `secretary-web.service` leaves in its journal, with a duration.
+
+    Before secretary-1649 that line was the request line `BaseHTTPRequestHandler` prints from
+    `send_response`: method, target, status, and nothing about the cost. The sprint's whole subject
+    is how long these pages take, and the operator's own record of it said nothing — so the line
+    now carries the milliseconds the application spent, and there is still exactly one of it.
+    """
+
+    #: Every field of the line, in order. A test that matched loosely would not notice the target
+    #: or the status quietly leaving it.
+    LINE = re.compile(
+        r"^(?P<client>\S+) (?P<method>[A-Z]+) (?P<target>\S+) (?P<status>\d{3}) (?P<ms>\d+\.\d)ms$"
+    )
+
+    def serve(self, app: Any) -> tuple[str, int]:
+        server = build_server(app, host="127.0.0.1", port=0)
+        self.addCleanup(server.server_close)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        return server.server_address[0], server.server_address[1]
+
+    def request_lines(self, log: io.StringIO) -> list[re.Match[str]]:
+        return [
+            match
+            for match in (self.LINE.match(line) for line in log.getvalue().splitlines())
+            if match is not None
+        ]
+
+    def settle(self, log: io.StringIO, expected: int) -> list[re.Match[str]]:
+        """Wait for the server thread to write its lines, which it does after it answers.
+
+        The line is written in a `finally`, on the handler thread, after the response has gone out:
+        a client that has already read the body may well get there first. The base class's own
+        request line, if one ever came back, is printed *before* ours by `send_response`, so a wait
+        that sees ours has seen any duplicate too.
+        """
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            lines = self.request_lines(log)
+            if len(lines) >= expected:
+                return lines
+            time.sleep(0.01)
+        return self.request_lines(log)
+
+    def drive(self, app: Any, calls: list[tuple[str, str]]) -> list[re.Match[str]]:
+        """Make each request over one real socket and return the per-request lines it produced."""
+        host, port = self.serve(app)
+        log = io.StringIO()
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            for method, path in calls:
+                connection.request(method, path)
+                connection.getresponse().read()
+            return self.settle(log, len(calls))
+
+    def test_a_normal_200_leaves_one_line_with_the_method_path_status_and_duration(self) -> None:
+        self._card()
+        lines = self.drive(self.app(), [("GET", "/sprints")])
+
+        self.assertEqual(len(lines), 1, "one answered request is one line")
+        line = lines[0]
+        self.assertEqual(line["method"], "GET")
+        self.assertEqual(line["target"], "/sprints")
+        self.assertEqual(line["status"], "200")
+        # A page this installation renders costs real work; a zero would mean the clock never ran.
+        self.assertGreater(float(line["ms"]), 0.0)
+        self.assertLess(float(line["ms"]), 10_000.0)
+
+    def test_the_contained_500_leaves_its_own_line_with_a_duration(self) -> None:
+        """`_contain` answers a request too, so it is a request line like any other.
+
+        The frames line it also writes is not one: it carries the reference that joins the body to
+        the journal and deliberately has no status and no duration, and the shape check above is
+        what separates the two.
+        """
+        app = ExplodingApp(self.app(), "/api/system", RuntimeError(SECRET_MESSAGE))
+        lines = self.drive(app, [("GET", "/api/system")])
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["method"], "GET")
+        self.assertEqual(lines[0]["target"], "/api/system")
+        self.assertEqual(lines[0]["status"], "500")
+        self.assertGreater(float(lines[0]["ms"]), 0.0)
+
+    def test_a_head_and_a_refusal_are_recorded_under_the_verb_and_status_they_had(self) -> None:
+        self._card()
+        lines = self.drive(
+            self.app(),
+            [("HEAD", "/"), ("GET", "/api/tasks/secretary-absent"), ("GET", "/nowhere")],
+        )
+
+        self.assertEqual(
+            [(line["method"], line["target"], line["status"]) for line in lines],
+            [("HEAD", "/", "200"), ("GET", "/api/tasks/secretary-absent", "404"), ("GET", "/nowhere", "404")],
+        )
+
+    def test_a_verb_this_service_does_not_serve_is_recorded_too(self) -> None:
+        """`http.server` answers a DELETE with 501 by itself, and that is still an answered request."""
+        self._card()
+        host, port = self.serve(self.app())
+        log = io.StringIO()
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("DELETE", "/api/system")
+            response = connection.getresponse()
+            response.read()
+            lines = self.settle(log, 1)
+
+        self.assertEqual(response.status, 501)
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["method"], "DELETE")
+        self.assertEqual(lines[0]["target"], "/api/system")
+        self.assertEqual(lines[0]["status"], "501")
+
+    def test_the_query_string_stays_on_the_line_and_nothing_prints_a_second_one(self) -> None:
+        """The base class's own request line is gone, not merely duplicated with a duration."""
+        self._card()
+        host, port = self.serve(self.app())
+        log = io.StringIO()
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("GET", "/api/system?limit=1")
+            connection.getresponse().read()
+            self.settle(log, 1)
+
+        recorded = [line for line in log.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(recorded), 1, recorded)
+        self.assertEqual(self.request_lines(log)[0]["target"], "/api/system?limit=1")
 
 
 # -- the transport is a transport ----------------------------------------------------------------

@@ -171,6 +171,50 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.runtime.production_tick()
         self.assertEqual(self.read_through_the_agent_reader().generation, telemetry.generation)
 
+    def test_every_terminal_tick_records_how_long_it_took(self) -> None:
+        """The cost of a tick, beside the outcome it reached, for every outcome that is recorded.
+
+        Added by secretary-1649, which is about making the pipeline's own performance measurable
+        before anything is optimised: `record_tick_telemetry` already carried how a tick ended and
+        said nothing about how long it ran, so a dispatcher minute that grew from one second to
+        twenty left no trace anybody could read. The three cases below are the three terminal
+        records `production_tick` can make — the working tick, the frozen one, and the one that
+        died on an exception — and each of them has to carry its own number.
+        """
+        self.runtime.production_tick()
+        healthy = self.read_through_the_agent_reader().last
+        self.assertEqual(healthy["status"], "ok")
+        self.assertIsInstance(healthy["duration_ms"], float)
+        self.assertGreater(healthy["duration_ms"], 0.0)
+        # A tick over a fake board is quick, but it is not free and it is not an hour.
+        self.assertLess(healthy["duration_ms"], 60_000.0)
+
+        self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
+        self.runtime.production_tick()
+        frozen = self.read_through_the_agent_reader().last
+        self.assertEqual(frozen["status"], "skipped")
+        self.assertGreater(frozen["duration_ms"], 0.0)
+        self.runtime.resume_pipeline(actor="operator")
+
+        with (
+            mock.patch(
+                "secretary.dispatch.production._reconcile_production",
+                side_effect=RuntimeError("host is gone"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            self.runtime.production_tick()
+        failed = self.read_through_the_agent_reader().last
+        self.assertEqual(failed["status"], "failed")
+        self.assertGreater(failed["duration_ms"], 0.0)
+
+    def test_a_record_folded_in_outside_a_tick_reports_no_duration_rather_than_zero(self) -> None:
+        """There is no tick to time, and nought milliseconds would be a measurement nobody made."""
+        payload: dict = {}
+        record_tick_telemetry(payload, {"status": "ok", "step": "production-tick"})
+
+        self.assertIsNone(payload["tick_telemetry"]["last"]["duration_ms"])
+
     def test_a_rebuilt_state_file_starts_a_new_telemetry_generation(self) -> None:
         self.runtime.production_tick()
         first = self.read_through_the_agent_reader().generation

@@ -19,6 +19,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -36,6 +37,15 @@ LOOPBACK_ONLY = (
     "guarded front instead (`secretary web-front`, DoD 5), which terminates TLS, checks a password "
     "and proxies here; this refusal is what makes that front the only way in"
 )
+
+
+#: The one line every answered request leaves on stderr, which systemd puts in the service journal
+#: (`journalctl -u secretary-web.service`). It replaces the request line `BaseHTTPRequestHandler`
+#: used to print from `send_response`, which named the method, the target and the status and said
+#: nothing about how long any of it took — so the cost of a page was measurable only from outside,
+#: by a stopwatch on a client. The duration is the whole of the application's part of the answer:
+#: the body read, `WebApp.handle`, and the headers and body written back.
+REQUEST_LINE = "{client} {method} {target} {status} {duration:.1f}ms"
 
 
 #: How many of the innermost frames an unhandled failure is logged with. Enough to name the call
@@ -129,6 +139,13 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "secretary-web"
     sys_version = ""
 
+    #: The status this request was answered with, as `_write` decided it. 0 until it does, which is
+    #: what a request whose answer never reached the socket is logged as.
+    _answered_status = 0
+    #: When this request started, and whether its one line has been written yet.
+    _request_started: float | None = None
+    _request_logged = False
+
     def do_GET(self) -> None:  # the base class names the verbs
         self._answer("GET")
 
@@ -138,7 +155,31 @@ class _Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._answer("GET", head=True)
 
+    def parse_request(self) -> bool:
+        """Start this request's clock, where the request itself starts.
+
+        Here rather than in :meth:`_answer` for two reasons. The clock must not begin while the
+        socket is idle between two requests of a keep-alive connection, which is what timing from
+        the top of `handle_one_request` would do — a browser holding a connection open would then
+        be recorded as a twenty-second request. And a request `http.server` refuses by itself, an
+        unsupported verb or a malformed request line, never reaches `_answer` and is still a
+        request this service answered; it is logged from :meth:`send_error` against this same clock.
+        """
+        self._request_started = time.perf_counter()
+        self._request_logged = False
+        self._answered_status = 0
+        return super().parse_request()
+
     def _answer(self, method: str, *, head: bool = False) -> None:
+        # Every exit from here is an answered request, including the two early returns and the
+        # containment boundary, so the line is written in a `finally`: one request, one line,
+        # whichever way the answer was reached.
+        try:
+            self._answer_body(method, head=head)
+        finally:
+            self._log_answer(self._answered_status)
+
+    def _answer_body(self, method: str, *, head: bool = False) -> None:
         path, _, query = self.path.partition("?")
         try:
             body = self._read_body()
@@ -151,6 +192,40 @@ class _Handler(BaseHTTPRequestHandler):
             self._contain(exc, head=head)
             return
         self._write(response.status, response.body, response.content_type, head=head, extra=response.headers)
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        """A status `http.server` decided by itself is still an answered request, so it gets a line.
+
+        An unsupported verb (501) and a malformed or oversized request line (400, 431) never reach
+        the application and never reach :meth:`_answer`. The base class writes its own diagnostic
+        for them through `log_error`; that one says what went wrong and has no duration, so the
+        request line is written here as well, exactly as for any other answer.
+        """
+        super().send_error(code, message, explain)
+        self._log_answer(int(code))
+
+    def _log_answer(self, status: int) -> None:
+        """The per-request line: the verb as it was sent, the target, the status and the duration.
+
+        `self.command` rather than the verb handed to the application, because a HEAD is answered
+        through the GET path and an operator reading the journal is owed the request that was made.
+        The flag makes it one line per request: a refusal written through `send_error` from inside
+        the application path would otherwise be logged there and again in `_answer`'s `finally`.
+        """
+        if self._request_logged:
+            return
+        self._request_logged = True
+        started = self._request_started
+        print(
+            REQUEST_LINE.format(
+                client=self.address_string(),
+                method=self.command or "-",
+                target=getattr(self, "path", "") or "-",
+                status=status,
+                duration=0.0 if started is None else (time.perf_counter() - started) * 1000.0,
+            ),
+            file=sys.stderr,
+        )
 
     def _contain(self, exc: BaseException, *, head: bool) -> None:
         """Answer an escaped application exception as a complete 5xx instead of a closed socket.
@@ -204,6 +279,7 @@ class _Handler(BaseHTTPRequestHandler):
         head: bool,
         extra: dict[str, str] | None = None,
     ) -> None:
+        self._answered_status = status
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -223,8 +299,20 @@ class _Handler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:  # the base class names these
+        """Nothing here: :meth:`_log_answer` writes this request's one line, with its duration.
+
+        `send_response` calls this, and the base class prints the request line from it. Leaving
+        that in place would put two lines in the journal for every request, one of them the poorer:
+        it is written before the body is, so it could not carry a duration even if it wanted to.
+        """
+
     def log_message(self, format: str, *args: Any) -> None:  # the base class names this argument
-        """One line per request on stderr: the diagnostic OPERATIONS.md points at."""
+        """Stderr, for what the base class reports outside an answered request.
+
+        `log_error` reaches here for a malformed request line or a timed-out connection — cases
+        that never enter :meth:`_answer` and so have no duration of their own.
+        """
         print(f"{self.address_string()} {format % args}", file=sys.stderr)
 
 

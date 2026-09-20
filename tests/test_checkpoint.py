@@ -210,6 +210,29 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/runs/export.json", files)
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
 
+    def test_every_outcome_of_a_run_reports_how_long_the_run_took(self):
+        """The cost of a checkpoint, for each outcome the writer produces (secretary-1649).
+
+        A checkpoint run is the most expensive thing the dispatcher minute does — it regenerates
+        the whole board and run projection and commits it — and the only evidence it left was
+        whether it succeeded. A no-change run has to carry its own number too: it did all the
+        regeneration work and found nothing to commit, so it costs an operator the same minute.
+        """
+        committed = self.write()
+        self.assertEqual(committed.status, "committed")
+        self.assertGreater(committed.duration_ms, 0.0)
+        self.assertEqual(committed.to_json()["duration_ms"], committed.duration_ms)
+
+        unchanged = self.write()
+        self.assertEqual(unchanged.status, "unchanged")
+        self.assertGreater(unchanged.duration_ms, 0.0)
+
+        # The gate refuses this one before anything is staged, and a refusal is a run too.
+        self.seed_board([CARD, dict(CARD, id=2, title="collision")])
+        blocked = self.write()
+        self.assertEqual(blocked.status, "blocked")
+        self.assertGreater(blocked.duration_ms, 0.0)
+
     def test_duplicate_fresh_export_leaves_checkpoint_head_index_and_canon_untouched(self):
         self.assertEqual(self.write().status, "committed")
         head = git(self.instance_dir, "rev-parse", "HEAD").strip()
@@ -1396,6 +1419,24 @@ class CheckpointSnapshotTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def test_the_duration_of_the_run_the_status_describes_is_exposed(self):
+        """`secretary status` is where an operator reads what the last checkpoint run cost."""
+        snapshot = checkpoint_snapshot(
+            self.instance_dir,
+            write_state={"status": "committed", "at": "2026-07-20T10:00:00Z", "duration_ms": 1234.5},
+        )
+
+        self.assertEqual(snapshot["checkpoint_status"], "committed")
+        self.assertEqual(snapshot["checkpoint_duration_ms"], 1234.5)
+        self.assertIn("checkpoint: committed in 1234 ms", render_checkpoint_lines(snapshot))
+
+    def test_a_state_written_before_durations_existed_reports_no_time_rather_than_a_wrong_one(self):
+        snapshot = checkpoint_snapshot(
+            self.instance_dir, write_state={"status": "committed", "at": "2026-07-20T10:00:00Z"}
+        )
+
+        self.assertEqual(snapshot["checkpoint_duration_ms"], 0.0)
+
     def test_a_pushed_checkpoint_reports_no_lag(self):
         snapshot = checkpoint_snapshot(
             self.instance_dir,
@@ -1499,7 +1540,10 @@ class CheckpointSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["blocked_reason"], "audit pending")
         self.assertTrue(snapshot["checkpoint_retry_pending"])
         lines = "\n".join(render_checkpoint_lines(snapshot))
-        self.assertIn("checkpoint: skipped (retry pending)", lines)
+        # The line now states what the run cost as well as how it ended (secretary-1649). This
+        # write state carries no duration, so the skip reports nought milliseconds, which is also
+        # very nearly what a not-due decision actually costs.
+        self.assertIn("checkpoint: skipped in 0 ms (retry pending)", lines)
         self.assertIn("checkpoint last skipped: 1970-01-01T00:17:40Z (not due)", lines)
 
     def test_non_https_remote_is_reported_as_bypass_before_the_first_push(self):

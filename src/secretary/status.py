@@ -115,6 +115,7 @@ def collect_status(
             "pause": _pause_status(data_dir, production),
             "divergences": _divergences(production),
             "reconciliation": _reconciliation(production),
+            "last_tick": _last_tick(production),
         },
         "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
@@ -370,6 +371,39 @@ def _delivery_last_failure(delivery: Any) -> str | None:
     if not reason:
         return None
     return f"{delivery.get('last_failure_method') or 'observer-wake'}: {reason}"
+
+
+def _last_tick(production: dict[str, Any]) -> dict[str, Any] | None:
+    """How the last production tick ended and how long it took, or None if none has been recorded.
+
+    `record_tick_telemetry` has folded the terminal outcome of every tick into
+    `tick_telemetry.last` for as long as it has existed, and status carried nothing from it: an
+    operator asking why the pipeline felt slow had to read the dispatcher's state file by hand.
+    The whole entry is exposed rather than the duration alone, because a duration next to no
+    outcome cannot be read — three seconds is healthy for a tick that launched a head and alarming
+    for one that did nothing.
+    """
+    telemetry = production.get("tick_telemetry")
+    entry = telemetry.get("last") if isinstance(telemetry, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    duration = entry.get("duration_ms")
+    return {
+        "seq": int(_float(entry.get("seq"))),
+        "at": _text(entry.get("at")),
+        "status": _text(entry.get("status")),
+        "step": _text(entry.get("step")),
+        "healthy": bool(entry.get("healthy")),
+        "reason": _text(entry.get("reason")),
+        "actions": int(_float(entry.get("actions"))),
+        "error_count": int(_float(entry.get("error_count"))),
+        "degraded_count": int(_float(entry.get("degraded_count"))),
+        # Null, not zero, for a tick recorded before this field existed: a state file written by
+        # the previous release has no duration, and 0 ms would be a measurement nobody made.
+        "duration_ms": (
+            float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool) else None
+        ),
+    }
 
 
 def _divergences(production: dict[str, Any]) -> dict[str, Any]:

@@ -453,6 +453,54 @@ installation is no finding. `reconcile` neither creates nor deletes it.
 own. Timer-started oneshot units are neither required enabled nor active; their state is still
 reported.
 
+## How long things take
+
+Three durations are recorded on every running installation, and one command measures the dashboard
+against the thresholds a sprint is judged on.
+
+### Where the durations are
+
+| what | where it lands | how to read it |
+| --- | --- | --- |
+| one web request | `journalctl -u secretary-web.service` | `127.0.0.1 GET /sprints 200 4612.3ms` — client, verb, request target, HTTP status, and the milliseconds the application spent on it. One line per answered request, including a HEAD, a refusal and a contained 500. |
+| one dispatcher tick | the dispatcher journal, and `secretary status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `secretary status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
+| one checkpoint run | `secretary status` | `checkpoint.checkpoint_duration_ms`, printed by `secretary status` and by `secretary doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
+
+The web duration is the application's part of the answer — reading the body, handling the request,
+and writing the headers and body back — not the whole socket lifetime. The tick duration is the
+wall clock of `production_tick` up to the moment its outcome became durable.
+
+### Measuring the dashboard
+
+```bash
+python3 scripts/measure_dashboard.py            # against http://127.0.0.1:8787
+python3 scripts/measure_dashboard.py --json     # the same facts, as one document
+```
+
+Run it from a checkout, on the host the installation runs on. It reads only: three dashboard pages
+and, to reproduce what an operator's browser is doing, the `/po` overview and one session's JSON.
+It makes no POST and starts no head.
+
+It prints, with the Definition of Done threshold beside each number and whether that number meets it:
+
+- **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up request,
+  then twenty timed ones per route. The judged number is p95 (nearest rank, so over twenty samples
+  it is the second-slowest request); min, median and max are printed beside it. Threshold: 1.0 s.
+- **four concurrent** `GET /` while a `/po/api/sessions/{session}` poll runs every three seconds,
+  with each of the four durations. Threshold: 2.0 s for each request.
+
+The output names the base URL it measured and how it chose the poll target. If the installation has
+no PO session to poll, it says so and reports the concurrency numbers without the poll, rather than
+measuring a quieter scenario under the same heading.
+
+Exit status: `0` when every number is at or under its threshold, `1` when one exceeds it (the full
+table is still printed), `2` when there was nothing to measure — the installation was unreachable,
+or a route it needs is missing.
+
+The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
+command as the runtime user. Without it the script reports why and measures the concurrency without
+the poll.
+
 ## Record reconciliation and controlled divergences
 
 Before advancing cards, every production tick walks the dispatcher records whose card is not among
