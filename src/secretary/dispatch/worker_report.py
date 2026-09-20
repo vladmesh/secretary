@@ -17,6 +17,7 @@ from secretary.board.completion_evidence import (
     infra_report_fields,
     render_infra_completion_record,
 )
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import (
@@ -64,7 +65,7 @@ def worker_report_marker(
         record.outcome_terminal_path = OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
         records[ref] = record
         runtime.save_records(payload, records)
-        runtime._capture_outcome_source(task, record, phase="report", kind="card.reported", marker=marker)
+        attempt_accounting.capture_outcome_source(runtime, task, record, phase="report", kind="card.reported", marker=marker)
     return marker
 
 
@@ -86,7 +87,7 @@ def handle_worker_report(
             # Frozen and recorded before a tick died mid-move; the replay never wakes the worker.
             # The phase this report closed is the same one the dying tick accepted, so its
             # usage occurrence is finished here rather than lost with that tick.
-            runtime.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+            attempt_accounting.record_attempt_usage(runtime, ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
             runtime.writer.move(
                 role="dispatcher",
                 actor=runtime.owner,
@@ -115,7 +116,7 @@ def handle_worker_report(
             unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            runtime.terminal_effect(
+            attempt_accounting.terminal_effect(runtime, 
                 task,
                 record,
                 target="blocked",
@@ -158,7 +159,7 @@ def handle_worker_report(
         record.worker_answer_owed_since = 0.0
         # The report is accepted from here on. Account the worker phase it closes while the
         # head that wrote it is still on the record with its bound provider session.
-        runtime.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+        attempt_accounting.record_attempt_usage(runtime, ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
         record.review_baseline = len(task.get("comments") or [])
         # Freeze before moving the board. A later tick may finish the idempotent move, but it
         # never leaves a completed worker writing while CI or a reviewer owns this checkout.
@@ -205,11 +206,11 @@ def handle_worker_report(
         }
     if marker == "report:blocked":
         # Before the stop, so the phase is accounted while its head is still described here.
-        runtime.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+        attempt_accounting.record_attempt_usage(runtime, ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             task,
             record,
             target="blocked",
@@ -271,7 +272,7 @@ def _record_infra_completion(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             task,
             record,
             target="blocked",
@@ -335,7 +336,7 @@ def _accept_stale_infrastructure_done(
         )
     # The report is accepted here, for the same round the first one opened: the occurrence
     # that round already owns is what a repeated report returns, not a second account.
-    runtime.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+    attempt_accounting.record_attempt_usage(runtime, ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
     try:
         runtime.host.retain_worker(record)
         record.worker_continuation.begin_retention(time.time())
@@ -415,7 +416,7 @@ def _block_repeated_infrastructure_done(
     if unconfirmed is not None:
         return unconfirmed
     reports = record.rejected_done_reports + 1
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -463,7 +464,7 @@ def _reject_stale_done(
         if unconfirmed is not None:
             return unconfirmed
         record.rejected_done_reports = rejected
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             task,
             record,
             target="blocked",

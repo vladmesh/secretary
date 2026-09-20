@@ -9,6 +9,7 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.dispatch import release_lifecycle
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import _last_marker_body
 from secretary.dispatch.review_verdict import complete_park as _complete_park
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
@@ -82,7 +83,7 @@ def advance_assessment(
     )
     if visit and decision_request and decision_event_id:
         try:
-            runtime._persist_outcome_round_context(
+            attempt_accounting.persist_outcome_round_context(runtime, 
                 task,
                 record,
                 phase="decision",
@@ -224,7 +225,7 @@ def reslice_parked(
         return unconfirmed
 
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",

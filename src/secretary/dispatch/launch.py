@@ -50,6 +50,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.heartbeat import intent_heartbeat_identity
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, LaunchIntent
@@ -1132,7 +1133,7 @@ def _adopt_launch_intent(
         if deferred is not None:
             return deferred
         if role == WORKER_ROLE:
-            runtime._persist_outcome_round_context(task, record, phase="worker")
+            attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
         clear_launch_intent(record)
     else:
         record.state = "claimed"
@@ -1152,7 +1153,7 @@ def _adopt_launch_intent(
         if deferred is not None:
             return deferred
         if role == WORKER_ROLE:
-            runtime._persist_outcome_round_context(task, record, phase="worker")
+            attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
         clear_launch_intent(record)
     records[ref] = record
     _persist_quietly(runtime, payload, records)

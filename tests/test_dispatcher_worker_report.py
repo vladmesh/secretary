@@ -34,6 +34,12 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.runtime._stop_worker_confirmed.return_value = None
         self.runtime.host.worker_addressable.return_value = True
         self.runtime.host.head_commit.return_value = "new-candidate"
+        self.accounting = mock.Mock()
+        self.accounting_patcher = mock.patch.object(
+            dispatcher_worker_report, "attempt_accounting", self.accounting
+        )
+        self.accounting_patcher.start()
+        self.addCleanup(self.accounting_patcher.stop)
 
     def handle(self, marker):
         return dispatcher_worker_report.handle_worker_report(
@@ -63,7 +69,7 @@ class WorkerReportBoundaryTests(unittest.TestCase):
                     events.append(("source", self.record.outcome_terminal_path))
                     raise RuntimeError("source unavailable")
 
-                self.runtime._capture_outcome_source.side_effect = fail_source
+                self.accounting.capture_outcome_source.side_effect = fail_source
                 with (
                     mock.patch.object(
                         dispatcher_worker_report, "_round_report_ids", return_value={"report-id"}
@@ -94,7 +100,7 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.assertIsNone(marker)
         self.assertEqual(self.record.outcome_terminal_path, OutcomeTerminalPath.NO_ACCEPTED_REPORT)
         self.runtime.save_records.assert_not_called()
-        self.runtime._capture_outcome_source.assert_not_called()
+        self.accounting.capture_outcome_source.assert_not_called()
 
     def test_done_replay_saves_retention_before_move_and_never_refreezes(self) -> None:
         saved_retention = []
@@ -117,14 +123,14 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.assertEqual(self.runtime.writer.move.call_args.kwargs["request_id"], first_request)
         self.runtime.host.verify_worker_result.assert_called_once()
         self.runtime.host.retain_worker.assert_called_once()
-        self.assertEqual(self.runtime.record_attempt_usage.call_count, 2)
+        self.assertEqual(self.accounting.record_attempt_usage.call_count, 2)
 
     def test_unconfirmed_stop_refuses_report_terminal_effects(self) -> None:
         refused = {"status": "degraded", "action": "head-stop-unconfirmed"}
         self.runtime._stop_worker_confirmed.return_value = refused
         self.assertIs(self.handle("report:blocked"), refused)
-        self.runtime.record_attempt_usage.assert_called_once()
-        self.runtime.terminal_effect.assert_not_called()
+        self.accounting.record_attempt_usage.assert_called_once()
+        self.accounting.terminal_effect.assert_not_called()
         self.runtime.writer.move.assert_not_called()
         self.assertIs(self.records["sample-1"], self.record)
 

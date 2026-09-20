@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.host import _record_worker_delivery_evidence
@@ -196,7 +197,7 @@ def complete_red_transition(
         # A transition performing a decision is the second half of a round whose verdict was
         # already recorded at the park; recording it again would overwrite that outcome.
         runtime._record_verdict_routing(ref, record, continuation.verdict_outcome)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="in_progress",
@@ -532,7 +533,7 @@ def _block_unadmitted_continuation_liveness(
         )
     ref = task["ref"]
     reason = record.worker_continuation_liveness.reason or "provider source was not admitted"
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -743,7 +744,7 @@ def _finish_retained_worker_resume(
     retained_run = dict(record.worker_run)
     runtime.open_worker_round(record, round_number=rework_round)
     runtime.record_worker_routing(task, record, retained_run)
-    runtime._persist_outcome_round_context(task, record, phase="worker")
+    attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
     _record_worker_continuation(runtime, ref, record, "reused", phase, "retained worker resumed")
     record.worker_started_at = record.worker_progress_at = time.time()
     records[ref] = record
@@ -821,7 +822,7 @@ def _restart_red_worker(
     record.state = "claimed"
     runtime.open_worker_round(record, round_number=rework_round)
     runtime.record_worker_routing(task, record, launched.run)
-    runtime._persist_outcome_round_context(task, record, phase="worker")
+    attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
     _record_worker_continuation(runtime, ref, record, continuation, phase, continuation_reason)
     _clear_launch_intent(record)
     record.worker_started_at = record.worker_progress_at = time.time()

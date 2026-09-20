@@ -39,6 +39,7 @@ from secretary import (
 )
 from secretary import upgrade
 from secretary.board_transport import ensure as ensure_board_transport
+from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
 from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
 from secretary.dispatch import host as dispatcher_host_module
@@ -94,6 +95,7 @@ from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
     dispatcher_module,
+    dispatcher_attempt_accounting,
     dispatcher_claim,
     dispatcher_gate_lifecycle,
     dispatcher_production,

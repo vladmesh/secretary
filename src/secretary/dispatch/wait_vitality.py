@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.head_vitality import SnapshotSource as _SnapshotSource
 from secretary.dispatch.head_vitality import snapshots_from_status as _snapshots_from_status
 from secretary.dispatch.head_vitality_episode import (
@@ -1301,7 +1302,7 @@ def _escalate_wait(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
     if unconfirmed is not None:
         return unconfirmed
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
