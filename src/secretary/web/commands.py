@@ -13,6 +13,7 @@ import os
 import sys
 
 from secretary.web.app import WebApp
+from secretary.web.doctor import DoctorLayer
 from secretary.web.provider_usage import ProviderUsageLayer
 from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from secretary.webproto.card_ops import CardOperationLayer
@@ -65,8 +66,9 @@ def add_web_serve_subcommands(subparsers) -> None:
 def run_web_serve(args: argparse.Namespace) -> int:
     # The one PO runner of this process: built here, recovering what a previous run left running.
     po = PoLayer(args.instance, data_dir=args.data_dir)
+    reads = ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
     app = WebApp(
-        ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline)),
+        reads,
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
         SprintReadLayer(args.instance, data_dir=args.data_dir),
         SprintOperationLayer(args.instance, data_dir=args.data_dir),
@@ -77,6 +79,8 @@ def run_web_serve(args: argparse.Namespace) -> int:
         CommandReadLayer(args.instance, data_dir=args.data_dir),
         CardOperationLayer(args.instance, data_dir=args.data_dir),
         ProviderUsageLayer(),
+        # The lamp's reading: the same read layer's recorded health, cached for its own window.
+        DoctorLayer(reads.health_snapshot),
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
     )

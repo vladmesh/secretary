@@ -175,6 +175,17 @@ class RouteFixture(unittest.TestCase):
             self.command_reads,
             Recording(),
         ]
+        self.doctor = Recording(
+            doctor_snapshot={
+                "kind": "doctor",
+                "observed_at": "2026-09-20T12:00:00Z",
+                "readable": True,
+                "reason": None,
+                "colour": "green",
+                "problems": [],
+                "source": None,
+            }
+        )
         self.usage = Recording(
             usage_snapshot=usage_document(
                 [
@@ -188,10 +199,11 @@ class RouteFixture(unittest.TestCase):
             )
         )
 
-    def app(self, *, provider_usage: Any = ..., po: Any = ...) -> WebApp:
+    def app(self, *, provider_usage: Any = ..., po: Any = ..., doctor: Any = ...) -> WebApp:
         return WebApp(
             *self.layers,
             provider_usage=self.usage if provider_usage is ... else provider_usage,
+            doctor=self.doctor if doctor is ... else doctor,
             po_auth=Recording(po_admits={"admitted": True}),
             po=self.po if po is ... else po,
         )
@@ -236,6 +248,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 "/projects",
                 "/projects/secretary",
                 "/history",
+                "/doctor",
                 "/po",
                 "/po/sessions/s-1",
             },
@@ -250,6 +263,14 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 self.assertIn("<b>Codex</b>", bar)
                 self.assertIn("74.0%", bar)
                 self.assertIn("91.0%", bar)
+
+    def test_every_page_carries_one_doctor_lamp_and_it_links_to_the_doctor_page(self) -> None:
+        for route in self.page_routes():
+            path = self.concrete(route.pattern)
+            with self.subTest(path=path):
+                bar = bar_of(self.get(path))
+                lamps = re.findall(r'<a class="lamp lamp-(\w+)" href="(/doctor)"', bar)
+                self.assertEqual(lamps, [("green", "/doctor")], bar)
 
     def test_a_refusal_page_carries_the_bar_too(self) -> None:
         response = self.app().handle("GET", "/projects/absent")
@@ -460,7 +481,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74.0%", bar)
                 self.assertIn("41.0%", bar)
-        self.assertEqual(len(paths) * 5, 50, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 55, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:

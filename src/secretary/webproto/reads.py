@@ -206,6 +206,22 @@ class ReadLayer(ProtocolBoundary):
             "agents": agents,
         }
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Installation health alone: the section `system_snapshot` carries, without the rest.
+
+        The same `_health` call over the same recorded state, so the dashboard's panel and the
+        doctor lamp cannot answer the question differently. It is a separate operation only so that
+        a reader who wants health does not pay for the projects, the cards and the agents too.
+        """
+        now = self._clock()
+        report = self.report()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "health",
+            "observed_at": sources.isoformat(now),
+            "health": self._health(report, self.data_dir(report), now=now),
+        }
+
     def task_snapshot(self, ref: str, *, events: int = TASK_SNAPSHOT_EVENTS) -> dict[str, Any]:
         """One card: its state, its project, its recent history, its heads and its result."""
         now = self._clock()
@@ -585,6 +601,50 @@ def _text(value: Any) -> str:
 
 # -- installation health, summarized ---------------------------------------------------------------
 
+#: The severity every problem code carries, and the whole of the colour rule. A lamp is red if any
+#: red problem is present, otherwise yellow if any yellow one is, otherwise green -- so the table
+#: below, and not the wording of a sentence, is what decides a colour. A code is classified once,
+#: here, beside the place the code is minted, so a problem added to :func:`health_summary` meets
+#: this table in the same file rather than landing in a colour by accident.
+PROBLEM_SEVERITY: dict[str, str] = {
+    # Red: the installation cannot be trusted to run work, or its health is unknown.
+    "unit.failed": "red",
+    "unit.missing": "red",
+    "checkpoint.blocked": "red",
+    "checkpoint.last_failed": "red",
+    "secret_store.key_unusable": "red",
+    "board_transport.finding": "red",
+    "card_backend.finding": "red",
+    # Minted by the reader of this summary rather than here: health that could not be read at all
+    # is not an absence of problems, so it carries a code of its own and the gravest severity.
+    "health.unreadable": "red",
+    # Yellow: the installation is running, but a person should look.
+    "pipeline.paused": "yellow",
+    "dispatcher.divergences_open": "yellow",
+    "external_runtime.inactive": "yellow",
+    "host.inventory_unreadable": "yellow",
+    "memory.index_missing": "yellow",
+}
+
+#: What an unclassified code is worth. Deliberately not green: a problem somebody adds tomorrow and
+#: forgets to classify must show as something to look at, never as a clean installation.
+UNCLASSIFIED_SEVERITY = "yellow"
+
+
+def problem_severity(code: str) -> str:
+    """The severity of one problem code, keyed on the code and never on its sentence."""
+    return PROBLEM_SEVERITY.get(str(code), UNCLASSIFIED_SEVERITY)
+
+
+def lamp_colour(findings: Iterable[dict[str, Any]]) -> str:
+    """Red if anything red is present, else yellow if anything yellow is, else green."""
+    severities = {problem_severity(_text(finding.get("code"))) for finding in findings}
+    if "red" in severities:
+        return "red"
+    if severities:
+        return "yellow"
+    return "green"
+
 
 def health_summary(status: dict[str, Any]) -> dict[str, Any]:
     """The operator's view of `collect_status`: what is wrong, said by name, over the same facts.
@@ -595,14 +655,23 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
     name what needs attention without a person reading the whole status document. No threshold is
     invented here: a value the collector reports without judging it (free disk, load, lag) is
     carried as data for the page to show, and is not a problem until the collector says so.
+
+    Every problem also carries a stable code (:data:`PROBLEM_SEVERITY`), which is what a colour is
+    decided from: a sentence is for a person to read and may be reworded, a code may not. `state`
+    and `problems` keep their shape and meaning, so a reader written against them is unaffected.
     """
     installation = _object(status.get("installation"))
     host = _object(status.get("host"))
     dispatcher = _object(status.get("dispatcher"))
     checkpoint = _object(status.get("checkpoint"))
     pause = _object(dispatcher.get("pause"))
-    problems: list[str] = []
+    findings: list[dict[str, str]] = []
     units: list[dict[str, Any]] = []
+
+    def found(code: str, message: str) -> None:
+        """One problem: the sentence a person reads and the code the colour rule keys on."""
+        findings.append({"code": code, "message": message, "severity": problem_severity(code)})
+
     for unit in host.get("units") or []:
         if not isinstance(unit, dict):
             continue
@@ -617,39 +686,54 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
             }
         )
         if unit.get("present") is False:
-            problems.append(f"{name} is not installed on this host")
+            found("unit.missing", f"{name} is not installed on this host")
         elif _text(unit.get("active")) == "failed":
-            problems.append(f"{name} is failed")
+            found("unit.failed", f"{name} is failed")
     external = _object(host.get("external_runtime"))
     if _text(external.get("name")) and external.get("active") not in (None, "active"):
-        problems.append(f"{_text(external.get('name'))} is {_text(external.get('active'))}")
+        found(
+            "external_runtime.inactive",
+            f"{_text(external.get('name'))} is {_text(external.get('active'))}",
+        )
     for name, error in sorted(_object(host.get("inventory_errors")).items()):
-        problems.append(f"the host inventory could not read {name}: {error}")
+        found("host.inventory_unreadable", f"the host inventory could not read {name}: {error}")
     if pause.get("paused"):
-        problems.append(f"the pipeline is paused ({_text(pause.get('mode')) or 'unknown mode'})")
+        found(
+            "pipeline.paused",
+            f"the pipeline is paused ({_text(pause.get('mode')) or 'unknown mode'})",
+        )
     divergences = _object(dispatcher.get("divergences"))
     if int(divergences.get("open_count") or 0) > 0:
-        problems.append(f"{int(divergences.get('open_count') or 0)} dispatcher divergence(s) are open")
+        found(
+            "dispatcher.divergences_open",
+            f"{int(divergences.get('open_count') or 0)} dispatcher divergence(s) are open",
+        )
     if _text(checkpoint.get("blocked_reason")):
-        problems.append(f"the checkpoint is blocked: {_text(checkpoint.get('blocked_reason'))}")
+        found("checkpoint.blocked", f"the checkpoint is blocked: {_text(checkpoint.get('blocked_reason'))}")
     if _text(checkpoint.get("checkpoint_status")) == "failed":
-        problems.append(
+        found(
+            "checkpoint.last_failed",
             "the last checkpoint failed"
-            + (f": {_text(checkpoint.get('checkpoint_last_failure_reason'))}" if _text(checkpoint.get("checkpoint_last_failure_reason")) else "")
+            + (f": {_text(checkpoint.get('checkpoint_last_failure_reason'))}" if _text(checkpoint.get("checkpoint_last_failure_reason")) else ""),
         )
     for section in ("board_transport", "card_backend"):
-        findings = _object(status.get(section)).get("findings") or []
-        if findings:
-            problems.append(f"{section} has {len(findings)} finding(s)")
+        reported = _object(status.get(section)).get("findings") or []
+        if reported:
+            found(f"{section}.finding", f"{section} has {len(reported)} finding(s)")
     key = _object(_object(status.get("secret_store")).get("installation_key"))
     if key and not key.get("usable"):
-        problems.append("the secret store's installation key is not usable")
+        found("secret_store.key_unusable", "the secret store's installation key is not usable")
     memory = _object(status.get("memory"))
     if memory and memory.get("index_present") is False:
-        problems.append("the memory index is missing")
+        found("memory.index_missing", "the memory index is missing")
+    problems = [finding["message"] for finding in findings]
     return {
         "state": "ok" if not problems else "attention",
         "problems": problems,
+        # Added beside `problems` rather than instead of it: the same sentences, in the same order,
+        # each with the code a colour is decided from. See :data:`PROBLEM_SEVERITY`.
+        "findings": findings,
+        "colour": lamp_colour(findings),
         "dispatcher": {
             "phase": _text(dispatcher.get("phase")) or None,
             "paused": bool(pause.get("paused")),

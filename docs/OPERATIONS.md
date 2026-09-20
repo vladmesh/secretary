@@ -1581,6 +1581,42 @@ each provider once, and JSON routes, which render no page, ask nothing. A proces
 provider layer, and a read that refuses, both still serve every page; the bar then carries the reason
 where the numbers would be.
 
+#### The doctor lamp, and the page behind it
+
+The bar also carries a doctor lamp, at its left, on every page. It has exactly three colours and no
+fourth, and each one is decided by a rule rather than by a reading of the sentences:
+
+- **red** — the installation cannot be trusted to run work, or its health is unknown. Any of
+  `unit.failed`, `unit.missing`, `checkpoint.blocked`, `checkpoint.last_failed`,
+  `secret_store.key_unusable`, `board_transport.finding`, `card_backend.finding`, or
+  `health.unreadable`.
+- **yellow** — it runs, but somebody should look. Any of `pipeline.paused`,
+  `dispatcher.divergences_open`, `external_runtime.inactive`, `host.inventory_unreadable`,
+  `memory.index_missing`. A problem whose code nobody has classified is yellow too — never green.
+- **green** — health was read, and it reports no problem at all.
+
+Each problem carries that stable code beside the sentence a person reads, and the **code**, not the
+wording, is what the colour is decided from (`secretary.webproto.reads.PROBLEM_SEVERITY`). Red wins
+over yellow, and yellow over green: one red problem is a red lamp however many yellow ones there are.
+
+**Health that could not be read is red and never green.** A reading that did not happen — an instance
+that does not validate, a collector that refused — is reported as the problem `health.unreadable`,
+with the reason, and the lamp goes red. An empty list is never drawn as a clean installation.
+
+The lamp is a link to `/doctor` from every page. That page lists the current problems, each with its
+code and its message, grouped by the severity that decides the colour, with the red group first; when
+there are none it says so plainly; when health could not be read it says that, with the reason.
+
+**Refreshing the lamp reads recorded state only.** It is one cached read of the same collector the
+dashboard's doctor panel uses (`secretary.web.doctor`, a one-minute in-process cache over
+`reads.health_snapshot` → `collect_status` with no sprints and no panel probes): this host's own
+systemd inventory, production state, checkpoint snapshot, store findings and memory index. It runs no
+live `secretary doctor`, opens no SSH to any host, and touches no provider credential or provider
+endpoint. As with the provider half of the bar, rendering a page adds no collection: a walk over every
+page inside one cache window collects once, and JSON routes, which render no page, collect nothing. A
+process built without the doctor layer still serves every page, and its lamp is red, because health
+that nothing read is unknown health.
+
 ### Running a card through the installed service
 
 The two POST routes, through the front, as `curl`. `~/.secretary-owner.curlrc` is a mode-0600 file with

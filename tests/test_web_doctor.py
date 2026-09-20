@@ -1,0 +1,458 @@
+"""The doctor lamp on the bottom bar, the page behind it, and the rule that decides its colour.
+
+Three questions, and each is asked of the real thing. The colour rule is asked of
+:func:`~secretary.webproto.reads.health_summary` and its severity table, because a colour is
+decided from a code and not from a sentence. The cost is asked of :class:`
+~secretary.web.doctor.DoctorLayer` over a counting collector and a clock this test moves, because
+the lamp is on every page and the collection behind it is not cheap. And "recorded state only" is
+asked of the real read layer over a real instance, with the ways out of this process -- a
+subprocess, a socket, an HTTP request, the `secretary doctor` entry point -- taken away for the
+span of the read, so the assertion is about the path taken rather than about a comment.
+"""
+
+from __future__ import annotations
+
+import re
+import unittest
+from typing import Any
+from unittest import mock
+
+from secretary.web import pages
+from secretary.web.app import ROUTES, WebApp
+from secretary.web.doctor import CACHE_SECONDS, DOCTOR_NOT_BUILT, DoctorLayer
+from secretary.webproto.errors import InstallationUnavailable
+from secretary.webproto.reads import (
+    PROBLEM_SEVERITY,
+    UNCLASSIFIED_SEVERITY,
+    ReadLayer,
+    health_summary,
+    lamp_colour,
+    problem_severity,
+)
+from tests.web_fakes import Recording, system_snapshot
+from tests.webproto_sprint_fixtures import SprintProtocolFixture
+
+NOW = 1_800_000_000.0
+
+#: A status document that trips every problem `health_summary` can report, so the suite can assert
+#: over the whole set rather than over the handful somebody remembered.
+EVERY_PROBLEM: dict[str, Any] = {
+    "host": {
+        "units": [
+            {"name": "a.service", "kind": "service", "present": True, "active": "failed"},
+            {"name": "b.service", "kind": "service", "present": False, "active": None},
+        ],
+        "external_runtime": {"name": "orca-server.service", "active": "inactive"},
+        "inventory_errors": {"units": "systemctl timed out"},
+    },
+    "dispatcher": {"pause": {"paused": True, "mode": "drain"}, "divergences": {"open_count": 2}},
+    "checkpoint": {
+        "checkpoint_status": "failed",
+        "checkpoint_last_failure_reason": "push refused",
+        "blocked_reason": "no remote",
+    },
+    "board_transport": {"findings": ["x"]},
+    "card_backend": {"backend": "postgres", "findings": ["y"]},
+    "secret_store": {"installation_key": {"present": True, "usable": False}},
+    "memory": {"index_present": False},
+}
+
+PAUSED_ONLY: dict[str, Any] = {"dispatcher": {"pause": {"paused": True, "mode": "drain"}}}
+
+NOTHING_WRONG: dict[str, Any] = {
+    "host": {"units": [{"name": "a.timer", "kind": "timer", "present": True, "active": "active"}]}
+}
+
+
+def available() -> dict[str, Any]:
+    return {
+        "state": "available",
+        "reason": None,
+        "data_age_seconds": 0.0,
+        "observed_at": "2026-09-20T12:00:00Z",
+    }
+
+
+def health_snapshot(status: dict[str, Any]) -> dict[str, Any]:
+    """What `ReadLayer.health_snapshot` answers with, for a collector that answered."""
+    return {
+        "schema_version": 1,
+        "kind": "health",
+        "observed_at": "2026-09-20T12:00:00Z",
+        "health": {"source": available(), "status": health_summary(status)},
+    }
+
+
+def unreadable_snapshot(reason: str) -> dict[str, Any]:
+    """What it answers with when the collector itself could not be read."""
+    return {
+        "schema_version": 1,
+        "kind": "health",
+        "observed_at": "2026-09-20T12:00:00Z",
+        "health": {
+            "source": {"state": "unavailable", "reason": reason, "data_age_seconds": None},
+            "status": None,
+        },
+    }
+
+
+# -- criteria 1 and 2: every problem carries a code, and the code decides the colour -------------
+
+
+class TheColourRuleTests(unittest.TestCase):
+    def codes(self, status: dict[str, Any]) -> list[str]:
+        return [finding["code"] for finding in health_summary(status)["findings"]]
+
+    def test_every_problem_the_summary_can_report_is_classified_by_its_code(self) -> None:
+        codes = self.codes(EVERY_PROBLEM)
+        self.assertEqual(
+            codes,
+            [
+                "unit.failed",
+                "unit.missing",
+                "external_runtime.inactive",
+                "host.inventory_unreadable",
+                "pipeline.paused",
+                "dispatcher.divergences_open",
+                "checkpoint.blocked",
+                "checkpoint.last_failed",
+                "board_transport.finding",
+                "card_backend.finding",
+                "secret_store.key_unusable",
+                "memory.index_missing",
+            ],
+        )
+        for code in codes:
+            with self.subTest(code=code):
+                self.assertIn(code, PROBLEM_SEVERITY, "a problem nobody classified")
+                self.assertIn(PROBLEM_SEVERITY[code], {"red", "yellow"})
+
+    def test_the_severity_of_each_code_is_the_one_the_card_names(self) -> None:
+        red = {
+            "unit.failed",
+            "unit.missing",
+            "checkpoint.blocked",
+            "checkpoint.last_failed",
+            "secret_store.key_unusable",
+            "board_transport.finding",
+            "card_backend.finding",
+            "health.unreadable",
+        }
+        yellow = {
+            "pipeline.paused",
+            "dispatcher.divergences_open",
+            "external_runtime.inactive",
+            "host.inventory_unreadable",
+            "memory.index_missing",
+        }
+        self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "red"}, red)
+        self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "yellow"}, yellow)
+
+    def test_nothing_wrong_is_green_and_a_yellow_problem_alone_is_yellow(self) -> None:
+        self.assertEqual(health_summary(NOTHING_WRONG)["colour"], "green")
+        self.assertEqual(health_summary(PAUSED_ONLY)["colour"], "yellow")
+
+    def test_one_red_problem_makes_the_colour_red_however_many_yellow_ones_there_are(self) -> None:
+        self.assertEqual(health_summary(EVERY_PROBLEM)["colour"], "red")
+        just_red = {"memory": {"index_present": False}, "board_transport": {"findings": ["x"]}}
+        self.assertEqual(health_summary(just_red)["colour"], "red")
+
+    def test_the_colour_keys_on_the_code_and_not_on_the_wording(self) -> None:
+        """A sentence may be reworded tomorrow; the colour must not move when it is."""
+        reworded = [{"code": "unit.failed", "message": "something else entirely"}]
+        self.assertEqual(lamp_colour(reworded), "red")
+        self.assertEqual(lamp_colour([{"code": "pipeline.paused", "message": "x"}]), "yellow")
+
+    def test_a_code_nobody_classified_is_never_green(self) -> None:
+        self.assertNotEqual(UNCLASSIFIED_SEVERITY, "green")
+        self.assertEqual(problem_severity("something.nobody.classified"), UNCLASSIFIED_SEVERITY)
+        self.assertNotEqual(lamp_colour([{"code": "something.nobody.classified"}]), "green")
+
+
+# -- criterion 3: the document this card adds to keeps every promise it already made --------------
+
+
+class TheSummaryStaysAdditiveTests(unittest.TestCase):
+    def test_state_and_problems_keep_their_shape_and_their_order(self) -> None:
+        summary = health_summary(EVERY_PROBLEM)
+        self.assertEqual(summary["state"], "attention")
+        self.assertEqual(summary["problems"], [finding["message"] for finding in summary["findings"]])
+        self.assertTrue(all(isinstance(problem, str) for problem in summary["problems"]))
+        self.assertEqual(summary["problems"][0], "a.service is failed")
+        self.assertEqual(health_summary(NOTHING_WRONG)["state"], "ok")
+        self.assertEqual(health_summary(NOTHING_WRONG)["problems"], [])
+
+
+# -- criterion 7: a test per colour, and the one that cannot be read ------------------------------
+
+
+class TheLayerColoursTests(unittest.TestCase):
+    def layer(self, answer: Any) -> DoctorLayer:
+        def read() -> dict[str, Any]:
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        return DoctorLayer(read, now=lambda: NOW)
+
+    def test_green(self) -> None:
+        document = self.layer(health_snapshot(NOTHING_WRONG)).doctor_snapshot()
+        self.assertEqual(document["colour"], "green")
+        self.assertEqual(document["problems"], [])
+        self.assertTrue(document["readable"])
+
+    def test_yellow(self) -> None:
+        document = self.layer(health_snapshot(PAUSED_ONLY)).doctor_snapshot()
+        self.assertEqual(document["colour"], "yellow")
+        self.assertEqual([problem["code"] for problem in document["problems"]], ["pipeline.paused"])
+
+    def test_red(self) -> None:
+        document = self.layer(health_snapshot(EVERY_PROBLEM)).doctor_snapshot()
+        self.assertEqual(document["colour"], "red")
+        self.assertIn("unit.failed", [problem["code"] for problem in document["problems"]])
+
+    def test_health_that_cannot_be_read_is_red_and_says_so(self) -> None:
+        document = self.layer(
+            InstallationUnavailable("this instance config does not validate")
+        ).doctor_snapshot()
+        self.assertEqual(document["colour"], "red")
+        self.assertFalse(document["readable"])
+        self.assertEqual([problem["code"] for problem in document["problems"]], ["health.unreadable"])
+        self.assertIn("does not validate", document["reason"])
+
+    def test_a_collector_that_refused_inside_the_section_is_red_too(self) -> None:
+        document = self.layer(unreadable_snapshot("the production state is unreadable")).doctor_snapshot()
+        self.assertEqual(document["colour"], "red")
+        self.assertFalse(document["readable"])
+        self.assertEqual(document["reason"], "the production state is unreadable")
+
+
+# -- the transport: the lamp, the page, the cost --------------------------------------------------
+
+
+class TransportFixture(unittest.TestCase):
+    """The application over recording layers, with a doctor layer this test decides the answer of."""
+
+    def setUp(self) -> None:
+        self.collected = 0
+        self.status: dict[str, Any] | Exception = NOTHING_WRONG
+        self.clock = NOW
+        self.doctor = DoctorLayer(self.read_health, now=lambda: self.clock)
+
+    def read_health(self) -> dict[str, Any]:
+        self.collected += 1
+        if isinstance(self.status, Exception):
+            raise self.status
+        return health_snapshot(self.status)
+
+    def app(self, *, doctor: Any = ...) -> WebApp:
+        unreadable = InstallationUnavailable("not part of this test")
+        return WebApp(
+            Recording(system_snapshot=system_snapshot()),
+            Recording(run_list={"items": []}),
+            Recording(sprint_list={"kind": "sprint_list", "sprints": {"source": available(), "items": []}}),
+            Recording(),
+            Recording(pause_state=unreadable),
+            Recording(),
+            Recording(
+                command_history={
+                    "kind": "command_history",
+                    "observed_at": "2026-09-20T12:00:00Z",
+                    "limit": 25,
+                    "commands": {"source": available(), "items": [], "has_more": False, "next_cursor": None},
+                }
+            ),
+            Recording(),
+            doctor=self.doctor if doctor is ... else doctor,
+        )
+
+    def get(self, path: str, *, app: WebApp | None = None) -> str:
+        response = (app or self.app()).handle("GET", path)
+        self.assertEqual(response.status, 200, f"{path} answered {response.status}")
+        return response.body.decode("utf-8")
+
+    def lamp(self, page: str) -> str:
+        found = re.findall(r'<a class="lamp lamp-\w+" href="/doctor"[^>]*>.*?</a>', page)
+        self.assertEqual(len(found), 1, "a page carries exactly one lamp")
+        return found[0]
+
+
+class TheDoctorPageTests(TransportFixture):
+    def test_the_page_lists_every_problem_with_its_code_and_marks_what_makes_it_red(self) -> None:
+        self.status = EVERY_PROBLEM
+        page = self.get("/doctor")
+        self.assertIn("Red — the installation cannot be trusted to run work", page)
+        self.assertIn("Yellow — running, but a person should look", page)
+        red = page.index("Red — the installation")
+        yellow = page.index("Yellow — running")
+        self.assertLess(red, yellow, "what makes the lamp red is read first")
+        for code, message in (
+            ("unit.failed", "a.service is failed"),
+            ("card_backend.finding", "card_backend has 1 finding(s)"),
+            ("pipeline.paused", "the pipeline is paused (drain)"),
+            ("memory.index_missing", "the memory index is missing"),
+        ):
+            with self.subTest(code=code):
+                self.assertIn(f"<code>{code}</code>", page)
+                self.assertIn(message, page)
+        # The red codes are inside the red group and not merely somewhere on the page.
+        self.assertLess(page.index("unit.failed"), yellow)
+        self.assertGreater(page.index("pipeline.paused"), yellow)
+
+    def test_no_problem_at_all_is_said_plainly(self) -> None:
+        page = self.get("/doctor")
+        self.assertIn("no problem is recorded for this installation", page)
+        self.assertIn("lamp lamp-green", page)
+
+    def test_health_that_could_not_be_read_says_so_with_the_reason_and_is_not_a_clean_page(self) -> None:
+        self.status = InstallationUnavailable("the dispatcher state is unreadable")
+        page = self.get("/doctor")
+        self.assertIn("this installation's health could not be read.", page)
+        self.assertIn("the dispatcher state is unreadable", page)
+        self.assertIn("health.unreadable", page)
+        self.assertNotIn("no problem is recorded", page)
+        self.assertIn("lamp lamp-red", page)
+
+    def test_a_process_built_without_the_doctor_layer_says_that_rather_than_drawing_green(self) -> None:
+        app = self.app(doctor=None)
+        page = self.get("/doctor", app=app)
+        self.assertIn(DOCTOR_NOT_BUILT, page)
+        self.assertNotIn("no problem is recorded", page)
+        self.assertIn("lamp lamp-red", self.lamp(page))
+
+    def test_a_doctor_layer_that_refuses_is_the_page_content_and_never_the_page_status(self) -> None:
+        """Why `/doctor` is exempt from the transport's code-to-status walk (`test_web_transport`).
+
+        Every other route answers a refused read with the status of its code. This one cannot: a
+        503 refusal page can say that something refused, but not that the *installation's health*
+        is unknown, which is the one thing this page exists to say -- and it would leave the reader
+        with no page at the exact moment the lamp went red.
+        """
+        app = self.app(doctor=Recording(doctor_snapshot=InstallationUnavailable("no instance here")))
+        response = app.handle("GET", "/doctor")
+        self.assertEqual(response.status, 200)
+        page = response.body.decode("utf-8")
+        self.assertIn("no instance here", page)
+        self.assertIn("health.unreadable", page)
+        self.assertIn("lamp lamp-red", page)
+        self.assertNotIn("no problem is recorded", page)
+
+    def test_the_page_says_what_it_reads_and_what_it_does_not(self) -> None:
+        page = self.get("/doctor")
+        self.assertIn("reads recorded state only", page)
+        self.assertIn("opens no SSH and touches no provider", page)
+
+
+class TheLampTests(TransportFixture):
+    def test_the_lamp_carries_the_colour_of_the_reading_and_links_to_the_page(self) -> None:
+        for status, colour in ((NOTHING_WRONG, "green"), (PAUSED_ONLY, "yellow"), (EVERY_PROBLEM, "red")):
+            with self.subTest(colour=colour):
+                self.status = status
+                self.doctor = DoctorLayer(self.read_health, now=lambda: self.clock)
+                lamp = self.lamp(self.get("/"))
+                self.assertIn(f'class="lamp lamp-{colour}"', lamp)
+                self.assertIn('href="/doctor"', lamp)
+
+    def test_the_lamp_counts_the_problems_behind_the_colour_and_counts_nothing_when_green(self) -> None:
+        self.status = PAUSED_ONLY
+        self.assertIn('<span class="lamp-count">1</span>', self.lamp(self.get("/")))
+        self.status = NOTHING_WRONG
+        self.doctor = DoctorLayer(self.read_health, now=lambda: self.clock)
+        self.assertNotIn("lamp-count", self.lamp(self.get("/history")))
+
+
+class TheLampCostsOneCollectionTests(TransportFixture):
+    def page_paths(self) -> list[str]:
+        placeholders = {"ref": "secretary-9", "project": "secretary", "session": "s-1"}
+        paths = []
+        for route in ROUTES:
+            if not (route.page and route.method == "GET") or route.pattern.startswith("/po"):
+                continue
+            paths.append(re.sub(r"\{([a-z_]+)\}", lambda m: placeholders[m.group(1)], route.pattern))
+        return paths
+
+    def test_many_pages_across_many_routes_collect_once_per_cache_window(self) -> None:
+        app = self.app()
+        paths = [path for path in self.page_paths() if path in {"/", "/history", "/sprints", "/doctor"}]
+        for _ in range(6):
+            for path in paths:
+                self.get(path, app=app)
+        self.assertEqual(len(paths) * 6, 24, "the walk really did render many pages")
+        self.assertEqual(self.collected, 1, "one collection served every one of them")
+
+        self.clock += CACHE_SECONDS - 1
+        for path in paths:
+            self.get(path, app=app)
+        self.assertEqual(self.collected, 1, "still inside the window the layer decided")
+
+        self.clock += 2
+        for path in paths:
+            self.get(path, app=app)
+        self.assertEqual(self.collected, 2, "one more collection, not one per page")
+
+    def test_a_json_route_costs_no_health_collection_at_all(self) -> None:
+        app = self.app()
+        for path in ("/api/system", "/api/pause", "/api/history"):
+            app.handle("GET", path)
+        self.assertEqual(self.collected, 0)
+
+    def test_the_doctor_page_and_its_own_lamp_are_one_collection_rather_than_two(self) -> None:
+        self.get("/doctor")
+        self.assertEqual(self.collected, 1)
+
+
+# -- criterion 6: recorded state only, over the real read layer ----------------------------------
+
+
+class RecordedStateOnlyTests(SprintProtocolFixture):
+    """The read path, driven for real, with every way out of this process taken away."""
+
+    def test_the_lamp_reads_the_recorded_collector_and_nothing_else(self) -> None:
+        asked: list[str] = []
+
+        def status_reader() -> dict[str, Any]:
+            asked.append("collect_status")
+            return EVERY_PROBLEM
+
+        reads = ReadLayer(self.instance, data_dir=self.data_dir, status_reader=status_reader, offline=True)
+        layer = DoctorLayer(reads.health_snapshot, now=lambda: NOW)
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the doctor lamp left this process")
+
+        with (
+            mock.patch("subprocess.run", refuse),
+            mock.patch("subprocess.Popen", refuse),
+            mock.patch("subprocess.check_output", refuse),
+            mock.patch("socket.socket", refuse),
+            mock.patch("urllib.request.urlopen", refuse),
+            mock.patch("secretary.cli.run_doctor", refuse),
+            mock.patch("secretary.cli.collect_doctor_inspection", refuse),
+        ):
+            document = layer.doctor_snapshot()
+            rendered = pages.doctor({"available": True, "reason": None, "document": document})
+
+        self.assertEqual(asked, ["collect_status"], "one recorded-state read, and no second source")
+        self.assertEqual(document["colour"], "red")
+        self.assertIn("unit.failed", rendered)
+
+    def test_the_read_layer_asks_its_collector_for_recorded_state_and_not_for_the_live_host(self) -> None:
+        """`health_snapshot` is `collect_status` over this host's files: no sprints, no probes."""
+        seen: list[dict[str, Any]] = []
+
+        def collect(report: Any, **kwargs: Any) -> dict[str, Any]:
+            seen.append(kwargs)
+            return NOTHING_WRONG
+
+        reads = ReadLayer(self.instance, data_dir=self.data_dir, offline=True)
+        with mock.patch("secretary.webproto.reads.collect_status", collect):
+            snapshot = reads.health_snapshot()
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0]["offline"])
+        self.assertFalse(seen[0]["sprints"])
+        self.assertFalse(seen[0]["probe_panels"])
+        self.assertEqual(snapshot["health"]["status"]["colour"], "green")
+
+
+if __name__ == "__main__":
+    unittest.main()

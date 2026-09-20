@@ -433,6 +433,12 @@ class StatusMappingTests(unittest.TestCase):
         posted = {route.pattern for route in ROUTES if route.method == "POST" and route.body == "json"}
         self.assertEqual(posted, set(self.JSON_BODIES))
 
+    #: The one route whose own read refusing is its content rather than its status. The doctor page
+    #: exists to say that this installation's health could not be read, with the reason and with the
+    #: lamp red; answering 503 there would replace the only page that can say why health is unknown
+    #: with a refusal that cannot. Its refusal path is asserted in `tests/test_web_doctor.py`.
+    ANSWERS_ITS_OWN_REFUSAL: ClassVar[frozenset[str]] = frozenset({"/doctor"})
+
     def test_every_route_answers_a_refusal_with_the_status_of_its_code(self) -> None:
         for error, status in self.CODES.items():
             # The PO layers refuse too: the token check itself answers a refusing token layer with
@@ -443,6 +449,8 @@ class StatusMappingTests(unittest.TestCase):
                 po=RaisingLayer(error),
             )
             for route in ROUTES:
+                if route.pattern in self.ANSWERS_ITS_OWN_REFUSAL:
+                    continue
                 path = (
                     route.pattern.replace("{ref}", "secretary-1")
                     .replace("{run_id}", "pr-1")
@@ -487,6 +495,7 @@ class RouteTableTests(TransportFixture):
         ("POST", "/api/runs/start"),
         ("POST", "/api/runs/review"),
         ("GET", "/history"),
+        ("GET", "/doctor"),
         ("GET", "/api/pause"),
         ("GET", "/api/pause/scope"),
         ("POST", "/api/pause/drain"),
@@ -517,7 +526,8 @@ class RouteTableTests(TransportFixture):
             with self.subTest(route=route.pattern):
                 self.assertRegex(
                     route.operation,
-                    r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops|po_auth|po)\.[a-z_]+$",
+                    r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops"
+                    r"|doctor|po_auth|po)\.[a-z_]+$",
                 )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:

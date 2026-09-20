@@ -1708,6 +1708,7 @@ class ErrorContractTests(ProductRuntimeFixture):
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "system_snapshot": lambda layer: layer.system_snapshot(),
+        "health_snapshot": lambda layer: layer.health_snapshot(),
         "task_snapshot": lambda layer: layer.task_snapshot("secretary-run-1"),
         "task_events": lambda layer: layer.task_events("secretary-run-1", None, limit=10),
     }
