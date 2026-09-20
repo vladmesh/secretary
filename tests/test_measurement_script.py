@@ -153,20 +153,31 @@ class MeasurementScriptTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_address[1]}"
 
-    def cookie(self, value: str = "secretary_po=deadbeef") -> None:
-        """Stand in for the installation this run would otherwise resolve off the host.
+    def setUp(self) -> None:
+        """No case in this class may read the host it happens to be running on.
 
-        Both of the product-facing steps are replaced, because a hermetic test may read neither a
-        real instance nor a real `po-web-token`. What they resolve to is exercised on its own in
-        :class:`DataDirectoryResolutionTests`.
+        `tests/README.md`: no test needs a running installation. That is enforced here, once, for
+        every case in the class — not by each case remembering to ask for it, which is the shape of
+        mistake this card has already spent a round removing from the script itself. A case that
+        forgets is no longer possible, and a case that somehow reaches past these patches finds an
+        environment with no installation in it and fails the same way on every host instead of
+        resolving whatever this one happens to have.
+
+        It is not a hypothetical. `test_an_unreachable_installation_…` did not stub the resolution,
+        passed on a developer host that has `~/secretary-instance`, and turned CI red on a runner
+        that does not (run 35542829308, `unit`).
         """
-        for target, result in (
-            ("resolve_data_dir", (Path("/nonexistent/data"), "a test fixture")),
-            ("po_cookie", value),
-        ):
-            patch = mock.patch.object(measure, target, return_value=result)
-            patch.start()
-            self.addCleanup(patch.stop)
+        self.enterContext(mock.patch.dict(os.environ, {}, clear=False))
+        os.environ.pop("SECRETARY_DATA_DIR", None)
+        os.environ.pop("SECRETARY_INSTANCE", None)
+        self.enterContext(mock.patch("secretary.onboarding.DEFAULT_INSTANCE", "/nonexistent/instance"))
+        self.enterContext(
+            mock.patch.object(
+                measure, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
+            )
+        )
+        # What these two resolve to for real is exercised in `DataDirectoryResolutionTests`.
+        self.enterContext(mock.patch.object(measure, "po_cookie", return_value="secretary_po=deadbeef"))
 
     def run_main(self, base_url: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -271,18 +282,15 @@ class MeasurementScriptTests(unittest.TestCase):
         }
         for route, why in cases.items():
             with self.subTest(route=route, why=why):
-                self.cookie()
                 base = self.serve(missing=(route,))
                 with mock.patch.object(measure, "WARM_REQUESTS", 2):
                     code, text = self.run_main(base)
                 self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
                 self.assertIn("404", text)
                 self.assertNotIn("MEETS", text)
-                self.doCleanups()
 
     def test_a_run_asks_for_nothing_but_the_method_and_route_pairs_on_the_list(self) -> None:
         """Pairs, not paths: `HEAD /` must not pass because `GET /` happens to be listed."""
-        self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             self.run_main(base)
@@ -308,7 +316,6 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertEqual(measure.p95([5.0]), 5.0)
 
     def test_a_fast_installation_meets_every_threshold_and_exits_zero(self) -> None:
-        self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 3):
             code, text = self.run_main(base)
@@ -321,7 +328,6 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertIn("threshold 2000 ms", text)
 
     def test_a_slow_route_exits_one_and_still_prints_the_whole_table(self) -> None:
-        self.cookie()
         # Just over the warm threshold on one page, and only on that page.
         base = self.serve(delays={"/sprints": (measure.WARM_P95_THRESHOLD_MS + 200) / 1000.0})
         with mock.patch.object(measure, "WARM_REQUESTS", 3):
@@ -338,7 +344,6 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertIn("1 of 7 measurements exceed their threshold", text)
 
     def test_the_poll_target_is_named_with_how_it_was_chosen(self) -> None:
-        self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -355,7 +360,6 @@ class MeasurementScriptTests(unittest.TestCase):
         idle dashboard are a different scenario, and reporting them under the same heading, green,
         is the hole this whole round is about. Round 1's decision allowed it; round 3's withdrew it.
         """
-        self.cookie()
         base = self.serve(sessions=False)
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -375,7 +379,6 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertEqual(polled, [])
 
     def test_the_concurrent_scenario_is_repeated_and_every_round_is_printed(self) -> None:
-        self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -395,7 +398,6 @@ class MeasurementScriptTests(unittest.TestCase):
         17 s, 27 s and 38 s on three runs, so a single round could have reported either verdict.
         Here round one is fast and the later rounds are slow, and the run must come out red.
         """
-        self.cookie()
         warm = 2
         # Requests on `/`: one warm-up, then `warm` timed ones, then four per round. Slowing the
         # eighth GET onwards leaves the warm phase and round one fast and makes round two slow.
@@ -418,7 +420,6 @@ class MeasurementScriptTests(unittest.TestCase):
 
     def test_a_po_overview_that_does_not_answer_is_unmeasurable_not_no_session(self) -> None:
         """The reviewer's first reproduction: a 404 from `/po` used to exit 0 as "no session"."""
-        self.cookie()
         base = self.serve(missing=(measure.PO_OVERVIEW,))
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -435,7 +436,6 @@ class MeasurementScriptTests(unittest.TestCase):
         The four requests would still have been made, and would still have produced numbers — but
         not the numbers this scenario is defined as, because nothing was being polled beside them.
         """
-        self.cookie()
         base = self.serve(session_status=404)
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -453,7 +453,6 @@ class MeasurementScriptTests(unittest.TestCase):
         the poll now leave one barrier together, and the count printed per round is computed from
         the recorded windows, so the output proves the overlap instead of asserting it.
         """
-        self.cookie()
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
@@ -499,7 +498,6 @@ class MeasurementScriptTests(unittest.TestCase):
         `measure_concurrent` was the one call site that never had the status rule at all, so those
         four failures were recorded as four very fast durations and judged as a green result.
         """
-        self.cookie()
         warm = 2
         base = self.serve(status_after=("/", 1 + warm + 1, 404))
         with mock.patch.object(measure, "WARM_REQUESTS", warm):
@@ -514,7 +512,6 @@ class MeasurementScriptTests(unittest.TestCase):
 
     def test_a_late_contained_500_on_the_concurrent_reads_exits_two(self) -> None:
         """The other half of the same reproduction: the transport's own contained 500."""
-        self.cookie()
         warm = 2
         base = self.serve(status_after=("/", 1 + warm + 1, 500))
         with mock.patch.object(measure, "WARM_REQUESTS", warm):
@@ -534,7 +531,6 @@ class MeasurementScriptTests(unittest.TestCase):
         self.assertNotIn("MEETS", text)
 
     def test_a_missing_route_exits_two_rather_than_timing_a_404(self) -> None:
-        self.cookie()
         base = self.serve(missing=("/projects",))
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
