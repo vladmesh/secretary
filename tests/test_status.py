@@ -75,6 +75,21 @@ class StatusCliTests(unittest.TestCase):
                     {
                         "phase": "production",
                         "last_tick_finished_at": "2026-07-26T00:00:00Z",
+                        "tick_telemetry": {
+                            "tick_seq": 12,
+                            "last": {
+                                "seq": 12,
+                                "at": "2026-07-26T00:00:00Z",
+                                "status": "ok",
+                                "step": "production-tick",
+                                "healthy": True,
+                                "reason": "",
+                                "actions": 2,
+                                "error_count": 0,
+                                "degraded_count": 0,
+                                "duration_ms": 4321.5,
+                            },
+                        },
                         "records": {
                             "secretary-727": {
                                 "attempt_id": "a1",
@@ -157,6 +172,8 @@ class StatusCliTests(unittest.TestCase):
                 "push_failures": 0,
                 "remote_diverged": False,
                 "blocked_reason": "",
+                "checkpoint_status": "committed",
+                "checkpoint_duration_ms": 2100.0,
             }
             with (
                 contextlib.redirect_stdout(output),
@@ -196,6 +213,16 @@ class StatusCliTests(unittest.TestCase):
         # "last_tick_finished_at" as if it were reconciliation evidence.
         self.assertIsNone(payload["dispatcher"]["reconciliation"]["last_reconciled_at"])
         self.assertIn("external_runtime", payload["host"])
+        # What the last tick cost, beside the facts already recorded for it (secretary-1649): the
+        # dispatcher has always written this entry and status carried nothing from it.
+        last_tick = payload["dispatcher"]["last_tick"]
+        self.assertEqual(last_tick["duration_ms"], 4321.5)
+        self.assertEqual(last_tick["seq"], 12)
+        self.assertEqual(last_tick["status"], "ok")
+        self.assertEqual(last_tick["at"], "2026-07-26T00:00:00Z")
+        self.assertTrue(last_tick["healthy"])
+        self.assertEqual(last_tick["actions"], 2)
+        self.assertEqual(payload["checkpoint"]["checkpoint_duration_ms"], 2100.0)
 
     def test_status_human_output_and_live_watchdog_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,6 +369,7 @@ class StatusCliTests(unittest.TestCase):
                         "lag_minutes": None,
                         "remote_diverged": False,
                         "blocked_reason": None,
+                        "checkpoint_duration_ms": 0.0,
                     },
                 ),
             ):
@@ -428,6 +456,7 @@ class StatusCliTests(unittest.TestCase):
                             "lag_minutes": None,
                             "remote_diverged": False,
                             "blocked_reason": None,
+                            "checkpoint_duration_ms": 0.0,
                         },
                     ),
                     mock.patch.object(TaskAudit, "events", counting),

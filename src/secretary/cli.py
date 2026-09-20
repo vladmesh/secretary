@@ -649,8 +649,29 @@ def run_status(args: argparse.Namespace) -> int:
         print(f"sprints: {len(sprint_status['items'])}, {stopped} stopped, {stale} resume errors")
     memory_facts = snapshot["memory"]["fact_count"]
     print(f"memory facts: {memory_facts if memory_facts is not None else 'unknown'}")
+    # What a tick and a checkpoint cost, next to the outcome each of them reached. Both numbers are
+    # recorded by the dispatcher itself; this is where an operator reads them without opening a
+    # state file (docs/OPERATIONS.md, "Where the durations are").
+    last_tick = snapshot["dispatcher"]["last_tick"]
+    if last_tick is None:
+        print("last tick: none recorded")
+    else:
+        print(
+            f"last tick: #{last_tick['seq']} {last_tick['status']} at {last_tick['at']} "
+            f"in {_duration_text(last_tick['duration_ms'])}"
+        )
+    checkpoint = snapshot["checkpoint"]
+    print(
+        f"checkpoint: {checkpoint.get('checkpoint_status') or 'pending'} "
+        f"in {_duration_text(checkpoint.get('checkpoint_duration_ms'))}"
+    )
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0
+
+
+def _duration_text(value: float | None) -> str:
+    """Milliseconds as status prints them, or "unknown" for a record made before they existed."""
+    return "unknown" if value is None else f"{float(value):.0f} ms"
 
 
 def run_doctor_json(args: argparse.Namespace, report) -> int:

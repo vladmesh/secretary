@@ -453,6 +453,22 @@ installation is no finding. `reconcile` neither creates nor deletes it.
 own. Timer-started oneshot units are neither required enabled nor active; their state is still
 reported.
 
+## How long things take
+
+Three durations are recorded on every running installation.
+
+### Where the durations are
+
+| what | where it lands | how to read it |
+| --- | --- | --- |
+| one web request | `journalctl -u secretary-web.service` | `127.0.0.1 GET /sprints 200 4612.3ms` — client, verb, request target, HTTP status, and the milliseconds the application spent on it. One line per answered request, including a HEAD, a refusal and a contained 500. |
+| one dispatcher tick | the dispatcher journal, and `secretary status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `secretary status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
+| one checkpoint run | `secretary status` | `checkpoint.checkpoint_duration_ms`, printed by `secretary status` and by `secretary doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
+
+The web duration is the application's part of the answer — reading the body, handling the request,
+and writing the headers and body back — not the whole socket lifetime. The tick duration is the
+wall clock of `production_tick` up to the moment its outcome became durable.
+
 ## Record reconciliation and controlled divergences
 
 Before advancing cards, every production tick walks the dispatcher records whose card is not among

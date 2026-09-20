@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import contextvars
 import json
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +70,36 @@ DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed", "critical"})
 CHECKPOINT_INTERVAL_SECONDS = 5 * 60
 
 
+#: Where the clock of the tick currently being served lives. Every terminal record a tick makes is
+#: written somewhere down its own call tree — the working tick's own save, the frozen tick's, the
+#: fence refusal's, and the recovery write of a tick that died on an exception — and threading a
+#: start time through all four would put the same parameter on a dozen signatures that have no other
+#: reason to know the time. A context variable is set once, at the top of `production_tick`, and read
+#: back by `record_tick_telemetry`, which is the one place every one of those records is built.
+_TICK_STARTED: contextvars.ContextVar[float | None] = contextvars.ContextVar("tick_started", default=None)
+
+
+@contextlib.contextmanager
+def tick_clock() -> Iterator[None]:
+    """Run the wall clock of one tick, for the duration every terminal record carries."""
+    token = _TICK_STARTED.set(time.perf_counter())
+    try:
+        yield
+    finally:
+        _TICK_STARTED.reset(token)
+
+
+def tick_duration_ms() -> float | None:
+    """How long the tick being served has run, in milliseconds, or None outside a tick.
+
+    None is the honest answer for a record built outside `production_tick` — a test that folds an
+    outcome in by hand has no tick and so has no duration, and a zero there would read as a tick
+    that cost nothing.
+    """
+    started = _TICK_STARTED.get()
+    return None if started is None else round((time.perf_counter() - started) * 1000.0, 3)
+
+
 def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
     """Action outcomes of a tick that report a failed operation, in the order they happened."""
     return [
@@ -108,6 +141,9 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "status": status,
         "step": str(result.get("step") or ""),
         "healthy": status in HEALTHY_TICK_STATUSES and not degradations,
+        # How long this tick ran, beside the outcome it ran to. The record is made right before the
+        # save, so it covers everything the tick did up to the moment it became durable.
+        "duration_ms": tick_duration_ms(),
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -290,7 +326,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
 
 
 def production_tick(runtime: Any) -> dict[str, Any]:
-    with try_file_lock(runtime.production_state.tick_lock) as acquired:
+    with tick_clock(), try_file_lock(runtime.production_state.tick_lock) as acquired:
         if not acquired:
             return {
                 "status": "blocked",
@@ -643,12 +679,17 @@ def _push_forces_preparation(push_due: bool, state: dict[str, Any]) -> bool:
 
 def _checkpoint_skipped(state: dict[str, Any], now: float) -> dict[str, Any]:
     """Record an inexpensive not-yet-due decision without reclassifying success."""
+    started = time.perf_counter()
     result = dict(state)
     successful = _checkpoint_success_epoch(result)
     result.update(
         {
             "status": "skipped",
             "reason": "not due",
+            # This outcome inherits the previous run's fields, so its duration is restated rather
+            # than left behind: a skip that reported the last committed run's milliseconds would
+            # read as an expensive checkpoint nobody ran.
+            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
             "at": _checkpoint_rfc3339(now),
             "skip_epoch": now,
             "skip_at": _checkpoint_rfc3339(now),
@@ -663,6 +704,7 @@ def _checkpoint_skipped(state: dict[str, Any], now: float) -> dict[str, Any]:
 
 def _write_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[str, Any]:
     """Prepare a fresh checkpoint and retain success/failure history separately."""
+    started = time.perf_counter()
     writer = getattr(runtime, "checkpoint", None)
     if writer is None:
         raw = {"status": "blocked", "reason": "checkpoint writer is unavailable"}
@@ -679,6 +721,11 @@ def _write_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[s
         {
             "status": status,
             "reason": reason,
+            # The writer times its own run and reports it in `raw`; a run that never reached the
+            # writer, or one that died before it could return a result, is timed from out here so
+            # that every outcome this coordinator records carries a duration of its own.
+            "duration_ms": _number(raw.get("duration_ms"))
+            or round((time.perf_counter() - started) * 1000.0, 3),
             "at": _checkpoint_rfc3339(now),
             "attempted_epoch": now,
             "attempted_at": _checkpoint_rfc3339(now),
