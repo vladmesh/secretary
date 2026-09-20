@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from html import escape
 from typing import Any
 from urllib.parse import quote
@@ -342,6 +343,16 @@ LIMITS_NOT_IN_READING = "this reading carried nothing about this provider"
 #: The providers the bar always keeps a place for, in this order, whatever a reading holds.
 BAR_PROVIDERS: tuple[tuple[str, str], ...] = (("claude", "Claude"), ("codex", "Codex"))
 
+#: The clock a countdown on a page is measured against, for the span of one render. Unset -- which
+#: is every real request -- means this host's wall clock; a test sets it to render deterministically.
+_RENDER_CLOCK: ContextVar[Callable[[], datetime] | None] = ContextVar(
+    "secretary.web.render_clock", default=None
+)
+
+#: Whether the page being rendered is the answer to a POST, for the span of one request. A page
+#: reached that way must not reload itself: the browser would offer to send the submission again.
+_FROM_POST: ContextVar[bool] = ContextVar("secretary.web.from_post", default=False)
+
 
 @contextmanager
 def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
@@ -351,6 +362,26 @@ def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[
         yield
     finally:
         _LIMITS_SOURCE.reset(token)
+
+
+@contextmanager
+def render_clock(now: Callable[[], datetime] | None) -> Iterator[None]:
+    """Fix the clock this render measures a countdown against, so a test can assert one exactly."""
+    token = _RENDER_CLOCK.set(now)
+    try:
+        yield
+    finally:
+        _RENDER_CLOCK.reset(token)
+
+
+@contextmanager
+def from_post(value: bool) -> Iterator[None]:
+    """Mark the span of one request as answering a POST, so its pages carry no auto-reload."""
+    token = _FROM_POST.set(value)
+    try:
+        yield
+    finally:
+        _FROM_POST.reset(token)
 
 
 def _limits_bar() -> str:
@@ -419,7 +450,7 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
     drawn = "".join(
         f'<span class="window">{escape(str(window.get("name") or "window"))} '
         f'<b>{escape(str(window.get("remaining_percent", "—")))}%</b> '
-        f'<span class="resets">resets {escape(str(window.get("resets_at") or "—"))}</span></span>'
+        f'{_reset(window.get("resets_at"))}</span>'
         for window in windows
     )
     return f'<span class="provider"><b>{shown}</b>{drawn}{old}</span>'
@@ -505,8 +536,10 @@ def _page(
   showTheme();
 })();</script>""",
             # The refresh is the shell's, like the bar it keeps current, so every page has it and
-            # every page obeys the one rule: nothing reloads while a form holds typed text.
-            f"<script>{script}{_REFRESH_SCRIPT}</script>",
+            # every page obeys the one rule: nothing reloads while a form holds typed text. One
+            # page never carries it at all: the answer to a POST, where a reload is the browser
+            # re-sending the submission and asking the reader to confirm it.
+            f"<script>{script}{'' if _FROM_POST.get() else _REFRESH_SCRIPT}</script>",
             "</body></html>",
         ]
     )
@@ -602,6 +635,67 @@ def _age(seconds: Any) -> str:
     if value < 5400:
         return f"{int(value // 60)}m"
     return f"{int(value // 3600)}h"
+
+
+#: Said where a countdown would be when the reading carries no reset moment, or one this process
+#: cannot read. It is words, for the same reason a missing percentage is: nothing is not zero.
+NO_RESET_RECORDED = "no reset time recorded"
+
+
+def _reset_moment(value: Any) -> datetime | None:
+    """The moment a reading calls a reset, or `None` when it recorded none this process can read."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    # `provider_usage._iso` always writes UTC; a moment without an offset is read as UTC rather
+    # than as this host's local time, which would silently shift the countdown by the offset.
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+def _time_left(seconds: float) -> str:
+    """A reset as the time left until it: the one spelling of that rule in this module."""
+    total = int(seconds)
+    if total <= 0:
+        # Never a negative duration and never a bare zero: a zero beside a percentage reads as a
+        # window that is resetting right now, and this one is a reading that has simply aged out.
+        return "reset already passed"
+    if total < 60:
+        return "less than a minute left"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes} m left"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours} h {minutes} m left"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h left"
+
+
+def _reset(resets_at: Any) -> str:
+    """A usage window's reset, drawn once for both the bar and the dashboard panel.
+
+    What is shown is how long is left, because that is what a reader of a usage window wants and
+    an ISO moment is not it. The moment is not lost: it is the element's hover title, wherever
+    there is one to carry -- a reading with no moment carries no title at all rather than a
+    misleading one.
+
+    The countdown is measured against the clock of *this render* and never against the reading's
+    `observed_at`. The reading is served from a cache that may be up to `CACHE_SECONDS` old, so
+    counting from when it was observed would keep showing the time that was left then and overstate
+    what is left now; the page is drawn now, so now is what it counts from.
+    """
+    moment = _reset_moment(resets_at)
+    if moment is None:
+        return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>'
+    clock = _RENDER_CLOCK.get()
+    now = clock() if clock is not None else datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    left = _time_left((moment - now).total_seconds())
+    return f'<span class="resets" title="{escape(str(resets_at))}">{escape(left)}</span>'
 
 
 def _rows(headers: list[str], rows: list[list[str]]) -> str:
@@ -870,7 +964,8 @@ def _limits_panel(section: dict[str, Any] | None) -> str:
             continue
         windows = provider.get("windows") or []
         remaining = "<br>".join(
-            f"{escape(str(window.get('name') or 'window'))}: <b>{escape(str(window.get('remaining_percent', '—')))}%</b> · resets {escape(str(window.get('resets_at') or '—'))}"
+            f"{escape(str(window.get('name') or 'window'))}: "
+            f"<b>{escape(str(window.get('remaining_percent', '—')))}%</b> · {_reset(window.get('resets_at'))}"
             for window in windows
             if isinstance(window, dict)
         )
@@ -1935,7 +2030,9 @@ _REFRESH_SCRIPT = """
 // on a page nobody touches. Every switch carrying data-refresh-toggle is the same switch -- the
 // bar has one on every page, the dashboard keeps its own -- and the choice is this browser's and is
 // remembered. The guard is the point and is never loosened: focus in a field, or any field holding
-// text, cancels the reload, so a half-written /po message is never discarded by it.
+// typed content, cancels the reload, so a half-written /po message is never discarded by it -- and
+// a password field counts, because the /po login page's token is typed into one and a tick that
+// cleared it would be the same loss with none of the text on screen to retype from.
 (() => {
   const boxes = Array.from(document.querySelectorAll('input[data-refresh-toggle]'));
   let on = true;
@@ -1952,7 +2049,7 @@ _REFRESH_SCRIPT = """
     if (!on) return;
     const active = document.activeElement;
     if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.tagName === 'SELECT')) return;
-    for (const field of document.querySelectorAll('textarea, input[type=text], input:not([type])')) if (field.value) return;
+    for (const field of document.querySelectorAll('textarea, input[type=text], input[type=password], input[type=search], input[type=email], input[type=url], input[type=number], input:not([type])')) if (field.value) return;
     window.location.reload();
   }, 30000);
 })();

@@ -1552,15 +1552,23 @@ Card pages carry a comment and a move with reason (a second reason past the spri
 pages carry a comment and, when open, the close. All post to the routes in
 [Protocols](PROTOCOLS.md#routes) as role `po`, actor `web`. There is no browser `decide`. Every page reloads
 every 30 seconds unless a field has focus or holds typed text — a half-written `/po` message is never
-discarded by it; a checkbox turns the reload off, and the one in the bottom bar and the one on the
-dashboard are the same switch.
+discarded by it, and a password field counts, so the `/po` token being typed in is never cleared by a
+tick; a checkbox turns the reload off, and the one in the bottom bar and the one on the dashboard are
+the same switch. A page rendered as the answer to a POST — a refusal, normally — carries no reload at
+all, because reloading one is the browser offering to send the submission again.
 
 ### The bottom status bar
 
 Every HTML page the transport serves — the dashboard, sprints, projects, cards, `/history`, the sprint
 form, `/po` and its sessions, and refusal pages too — ends in one bar fixed to the bottom of the viewport.
 It shows what each provider subscription has left: for Claude and for Codex, every usage window the
-provider reported, its remaining percentage and when it resets. A provider whose reading is stale or
+provider reported, its remaining percentage and **how long is left until it resets** — `2 d 12 h left`,
+`6 h 45 m left`, `42 m left`, `less than a minute left`, or, for a reading whose moment has gone by,
+`reset already passed`; a window whose reading carries no moment says `no reset time recorded` rather
+than showing a dash. The exact moment is not lost: it is the hover title of that element, as the ISO
+UTC string the reading carried. The time left is counted from when the page was drawn, not from when
+the reading was taken, so a reading served from the cache does not overstate what is left. The
+dashboard's `Usage limits` panel says it the same way, from the same renderer. A provider whose reading is stale or
 unavailable is shown with that word, the reason, and no percentage at all: on a bar a number is read as
 what is left *now*, so no reading is drawn as words rather than as a figure. An available reading taken a
 while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it

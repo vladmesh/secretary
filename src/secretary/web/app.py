@@ -266,8 +266,12 @@ class WebApp:
         page rendered under this call, refusals included, draws the providers' limits from it, and
         it is a callable rather than a document, so a JSON route -- which renders no page -- costs
         no provider read. It is unset again when the request ends, so nothing is held between two.
+
+        Whether this request is a POST is marked here for the same span and the same reason: a page
+        rendered as the answer to a submission -- a refusal, normally -- must not reload itself,
+        because a reload of a POST result is the browser offering to send the submission again.
         """
-        with pages.limits_source(self._limits_section):
+        with pages.limits_source(self._limits_section), pages.from_post(method == "POST"):
             return self._handle(method, path, query=query, body=body, headers=headers)
 
     def _handle(
