@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
+from secretary.board.roles import Role
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
     TerminalTaxonomyValidationError,
@@ -24,7 +25,6 @@ from secretary.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
 )
 from secretary.dispatch.helpers import _round_report_ids
-from secretary.dispatch.launch import WORKER_ROLE
 from secretary.dispatch.state import DispatcherRecord, OutcomeTerminalPath
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.routing_journal import MODEL_UNKNOWN, REVIEWER, WORKER, HeadRun
@@ -48,7 +48,7 @@ def _usage_fallback_snapshot(
     spec = spec if isinstance(spec, dict) else {}
     return HeadRun(
         role=journal_role,
-        head=record.head if role == WORKER_ROLE else record.review_head,
+        head=record.head if role == Role.WORKER.value else record.review_head,
         adapter=str(spec.get("adapter") or ""),
         model=str(spec.get("model") or ""),
         model_source=MODEL_UNKNOWN,
@@ -675,15 +675,15 @@ def record_attempt_usage(runtime: Any, ref: str, record: DispatcherRecord, *, ro
 
 
 def _write_attempt_usage(runtime: Any, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
-    phase = "worker" if role == WORKER_ROLE else "review"
-    journal_role = WORKER if role == WORKER_ROLE else REVIEWER
+    phase = "worker" if role == Role.WORKER.value else "review"
+    journal_role = WORKER if role == Role.WORKER.value else REVIEWER
     # A round is what binds the occurrence to a phase. Every accepted terminal report has one;
     # a record rebuilt without one still owes the phase an account, so the first round answers
     # for it rather than the occurrence being dropped.
     attempt = max(record.attempt_round or runtime._journal_round(ref), 1)
     generation = max(record.report_generation, 1)
-    snapshot = dict(record.worker_run if role == WORKER_ROLE else record.review_run)
-    lifecycle = dict(record.worker_head_run if role == WORKER_ROLE else record.review_head_run)
+    snapshot = dict(record.worker_run if role == Role.WORKER.value else record.review_run)
+    lifecycle = dict(record.worker_head_run if role == Role.WORKER.value else record.review_head_run)
     if not snapshot:
         # A recovered record can hold the head's own run without the routing snapshot of its
         # configuration. The head's attested launch spec answers for the adapter; re-reading
