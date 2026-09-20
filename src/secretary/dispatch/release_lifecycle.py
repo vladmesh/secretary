@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
     has_candidate,
@@ -107,7 +108,7 @@ def block_merge_path(
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -384,7 +385,7 @@ def release_effect(
             outcome="release cleanup refused",
             decision=decision,
         )
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="done",

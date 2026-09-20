@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
 from secretary.board.terminal_taxonomy import (
@@ -363,10 +364,10 @@ def _production_tick_work(
     # outside everything below. Publishing them from the pending set is the only pass that reaches
     # those, and it runs before the fence, the cycle, reconciliation and any claim, because all of
     # them read a journal these records belong in.
-    usage_outcomes = runtime.publish_pending_attempt_usage()
+    usage_outcomes = attempt_accounting.publish_pending_attempt_usage(runtime)
     # Outcome recovery is journal-only and reports its own degradation.  It
     # cannot delay the fence or any lifecycle work below.
-    outcome_outcomes = runtime.publish_pending_attempt_outcomes()
+    outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
@@ -1404,7 +1405,7 @@ def _production_active_mismatch(
             f"stopped: {stopped['reason']}"
         )
         return stopped
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",

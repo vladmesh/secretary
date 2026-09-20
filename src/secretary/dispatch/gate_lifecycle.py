@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch import release_lifecycle
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
@@ -77,7 +78,7 @@ def run_gate(
         )
     except HostError as exc:
         runtime.host.stop(record)
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             task,
             record,
             target="blocked",
@@ -194,7 +195,7 @@ def _block_missing_gate_receipt(
     """
     ref = task["ref"]
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -457,7 +458,7 @@ def _block_infrastructure_reruns_exhausted(
         f"{record.gate_infrastructure_reruns_sha or runtime.host.head_commit(record)}; "
         "the bounded automatic recovery is exhausted."
     )
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -506,7 +507,7 @@ def _block_infrastructure_rerun_unavailable(
         f"run could not be rerun: {scrub_host_output(str(exc))}. Blocked rather than rereading "
         "the same terminal result."
     )
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -760,7 +761,7 @@ def gate_pending(
             "action": action,
         }
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
