@@ -3586,7 +3586,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 side_effect=AssertionError("provider session read"),
             ),
             mock.patch.object(
-                dispatcher_module,
+                attempt_accounting,
                 "_collect_usage",
                 side_effect=AssertionError("dispatcher provider read"),
             ),
