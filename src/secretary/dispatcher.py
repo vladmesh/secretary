@@ -131,6 +131,7 @@ from secretary.dispatch.review_verdict import (
 )
 from secretary.dispatch.state import (
     DispatcherRecord,
+    OutcomeTerminalPath,
     now_rfc3339,
 )
 from secretary.dispatch.state import (
@@ -190,6 +191,7 @@ from secretary.head_health import (
     HeadReadiness,
 )
 from secretary.routing_journal import (
+    MODEL_UNKNOWN,
     REVIEWER,
     WORKER,
     HeadRun,
