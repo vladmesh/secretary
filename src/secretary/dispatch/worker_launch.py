@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import (
     _spent_report_generations,
     _task_doc_report_generation,
@@ -150,7 +151,7 @@ def launch_worker_after_claim(
     require_existing_workspace: bool = False,
 ) -> dict[str, Any]:
     ref = claimed["ref"]
-    runtime._persist_outcome_round_context(claimed, record, phase="worker")
+    attempt_accounting.persist_outcome_round_context(runtime, claimed, record, phase="worker")
     mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
     if mismatch:
         divergence = _record_divergence(
@@ -206,7 +207,7 @@ def launch_worker_after_claim(
         if intent_failure.startswith("codex-fanout-policy:"):
             # No terminal was created. This is policy evidence, not a transient failure worth
             # retrying: a later tick with the same schema is the same prohibited launch.
-            runtime.terminal_effect(
+            attempt_accounting.terminal_effect(runtime, 
                 claimed,
                 record,
                 target="blocked",
@@ -279,7 +280,7 @@ def launch_worker_after_claim(
         reason = _bring_up_blocked_reason(
             "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
         )
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             claimed,
             record,
             target="blocked",
@@ -769,7 +770,7 @@ def _refuse_headless_worker(
             f" (branch {headless.get('branch') or '(unbound)'},"
             f" candidate {headless.get('candidate_sha') or '(unreadable)'})."
         )
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",

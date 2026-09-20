@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import has_candidate
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_lifecycle import (
@@ -58,14 +59,14 @@ def advance_review_verdict(
         return _complete_red_transition(runtime, task, record, records, payload, attempt_id, ref=ref)
     marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
     if marker == "review:green":
-        runtime._capture_outcome_source(
+        attempt_accounting.capture_outcome_source(runtime, 
             task, record, phase="verdict", kind="card.verdict", marker=marker
         )
         return park_green_verdict(runtime, task, record, records, payload, attempt_id)
     if marker != "review:red":
         return None
 
-    runtime._capture_outcome_source(task, record, phase="verdict", kind="card.verdict", marker=marker)
+    attempt_accounting.capture_outcome_source(runtime, task, record, phase="verdict", kind="card.verdict", marker=marker)
     # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
     # terminals down, and this checkout is about to be parked and is never re-created from
     # base. An unconfirmed stop ends the tick before the card moves. The commit is read
@@ -84,7 +85,7 @@ def advance_review_verdict(
         return unconfirmed
     # The verdict is accepted here, whichever of the three red outcomes it takes: the
     # reviewer's pane is closed but its run, and the session it names, are still recorded.
-    runtime.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+    attempt_accounting.record_attempt_usage(runtime, ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
     record.rejected_sha = reviewed
     record.rejected_failure_class = "substantive"
     record.rejected_failure_reason = REVIEW_REJECTION_REASON
@@ -170,7 +171,7 @@ def park_green_verdict(
     if reviewed:
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         runtime._record_verdict_routing(ref, record, "green")
-        runtime.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+        attempt_accounting.record_attempt_usage(runtime, ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
     if has_candidate(task):
         gated = merge_ready_for_park(runtime, task, record, records, payload, attempt_id)
         if gated is not None:

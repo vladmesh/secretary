@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
@@ -82,7 +83,7 @@ def advance_assessment(
     )
     if visit and decision_request and decision_event_id:
         try:
-            runtime._persist_outcome_round_context(
+            attempt_accounting.persist_outcome_round_context(runtime, 
                 task,
                 record,
                 phase="decision",
@@ -224,7 +225,7 @@ def reslice_parked(
         return unconfirmed
 
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
