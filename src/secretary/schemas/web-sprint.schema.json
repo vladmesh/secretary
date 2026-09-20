@@ -378,6 +378,7 @@
       "description": "What one sprint is doing. The same object in a listing item and in a watched sprint, built by the same call, so the two surfaces cannot answer this differently. Each section names the source that answered it: the sprint board, the Pipeline listing, or the dispatcher's production state.",
       "required": [
         "current_task",
+        "current_card_state",
         "decision",
         "cards",
         "degraded_cards",
@@ -406,6 +407,67 @@
             },
             "live": {
               "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "current_card_state": {
+          "type": "object",
+          "description": "Where the sprint's current card stands and since when. A section of its own, decided over the Pipeline listing and the committed audit: `current_task` is the sprint row's alone, and a journal or listing nobody could read must leave the card's reference and the sprint's row standing. `since` is the card's last state transition on the committed audit and never `updated_at`, which moves for a comment or a report; `age_seconds` is how old that moment was when the document was read, and both are null unless `transition` is `recorded`.",
+          "required": [
+            "source",
+            "card",
+            "state",
+            "since",
+            "age_seconds",
+            "transition",
+            "reason"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "card": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Which card the answer is about, carried wherever the sprint row answered -- a subject, never a claim about where the card stands."
+            },
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The board state the Pipeline listing holds this card in, or null when the listing holds no such card."
+            },
+            "since": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The moment of the card's last state transition on the committed audit. Null for every answer but `recorded`, and never a stand-in moment."
+            },
+            "age_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "How long the card had been in that state when the document was read. Null and never zero when no transition dates it: a zero would read as a card that moved just now."
+            },
+            "transition": {
+              "enum": [
+                "recorded",
+                "absent",
+                "not_applicable",
+                "unknown"
+              ],
+              "description": "`recorded` is a transition of this card on the journal; `absent` is the journal's own answer that it holds none; `not_applicable` is a sprint with no current card or one whose card is where the sprint ended; `unknown` is a source nobody could read."
             },
             "reason": {
               "type": [

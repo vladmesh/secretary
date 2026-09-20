@@ -85,6 +85,15 @@ def sprint_item(ref: str = "sprint:7") -> dict[str, Any]:
         "reservations": ["secretary"],
         "goal": "a goal " * 60,
         "current_task": {"ref": "secretary-9", "live": True, "reason": "cut", "source": available()},
+        "current_card_state": {
+            "card": "secretary-9",
+            "state": "in_progress",
+            "since": "2026-09-13T09:00:00Z",
+            "age_seconds": 10800.0,
+            "transition": "recorded",
+            "reason": "secretary-9 stands in in_progress",
+            "source": available(),
+        },
         "observer": {
             "declared": {"profile": "claude-observer", "state": "declared"},
             "launch": {"state": "running", "reason": "an observer head is up", "source": available()},
@@ -455,6 +464,62 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn('href="/sprints/sprint%3A7"', page)
         self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["open"])
         self.assertIn('aria-current="page"', self.text(self.get("/sprints")))
+
+    def test_the_sprints_page_says_where_the_current_card_stands_and_since_when(self) -> None:
+        """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""
+        page = self.text(self.get("/sprints"))
+        self.assertIn('title="2026-09-13T09:00:00Z"', page)
+        self.assertIn("3h in this state", page)
+        self.assertIn(">in progress<", page)
+
+    def test_a_card_the_journal_dates_no_transition_for_shows_no_age(self) -> None:
+        """Criterion 6 on the page: words, and never a duration that reads as "just now"."""
+        item = sprint_item()
+        item["current_card_state"] = {
+            **item["current_card_state"],
+            "since": None,
+            "age_seconds": None,
+            "transition": "absent",
+            "reason": "the committed audit records no state transition of secretary-9",
+        }
+        self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
+        page = self.text(self.get("/sprints"))
+        self.assertIn("no transition recorded", page)
+        self.assertNotIn("in this state", page)
+        self.assertNotIn("0s", page)
+
+    def test_a_sprint_that_ended_shows_no_ticking_age_for_its_card(self) -> None:
+        item = sprint_item()
+        item["status"] = "closed"
+        item["current_card_state"] = {
+            **item["current_card_state"],
+            "since": None,
+            "age_seconds": None,
+            "transition": "not_applicable",
+            "reason": "sprint:7 is closed: secretary-9 is the card it ended on",
+        }
+        self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
+        page = self.text(self.get("/sprints"))
+        self.assertIn("the card it ended on", page)
+        self.assertNotIn("in this state", page)
+
+    def test_a_source_that_refused_leaves_the_card_on_the_row(self) -> None:
+        """Criterion 2 on the page: the reference stands, only the new part says it is unknown."""
+        item = sprint_item()
+        item["current_card_state"] = {
+            "card": "secretary-9",
+            "state": None,
+            "since": None,
+            "age_seconds": None,
+            "transition": "unknown",
+            "reason": "the committed audit journal could not be read: denied",
+            "source": {**available(), "state": "unavailable", "reason": "denied"},
+        }
+        self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
+        page = self.text(self.get("/sprints"))
+        self.assertIn("secretary-9", page)
+        self.assertIn("the committed audit journal could not be read", page)
+        self.assertNotIn("in this state", page)
 
     def test_archive_requests_terminal_sprints_and_offers_search(self) -> None:
         second = sprint_item("sprint:8")
