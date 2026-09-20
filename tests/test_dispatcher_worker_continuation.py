@@ -52,6 +52,12 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.runtime._stop_worker_confirmed.return_value = None
         self.runtime.open_worker_round.side_effect = self.open_round
         self.runtime.host.provider_progress.side_effect = self.provider_evidence
+        self.accounting = mock.Mock()
+        self.accounting_patcher = mock.patch.object(
+            continuation_module, "attempt_accounting", self.accounting
+        )
+        self.accounting_patcher.start()
+        self.addCleanup(self.accounting_patcher.stop)
 
     def open_round(self, record, *, round_number):
         record.attempt_round = round_number
@@ -144,7 +150,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
             self.begin()
         self.assertTrue(self.record.worker_continuation.red_transition_pending)
         self.assertEqual(self.record.worker_continuation.reserved_generation, 4)
-        self.runtime.terminal_effect.assert_not_called()
+        self.accounting.terminal_effect.assert_not_called()
         self.runtime.host.resume_worker.assert_not_called()
         self.runtime._stop_worker_confirmed.assert_not_called()
 
@@ -164,11 +170,11 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.assertEqual(snapshots[0], (WorkerContinuationStage.RED_TRANSITION_PENDING, 3))
         self.assertIsInstance(self.record.gate_attestation, PersistedGateReceipt)
         self.assertEqual(self.record.gate_attestation.to_json(), {})
-        first_request = self.runtime.terminal_effect.call_args.kwargs["request_id"]
+        first_request = self.accounting.terminal_effect.call_args.kwargs["request_id"]
         self.assertEqual(self.record.report_generation, 4)
         with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={"ok": True}):
             self.assertEqual(self.complete(), {"ok": True})
-        self.assertEqual(self.runtime.terminal_effect.call_args.kwargs["request_id"], first_request)
+        self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["request_id"], first_request)
         self.assertEqual(self.record.report_generation, 4)
         self.assertEqual(self.record.worker_continuation.reserved_generation, 4)
 

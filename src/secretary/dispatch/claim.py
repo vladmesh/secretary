@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from secretary.board.completion_evidence import has_candidate
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from secretary.dispatch.helpers import _worker_id, scrub_host_output
 from secretary.dispatch.launch import (
@@ -477,7 +478,7 @@ def _write_claim_preflight_block(
     """Nothing is computed here and nothing is read: the transition is the first statement made
     about the claimed card, and the dispatcher's own bookkeeping only follows it.
     """
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         DispatcherRecord(
             worker=_worker_id(task),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
@@ -197,7 +198,7 @@ def review_infrastructure_failure(
         if held is not None:
             return dict(held, **failure.outcome_fields(held["reason"]))
     blocked_reason = review_infrastructure_blocked_reason(record, reason, failure)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -930,7 +931,7 @@ def start_review(
     )
     if failure is not None:
         if failure.startswith("codex-fanout-policy:"):
-            runtime.terminal_effect(
+            attempt_accounting.terminal_effect(runtime, 
                 task,
                 record,
                 target="blocked",
@@ -1045,7 +1046,7 @@ def start_review(
         blocked_reason = bring_up_blocked_reason(
             "review bring-up failed", exc, record, REVIEW_ROLE, failure=failure
         )
-        runtime.terminal_effect(
+        attempt_accounting.terminal_effect(runtime, 
             task,
             record,
             target="blocked",

@@ -13,6 +13,7 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
@@ -107,7 +108,7 @@ def block_merge_path(
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
     runtime.host.stop(record)
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="blocked",
@@ -384,7 +385,7 @@ def release_effect(
             outcome="release cleanup refused",
             decision=decision,
         )
-    runtime.terminal_effect(
+    attempt_accounting.terminal_effect(runtime, 
         task,
         record,
         target="done",
