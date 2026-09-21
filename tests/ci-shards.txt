@@ -174,4 +174,5 @@ unit tests/test_web_markdown.py
 unit tests/test_po_token.py
 unit tests/test_provider_usage.py
 unit tests/test_web_process_coherence.py
+unit tests/test_suite_tmp_guard.py
 unit tests/test_web_process_receipt.py

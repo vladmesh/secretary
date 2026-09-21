@@ -260,6 +260,127 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(blocked.status, "blocked")
         self.assertGreater(blocked.duration_ms, 0.0)
 
+    def staging_dirs(self) -> list[str]:
+        """Checkpoint staging and publish backups left in the state repo's `state/` directory."""
+        state = self.instance_dir / "state"
+        if not state.exists():
+            return []
+        return sorted(path.name for path in state.iterdir() if path.name.endswith(".tmp"))
+
+    def watch_staging(self) -> tuple[list[Path], contextlib.AbstractContextManager]:
+        """Record every staging directory the writer creates, so a test can prove one existed."""
+        created: list[Path] = []
+        real = tempfile.mkdtemp
+
+        def mkdtemp(*args, **kwargs):
+            path = real(*args, **kwargs)
+            if "-checkpoint-" in str(kwargs.get("prefix", "")):
+                created.append(Path(path))
+            return path
+
+        return created, mock.patch("secretary.checkpoint.tempfile.mkdtemp", side_effect=mkdtemp)
+
+    def test_every_outcome_of_a_run_removes_its_staging(self):
+        """Staging never outlives its run: committed, unchanged and blocked (secretary-1663)."""
+        created, watching = self.watch_staging()
+        with watching:
+            # Blocked on the second component, after the board was already published.
+            self.seed_runs([{"line": 1}], run_record_count=9)
+            blocked = self.write()
+            self.assertEqual(blocked.status, "blocked")
+            self.assertIn("runs export count mismatch", blocked.reason)
+            self.assertEqual(self.staging_dirs(), [])
+            # Blocked on the board: the gate refuses the staged copy.
+            self.seed_runs([])
+            self.seed_board([CARD], card_count=4)
+            blocked = self.write()
+            self.assertEqual(blocked.status, "blocked")
+            self.assertIn("board export count mismatch", blocked.reason)
+            self.assertEqual(self.staging_dirs(), [])
+            self.seed_board([CARD])
+            self.assertEqual(self.write().status, "committed")
+            self.assertEqual(self.staging_dirs(), [])
+            self.assertEqual(self.write().status, "unchanged")
+            self.assertEqual(self.staging_dirs(), [])
+
+        self.assertGreaterEqual(len(created), 6)
+        self.assertEqual([path for path in created if path.exists()], [])
+
+    def test_an_exception_mid_publish_still_removes_its_staging(self):
+        """The leak production showed: an error no gate names left 132 MB of staging behind."""
+        self.assertEqual(self.write().status, "committed")
+        self.seed_board([dict(CARD, title="new cut")])
+        created, watching = self.watch_staging()
+
+        with (
+            watching,
+            mock.patch("secretary.checkpoint.publish_split_board", side_effect=OSError("disk went away")),
+            self.assertRaisesRegex(OSError, "disk went away"),
+        ):
+            self.write()
+
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
+        self.assertEqual(self.staging_dirs(), [])
+
+    def test_abandoned_staging_is_collected_at_start_under_the_lock(self):
+        """Only one writer holds the lock, so staging found then belongs to no live run."""
+        state = self.instance_dir / "state"
+        abandoned = [state / ".board-checkpoint-3xno64tc.tmp", state / ".runs-checkpoint-abc123.tmp"]
+        for path in abandoned:
+            (path / "nested").mkdir(parents=True)
+            (path / "nested" / "cards.ndjson").write_text("{}\n", encoding="utf-8")
+        survivors = [
+            state / ".board-checkpoint-3xno64tc.tmpx",
+            state / "board-checkpoint-3xno64tc.tmp",
+            state / ".board-old-3xno64tc.tmp",
+            state / ".other-checkpoint-3xno64tc.tmp",
+            state / ".board-checkpoint-3xno64tc",
+        ]
+        for path in survivors:
+            path.mkdir()
+        planted_file = state / ".runs-checkpoint-file.tmp"
+        planted_file.write_text("not a directory\n", encoding="utf-8")
+        elsewhere = self.instance_dir / ".board-checkpoint-elsewhere.tmp"
+        elsewhere.mkdir()
+
+        from secretary import checkpoint as checkpoint_module
+
+        held = {"lock": False}
+        real_lock = checkpoint_module.state_repo.state_repo_lock
+        real_cleanup = checkpoint_module._cleanup_staging_dir
+        removals: list[tuple[str, bool]] = []
+
+        @contextlib.contextmanager
+        def lock(instance_dir):
+            with real_lock(instance_dir):
+                # Nothing was collected before the lock was taken.
+                self.assertTrue(all(path.exists() for path in abandoned))
+                held["lock"] = True
+                try:
+                    yield
+                finally:
+                    held["lock"] = False
+
+        def cleanup(path):
+            removals.append((Path(path).name, held["lock"]))
+            return real_cleanup(path)
+
+        # A run the audit gate blocks before staging anything still collects.
+        TaskAudit(self.data_dir).stage("request-1", {"event_id": "e1"})
+        with (
+            mock.patch("secretary.checkpoint.state_repo.state_repo_lock", side_effect=lock),
+            mock.patch("secretary.checkpoint._cleanup_staging_dir", side_effect=cleanup),
+        ):
+            result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(sorted(removals), sorted((path.name, True) for path in abandoned))
+        self.assertTrue(all(not path.exists() for path in abandoned))
+        self.assertTrue(all(path.is_dir() for path in survivors))
+        self.assertEqual(planted_file.read_text(encoding="utf-8"), "not a directory\n")
+        self.assertTrue(elsewhere.is_dir())
+
     def test_duplicate_fresh_export_leaves_checkpoint_head_index_and_canon_untouched(self):
         self.assertEqual(self.write().status, "committed")
         head = git(self.instance_dir, "rev-parse", "HEAD").strip()
