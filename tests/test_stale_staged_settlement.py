@@ -283,6 +283,36 @@ class StaleStagedSettlementTests(SettlementCase):
         self.assertEqual([o["outcome"] for o in outcomes], ["committed"])
         self.assertEqual(self.audit.committed_event("req-denied"), record)
 
+    def replaced(self) -> dict[str, Any]:
+        """`evt_first` staged and aged past the grace, then replaced by a different `evt_second`."""
+        template = dict(self.charge("req-template"))
+        first = {**template, "request_id": "reused-id", "event_id": "evt_first"}
+        second = {**template, "request_id": "reused-id", "event_id": "evt_second"}
+        self.audit.stage("reused-id", first)
+        self.age("reused-id", STALE_MINUTES)
+        self.audit.stage("reused-id", second)
+        self.assertEqual(self.audit.pending_event("reused-id"), second)
+        return second
+
+    def test_a_replaced_staged_record_is_judged_by_its_own_age(self) -> None:
+        """The reviewer's case: the replacement is fresh although the id's first claim is old."""
+        second = self.replaced()
+
+        self.assertEqual(self.audit.settle_stale_staged(), [])
+
+        self.assertEqual(self.status_of("reused-id"), "staged")
+        self.assertEqual(self.audit.pending_event("reused-id"), second)
+        self.assertIsNone(self.audit.refusal("reused-id"))
+
+    def test_a_replaced_record_left_past_the_grace_is_still_settled(self) -> None:
+        self.replaced()
+        self.age("reused-id", STALE_MINUTES)
+
+        outcomes = self.audit.settle_stale_staged()
+
+        self.assertEqual([(o["request_id"], o["outcome"]) for o in outcomes], [("reused-id", "refused")])
+        self.assertEqual(self.status_of("reused-id"), "discarded")
+
     def test_a_row_younger_than_the_grace_is_left_alone(self) -> None:
         record = dict(self.charge("req-template"))
         record.update({"request_id": "req-in-flight", "event_id": "evt_in_flight"})

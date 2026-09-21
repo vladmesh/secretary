@@ -616,6 +616,8 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   belongs to another operation or payload"`; same and committed → replay, nothing written; same
   and staged → the existing claim is returned.
 - A generic stage may replace a generic staged record, never a protocol one (`requests.protocol`).
+  An accepted replacement by a different record resets `created_at`, so a staged row's age is the
+  age of its current record. A commit over a row's own staged claim keeps its `created_at`.
 - `discard` deletes a staged non-protocol row.
 - A row staged outside a transaction whose writer died stays `staged`. The checkpoint writer calls
   `settle_stale_staged` before its gate counts staged rows, and settles each row staged longer than

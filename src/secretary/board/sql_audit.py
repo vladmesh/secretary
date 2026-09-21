@@ -371,6 +371,12 @@ class SqlTaskAudit:
             "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
             "ref, created_at, settled_at) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (request_id) DO UPDATE SET intent = EXCLUDED.intent, "
+            # An accepted replacement of a staged record by a different staged record starts that
+            # record's age anew: `settle_stale_staged` judges the current record, not the id's first
+            # claim. A commit over its own staged row keeps the claim time, as it always has.
+            "created_at = CASE WHEN requests.status = 'staged' AND EXCLUDED.status = 'staged' "
+            "AND requests.intent IS DISTINCT FROM EXCLUDED.intent "
+            "THEN EXCLUDED.created_at ELSE requests.created_at END, "
             "status = EXCLUDED.status, settled_at = EXCLUDED.settled_at, "
             "protocol = EXCLUDED.protocol, operation = EXCLUDED.operation, ref = EXCLUDED.ref",
             (
