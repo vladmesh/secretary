@@ -1661,7 +1661,7 @@ class TaskWriter:
         data_dir: str | os.PathLike[str],
         workspace: str | os.PathLike[str] | None = None,
     ) -> None:
-        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.board.write_barrier import require_board_write_allowed
 
         require_board_write_allowed(data_dir)
         self.client = client
