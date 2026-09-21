@@ -455,7 +455,8 @@ reported.
 
 ## How long things take
 
-Three durations are recorded on every running installation.
+Three durations are recorded on every running installation, and one command measures the dashboard's
+warm response times against the thresholds a sprint is judged on.
 
 ### Where the durations are
 
@@ -468,6 +469,52 @@ Three durations are recorded on every running installation.
 The web duration is the application's part of the answer — reading the body, handling the request,
 and writing the headers and body back — not the whole socket lifetime. The tick duration is the
 wall clock of `production_tick` up to the moment its outcome became durable.
+
+### Measuring the dashboard
+
+```bash
+python3 scripts/measure_dashboard.py            # against http://127.0.0.1:8787
+python3 scripts/measure_dashboard.py --json     # the same facts, as one document
+```
+
+This command measures the warm items only; the Definition-of-Done item about four concurrent `GET /` while a PO page polls is measured separately, not by it.
+
+Run it from a checkout, on the host the installation runs on. It reads only, and only from the
+installation named by `--base-url`: a `HEAD /` to check the installation answers, then the three
+dashboard pages. It makes no POST and starts no head. It also cannot be sent anywhere else: its
+one opener follows no redirect — a 3xx from any route ends the run instead — and reads no
+`http_proxy`/`https_proxy` variable, because either would time a different installation under this
+route's name.
+
+It prints, with the Definition of Done threshold beside each number and whether that number meets
+it, **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up
+request, then twenty timed ones per route. The judged number is the **p95 by nearest rank**, which
+over twenty samples is the second-slowest of the twenty: one request that actually happened, so two
+runs compare the same way every time. Min, median and max are printed beside it, and the warm-up is
+discarded because the first request after a deploy pays for import and cache warming that no later
+request pays again. Threshold: 1.0 s per route.
+
+Before any clock starts, the data directory is resolved the way the product resolves it:
+`--data-dir`, then `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the instance the CLI
+itself defaults to (`secretary.onboarding.DEFAULT_INSTANCE`, read through
+`secretary.config.instance_data_dir`). That last step is what makes the one command above work in
+an ordinary checkout shell, which does not inherit the service unit's environment. The output names
+the directory it resolved and which of those four rules chose it.
+
+### What it refuses to report
+
+**No number is judged MEETS unless it came from exactly the measurement the DoD names.** So the
+exit statuses are
+
+- `0` — every request answered 2xx and every judged number is at or under its threshold;
+- `1` — the same, except that a judged number is over its threshold. A red number is still a real
+  number, and the full table is printed;
+- `2` — everything else: the installation is unreachable, the data directory cannot be resolved, or
+  any request on any route answers non-2xx, including a 3xx (a missing route, a refusal, a
+  redirect, or the transport's contained 500).
+
+On exit 2 the command prints the numbers it did take, marks every one of them `NOT JUDGED`, and
+says in one line what could not be measured.
 
 ## Record reconciliation and controlled divergences
 
