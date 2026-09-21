@@ -317,7 +317,7 @@ class CutoverStateTests(CutoverFixture):
             cutover._read_state(self.paths)
 
     def test_durable_freeze_blocks_other_writers_and_allows_only_controller_identity(self) -> None:
-        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.board.write_barrier import require_board_write_allowed
         from secretary.tasks import TaskError
 
         state = cutover._new_state(PLAN, args().actor, args().reason)
@@ -334,7 +334,7 @@ class CutoverStateTests(CutoverFixture):
             require_board_write_allowed(self.data)
 
     def test_terminal_cutover_never_rearms_during_a_later_freeze(self) -> None:
-        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.board.write_barrier import require_board_write_allowed
 
         state = cutover._new_state(PLAN, args().actor, args().reason)
         state["status"] = "resume-ready"
@@ -348,7 +348,7 @@ class CutoverStateTests(CutoverFixture):
         state["phases"]["global_freeze"] = {"status": "complete"}
         cutover._write_state(self.paths, state)
         script = (
-            "from secretary.cutover.barrier import require_board_write_allowed; "
+            "from secretary.board.write_barrier import require_board_write_allowed; "
             f"require_board_write_allowed({str(self.data)!r})"
         )
         environment = dict(os.environ)
@@ -1407,7 +1407,7 @@ class CutoverFailureInjectionTests(CutoverFixture):
                     if name == failed_phase and failure["enabled"]:
                         raise RuntimeError("injected crash")
                     if name in fixture.barrier_phases:
-                        from secretary.cutover.barrier import require_board_write_allowed
+                        from secretary.board.write_barrier import require_board_write_allowed
                         from secretary.tasks import TaskError
 
                         durable = cutover._read_state(self.paths)
@@ -1545,7 +1545,7 @@ if os.environ.get("CUTOVER_TEST_FAKES"):
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     paths = cutover.Paths(Path(config["instance"]), Path(config["data"]))
     probe = (
-        "from secretary.cutover.barrier import require_board_write_allowed; "
+        "from secretary.board.write_barrier import require_board_write_allowed; "
         f"require_board_write_allowed({config['data']!r})"
     )
 
@@ -1843,7 +1843,7 @@ class DetachedControllerTests(CutoverFixture):
         self.assert_phase_completes_after_the_callers_group_and_output_die(retried)
 
     def test_the_launcher_relays_the_outcome_and_the_barrier_refuses_it(self) -> None:
-        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.board.write_barrier import require_board_write_allowed
         from secretary.tasks import TaskError
 
         verdicts: list[object] = []

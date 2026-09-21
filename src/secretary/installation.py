@@ -833,6 +833,15 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def _board_label() -> str:
+    """The board this installation serves cards from, named for an operator message.
+
+    `card_backend_status` reports rather than refuses, so naming the board cannot itself be the
+    thing that fails; an unusable switch value is refused by the call that needs the board.
+    """
+    return "PostgreSQL" if card_backend_status().get("backend") == POSTGRES else "Kanboard"
+
+
 def check_prerequisites(
     transport: BoardTransport,
     instance_dir: Path,
@@ -852,9 +861,7 @@ def check_prerequisites(
     # The prerequisite is the board this installation will actually serve cards from, so the
     # switch names it (board/backend.py).  The Kanboard transport is still handed over, and
     # still used, when the switch says `kanboard`; under `postgres` the store answers instead.
-    # `card_backend_status` reports rather than refuses, so naming the board in the message
-    # cannot itself be the thing that fails; an unusable switch value is refused by the call.
-    label = "PostgreSQL" if card_backend_status().get("backend") == POSTGRES else "Kanboard"
+    label = _board_label()
     try:
         TaskReader(board_client(instance_dir, serves=(CARD,), transport=transport)).list()
     except TaskError as exc:
@@ -1746,7 +1753,7 @@ def install(args: argparse.Namespace) -> InstallResult:
         )
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
             check_prerequisites(transport, target, args.installation_user)
-            result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
+            result.add("prerequisites", "unchanged", f"{_board_label()} and Orca are reachable")
             report = _validated_instance(target)
             assert report.data_dir is not None
             data_dir = report.data_dir

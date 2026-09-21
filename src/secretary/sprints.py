@@ -903,7 +903,7 @@ class SprintWriter:
         thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
     ) -> None:
-        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.board.write_barrier import require_board_write_allowed
         from secretary.product_issues import ProductIssueTransaction
 
         require_board_write_allowed(data_dir)

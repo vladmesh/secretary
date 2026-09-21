@@ -42,6 +42,12 @@ host requires `reconcile plan` and a separate confirmed apply.
 default, so it is not a recoverable credential. The file is gitignored and its contents may appear in
 board reports.
 
+It is one backend's transport. On `SECRETARY_CARD_BACKEND=postgres` the board is reached through
+`board-store.env`, so an absent or unusable tuple is not a finding, the `board-transport` upgrade
+step is a recorded no-op, and a role launch no longer refuses for the want of it. On
+`SECRETARY_CARD_BACKEND=kanboard` every one of those is unchanged. A tuple *tracked* in the instance
+repository stays a finding on both backends: that is a statement about the repository.
+
 Upgrade copies a complete legacy `KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN` tuple from
 `runtime.env` into this file once and removes it from `runtime.env`, keeping the running container
 working. It never guesses or rotates a token. A disagreement is reported as `board transport
@@ -2112,7 +2118,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `pull` | `git fetch` plus `merge --ff-only`; a dirty checkout is refused |
 | `registries` | read the skill manifest, instance overlay, head canon and memory pack; an unreadable or undeliverable registry stops the run before any write |
 | `memory-pack` | materialize the shipped memory pack into the memory canon |
-| `board-transport` | migrate a legacy runtime Kanboard tuple once, or create the deterministic `board-transport.env` |
+| `board-transport` | migrate a legacy runtime Kanboard tuple once, or create the deterministic `board-transport.env`; `skipped` on the PostgreSQL backend, which does not use it |
 | `dependencies` | reinstall into the virtualenv if the dependency manifest moved |
 | `dependency-provenance` | import `secretary`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
