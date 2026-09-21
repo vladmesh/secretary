@@ -247,10 +247,46 @@ def resolve(instance_dir: Path | str) -> BoardStoreConfig:
 def resolve_with_lifecycle(instance_dir: Path | str) -> tuple[BoardStoreConfig, StoreOutcome]:
     """`resolve`, with the exclusion action it took, so a caller can report it.
 
-    `upgrade.py`'s step renders this outcome; nothing else has to, and nothing may skip it.
+    `upgrade.py`'s step renders this outcome; nothing else has to, and nothing may skip it -- except
+    a process that has already held the exclusion once (`hold_exclusion`), which answers from that.
     """
-    outcome = enforce_exclusion(instance_dir)
+    held = _HELD.get(_held_key(instance_dir))
+    if isinstance(held, BoardStoreError):
+        raise BoardStoreError(str(held))
+    outcome = enforce_exclusion(instance_dir) if held is None else StoreOutcome()
     return parse(store_path(instance_dir)), outcome
+
+
+#: The exclusions this process has held, by instance: established (`StoreOutcome`) or refused
+#: (the refusal, answered again on every later read). Filled only by `hold_exclusion`.
+_HELD: dict[Path, StoreOutcome | BoardStoreError] = {}
+
+
+def _held_key(instance_dir: Path | str) -> Path:
+    return normalize_instance_dir(instance_dir).expanduser().resolve()
+
+
+def hold_exclusion(instance_dir: Path | str) -> StoreOutcome:
+    """Run the exclusion guard once for this process, so its reads do not run it again.
+
+    A long-lived reader -- `web-serve` -- calls this at start-up, before it serves anything. Its
+    requests then resolve the store without a `git` call, and none of them can write `.gitignore`:
+    only this call can, and it is not on a request's path. What it found holds for the life of the
+    process. A refusal holds too: a tracked, missing or unguardable file keeps refusing with the
+    same reason rather than being retried -- and possibly repaired -- by a read. A store that
+    appears or is repaired later is picked up by restarting the process.
+    """
+    key = _held_key(instance_dir)
+    path = store_path(instance_dir)
+    try:
+        if not path.exists() and not path.is_symlink():
+            raise BoardStoreError(f"board store configuration is missing: {path}")
+        outcome = enforce_exclusion(instance_dir)
+    except BoardStoreError as exc:
+        _HELD[key] = exc
+        raise
+    _HELD[key] = outcome
+    return outcome
 
 
 def resolve_role(instance_dir: Path | str, role: str) -> BoardStoreCredentials:
@@ -373,6 +409,7 @@ __all__ = [
     "ensure_ignored",
     "findings",
     "fresh_config",
+    "hold_exclusion",
     "materialize_fresh",
     "parse",
     "resolve",

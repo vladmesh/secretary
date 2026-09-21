@@ -11,6 +11,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 
 from secretary.web.app import WebApp
 from secretary.web.doctor import DoctorLayer
@@ -23,7 +25,7 @@ from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
-from secretary.webproto.reads import ReadLayer
+from secretary.webproto.reads import ReadLayer, hold_store_exclusion
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
 
@@ -63,10 +65,40 @@ def add_web_serve_subcommands(subparsers) -> None:
     group.set_defaults(handler=run_web_serve)
 
 
+def health_layers(
+    instance: str,
+    *,
+    data_dir: str | None = None,
+    offline: bool = False,
+    now: Callable[[], float] = time.time,
+) -> tuple[ReadLayer, DoctorLayer]:
+    """The read layer and the doctor lamp over one health cache, as `web-serve` wires them.
+
+    The lamp's layer holds the only cached reading of recorded health in the process, and the read
+    layer's `system_snapshot` takes the dashboard's health section from that same reading rather
+    than collecting its own: one collection per `CACHE_SECONDS` window, and a panel and a lamp that
+    cannot disagree within it.
+    """
+    reads = ReadLayer(
+        instance,
+        data_dir=data_dir,
+        offline=offline,
+        health_reader=lambda: doctor.health_snapshot(),
+    )
+    doctor = DoctorLayer(reads.health_snapshot, now=now)
+    return reads, doctor
+
+
 def run_web_serve(args: argparse.Namespace) -> int:
+    # The board store's git-exclusion guard, run once here and not on every request: from now on a
+    # read resolves the store without a `git` call, and no request can write `.gitignore`. A
+    # refusal is held too, and every store read of this process answers with it.
+    refused = hold_store_exclusion(args.instance)
+    if refused is not None:
+        print(f"board store: {refused}", file=sys.stderr)
     # The one PO runner of this process: built here, recovering what a previous run left running.
     po = PoLayer(args.instance, data_dir=args.data_dir)
-    reads = ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
+    reads, doctor = health_layers(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
     app = WebApp(
         reads,
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
@@ -79,8 +111,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
         CommandReadLayer(args.instance, data_dir=args.data_dir),
         CardOperationLayer(args.instance, data_dir=args.data_dir),
         ProviderUsageLayer(),
-        # The lamp's reading: the same read layer's recorded health, cached for its own window.
-        DoctorLayer(reads.health_snapshot),
+        doctor,
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
     )

@@ -754,6 +754,76 @@ class ExclusionEnforcementTests(InstanceRepository):
         self.assertIn("outcome = enforce_exclusion(instance_dir)", source)
 
 
+class HeldExclusionTests(InstanceRepository):
+    """`hold_exclusion`: the same guard, run once per process instead of on every read.
+
+    A long-lived reader (`web-serve`) holds it at start-up. Its reads then cost no `git` call, and
+    none of them can write `.gitignore`; a refusal found at start-up keeps refusing.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(mock.patch.dict(store._HELD, clear=True))
+
+    def gitignore(self) -> str:
+        path = self.instance / ".gitignore"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def test_the_guard_runs_once_at_hold_and_adds_a_missing_exclusion_there(self) -> None:
+        write_store(self.instance)
+        self.assertFalse(self.ignored())
+
+        outcome = store.hold_exclusion(self.instance)
+
+        self.assertTrue(outcome.ignore_added)
+        self.assertTrue(self.ignored())
+
+    def test_a_held_read_runs_no_git_and_cannot_write_the_ignore_file(self) -> None:
+        write_store(self.instance)
+        store.hold_exclusion(self.instance)
+        # The entry is removed after the hold: an unheld read would put it back, a held one must not.
+        (self.instance / ".gitignore").write_text("", encoding="utf-8")
+
+        with mock.patch.object(state_repo, "git", side_effect=AssertionError("a read ran git")):
+            config, outcome = resolve_with_lifecycle(self.instance)
+            resolve_role(self.instance, "app")
+
+        self.assertEqual(config.owner_user, "secretary_owner")
+        self.assertFalse(outcome.changed)
+        self.assertEqual(self.gitignore(), "")
+
+    def test_a_tracked_file_found_at_hold_keeps_refusing_every_read(self) -> None:
+        write_store(self.instance)
+        self.git("add", "-f", STORE_FILE)
+        self.git("commit", "-m", "credentials, by mistake")
+
+        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
+            store.hold_exclusion(self.instance)
+        with (
+            mock.patch.object(state_repo, "git", side_effect=AssertionError("a read ran git")),
+            self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"),
+        ):
+            resolve(self.instance)
+        self.assertEqual(self.gitignore(), "")
+
+    def test_a_store_missing_at_hold_is_refused_without_touching_the_repository(self) -> None:
+        with self.assertRaisesRegex(BoardStoreError, "missing"):
+            store.hold_exclusion(self.instance)
+        write_store(self.instance)
+
+        with self.assertRaisesRegex(BoardStoreError, "missing"):
+            resolve(self.instance)
+        self.assertEqual(self.gitignore(), "")
+        self.assertFalse(self.ignored())
+
+    def test_an_unheld_process_still_guards_every_read(self) -> None:
+        write_store(self.instance)
+
+        resolve(self.instance)
+
+        self.assertTrue(self.ignored(), "without a hold, resolve still makes the exclusion durable")
+
+
 class UpgradeStepTests(unittest.TestCase):
     """`step_board_store`: the three outcomes the observer decision defines for it."""
 
