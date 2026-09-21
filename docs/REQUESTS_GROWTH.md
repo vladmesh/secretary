@@ -17,8 +17,10 @@ cost the whole history, on the dispatcher tick and on web requests alike.
    narrows by ref, set of refs, kind, settle-time window and page in SQL, and every query it
    issues is served by an index of `0012_request_read_indexes` (`docs/BOARD_STORE.md` §7.3). A
    sprint's read costs that sprint's rows and a task's read costs that task's rows, however much
-   unrelated history sits beside them. Deleting history would therefore buy almost nothing on
-   the paths that matter.
+   unrelated history sits beside them. The budget pass reads a page of its uncharged candidates
+   through `0013_budget_candidates`'s partial index, so its cost follows the budget events and not
+   the history (secretary-1661). Deleting history would therefore buy almost nothing on the paths
+   that matter.
 2. **`requests` is what recovery replays.** It is the audit canon on PostgreSQL
    (`docs/BOARD_STORE.md` §7.3): the checkpoint exports it whole as `audit.json`/`audit.ndjson`
    (`secretary/data.py`), `restore` reads it back, and request-id replay answers, budget and usage
@@ -32,6 +34,8 @@ cost the whole history, on the dispatcher tick and on web requests alike.
 over N and over 10×N unrelated records and requires the rows touched to be equal. The same module
 proves that every query the audit issues has an index (`IndexAvailabilityTests`) and that the
 narrowed reads answer exactly what the old read-all-then-filter answered (`SameAnswersTests`).
+`tests/test_budget_candidates.py` proves the same of the budget pass's candidate read, and that its
+charges equal the old whole-audit pass's.
 
 ## What would make us revisit it
 
@@ -42,10 +46,6 @@ narrowed reads answer exactly what the old read-all-then-filter answered (`SameA
 - `requests` reaching a size where its disk footprint, backup time or `restore` replay time is
   itself an operational problem — as an order of magnitude, several GB or a backup that no
   longer fits its window.
-- The budget pass (`dispatch/production.py::_reconcile_sprint_budget`) still reads the whole
-  committed audit every tick. It is the one known exception on the tick, kept as it was until its
-  own card (secretary-1658's successor B in sprint:1449: an indexed set of uncharged budget
-  events, read a page per tick) gives it a bounded read; until then its cost follows history.
 
 Any of these reopens the question as a separate decision. Rotation or archiving would then need
 its own design for what recovery replays from, and is not done piecemeal.

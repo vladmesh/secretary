@@ -8,7 +8,6 @@ import contextlib
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import tomllib
@@ -115,33 +114,26 @@ from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRe
 def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
     """Every audit read under this scope must name a reference set, a window or a page bound.
 
-    One named exemption: `_reconcile_sprint_budget`, until its follow-up card (see below).
+    No exemption: the budget pass reads a page of its uncharged candidate set (secretary-1661).
 
     secretary-1658: nothing the production tick runs may read the whole committed audit. Both
     audit owners are patched at the class, so a read by any instance under the scope is seen; a
     violation is recorded (the tick swallows some exceptions into its own outcomes) and raised.
     """
     from secretary.board.sql_audit import SqlTaskAudit
-    from secretary.dispatch.production import _reconcile_sprint_budget
-
-    # The one exemption: the budget pass still reads the whole committed audit, exactly as on `main`
-    # 2d5b25b (secretary-1659). Its follow-up card, secretary-1658's successor B in sprint:1449
-    # (the budget pass as an indexed set of uncharged budget events, read a page per tick), removes
-    # this exemption. Only a direct call from that function is exempt; no other tick caller is.
-    _BUDGET_EXEMPT = _reconcile_sprint_budget.__code__
 
     violations: list[str] = []
     patches = []
     for owner in (TaskAudit, SqlTaskAudit):
         events = owner.events
         projection = owner._occurrence_projection_records
+        candidates = owner.uncharged_budget_candidates
 
         def guarded_events(self, reference="", *, _events=events, **filters):  # type: ignore[no-untyped-def]
             if (
                 not reference
                 and filters.get("references") is None
                 and filters.get("since") is None
-                and sys._getframe(1).f_code is not _BUDGET_EXEMPT
             ):
                 violations.append("".join(traceback.format_stack(limit=8)))
                 raise AssertionError("an unfiltered audit read under the tick")
@@ -153,9 +145,16 @@ def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
                 raise AssertionError("an unfiltered occurrence projection under the tick")
             return _projection(self, kinds, **options)
 
+        def guarded_candidates(self, *, limit, _candidates=candidates):  # type: ignore[no-untyped-def]
+            if not isinstance(limit, int) or not 0 < limit <= 1000:
+                violations.append("".join(traceback.format_stack(limit=8)))
+                raise AssertionError("an unbounded budget candidate read under the tick")
+            return _candidates(self, limit=limit)
+
         patches += [
             mock.patch.object(owner, "events", guarded_events),
             mock.patch.object(owner, "_occurrence_projection_records", guarded_projection),
+            mock.patch.object(owner, "uncharged_budget_candidates", guarded_candidates),
         ]
     for patch in patches:
         patch.start()
@@ -393,6 +392,15 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """Claim, advance, budget, usage and outcome recovery, the observer launch and a wake."""
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        # A budget event, so the budget pass charges under the guard rather than finding nothing.
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="guarded budget event",
+            request_id="guard-red-review",
+        )
         with unfiltered_audit_reads_raise() as violations:
             launched = self.runtime.production_tick()
             self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
@@ -409,6 +417,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(violations, [], "\n\n".join(violations))
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual([row["action"] for row in self.actions(nudged)], ["observer-nudged"])
+        self.assertEqual(
+            [row["event_type"] for row in self.actions(launched, "sprint-budget")], ["red_review"]
+        )
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
         for result in (launched, nudged, again):
             self.assertNotIn(
                 "sprint-budget", {str(error.get("step") or "") for error in result.get("errors") or []}

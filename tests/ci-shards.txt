@@ -139,6 +139,7 @@ unit tests/test_sprint_write.py
 integration-board tests/test_sprints_sql_backend.py
 integration-board tests/test_sql_board_bulk_reads.py
 integration-board tests/test_sql_audit_reads.py
+integration-board tests/test_budget_candidates.py
 unit tests/test_sprints.py
 unit tests/test_sprint_guard_outside_sprint.py
 unit tests/test_state_repo.py

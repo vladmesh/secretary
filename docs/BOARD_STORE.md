@@ -708,7 +708,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made |
 | `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) |
 | `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) |
-| `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads (`docs/REQUESTS_GROWTH.md`) (head) |
+| `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads (`docs/REQUESTS_GROWTH.md`) |
+| `0013_budget_candidates` | one partial index on `requests` only, `requests_budget_candidates`: committed rows meeting the budget pass's candidate predicate (`board/budget_candidates.py`), in claim order (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -975,9 +976,19 @@ applies them in SQL, each served by an index of `0012_request_read_indexes`: a r
 projection's slice (its kind, records sharing an `event_id` with it, records owing an outcome) in
 one statement; a page and its count are one statement too, so they share a snapshot. Nothing the
 production tick runs reads the audit without a reference set, a window or a page bound
-(`tests/test_dispatcher_observer.py::unfiltered_audit_reads_raise` guards it), except the budget
-pass (`_reconcile_sprint_budget`), which still reads it whole until its own card; whole-history readers
-such as restore stay off the tick and the web request path. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
+(`tests/test_dispatcher_observer.py::unfiltered_audit_reads_raise` guards it, with no exemption);
+whole-history readers such as restore stay off the tick and the web request path.
+
+**Budget candidates.** The budget pass (`_reconcile_sprint_budget`) reads a page of
+`uncharged_budget_candidates(limit=)`: committed records meeting the classifier's necessary
+conditions (`board/budget_candidates.py`, over both the `kind`/`payload` and the
+`record_type`/`transition` shapes) with no committed record under their charge id
+`sprint-budget-<event_id or request_id>`. `SqlTaskAudit` walks `requests_budget_candidates` (`0013`)
+in claim order and probes each charge id through the primary key; the file journal applies the same
+predicate in Python. There is no cursor: a record that commits late, or whose card lookup fails for
+any number of ticks, stays in the set until it is charged. Every candidate leaves it exactly once, by
+a charge, a `budget_unlinked` marker (card has no sprint) or a `budget_unclassified` marker (the
+classifier types it nothing, or its terminal taxonomy is invalid), each under the charge id. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
 
 **Card edges.** `TaskWriter._transition_card` and `TaskWriter.retire_done` run inside
 `TaskWriter._mutation()`. On PostgreSQL the claim, the state/archive change, the caller's finishing

@@ -35,6 +35,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 
+from secretary.board import budget_candidates
 from secretary.board.models import EntityKind, Event, EventKind
 
 #: Every `kind` a `board_events` row may carry (§3.12).  A record whose kind is outside it is a
@@ -200,6 +201,27 @@ class SqlTaskAudit:
         )
         total = int(rows[0][0])
         return total, [self._document(intent) for _total, intent in rows if intent is not None]
+
+    def uncharged_budget_candidates(self, *, limit: int) -> list[dict[str, Any]]:
+        """The oldest `limit` committed budget candidates with no committed charge, in claim order.
+
+        `budget_candidates` defines both halves: the candidate predicate, which the partial index
+        `requests_budget_candidates` of `0013_budget_candidates` holds exactly, and the charge id,
+        which the anti-join probes through the primary key. No position is kept, so a record that
+        commits late or stays unresolved for any number of passes is answered until it is charged.
+        Without the index the answer is the same and the plan reads the committed claim order.
+        """
+        predicate = budget_candidates.CANDIDATE_PREDICATE.replace("%", "%%")
+        identity = budget_candidates.IDENTITY
+        rows = self._query(
+            f"SELECT intent FROM requests WHERE status = 'committed' AND {predicate} "
+            f"AND {identity} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM requests AS charge "
+            f"WHERE charge.request_id = %s || {identity.replace('intent', 'requests.intent')} "
+            "AND charge.status = 'committed') "
+            f"ORDER BY {_CLAIM_ORDER} LIMIT %s",
+            (budget_candidates.CHARGE_PREFIX, max(limit, 0)),
+        )
+        return [self._document(intent) for (intent,) in rows]
 
     def pending_events(self) -> list[dict[str, Any]]:
         return [
