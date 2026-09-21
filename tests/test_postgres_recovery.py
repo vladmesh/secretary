@@ -970,6 +970,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "0009_po_requests",
                 "0010_po_session_close",
                 "0011_card_kinds",
+                "0012_request_read_indexes",
             ),
         )
         before_content = content_snapshot(original)

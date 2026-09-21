@@ -277,8 +277,13 @@ def _source(
 
 @dataclass(frozen=True, slots=True)
 class _History:
-    """The committed audit, read and converted once for the whole document."""
+    """One page of the committed audit, read and converted once for the whole document.
 
+    `total` is how many records are committed; `records` are the ordinals `[end - limit, end)` of
+    the traversal, which is all the page reads (secretary-1658).
+    """
+
+    total: int
     records: tuple[dict[str, Any], ...]
 
 
@@ -295,7 +300,7 @@ class _Lookup:
     pending: dict[str, Any] | None = None
 
 
-def _page(records: tuple[dict[str, Any], ...], cursor: Cursor | None, limit: int) -> dict[str, Any]:
+def _page(history: _History, cursor: Cursor | None, limit: int) -> dict[str, Any]:
     """The newest `limit` records at or before `cursor`, newest first, and where reading continues.
 
     The position is an ordinal in the traversal's append-ordered sequence: `offset` is how many
@@ -303,15 +308,15 @@ def _page(records: tuple[dict[str, Any], ...], cursor: Cursor | None, limit: int
     this one. It is frozen for the same reason a byte offset is -- the journal only grows, so no
     record can ever appear before one already counted.
     """
-    end = len(records) if cursor is None else cursor.offset
-    if end > len(records):
+    end = history.total if cursor is None else cursor.offset
+    if end > history.total:
         raise InvalidCursor(
             "this cursor is past the end of the committed audit, which only ever grows; "
             "the journal it was issued for is not the journal being read"
         )
     start = max(0, end - limit)
     return {
-        "items": [_row(record) for record in reversed(records[start:end])],
+        "items": [_row(record) for record in reversed(history.records)],
         "next_cursor": Cursor(ref=HISTORY_SCOPE, offset=start).encode(),
         # True only when the limit cut the page short, so a page that reached the beginning of the
         # history is told from one that stopped because it was full.
@@ -536,13 +541,15 @@ class CommandReadLayer(ProtocolBoundary):
         bounded = max(1, min(int(limit), MAX_LIMIT))
         position = None if not cursor else decode(cursor, ref=HISTORY_SCOPE)
         report, installation = self._installation(now=now)
-        audit = self._history(self.data_dir(report), now=now)
+        audit = self._history(
+            self.data_dir(report), end=None if position is None else position.offset, limit=bounded, now=now
+        )
         if audit.answered:
             # Paged outside the source span on purpose: a cursor this reader did not issue is the
             # caller being refused, not the audit failing to answer, and a defect in the paging is
             # this layer's own. The span is the read and the conversion of the document, and stops
             # where the audit has answered.
-            audit = Reading(SOURCE_AUDIT, audit.source, _page(audit.value.records, position, bounded))
+            audit = Reading(SOURCE_AUDIT, audit.source, _page(audit.value, position, bounded))
         read = SourceSet([installation, audit])
         return render(
             {
@@ -644,8 +651,8 @@ class CommandReadLayer(ProtocolBoundary):
 
     # -- the source ---------------------------------------------------------------------------
 
-    def _history(self, data_dir: Path, *, now: float) -> Reading:
-        """The committed audit, read once for the document through the released traversal.
+    def _history(self, data_dir: Path, *, end: int | None, limit: int, now: float) -> Reading:
+        """One page of the committed audit, read once for the document through the released traversal.
 
         The released traversal answers `[]` for a journal that is not there, which is the one answer
         this read may not publish: an installation whose journal is missing has not commanded
@@ -658,15 +665,15 @@ class CommandReadLayer(ProtocolBoundary):
         the traversal, as it is for every other reader of this journal. This read publishes what the
         traversal parsed and :data:`HISTORY_EXTENT` says so.
 
-        And what is deliberately *not* optimised: the traversal parses the whole journal to answer a
-        page of it, exactly as `SprintReader.status_views` already does over the same file. The
-        alternative is an index of this layer's own, which is the second store this read exists
-        without; a cross-entity page is an operator read, not a hot path, and the cost is one pass
-        over one append-only file.
+        The audit owner reads the page itself (`events_page`): on PostgreSQL a count and the page
+        from the committed claim-order index, so the cost is the page and the pages above it rather
+        than the history (secretary-1658); the file journal still parses the whole file. A cursor
+        past the end reads no rows and is refused by `_page`, outside the span.
         """
 
         def produce(audit: Any) -> _History:
-            return _History(tuple(audit.events()))
+            total, records = audit.events_page(end=end, limit=limit)
+            return _History(total, tuple(records))
 
         return self._audit(data_dir, produce, now=now)
 

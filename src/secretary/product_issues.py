@@ -672,7 +672,7 @@ class ProductIssueStore:
         ]
         audit = [
             event
-            for event in self.audit.events()
+            for event in self.audit.events(reference)
             if isinstance(event, dict) and event.get("ref") == reference
         ]
         view = self._view(card, meta)

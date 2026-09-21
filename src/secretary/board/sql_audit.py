@@ -41,6 +41,17 @@ from secretary.board.models import EntityKind, Event, EventKind
 #: generic audit record and stays in its `requests` row.
 _TYPED_KINDS = frozenset(kind.value for kind in EventKind)
 
+#: The order `events()` has always answered in, and the key columns of its indexes.
+_CLAIM_ORDER = "settled_at, created_at, request_id"
+_CLAIM_ORDER_DESC = "settled_at DESC, created_at DESC, request_id DESC"
+
+
+def _kinds_answering(kind: str) -> set[str]:
+    """Every stored `kind` a `kind=` narrowing matches: itself, and each whose action it is."""
+    from secretary.tasks import _MARKER_EVENT_ACTIONS
+
+    return {kind} | {stored for stored, action in _MARKER_EVENT_ACTIONS.items() if action == kind}
+
 
 class SqlAuditError(RuntimeError):
     pass
@@ -108,23 +119,82 @@ class SqlTaskAudit:
         committed = self.committed_event(request_id)
         return committed if committed is not None else self.pending_event(request_id)
 
-    def events(self, reference: str = "", *, kind: str = "") -> list[dict[str, Any]]:
-        """Committed records in claim order, narrowed the way the file journal narrows them."""
-        from secretary.tasks import _event_action
+    def events(
+        self,
+        reference: str = "",
+        *,
+        kind: str = "",
+        references: Iterable[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Committed records in claim order, narrowed in SQL the way the file journal narrows them.
 
+        `reference` and `references` (a set of refs) narrow by `requests.ref`, which is the record's
+        own `ref` on every row `_claim_row` writes; `kind` matches the record's kind or its released
+        action spelling (`_event_action`); `since` keeps what settled at or after that moment. Each
+        filter is served by an index of `0012_request_read_indexes`, so what a read costs follows
+        the slice it asks for and not the history beside it. On a store the revision has not reached
+        yet the answer is the same and only the plan differs.
+        """
+        clauses, params = self._committed_filter(reference, kind=kind, references=references, since=since)
+        if clauses is None:
+            return []
         rows = self._query(
-            "SELECT intent FROM requests WHERE status = 'committed' "
-            "ORDER BY settled_at, created_at, request_id"
+            f"SELECT intent FROM requests WHERE {' AND '.join(clauses)} ORDER BY {_CLAIM_ORDER}",
+            tuple(params),
         )
-        result = []
-        for (intent,) in rows:
-            event = self._document(intent)
-            if reference and event.get("ref") != reference:
-                continue
-            if kind and event.get("kind") != kind and _event_action(event) != kind:
-                continue
-            result.append(event)
-        return result
+        return [self._document(intent) for (intent,) in rows]
+
+    @staticmethod
+    def _committed_filter(
+        reference: str,
+        *,
+        kind: str,
+        references: Iterable[str] | None,
+        since: datetime | None,
+    ) -> tuple[list[str] | None, list[Any]]:
+        clauses = ["status = 'committed'"]
+        params: list[Any] = []
+        if reference:
+            clauses.append("ref = %s")
+            params.append(reference)
+        if references is not None:
+            wanted = sorted({str(item) for item in references if item})
+            if not wanted:
+                return None, []
+            clauses.append("ref = ANY(%s)")
+            params.append(wanted)
+        if kind:
+            clauses.append("intent->>'kind' = ANY(%s)")
+            params.append(sorted(_kinds_answering(kind)))
+        if since is not None:
+            clauses.append("settled_at >= %s")
+            params.append(since)
+        return clauses, params
+
+    def events_page(self, *, end: int | None, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        """How many records are committed, and the ordinals `[end - limit, end)` of `events()`.
+
+        One statement, so the count and the page come from one snapshot: counted and read in two,
+        a command committing in between shifts the ordinals and a traversal skips or repeats a
+        row. The count is an index-only scan, and the page is read newest first from the committed
+        claim-order index, so the rows fetched are the page and the pages above it rather than the
+        whole history. `end` past the count answers no rows; the caller refuses it.
+        """
+        stop = "COALESCE(%s::bigint, total.n)"
+        rows = self._query(
+            "WITH total AS (SELECT count(*) AS n FROM requests WHERE status = 'committed') "
+            "SELECT total.n, page.intent FROM total LEFT JOIN LATERAL ("
+            "SELECT intent, settled_at, created_at, request_id FROM requests "
+            f"WHERE status = 'committed' AND {stop} <= total.n "
+            f"ORDER BY {_CLAIM_ORDER_DESC} "
+            f"LIMIT GREATEST(LEAST(%s::bigint, {stop}), 0) OFFSET GREATEST(total.n - {stop}, 0)"
+            ") AS page ON true "
+            "ORDER BY page.settled_at, page.created_at, page.request_id",
+            (end, limit, end, end),
+        )
+        total = int(rows[0][0])
+        return total, [self._document(intent) for _total, intent in rows if intent is not None]
 
     def pending_events(self) -> list[dict[str, Any]]:
         return [
@@ -412,11 +482,47 @@ class SqlTaskAudit:
                 owners[request_id] = candidate
         return owners
 
-    def _occurrence_projection_records(self) -> list[tuple[dict[str, Any], bool]]:
-        """The fail-closed usage projection's input: committed first, then staged."""
-        return [(record, False) for record in self.events()] + [
-            (record, True) for record in self.pending_events()
-        ]
+    def _occurrence_projection_records(
+        self, kinds: Iterable[str] | None = None, *, outcome_owed: bool = False
+    ) -> list[tuple[dict[str, Any], bool]]:
+        """The fail-closed usage projection's input: committed first, then staged.
+
+        With `kinds`, the slice a projection over those kinds can be decided from, in one statement
+        and so one snapshot: every record of those kinds, every record sharing an `event_id` with
+        one of them (the only cross-record conflict a projection checks that SQL does not already
+        rule out, since `request_id` is the primary key), and with `outcome_owed` every record
+        whose data carries an `attempt_outcome_owed` obligation. Without `kinds`, everything.
+        """
+        if kinds is None:
+            return [(record, False) for record in self.events()] + [
+                (record, True) for record in self.pending_events()
+            ]
+        wanted = sorted({str(kind) for kind in kinds})
+        columns = "request_id, status, intent, settled_at, created_at"
+        owed = (
+            f" UNION ALL SELECT {columns} FROM requests WHERE status IN ('committed', 'staged') "
+            "AND (intent->'data') ? 'attempt_outcome_owed'"
+            if outcome_owed
+            else ""
+        )
+        # Arms the planner can each serve from one index, rather than a semi-join on `request_id`
+        # that it prefers to answer with a hash over the whole table: the kind by `requests_by_kind`,
+        # the shared event ids as one array by `requests_by_event_id`, the obligations by
+        # `requests_owing_outcome`. A record two arms both find is kept once.
+        rows = self._query(
+            f"WITH own AS (SELECT {columns} FROM requests WHERE status IN ('committed', 'staged') "
+            "AND intent->>'kind' = ANY(%s)) "
+            "SELECT status, intent FROM ("
+            f"SELECT DISTINCT ON (request_id) {columns} FROM ("
+            f"SELECT {columns} FROM own"
+            f" UNION ALL SELECT {columns} FROM requests WHERE status IN ('committed', 'staged') "
+            "AND intent->>'event_id' = ANY(ARRAY(SELECT intent->>'event_id' FROM own))"
+            + owed
+            + ") AS found ORDER BY request_id) AS slice "
+            f"ORDER BY status = 'staged', {_CLAIM_ORDER}",
+            (wanted,),
+        )
+        return [(self._document(intent), status == "staged") for status, intent in rows]
 
 
 __all__ = ["SqlAuditError", "SqlTaskAudit"]

@@ -70,6 +70,7 @@ SELECT
 #: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key. `0010` adds one `CHECK`
 #: on `po_sessions` (closed exactly when audited). `0011` restates the `task_type` CHECK (one for one)
 #: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
+#: `0012` adds non-unique indexes on `requests` only, so no number here moves.
 DOCUMENTED_COUNTS = (28, 50, 44, 28, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
@@ -85,6 +86,7 @@ REVISIONS = (
     "0009_po_requests",
     "0010_po_session_close",
     "0011_card_kinds",
+    "0012_request_read_indexes",
 )
 
 
@@ -455,6 +457,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0009_po_requests",
                 "0010_po_session_close",
                 "0011_card_kinds",
+                "0012_request_read_indexes",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -698,7 +701,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-4", task_type="infra")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0011_card_kinds",))
+        self.assertEqual(
+            self.run_migrations(connection), ("0011_card_kinds", "0012_request_read_indexes")
+        )
 
         self.assertEqual(
             connection.exec_driver_sql(

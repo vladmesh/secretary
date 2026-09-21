@@ -707,7 +707,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0008_po_sessions` | PO head `po_sessions`, `po_turns` (one running turn per session), `po_feed` |
 | `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made |
 | `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) |
-| `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) (head) |
+| `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) |
+| `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads (`docs/REQUESTS_GROWTH.md`) (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -955,7 +956,7 @@ per-card lock for marker comments.
 | committed records in `events.ndjson`, pending in `pending-audit/v2-<sha256>.json`, under `.audit.lock` | `requests.status` and `board_events.committed`, under advisory locks |
 | `BoardEventCanon.stage` / `commit` / `committed(request_id)` | insert/upsert on `requests`, then compare the stored `intent` |
 | `_pending_owner`'s generic-stage replacement | the same rule over staged rows with `NOT protocol` |
-| `TaskAudit.event_id_owner` | lookup by `intent->>'event_id'` in `requests` |
+| `TaskAudit.event_id_owner` | lookup by `intent->>'event_id'` in `requests`, served by `requests_by_event_id` |
 | `_require_same_event` | same comparison against `requests.intent` |
 | `MutationEventTransaction` stage → effect → confirm → finish → commit | one transaction (§7.1) |
 | `BoardEventPending` and `recover_*` for half-applied board writes | none: a rolled-back mutation leaves nothing; `reconcile` answers `(0, 0)` |
@@ -964,6 +965,19 @@ per-card lock for marker comments.
 
 Caller contracts are the same on both backends: same `request_id`, same replay answer, same refusal
 on reuse with another payload, same installation-wide scope.
+
+**Narrowed reads.** `events(reference, kind=, references=, since=)`, `events_page(end=, limit=)` and
+`_occurrence_projection_records(kinds, outcome_owed=)` take their filters on both backends. The
+file journal filters in Python (and ignores `since`, which it has no settle time for); `SqlTaskAudit`
+applies them in SQL, each served by an index of `0012_request_read_indexes`: a ref or ref set by
+`requests.ref`, a kind by `intent->>'kind'` including the released action spellings
+(`_event_action`), a window by `settled_at`, a page by the committed claim-order index, and a
+projection's slice (its kind, records sharing an `event_id` with it, records owing an outcome) in
+one statement; a page and its count are one statement too, so they share a snapshot. Nothing the
+production tick runs reads the audit without a reference set, a window or a page bound
+(`tests/test_dispatcher_observer.py::unfiltered_audit_reads_raise` guards it), except the budget
+pass (`_reconcile_sprint_budget`), which still reads it whole until its own card; whole-history readers
+such as restore stay off the tick and the web request path. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
 
 **Card edges.** `TaskWriter._transition_card` and `TaskWriter.retire_done` run inside
 `TaskWriter._mutation()`. On PostgreSQL the claim, the state/archive change, the caller's finishing

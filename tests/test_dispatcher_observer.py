@@ -4,13 +4,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
+import traceback
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -105,6 +109,61 @@ from triggered_agents.runtime.agent_prompt_transport import (
 )
 from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+
+
+@contextlib.contextmanager
+def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
+    """Every audit read under this scope must name a reference set, a window or a page bound.
+
+    One named exemption: `_reconcile_sprint_budget`, until its follow-up card (see below).
+
+    secretary-1658: nothing the production tick runs may read the whole committed audit. Both
+    audit owners are patched at the class, so a read by any instance under the scope is seen; a
+    violation is recorded (the tick swallows some exceptions into its own outcomes) and raised.
+    """
+    from secretary.board.sql_audit import SqlTaskAudit
+    from secretary.dispatch.production import _reconcile_sprint_budget
+
+    # The one exemption: the budget pass still reads the whole committed audit, exactly as on `main`
+    # 2d5b25b (secretary-1659). Its follow-up card, secretary-1658's successor B in sprint:1449
+    # (the budget pass as an indexed set of uncharged budget events, read a page per tick), removes
+    # this exemption. Only a direct call from that function is exempt; no other tick caller is.
+    _BUDGET_EXEMPT = _reconcile_sprint_budget.__code__
+
+    violations: list[str] = []
+    patches = []
+    for owner in (TaskAudit, SqlTaskAudit):
+        events = owner.events
+        projection = owner._occurrence_projection_records
+
+        def guarded_events(self, reference="", *, _events=events, **filters):  # type: ignore[no-untyped-def]
+            if (
+                not reference
+                and filters.get("references") is None
+                and filters.get("since") is None
+                and sys._getframe(1).f_code is not _BUDGET_EXEMPT
+            ):
+                violations.append("".join(traceback.format_stack(limit=8)))
+                raise AssertionError("an unfiltered audit read under the tick")
+            return _events(self, reference, **filters)
+
+        def guarded_projection(self, kinds=None, *, _projection=projection, **options):  # type: ignore[no-untyped-def]
+            if kinds is None:
+                violations.append("".join(traceback.format_stack(limit=8)))
+                raise AssertionError("an unfiltered occurrence projection under the tick")
+            return _projection(self, kinds, **options)
+
+        patches += [
+            mock.patch.object(owner, "events", guarded_events),
+            mock.patch.object(owner, "_occurrence_projection_records", guarded_projection),
+        ]
+    for patch in patches:
+        patch.start()
+    try:
+        yield violations
+    finally:
+        for patch in reversed(patches):
+            patch.stop()
 
 
 class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
@@ -326,6 +385,102 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "head_run_id": run_id,
             "head_run_fingerprint": fingerprint,
         }
+
+
+    # the tick reads no whole audit (secretary-1658) ------------------------------
+
+    def test_no_tick_caller_reads_the_whole_audit(self) -> None:
+        """Claim, advance, budget, usage and outcome recovery, the observer launch and a wake."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        with unfiltered_audit_reads_raise() as violations:
+            launched = self.runtime.production_tick()
+            self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+            self.writer.comment(
+                role="dispatcher",
+                actor="dispatcher",
+                reference="secretary-510-pilot",
+                body="card changed",
+                request_id="guard-event",
+            )
+            nudged = self.runtime.production_tick()
+            again = self.runtime.production_tick()
+
+        self.assertEqual(violations, [], "\n\n".join(violations))
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual([row["action"] for row in self.actions(nudged)], ["observer-nudged"])
+        for result in (launched, nudged, again):
+            self.assertNotIn(
+                "sprint-budget", {str(error.get("step") or "") for error in result.get("errors") or []}
+            )
+
+    def test_links_that_keep_changing_leave_the_observer_state_unestablished(self) -> None:
+        from secretary.dispatch.observer import _observer_event_state
+
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+        original = self.runtime.sprints.show
+        linked = iter(range(100))
+
+        def show(reference: str, **options: object) -> dict:
+            sprint = original(reference, **options)
+            # Every listing finds one more card linked than the last, as a burst of links would.
+            sprint["cards"] = list(sprint.get("cards") or []) + [{"ref": f"linked-{next(linked)}"}]
+            return sprint
+
+        with unfiltered_audit_reads_raise() as violations, mock.patch.object(
+            self.runtime.sprints, "show", side_effect=show
+        ):
+            state = _observer_event_state(self.runtime, "sprint:1", record)
+
+        self.assertEqual(violations, [], "\n\n".join(violations))
+        self.assertEqual(
+            state,
+            {"known": False, "pending": False, "reason": "linked cards changed while the audit was read"},
+        )
+
+    def test_a_cursor_outside_the_slice_is_found_by_its_own_key(self) -> None:
+        from secretary.dispatch.observer import _observer_event_state
+
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        # A legacy cursor naming telemetry of a card that is not linked to this sprint (any more).
+        # The id is found by its request id (the primary key) or by its typed event id.
+        for request_id, event_id in (("unlinked-telemetry", "evt_unlinked_telemetry"), ("same-id", "same-id")):
+            with self.subTest(cursor=event_id):
+                record = {
+                    "request_id": request_id,
+                    "ref": "secretary-9-unlinked",
+                    "kind": "routing",
+                    "outcome": "success",
+                    "actor": {"role": "dispatcher", "id": "dispatcher"},
+                    "payload": {},
+                    "occurred_at": _now(),
+                    "event_id": event_id,
+                }
+                self.audit.append(request_id, record)
+                observer = self.observers()["sprint:1"]
+                observer.delivery.acknowledged_through = event_id
+                read: list[dict] = []
+                original = TaskAudit.events
+
+                def recording(
+                    audit: TaskAudit, reference: str = "", *, _read=read, _original=original, **filters: object
+                ) -> list[dict]:
+                    _read.append(dict(filters))
+                    return _original(audit, reference, **filters)
+
+                with unfiltered_audit_reads_raise() as violations, mock.patch.object(
+                    TaskAudit, "events", recording
+                ):
+                    state = _observer_event_state(self.runtime, "sprint:1", observer)
+
+                self.assertEqual(violations, [], "\n\n".join(violations))
+                self.assertTrue(state["known"], state)
+                self.assertIn("secretary-9-unlinked", read[-1]["references"])
 
     # lifecycle ---------------------------------------------------------------
 
