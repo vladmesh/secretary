@@ -19,6 +19,7 @@ from unittest import mock
 
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
+from secretary.web.commands import health_layers
 from secretary.web.doctor import CACHE_SECONDS, DOCTOR_NOT_BUILT, DoctorLayer
 from secretary.webproto.errors import InstallationUnavailable
 from secretary.webproto.reads import (
@@ -452,6 +453,103 @@ class RecordedStateOnlyTests(SprintProtocolFixture):
         self.assertFalse(seen[0]["sprints"])
         self.assertFalse(seen[0]["probe_panels"])
         self.assertEqual(snapshot["health"]["status"]["colour"], "green")
+
+
+# -- one cached reading: the dashboard's panel and the lamp ---------------------------------------
+
+
+class OneReadingTests(SprintProtocolFixture):
+    """The dashboard's health panel reads the lamp's cache, wired as `web-serve` wires it.
+
+    One cache, one window: the real read layer and doctor layer from `health_layers`, over the real
+    instance, with the collector counted and its answer changed inside the window.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.clock = NOW
+        self.collected = 0
+        self.status: dict[str, Any] = NOTHING_WRONG
+
+        def collect(report: Any, **kwargs: Any) -> dict[str, Any]:
+            self.collected += 1
+            return self.status
+
+        self.enterContext(mock.patch("secretary.webproto.reads.collect_status", collect))
+        self.reads, self.doctor = health_layers(
+            str(self.instance), data_dir=str(self.data_dir), offline=True, now=lambda: self.clock
+        )
+
+    def panel(self) -> dict[str, Any]:
+        return self.reads.system_snapshot()["installation"]["health"]
+
+    def app(self) -> WebApp:
+        unreadable = InstallationUnavailable("not part of this test")
+        return WebApp(
+            self.reads,
+            Recording(run_list={"items": []}),
+            Recording(sprint_list={"kind": "sprint_list", "sprints": {"source": available(), "items": []}}),
+            Recording(),
+            Recording(pause_state=unreadable),
+            Recording(),
+            Recording(),
+            Recording(),
+            doctor=self.doctor,
+        )
+
+    def test_the_panel_and_the_lamp_are_one_reading_within_a_window_and_move_together(self) -> None:
+        panel = self.panel()
+        self.assertEqual(panel, self.doctor.health_snapshot()["health"])
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "green")
+        self.assertEqual(self.collected, 1, "the dashboard and the lamp shared one collection")
+
+        self.status = EVERY_PROBLEM
+        self.clock += CACHE_SECONDS - 1
+        self.assertEqual(self.panel(), panel, "inside the window the panel keeps the lamp's reading")
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "green")
+        self.assertEqual(self.collected, 1)
+
+        self.clock += 2
+        # The lamp is asked first this time: whichever reader opens the window, both see its reading.
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "red")
+        self.assertEqual(self.panel()["status"], health_summary(EVERY_PROBLEM))
+        self.assertEqual(self.panel(), self.doctor.health_snapshot()["health"])
+        self.assertEqual(self.collected, 2)
+
+    def test_the_rendered_dashboard_and_its_lamp_cannot_disagree(self) -> None:
+        app = self.app()
+        first = app.handle("GET", "/").body.decode("utf-8")
+        self.assertIn("nothing needs attention.", first)
+        self.assertIn("lamp lamp-green", first)
+
+        self.status = EVERY_PROBLEM
+        self.clock += CACHE_SECONDS - 1
+        for path in ("/", "/doctor", "/projects"):
+            app.handle("GET", path)
+        page = app.handle("GET", "/").body.decode("utf-8")
+        self.assertIn("nothing needs attention.", page)
+        self.assertNotIn("a.service is failed", page)
+        self.assertIn("lamp lamp-green", page)
+        self.assertEqual(self.collected, 1, "every page of the window was one collection")
+
+        self.clock += 2
+        page = app.handle("GET", "/").body.decode("utf-8")
+        self.assertIn("a.service is failed", page)
+        self.assertIn("lamp lamp-red", page)
+        self.assertEqual(self.collected, 2)
+
+    def test_health_that_cannot_be_read_is_unavailable_in_the_panel_and_red_in_the_lamp(self) -> None:
+        def refuse(report: Any, **kwargs: Any) -> dict[str, Any]:
+            self.collected += 1
+            raise OSError("production state is unreadable")
+
+        with mock.patch("secretary.webproto.reads.collect_status", refuse):
+            panel = self.panel()
+            lamp = self.doctor.doctor_snapshot()
+        self.assertEqual(panel["source"]["state"], "unavailable")
+        self.assertIn("production state is unreadable", panel["source"]["reason"])
+        self.assertEqual(lamp["colour"], "red")
+        self.assertEqual(self.collected, 1)
 
 
 if __name__ == "__main__":

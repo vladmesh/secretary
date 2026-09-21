@@ -14,7 +14,10 @@ that reached out would turn a page view into a remote call.
 
 Cached for the same reason the provider layer is (:mod:`secretary.web.provider_usage`, whose shape
 this copies): the bar is rendered by every page, and the collection behind it is not cheap, so one
-in-process cache with its own TTL and an injectable clock decides how often it actually runs.
+in-process cache with its own TTL and an injectable clock decides how often it actually runs. It is
+the only health cache of the process: the dashboard's health panel reads the same cached reading
+(:meth:`DoctorLayer.health_snapshot`), so it is up to `CACHE_SECONDS` stale exactly as the lamp is,
+and within one window the two are one reading.
 """
 
 from __future__ import annotations
@@ -40,7 +43,13 @@ DOCTOR_NOT_BUILT = "this web process was built without the doctor layer"
 
 
 class DoctorLayer:
-    """One cached reading of recorded health, as the lamp and the doctor page both read it."""
+    """One cached reading of recorded health, as the lamp, the doctor page and the dashboard read it.
+
+    The cache holds the reading itself -- the read layer's health snapshot, or the refusal it
+    raised -- beside the lamp's classification of it. :meth:`health_snapshot` hands out that
+    reading, which is how the dashboard's health panel reads this same cache (`ReadLayer`'s
+    `health_reader`): one collection, one window, so the panel and the lamp cannot disagree.
+    """
 
     def __init__(
         self,
@@ -50,47 +59,62 @@ class DoctorLayer:
     ) -> None:
         self.read_health = read_health
         self.now = now
-        self._cached: tuple[float, dict[str, Any]] | None = None
+        self._cached: tuple[float, dict[str, Any] | ReadError, dict[str, Any]] | None = None
 
     def doctor_snapshot(self) -> dict[str, Any]:
         """The current colour and the problems behind it, collected at most once per window."""
+        return self._reading()[2]
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """The recorded-health reading the lamp is classified from, out of the same cache."""
+        reading = self._reading()[1]
+        if isinstance(reading, ReadError):
+            raise reading
+        return reading
+
+    def _reading(self) -> tuple[float, dict[str, Any] | ReadError, dict[str, Any]]:
         observed = self.now()
         if self._cached is not None and observed - self._cached[0] < CACHE_SECONDS:
-            return self._cached[1]
-        document = self._collect()
-        self._cached = (observed, document)
-        return document
-
-    def _collect(self) -> dict[str, Any]:
+            return self._cached
+        reading: dict[str, Any] | ReadError
         try:
-            snapshot = self.read_health()
+            reading = self.read_health()
         except ReadError as exc:
-            return unreadable(exc.message)
-        section = snapshot.get("health") if isinstance(snapshot, dict) else None
-        section = section if isinstance(section, dict) else {}
-        status = section.get("status")
-        source = section.get("source") if isinstance(section.get("source"), dict) else None
-        if not isinstance(status, dict) or not status:
-            reason = str((source or {}).get("reason") or "installation health was not read")
-            return unreadable(reason, source=source)
-        problems = [
-            {
-                "code": str(finding.get("code") or ""),
-                "message": str(finding.get("message") or ""),
-                "severity": problem_severity(str(finding.get("code") or "")),
-            }
-            for finding in status.get("findings") or []
-            if isinstance(finding, dict)
-        ]
-        return {
-            "kind": "doctor",
-            "observed_at": str(snapshot.get("observed_at") or "") or None,
-            "readable": True,
-            "reason": None,
-            "colour": lamp_colour(problems),
-            "problems": problems,
-            "source": source,
+            reading = exc
+        self._cached = (observed, reading, _classify(reading))
+        return self._cached
+
+
+def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
+    """The lamp's document for one reading: its colour and the problems behind it."""
+    if isinstance(reading, ReadError):
+        return unreadable(reading.message)
+    snapshot = reading
+    section = snapshot.get("health") if isinstance(snapshot, dict) else None
+    section = section if isinstance(section, dict) else {}
+    status = section.get("status")
+    source = section.get("source") if isinstance(section.get("source"), dict) else None
+    if not isinstance(status, dict) or not status:
+        reason = str((source or {}).get("reason") or "installation health was not read")
+        return unreadable(reason, source=source)
+    problems = [
+        {
+            "code": str(finding.get("code") or ""),
+            "message": str(finding.get("message") or ""),
+            "severity": problem_severity(str(finding.get("code") or "")),
         }
+        for finding in status.get("findings") or []
+        if isinstance(finding, dict)
+    ]
+    return {
+        "kind": "doctor",
+        "observed_at": str(snapshot.get("observed_at") or "") or None,
+        "readable": True,
+        "reason": None,
+        "colour": lamp_colour(problems),
+        "problems": problems,
+        "source": source,
+    }
 
 
 def unreadable(reason: str, *, source: dict[str, Any] | None = None) -> dict[str, Any]:

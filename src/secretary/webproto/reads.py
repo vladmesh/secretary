@@ -35,7 +35,7 @@ from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.cursor import POSITION_OFFSET, POSITION_ORDINAL, Cursor, decode
-from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, TaskNotFound
+from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, ReadError, TaskNotFound
 from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventJournal, EventPage
 
 SCHEMA_VERSION = 1
@@ -53,6 +53,23 @@ TASK_SNAPSHOT_EVENTS = 20
 _SOURCE_FAILURES = (TaskError, HostError, OSError, ValueError, KeyError, TypeError, AssertionError)
 
 
+def hold_store_exclusion(instance: str | Path) -> str | None:
+    """Run the board store's git-exclusion guard once for this process; the refusal, if it refused.
+
+    For a long-lived reader, called before it serves: from then on every read of the store in this
+    process resolves it without a `git` call, and none can write `.gitignore`
+    (:func:`secretary.board.store.hold_exclusion`). A refusal is held as well, and is returned here
+    so the caller can say it once; the reads that follow answer with it.
+    """
+    from secretary.board.store import BoardStoreError, hold_exclusion
+
+    try:
+        hold_exclusion(instance)
+    except BoardStoreError as refused:
+        return str(refused)
+    return None
+
+
 class ReadLayer(ProtocolBoundary):
     """One installation, read three ways, with no knowledge of who is asking.
 
@@ -62,6 +79,12 @@ class ReadLayer(ProtocolBoundary):
     ``board_client`` and ``status_reader`` exist so a test -- or a transport with its own
     connection policy -- can supply those two sources directly. Neither is a mode: the same code
     path runs with the live client as with a fake one.
+
+    ``health_reader`` is where :meth:`system_snapshot` takes its health section from instead of
+    collecting it: a transport that already holds a cached reading of :meth:`health_snapshot` --
+    the web process's doctor lamp -- hands that reading in, so the dashboard's panel and the lamp
+    are one collection in one window rather than two answers to one question. Without it, the
+    section is collected on every call, as before.
     """
 
     def __init__(
@@ -71,6 +94,7 @@ class ReadLayer(ProtocolBoundary):
         data_dir: str | Path | None = None,
         board_client: Any | None = None,
         status_reader: Callable[[], dict[str, Any]] | None = None,
+        health_reader: Callable[[], dict[str, Any]] | None = None,
         offline: bool = False,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -79,6 +103,7 @@ class ReadLayer(ProtocolBoundary):
         self._board_client = board_client
         self._resolved_client: Any | None = board_client
         self._status_reader = status_reader
+        self._health_reader = health_reader
         self.offline = offline
         self._clock = clock
 
@@ -187,7 +212,7 @@ class ReadLayer(ProtocolBoundary):
         now = self._clock()
         report = self.report()
         data_dir = self.data_dir(report)
-        health = self._health(report, data_dir, now=now)
+        health = self._system_health(report, data_dir, now=now)
         projects = self._projects(report, now=now)
         tasks = self._tasks(data_dir, now=now)
         agents = self._agents(data_dir, now=now, projects_by_ref=_projects_by_ref(tasks["items"]))
@@ -303,6 +328,29 @@ class ReadLayer(ProtocolBoundary):
         return reader.tail(ref, limit=limit, now=now)
 
     # -- sections --------------------------------------------------------------------------
+
+    def _system_health(self, report: InstanceReport, data_dir: Path, *, now: float) -> dict[str, Any]:
+        """The snapshot's health section: the shared reading when there is one, else collected.
+
+        The shared reading is a :meth:`health_snapshot`, so its section is this same `_health` over
+        the same recorded state -- only collected when the holder's window says so, and dated by
+        its own `source.observed_at` rather than by this snapshot's.
+        """
+        if self._health_reader is None:
+            return self._health(report, data_dir, now=now)
+        try:
+            section = self._health_reader().get("health")
+        except (ReadError, *_SOURCE_FAILURES) as exc:
+            reason = exc.message if isinstance(exc, ReadError) else str(exc)
+            section = {
+                "source": sources.unavailable(
+                    f"installation health could not be collected: {reason}",
+                    now=now,
+                    evidence=self._production_path(data_dir),
+                ).to_json(),
+                "status": None,
+            }
+        return section
 
     def _health(self, report: InstanceReport, data_dir: Path, *, now: float) -> dict[str, Any]:
         """Installation health, straight from `secretary status`'s own collector.
