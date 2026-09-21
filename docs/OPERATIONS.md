@@ -455,7 +455,8 @@ reported.
 
 ## How long things take
 
-Three durations are recorded on every running installation.
+Three durations are recorded on every running installation, and one command measures the dashboard
+against the thresholds a sprint is judged on.
 
 ### Where the durations are
 
@@ -468,6 +469,88 @@ Three durations are recorded on every running installation.
 The web duration is the application's part of the answer — reading the body, handling the request,
 and writing the headers and body back — not the whole socket lifetime. The tick duration is the
 wall clock of `production_tick` up to the moment its outcome became durable.
+
+### Measuring the dashboard
+
+```bash
+python3 scripts/measure_dashboard.py            # against http://127.0.0.1:8787
+python3 scripts/measure_dashboard.py --json     # the same facts, as one document
+```
+
+Run it from a checkout, on the host the installation runs on, as the runtime user. It reads only,
+and only from the installation named by `--base-url`: three dashboard pages and, to reproduce what
+an operator's browser is doing, the `/po` overview and one session's JSON. It makes no POST, starts
+no head, and follows no redirect — a 3xx from any route ends the run instead, because following one
+would time a different installation under this route's name and would hand it this installation's
+PO cookie.
+
+It prints, with the Definition of Done threshold beside each number and whether that number meets it:
+
+- **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up request,
+  then twenty timed ones per route. The judged number is the **p95 by nearest rank**, which over
+  twenty samples is the second-slowest of the twenty: one request that actually happened, so two
+  runs compare the same way every time. Min, median and max are printed beside it, and the warm-up
+  is discarded because the first request after a deploy pays for import and cache warming that no
+  later request pays again. Threshold: 1.0 s.
+- **four concurrent** `GET /`, all four released together, while a `/po/api/sessions/{session}`
+  poll runs on the three-second cadence the `/po` page itself uses. The scenario is repeated
+  **three rounds**; every round's four durations are printed, and the threshold is judged on the
+  **worst round** — the one holding the slowest single request. One round is not a measurement:
+  the same unchanged installation produced 17 s, 27 s and 38 s on three runs of the first version
+  of this script, and the DoD says *each* of the four answers within 2.0 s, so a scenario that
+  breaches that in one round of three has not met it. Threshold: 2.0 s for each request of the
+  worst round.
+
+### The cadence, and how a round is scheduled against it
+
+The concurrent number is only the DoD's number if the four requests ran *while* a session was being
+polled every three seconds. Two things in the output say whether that happened, and the command
+refuses to judge anything if either of them says no.
+
+- **The cadence is observed, not asserted.** Each poll is scheduled three seconds after the
+  previous poll started — the anchor a browser's `setInterval` uses — and nothing shortens that
+  wait. The output prints the spacing that actually occurred (`observed spacing: 3.000 s min, …`)
+  and says `the poll ran every 3 s` only where those numbers show it. Polls observed closer
+  together than the cadence mean a heavier workload than the DoD names, so the run is refused.
+- **Every round overlaps a poll.** A round is released by a poll that has fallen **due**: the four
+  requests wait for the next poll on its own cadence and start at the moment it is issued. So a
+  round costs up to three seconds of waiting before its first clock starts — that wait is in no
+  number — and the overlap is produced without pulling a poll forward or stretching a round. Each
+  round's line carries `[N poll(s) in flight]`, counted from the recorded start and end of every
+  poll, and a round no poll overlapped is refused.
+
+On a fast installation a round takes milliseconds, so the poll it overlaps is the one that released
+it; on a slow one a further poll falls due inside the round and the count rises. Both are the same
+scenario.
+
+### What it refuses to report
+
+The rule the whole script is built around: **no number is judged MEETS unless it came from exactly
+the scenario the DoD names.** So the exit statuses are
+
+- `0` — every request answered 2xx, the whole specified scenario ran, and every judged number is at
+  or under its threshold;
+- `1` — the same, except that a judged number is over its threshold. A red number is still a real
+  number, and the full table is printed;
+- `2` — everything else.
+
+Everything else includes: the installation is unreachable; any request on any route answers
+non-2xx, including a 3xx (a missing route, a refusal, a redirect, or the transport's contained 500
+under the load being measured); the data directory or the PO token cannot be resolved or read; the
+polls did not run on the three-second cadence; a round ran with no poll overlapping it; and the
+installation has **no open PO session**. That last one is not a fault of the installation — `/po`
+answered and simply lists nothing — but the concurrent half of the DoD cannot be reproduced without
+it, and measuring four requests against an idle dashboard instead would be a different scenario
+under the same heading. In every case the command prints the numbers it did take, marks every one
+of them `NOT JUDGED`, says plainly what could not be measured, and exits 2.
+
+The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
+command as the runtime user. The data directory is resolved the way the product resolves it:
+`--data-dir`, then `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the instance the CLI
+itself defaults to (`secretary.onboarding.DEFAULT_INSTANCE`, read through
+`secretary.config.instance_data_dir`). That last step is what makes the one command above work in
+an ordinary checkout shell, which does not inherit the service unit's environment. The output names
+the directory it resolved and which of those four rules chose it.
 
 ## Record reconciliation and controlled divergences
 
