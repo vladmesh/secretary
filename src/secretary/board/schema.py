@@ -49,6 +49,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase
 
+from secretary.board.budget_candidates import CANDIDATE_PREDICATE
+
 #: `timestamptz`, the only time type in this schema (§3).
 TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
@@ -726,6 +728,14 @@ class Request(Base):
             "requests_owing_outcome",
             "request_id",
             postgresql_where=sa.text("(intent -> 'data') ? 'attempt_outcome_owed'"),
+        ),
+        # `0013`: only the budget pass's candidates, in claim order (`budget_candidates`).
+        sa.Index(
+            "requests_budget_candidates",
+            "settled_at",
+            "created_at",
+            "request_id",
+            postgresql_where=sa.text("status = 'committed' AND " + CANDIDATE_PREDICATE),
         ),
     )
 

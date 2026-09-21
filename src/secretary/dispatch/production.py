@@ -1617,8 +1617,20 @@ def _unexpected_error(reference: str, exc: Exception) -> dict[str, str]:
     }
 
 
+#: How many uncharged budget candidates one tick resolves at most. The set is empty between ticks in
+#: steady state; a backlog (the first pass after a deployment, a board outage) drains a page a tick.
+BUDGET_CANDIDATE_PAGE = 200
+
+
 def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
-    """Charge each durable card event once, using its audit identity as the budget request id."""
+    """Charge each durable card event once, using its audit identity as the budget request id.
+
+    The pass reads a page of the uncharged candidate set (`secretary.board.budget_candidates`), not
+    the audit's history: committed events that may be budget events and whose charge id has no
+    committed record. Every candidate it reads leaves the set exactly once, by a charge or by a
+    terminal marker under the charge id: unlinked card, no budget type, or an invalid taxonomy. Only a
+    failed card lookup leaves it in the set, for a later tick; nothing records a position to pass it.
+    """
     instance = getattr(runtime.catalog, "instance", {})
     thresholds = budget_thresholds(instance if isinstance(instance, dict) else None)
     writer = SprintWriter(
@@ -1626,19 +1638,20 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         data_dir=Path(getattr(runtime, "data_dir", None) or Path(runtime.audit.board_dir).parent),
         thresholds=thresholds,
     )
-    events = runtime.audit.events()
-    committed = {str(event.get("request_id") or "") for event in events}
     outcomes: list[dict[str, Any]] = []
     sprint_cache: dict[str, str | None] = {}
-    for event in events:
+    for event in runtime.audit.uncharged_budget_candidates(limit=BUDGET_CANDIDATE_PAGE):
         reference = str(event.get("ref") or "")
-        if not reference or reference.startswith("sprint:"):
+        identity = str(event.get("event_id") or event.get("request_id") or "")
+        if not reference or reference.startswith("sprint:") or not identity:
             continue
+        request_id = "sprint-budget-" + identity
         try:
             event_type = _budget_event_type(event)
         except TerminalTaxonomyValidationError as exc:
             # A corrupt observation is not a lifecycle concern and must not
             # prevent later durable events from reaching their budget seam.
+            # The record cannot change, so it is reported once and marked.
             outcomes.append(
                 {
                     "status": "degraded",
@@ -1648,14 +1661,12 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
                     "reason": str(exc),
                 }
             )
+            _record_unclassified_budget_event(runtime, event, request_id, identity, str(exc))
             continue
         if event_type is None:
-            continue
-        identity = str(event.get("event_id") or event.get("request_id") or "")
-        if not identity:
-            continue
-        request_id = "sprint-budget-" + identity
-        if request_id in committed:
+            # The candidate predicate is a superset of the classifier (a forward Blocked record whose
+            # taxonomy owns no budget type); the answer is as final as the record it was read from.
+            _record_unclassified_budget_event(runtime, event, request_id, identity, "no budget event type")
             continue
         sprint = _event_sprint(runtime, event, sprint_cache)
         if sprint is None:
@@ -1728,6 +1739,36 @@ def _record_unlinked_budget_event(
             "backend": dict(event.get("backend") or {}),
             "request_id": request_id,
             "payload": {"source_event_id": source_event_id, "event_type": event_type},
+        },
+    )
+
+
+def _record_unclassified_budget_event(
+    runtime: Any,
+    event: dict[str, Any],
+    request_id: str,
+    source_event_id: str,
+    reason: str,
+) -> None:
+    """Durably remember that a budget candidate is no budget event, under its charge id.
+
+    `_budget_event_type` reads only the committed record, so its answer cannot change; the marker
+    takes the candidate out of the uncharged set instead of it being classified again every tick.
+    """
+    runtime.audit.append(
+        request_id,
+        {
+            "event_id": "evt_budget_unclassified_" + source_event_id,
+            "schema_version": 1,
+            "occurred_at": now_rfc3339(),
+            "actor": {"role": "dispatcher", "id": runtime.owner},
+            "kind": "budget_unclassified",
+            "outcome": "success",
+            "task_id": str(event.get("task_id") or ""),
+            "ref": str(event.get("ref") or ""),
+            "backend": dict(event.get("backend") or {}),
+            "request_id": request_id,
+            "payload": {"source_event_id": source_event_id, "reason": reason},
         },
     )
 

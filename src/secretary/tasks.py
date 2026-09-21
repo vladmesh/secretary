@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board import budget_candidates
 from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
@@ -1432,6 +1433,40 @@ class TaskAudit:
                     result.append(event)
         except FileNotFoundError:
             return []
+        return result
+
+    def uncharged_budget_candidates(self, *, limit: int) -> list[dict[str, Any]]:
+        """`SqlTaskAudit.uncharged_budget_candidates` over the journal, which has no index to use.
+
+        The same set by the same definition (`budget_candidates`): the oldest `limit` candidates in
+        append order whose charge id has no committed record.
+        """
+        journal: list[dict[str, Any]] = []
+        try:
+            with open(self.events_path, encoding="utf-8") as events:
+                for line in events:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict):
+                        journal.append(event)
+        except FileNotFoundError:
+            return []
+        committed = {str(event.get("request_id") or "") for event in journal}
+        result: list[dict[str, Any]] = []
+        for event in journal:
+            if len(result) >= limit:
+                break
+            identity = budget_candidates.identity(event)
+            if (
+                identity
+                and budget_candidates.is_candidate(event)
+                and budget_candidates.CHARGE_PREFIX + identity not in committed
+            ):
+                result.append(event)
         return result
 
     def events_page(self, *, end: int | None, limit: int) -> tuple[int, list[dict[str, Any]]]:
