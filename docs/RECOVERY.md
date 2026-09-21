@@ -108,7 +108,7 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
 
-Every consumer of a committed checkpoint reads it through `checkpoint_layout.open_checkpoint_board`,
+Every consumer of a committed checkpoint reads it through `board.checkpoint_layout.open_checkpoint_board`,
 which understands both layouts and returns the same logical bytes for the same board. The first
 checkpoint after the upgrade converts a flat checkpoint in place: it writes the split parts and
 removes the flat files in the same commit. Earlier commits keep their flat files; history is never

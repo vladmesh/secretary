@@ -25,6 +25,7 @@ from secretary.board import (
     EventKind,
     FakeBoardHost,
 )
+from secretary.board.checkpoint_layout import CheckpointBoard, open_checkpoint_board
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import (
     ANALYTICS_MANIFEST,
@@ -42,7 +43,6 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
     verify_analytics_checkpoint,
 )
-from secretary.checkpoint_layout import CheckpointBoard, open_checkpoint_board
 from secretary.data import DataExport
 from secretary.dispatch.production import _coordinate_checkpoint
 from secretary.routing_journal import attempts

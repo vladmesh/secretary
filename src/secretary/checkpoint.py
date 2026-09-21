@@ -4,7 +4,8 @@ Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers", "Va
 "Failure and divergence", "Observability". The writer regenerates the normalized board and runs
 exports, validates the snapshot, and commits `state/board` and `state/runs` into the private
 repo. The board is validated flat in staging and published in the split layout of
-`secretary.checkpoint_layout`, so a commit carries only the records and log segments that changed. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
+`secretary.board.checkpoint_layout`, so a commit carries only the records and log segments that
+changed. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
 remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
 checkpoint writes cannot overlap a green-card publish against the same checkout.
 
@@ -44,14 +45,14 @@ from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from secretary.board.backend import CARD, board_client
-from secretary.board.models import Event
-from secretary.checkpoint_layout import (
+from secretary.board.checkpoint_layout import (
     FLAT,
     CheckpointBoard,
     CheckpointLayoutError,
     open_checkpoint_board,
     publish_split_board,
 )
+from secretary.board.models import Event
 from secretary.data import (
     PIPELINE_STATE_DIR,
     export_board,
@@ -1212,7 +1213,7 @@ def _publish_board(staging: Path, destination: Path) -> None:
     """Publish the validated flat board cut into `state/board` in the split layout.
 
     The staging directory keeps the flat files the gate validated, sealed and scanned; what reaches
-    the instance repository is their split form (`secretary.checkpoint_layout`), written part by
+    the instance repository is their split form (`secretary.board.checkpoint_layout`), written part by
     part so only what changed becomes a new Git object. The seal leaves first and arrives last, so a
     reader never verifies a half-written cut.
     """

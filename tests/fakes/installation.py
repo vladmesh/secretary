@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from secretary.checkpoint_layout import LOGICAL_FILES, publish_split_board
+from secretary.board.checkpoint_layout import LOGICAL_FILES, publish_split_board
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine

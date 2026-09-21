@@ -43,13 +43,13 @@ from secretary._fsutil import (
 )
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.board.backend import CARD, POSTGRES, board_client, card_backend_status
+from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.board_transport import (
     BoardTransport,
     BoardTransportError,
     ensure_from_runtime_values,
     transport_path,
 )
-from secretary.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import (

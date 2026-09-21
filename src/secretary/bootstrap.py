@@ -29,11 +29,11 @@ import yaml
 
 from secretary import _proc
 from secretary._fsutil import write_text_atomic
+from secretary.board.checkpoint_layout import CheckpointLayoutError, open_checkpoint_board
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board_transport import ensure_from_runtime_values, transport_path
-from secretary.checkpoint_layout import CheckpointLayoutError, open_checkpoint_board
 from secretary.host_apply import pinned_orca_executable
 from secretary.infra.kanboard_compose import (
     KANBOARD_COMPOSE_FILE,

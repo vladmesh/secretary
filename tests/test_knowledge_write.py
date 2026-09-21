@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.board.checkpoint_layout import open_checkpoint_board
 from secretary.checkpoint import CheckpointWriter
-from secretary.checkpoint_layout import open_checkpoint_board
 from secretary.cli import main as cli_main
 from secretary.data import DataExport
 from secretary.knowledge_write import (
