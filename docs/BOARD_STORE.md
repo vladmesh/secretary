@@ -624,13 +624,12 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   `outcome_round_context`, anything marked `backend.revision = "not_written"`), or an effect table
   (`sprint_budget_events`, `sprint_comments`, `sprint_decisions`, `task_comments`,
   `issue_comments`, `product_comments`) holds a row claiming its request id. Every other row is
-  refused, whether its effect is absent or cannot be proven. Refusal sets the row to `discarded`,
-  which is the only writer of that status, and commits an `audit_refused` record that carries the
-  reason. That record is inserted with `ON CONFLICT DO NOTHING` under `audit-refused:<request id>`,
-  or under the next free `...#<n>` when another record already owns that id. No prefix is reserved,
-  and settlement never writes over a request id it does not own; `refusal()` finds the record by its
-  content. A `discarded` request id is terminal:
-  `stage`, `claim` and `append` refuse it. Settlement never applies an effect.
+  refused, whether its effect is absent or cannot be proven. Refusal moves that same row to
+  `discarded` in one statement guarded by `status = 'staged'`, which is the only writer of that
+  status, and records the reason on the row as `intent.stale_refusal`. The row is a staged claim the
+  settlement owns, not a frozen committed record. No request id is allocated and no other row is
+  written. The refusal is found by the row's own id and status (`refusal`, `refusals`). A
+  `discarded` request id is terminal: `stage`, `claim` and `append` refuse it. Settlement never applies an effect.
 - A pending-request count is `SELECT count(*) FROM requests WHERE status = 'staged'`; it is the
   export gate (§6.3) and `secretary task verify-audit`'s answer.
 - One advisory lock (`secretary.board.requests`) serializes separate claims outside a transaction;

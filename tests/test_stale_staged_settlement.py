@@ -19,6 +19,7 @@ on its own and nothing followed). Like the other `*_sql_backend` suites this nee
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,10 +28,10 @@ from typing import Any
 from secretary.board.events import BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.sql_audit import (
-    REFUSAL_KIND,
     STALE_STAGED_GRACE_SECONDS,
     SqlTaskAudit,
 )
+from secretary.board.sql_cards import SqlCardClient
 from secretary.checkpoint import CheckpointWriter, checkpoint_snapshot
 from secretary.dispatch.production import _write_checkpoint
 from secretary.sprints import SprintWriter
@@ -62,6 +63,7 @@ class SettlementCase(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         instance = _write_project_registry(self.tmp, "secretary", "secretary-instance", "other")
         config = BOARD.fresh_database()
+        self.config = config
         self.client = seed_client(config, ProductSprintKanboard(), self.tmp)
         self.addCleanup(BOARD.drop_database, config.dbname)
         self.addCleanup(self.client.close)
@@ -151,12 +153,11 @@ class StaleStagedSettlementTests(SettlementCase):
         self.assertEqual(self.budget_rows(), rows_before, "a refusal never applies the effect")
         refusal = self.audit.refusal("req-lost")
         assert refusal is not None
-        self.assertEqual(refusal["kind"], REFUSAL_KIND)
-        self.assertEqual(refusal["ref"], self.sprint)
-        self.assertEqual(refusal["payload"]["refused_request_id"], "req-lost")
-        self.assertEqual(refusal["payload"]["refused_kind"], "budget_recorded")
-        self.assertIn("its effect is absent", refusal["payload"]["reason"])
-        self.assertIn(refusal, self.audit.events(self.sprint, kind=REFUSAL_KIND))
+        self.assertEqual(refusal["request_id"], "req-lost")
+        self.assertEqual(refusal["kind"], "budget_recorded")
+        self.assertIn("its effect is absent", refusal["reason"])
+        self.assertEqual(refusal["staged_at"], outcomes[0]["staged_at"])
+        self.assertEqual(self.audit.refusals(), [refusal])
         with self.assertRaises(TaskError) as retried:
             self.audit.stage("req-lost", record)
         self.assertEqual(retried.exception.code, "validation")
@@ -169,31 +170,65 @@ class StaleStagedSettlementTests(SettlementCase):
             "created_at, settled_at FROM requests ORDER BY request_id"
         )
 
-    def test_a_refusal_never_writes_over_a_record_that_owns_its_id(self) -> None:
-        """The reviewer's collision: a caller already committed `audit-refused:req-lost`."""
-        self.charge("audit-refused:req-lost")
-        owner_before = [row for row in self.requests_snapshot() if row[0] == "audit-refused:req-lost"]
+    def others(self, request_id: str) -> list[tuple[Any, ...]]:
+        return [row for row in self.requests_snapshot() if row[0] != request_id]
+
+    def test_a_refusal_allocates_no_request_id_even_when_every_derived_one_is_owned(self) -> None:
+        """The reviewer's exhaustion case: 70 ordinary records own `audit-refused:req-lost*`."""
+        for n in range(70):
+            self.charge("audit-refused:req-lost" + (f"#{n}" if n else ""))
         record = dict(self.charge("req-template"))
         record.update({"request_id": "req-lost", "event_id": "evt_lost"})
         self.audit.stage("req-lost", record)
         self.age("req-lost", STALE_MINUTES)
+        others_before = self.others("req-lost")
 
         outcomes = self.audit.settle_stale_staged()
 
-        self.assertEqual([o["outcome"] for o in outcomes], ["refused"])
-        owner_after = [row for row in self.requests_snapshot() if row[0] == "audit-refused:req-lost"]
-        self.assertEqual(owner_after, owner_before, "the owner of the id stays byte-identical")
-        self.assertEqual(self.audit.committed_event("audit-refused:req-lost")["kind"], "budget_recorded")
+        self.assertEqual([(o["request_id"], o["outcome"]) for o in outcomes], [("req-lost", "refused")])
+        self.assertEqual(self.others("req-lost"), others_before, "no other row is written")
         self.assertEqual(self.status_of("req-lost"), "discarded")
+        self.assertEqual(self.audit.status(), {"ok": True, "pending": 0})
         refusal = self.audit.refusal("req-lost")
         assert refusal is not None
-        self.assertEqual(refusal["request_id"], "audit-refused:req-lost#1")
-        self.assertEqual(refusal["kind"], REFUSAL_KIND)
-        self.assertEqual(refusal["payload"]["refused_request_id"], "req-lost")
-        self.assertIn(refusal, self.audit.events(self.sprint, kind=REFUSAL_KIND))
+        self.assertIn("its effect is absent", refusal["reason"])
+        self.assertEqual([item["request_id"] for item in self.audit.refusals()], ["req-lost"])
         with self.assertRaises(TaskError) as retried:
             self.audit.stage("req-lost", record)
         self.assertIn("its effect is absent", retried.exception.message)
+
+    def test_two_concurrent_settlers_resolve_the_row_exactly_once(self) -> None:
+        record = dict(self.charge("req-template"))
+        record.update({"request_id": "req-lost", "event_id": "evt_lost"})
+        self.audit.stage("req-lost", record)
+        self.age("req-lost", STALE_MINUTES)
+        others_before = self.others("req-lost")
+        second = SqlCardClient(self.config.for_role("owner"), self.tmp)
+        self.addCleanup(second.close)
+        audits = [self.audit, SqlTaskAudit(second)]
+        barrier = threading.Barrier(2)
+        results: list[list[dict[str, Any]]] = [[], []]
+        errors: list[BaseException] = []
+
+        def settle(index: int) -> None:
+            try:
+                barrier.wait(timeout=10)
+                results[index] = audits[index].settle_stale_staged()
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=settle, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            sorted(o["request_id"] for result in results for o in result), ["req-lost"], results
+        )
+        self.assertEqual(self.status_of("req-lost"), "discarded")
+        self.assertEqual(self.others("req-lost"), others_before)
 
     def test_a_second_settlement_pass_writes_nothing_new(self) -> None:
         record = dict(self.charge("req-template"))
