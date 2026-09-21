@@ -25,7 +25,7 @@ from secretary.board import (
     EventKind,
     FakeBoardHost,
 )
-from secretary.board.checkpoint_layout import CheckpointBoard, open_checkpoint_board
+from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import (
     ANALYTICS_MANIFEST,
@@ -996,6 +996,24 @@ class AnalyticsManifestTests(unittest.TestCase):
         (split / "cards" / "0000" / "stray.json").write_text("{}\n", encoding="utf-8")
         with self.assertRaisesRegex(AnalyticsManifestError, "unexpected entry"):
             verify_analytics_checkpoint(split)
+
+    def test_symlinked_layout_marker_is_refused_not_read_as_flat(self):
+        """secretary-1656 rework: the marker is the one entry that must not be followed."""
+        split = self.copy_board()
+        split_board(split)
+        verify_analytics_checkpoint(split)
+        external = self.board.parent / "external-layout.json"
+        external.write_bytes((split / "layout.json").read_bytes())
+        (split / "layout.json").unlink()
+        (split / "layout.json").symlink_to(external)
+
+        with self.assertRaisesRegex(AnalyticsManifestError, "layout marker is a symlink"):
+            verify_analytics_checkpoint(split)
+        with self.assertRaisesRegex(CheckpointLayoutError, "layout marker is a symlink"):
+            open_checkpoint_board(split)
+        external.unlink()  # dangling: still refused, never the flat fallback
+        with self.assertRaisesRegex(CheckpointLayoutError, "layout marker is a symlink"):
+            open_checkpoint_board(split)
 
     def test_baseline_seal_returns_only_checkpoint_metadata(self):
         verified = verify_analytics_checkpoint(self.board)

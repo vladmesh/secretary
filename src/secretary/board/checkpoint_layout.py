@@ -165,8 +165,14 @@ def open_checkpoint_board(directory: Path) -> CheckpointBoard:
     """The single reader of a committed board checkpoint, in the flat layout or the split one."""
     root = Path(directory)
     marker = root / LAYOUT_MARKER
+    # Refused before the flat fallback: a symlinked marker, even a dangling one, is untrusted input,
+    # never "no marker".
+    if marker.is_symlink():
+        raise CheckpointLayoutError(f"{marker}: checkpoint layout marker is a symlink")
     if not marker.exists():
         return CheckpointBoard(root, FLAT)
+    if not marker.is_file():
+        raise CheckpointLayoutError(f"{marker}: checkpoint layout marker is not a regular file")
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
