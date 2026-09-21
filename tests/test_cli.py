@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -418,6 +419,107 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("blocked: secret detected in state/board/cards.ndjson", output)
         self.assertIn("status: findings", output)
+
+    def test_doctor_reports_a_checkpoint_blocked_past_the_rpo_as_red_with_the_gate_reason(self):
+        """secretary-1664: a blocked gate commits nothing, so the unpushed lag reads zero while
+        nothing has published for 40 minutes. The finding counts from the last successful
+        preparation, is classified red by the lamp's table and names the gate's reason and since
+        when."""
+        now = time.time()
+        reason = (
+            "the postgres task audit has 1 unresolved pending record(s); oldest budget_recorded "
+            "req-1 staged since 2026-09-21T10:00:00Z"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint": {
+                        "status": "blocked",
+                        "reason": reason,
+                        "last_success_epoch": now - 40 * 60,
+                        "last_success_at": "2026-09-21T10:00:00Z",
+                        "last_failure_epoch": now - 60,
+                        "last_failure_at": "2026-09-21T10:39:00Z",
+                        "last_failure_reason": reason,
+                        "failing_since_epoch": now - 35 * 60,
+                        "failing_since_at": "2026-09-21T10:05:00Z",
+                    },
+                },
+            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
+            json_code, json_output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 1, output)
+        self.assertIn(
+            "red: checkpoint has not published for 40 min, past the 30 min RPO: checkpoint gate "
+            f"blocked since 2026-09-21T10:05:00Z: {reason}",
+            output,
+        )
+        self.assertIn("status: findings", output)
+        self.assertEqual(json_code, 1, json_output)
+        rpo = [
+            finding
+            for finding in json.loads(json_output)["findings"]
+            if finding["code"] == "checkpoint.rpo_exceeded"
+        ]
+        self.assertEqual(len(rpo), 1, json_output)
+        self.assertEqual(rpo[0]["severity"], "red")
+        self.assertIn(reason, rpo[0]["message"])
+
+    def test_doctor_reports_a_failing_push_past_the_rpo_as_red_with_the_push_failure(self):
+        """The other way the remote goes without a checkpoint: preparation commits, the push fails,
+        and the oldest unpushed commit ages past the RPO."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint": {"status": "committed", "last_success_epoch": time.time()},
+                    "checkpoint_push": {
+                        "status": "failed",
+                        "reason": "checkpoint push failed: could not read Username",
+                        "attempted_at": "2026-09-21T10:30:00Z",
+                        "attempted_epoch": time.time(),
+                    },
+                },
+            )
+            old = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 50 * 60))
+            subprocess.run(
+                ["git", "-C", str(instance_dir), "commit", "--quiet", "--amend", "--no-edit", "--reset-author"],
+                env={**os.environ, "GIT_COMMITTER_DATE": old, "GIT_AUTHOR_DATE": old},
+                check=True,
+            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn(
+            "red: checkpoint has not published for 50 min, past the 30 min RPO: checkpoint push "
+            "failed at 2026-09-21T10:30:00Z: checkpoint push failed: could not read Username",
+            output,
+        )
+
+    def test_doctor_has_no_rpo_finding_inside_the_rpo(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint": {
+                        "status": "blocked",
+                        "reason": "the postgres task audit has 1 unresolved pending record(s)",
+                        "last_success_epoch": time.time() - 10 * 60,
+                        "last_failure_reason": "the postgres task audit has 1 unresolved pending record(s)",
+                    },
+                },
+            )
+            _code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
+
+        self.assertNotIn("past the 30 min RPO", output)
+        self.assertIn("checkpoint gate blocked: the postgres task audit", output)
 
     def test_doctor_stays_quiet_about_checkpoints_an_instance_never_wrote(self):
         with tempfile.TemporaryDirectory() as tmpdir:

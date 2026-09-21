@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import CARD, board_client
+from secretary.checkpoint import rpo_problem
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
@@ -660,6 +661,8 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "unit.missing": "red",
     "checkpoint.blocked": "red",
     "checkpoint.last_failed": "red",
+    # No checkpoint has reached the remote for longer than the 30-minute RPO (`rpo_problem`).
+    "checkpoint.rpo_exceeded": "red",
     "secret_store.key_unusable": "red",
     "board_transport.finding": "red",
     "card_backend.finding": "red",
@@ -673,6 +676,9 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "host.inventory_unreadable": "yellow",
     "memory.index_missing": "yellow",
 }
+
+#: The code `secretary doctor` reports a checkpoint past its RPO under, classified above.
+CHECKPOINT_RPO_EXCEEDED = "checkpoint.rpo_exceeded"
 
 #: What an unclassified code is worth. Deliberately not green: a problem somebody adds tomorrow and
 #: forgets to classify must show as something to look at, never as a clean installation.
@@ -764,6 +770,8 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
             "the last checkpoint failed"
             + (f": {_text(checkpoint.get('checkpoint_last_failure_reason'))}" if _text(checkpoint.get("checkpoint_last_failure_reason")) else ""),
         )
+    if checkpoint.get("rpo_exceeded"):
+        found(CHECKPOINT_RPO_EXCEEDED, rpo_problem(checkpoint))
     for section in ("board_transport", "card_backend"):
         reported = _object(status.get(section)).get("findings") or []
         if reported:

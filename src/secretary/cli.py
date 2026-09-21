@@ -13,9 +13,9 @@ from secretary.backup import create_backups, verify_backup
 from secretary.board_transport import findings as _board_transport_findings
 from secretary.check_commands import add_check_subcommands
 from secretary.checkpoint import (
-    PUSH_INTERVAL_SECONDS,
     checkpoint_snapshot,
     render_checkpoint_lines,
+    rpo_problem,
 )
 from secretary.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
 from secretary.cutover import add_cutover_subcommands
@@ -96,7 +96,6 @@ from secretary.web.commands import add_web_serve_subcommands
 from secretary.webfront.commands import add_web_front_subcommands
 from secretary.webproto.commands import add_web_read_subcommands, add_web_run_subcommands
 
-PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
@@ -748,7 +747,9 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     dispatcher = dispatcher_findings(
         report, collected, inspect_live=not args.offline, provenance=provenance
     )
-    checkpoint = checkpoint_findings(report)
+    checkpoint_rpo = checkpoint_rpo_findings(report)
+    checkpoint_plain = checkpoint_findings(report)
+    checkpoint = [f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo] + checkpoint_plain
     secret_store = secret_store_findings(report)
     board_transport = _board_transport_findings(report.instance_path.parent)
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
@@ -775,7 +776,8 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
     if provenance is not None:
         findings.append(provenance)
-    findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
+    findings.extend(checkpoint_rpo)
+    findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_plain)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
     findings.extend({"code": "board_transport", "message": finding} for finding in board_transport)
     findings.extend(
@@ -1226,7 +1228,10 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
         return []
     data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
-    findings = checkpoint_findings(report) if findings is None else findings
+    if findings is None:
+        findings = [
+            f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo_findings(report)
+        ] + checkpoint_findings(report)
     if "checkpoint" not in production and "checkpoint_push" not in production:
         if findings:
             print()
@@ -1252,6 +1257,37 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     return findings
 
 
+def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
+    """A checkpoint that has not published for longer than the RPO, as a classified finding.
+
+    Its code is classified by the doctor lamp's own table (`webproto.reads.PROBLEM_SEVERITY`), and
+    its sentence names what stopped it: the gate's blocked reason and since when, or the push
+    failure.
+    """
+    if report.data_dir is None:
+        return []
+    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    if "checkpoint" not in production and "checkpoint_push" not in production:
+        return []
+    snapshot = checkpoint_snapshot(
+        report.instance_path.parent,
+        write_state=production.get("checkpoint"),
+        push_state=production.get("checkpoint_push"),
+    )
+    message = rpo_problem(snapshot)
+    if not message:
+        return []
+    from secretary.webproto.reads import CHECKPOINT_RPO_EXCEEDED, problem_severity
+
+    return [
+        {
+            "code": CHECKPOINT_RPO_EXCEEDED,
+            "severity": problem_severity(CHECKPOINT_RPO_EXCEEDED),
+            "message": message,
+        }
+    ]
+
+
 def checkpoint_findings(report) -> list[str]:
     if report.data_dir is None:
         return []
@@ -1273,9 +1309,6 @@ def checkpoint_findings(report) -> list[str]:
             )
         if snapshot["blocked_reason"]:
             findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
-        lag = snapshot["lag_minutes"]
-        if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
-            findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
     instance = report.instance_path.parent
     # Example and pre-install configuration documents are intentionally not
     # instance repositories. The lifecycle cannot have established local Git

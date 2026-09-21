@@ -291,8 +291,13 @@ class CheckpointGateTests(SqlAuditCase):
         result = self.writer().write()
 
         self.assertEqual(result.status, "blocked")
+        # secretary-1664: the reason also names the oldest staged record and since when.
+        oldest = self.audit.oldest_pending()
+        assert oldest is not None
         self.assertEqual(
-            result.reason, "the postgres task audit has 1 unresolved pending record(s)"
+            result.reason,
+            "the postgres task audit has 1 unresolved pending record(s); oldest card.started "
+            f"req-staged staged since {oldest['staged_at']}",
         )
 
     def test_a_missing_or_stale_file_journal_cannot_make_the_gate_green_or_red(self) -> None:
