@@ -26,19 +26,23 @@ for a scenario it did not run. Concretely:
 
 That rule lives in exactly four places, and nowhere else:
 
-  1. :func:`fetch` refuses a response that is not 2xx, and follows no redirect. It holds the only
-     transport call in this file — :data:`_OPENER`, built without a redirect handler — so every
-     request in the script passes through it, and no caller re-implements the check or is able to
-     forget it. A caller that genuinely wants to tolerate a status says so with `tolerate=` and a
-     written reason; a 3xx is refused even then, because a followed redirect would measure a
-     different installation and would carry this installation's PO cookie to it.
-  2. :func:`prepare` proves the whole scenario is reproducible — data directory, PO token, a
-     session to poll, and one poll of it that actually answered — before any clock starts.
-  3. :func:`measure_concurrent` proves *overlap*: each round's timed window has to overlap a
-     selected-session poll that was genuinely in flight during it. The round is scheduled against
-     a poll that is **due** — the four requests wait at a barrier that the poll thread reaches when
-     its own cadence next falls due — so the overlap is produced without shortening anything, and
-     the per-round count in the output is computed from the recorded windows rather than asserted.
+  1. :func:`fetch` refuses a response that is not 2xx, and reaches only the installation the
+     caller named. It holds the only transport call in this file — :data:`_OPENER`, built with no
+     redirect handler and with an empty `ProxyHandler` — so every request in the script passes
+     through it, and no caller re-implements the check or is able to forget it. A caller that
+     genuinely wants to tolerate a status says so with `tolerate=` and a written reason; a 3xx is
+     refused even then, because a followed redirect would measure a different installation and
+     would carry this installation's PO cookie to it, and a proxy would do the same without even a
+     response to show for it.
+  2. :func:`prepare` proves the whole scenario is reproducible — data directory, PO token, and a
+     session whose own JSON says a turn is **running**, which is the only kind of session a `/po`
+     page polls at all — before any clock starts.
+  3. :func:`measure_concurrent` proves the round was *launched by a due poll*: the poll for the
+     round falls due on its own cadence, is issued, and only then are the four requests released.
+     That ordering is program order inside the poll thread, so it holds at any installation speed.
+     How many polls were genuinely **in flight** during the round is measured from the recorded
+     windows and printed per round — it is a fact about the run, not a condition on it, and on a
+     fast installation it is legitimately zero.
   4. :func:`require_cadence` proves the *cadence*: the spacing actually observed between polls is
      what is judged and what is printed, never the constant. Nothing in this file can shorten an
      interval — :meth:`SessionPoll._sleep_until` waits out an absolute deadline and only a full
@@ -49,9 +53,10 @@ That rule lives in exactly four places, and nowhere else:
 **This script only reads, and only from the installation it was given.** Every request it makes
 is a GET or a HEAD, and the whole list is :data:`READ_REQUESTS` below. There is no POST, nothing
 that starts or stops a head, and nothing is written to the board, the state directory or the
-instance repository. Every request goes to `--base-url` and nowhere else: redirects are disabled on
-the opener, so no response can send this script — or the PO cookie it carries — to another host or
-port, and the list below stays the complete inventory of what a run asks for.
+instance repository. Every request goes to `--base-url` and nowhere else: the opener follows no
+redirect and reads no proxy variable, so neither a response nor the caller's environment can send
+this script — or the PO cookie it carries — to another host or port, and the list below stays the
+complete inventory of what a run asks for.
 
 Standard library only. What it imports from the product is the product's own resolution of an
 installation — where a data directory comes from, and how the PO cookie is derived — because a
@@ -185,11 +190,23 @@ class Sample:
 
 @dataclass
 class Round:
-    """One round of the concurrent scenario, and the proof that it was that scenario."""
+    """One round of the concurrent scenario: what it cost, and what the poll beside it did.
+
+    The two poll numbers here answer different kinds of question, and only one of them is a
+    condition. `launched_at` is the scenario: a poll fell due on the cadence, was issued, and
+    released this round. `polls_in_flight` is a measurement of what that produced — how much of the
+    round genuinely had a session read running alongside it — which depends on how fast the
+    installation answers and is reported rather than required.
+    """
 
     samples: list[Sample]
-    #: Selected-session polls that were genuinely in flight during this round's timed window.
-    overlapping_polls: int
+    #: When the poll that released this round was issued, or None if none did. A round no poll
+    #: launched is refused: it is four requests beside nothing, not the scenario.
+    launched_at: float | None
+    #: Selected-session polls genuinely in flight during this round's timed window. On a fast
+    #: installation the launching poll has already finished before the round starts and the next
+    #: one is seconds away, so 0 here is an ordinary reading and not a failure.
+    polls_in_flight: int
 
     @property
     def started_at(self) -> float:
@@ -198,6 +215,19 @@ class Round:
     @property
     def ended_at(self) -> float:
         return max(sample.ended_at for sample in self.samples)
+
+
+@dataclass
+class Launch:
+    """The poll that releases one round, as the poll thread records it before releasing.
+
+    Written by the poll thread and read by the round's own thread once the round is over, with the
+    event as the handover: a round that finds `issued` set knows its poll was issued first, because
+    that is the order the poll thread did the two things in.
+    """
+
+    issued: threading.Event = field(default_factory=threading.Event)
+    started_at: float | None = None
 
 
 @dataclass
@@ -262,12 +292,15 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-#: The only transport in this file. `build_opener` keeps the default handlers except the ones a
-#: passed handler replaces, so installing the refusing subclass leaves an opener that cannot follow
-#: a redirect at all. That is what keeps every request — and the PO cookie one of them carries — on
-#: the installation the caller named. Built once, at module level, so a second opener would be as
-#: visible to a reader as a second `urlopen` was.
-_OPENER = urllib.request.build_opener(_RefuseRedirects())
+#: The only transport in this file, and the whole of "only the installation the caller named".
+#: `build_opener` keeps the default handlers except the ones a passed handler replaces, and both
+#: passed here are replacements: the refusing subclass leaves an opener that cannot follow a
+#: redirect, and `ProxyHandler({})` leaves one that reads no proxy environment at all. Without the
+#: second, `http_proxy` in the caller's shell is enough to send every request — and the PO cookie
+#: one of them carries — to a host the base URL never named, while the output still reports the
+#: base URL. Built once, at module level, so a second opener would be as visible to a reader as a
+#: second `urlopen` was.
+_OPENER = urllib.request.build_opener(_RefuseRedirects(), urllib.request.ProxyHandler({}))
 
 
 def fetch(
@@ -411,22 +444,66 @@ def po_cookie(data_dir: Path) -> str:
     return f"{COOKIE_NAME}={cookie_value(token)}"
 
 
+def session_is_running(route: str, body: bytes) -> bool:
+    """Whether the session's own JSON says a turn is running — read from the body, not the page.
+
+    The product decides this and publishes it: `webproto.po_ops.po_session` sets `running` from
+    whether any turn of the session is in the running state, and the session page installs its
+    three-second `setInterval` only `if (__RUNNING__)`, clearing it when the turn ends
+    (`src/secretary/web/pages.py`). So an idle session is one no browser polls, and a document
+    this script cannot read `running` out of is one it cannot say either way about — which is a
+    refusal here rather than a guess, because the guess would decide whether a scenario was
+    reproduced.
+    """
+    try:
+        document = json.loads(body.decode("utf-8", "replace"))
+    except ValueError as exc:
+        raise Unmeasurable(
+            f"GET {route} did not answer with JSON ({exc}), so whether a PO page would be polling "
+            f"this session could not be established"
+        ) from None
+    running = document.get("running") if isinstance(document, dict) else None
+    if not isinstance(running, bool):
+        raise Unmeasurable(
+            f"GET {route} answered a document with no boolean `running` field, so whether a PO "
+            f"page would be polling this session could not be established"
+        )
+    return running
+
+
 def choose_poll_target(base_url: str, cookie: str) -> tuple[str, str]:
     """The session to poll and how it was chosen, or an empty target and why there is none.
 
-    The first session the `/po` overview lists, which is the one an operator's browser would be
-    polling. A `/po` that does not answer never reaches here — `fetch` refuses it — so the only way
-    out with an empty target is the product's own state of having no open session. That is not an
-    error of this installation, and the caller says so in the output; it is still not the specified
-    scenario, so the run cannot come out green.
+    The first session the `/po` overview lists **whose own JSON reports a turn running**. That
+    qualifier is the whole point: the page's poll exists only while a turn runs, so polling an idle
+    session would be a request no `/po` page makes, and the concurrency measurement would be four
+    requests beside a load the operator's browser is not producing. The overview's markup is not
+    trusted for it — each candidate is read at the route that would actually be polled, and the
+    answer comes out of that response body.
+
+    A `/po` that does not answer never reaches here, and neither does a session whose JSON does
+    not: `fetch` refuses both. So the only ways out with an empty target are the product's own
+    states of having no open session at all and of having no turn running in any of them. Neither
+    is an error of this installation, and the caller says which one in the output; neither is the
+    specified scenario either, so the run cannot come out green.
     """
     overview = fetch(base_url, PO_OVERVIEW, cookie=cookie)
-    found = _SESSION_LINK.search(overview.body.decode("utf-8", "replace"))
-    if not found:
+    sessions = _SESSION_LINK.findall(overview.body.decode("utf-8", "replace"))
+    if not sessions:
         return "", f"{PO_OVERVIEW} answered, and lists no open session to poll"
-    session = found.group(1)
-    return PO_SESSION_JSON.format(session=session), (
-        f"the first session {PO_OVERVIEW} lists ({session}), read with this installation's PO cookie"
+    for session in sessions:
+        route = PO_SESSION_JSON.format(session=session)
+        # The probe is made at the polled route with the polled cookie, so a session that passes
+        # it has been proved pollable by the same request the measurement will repeat.
+        if session_is_running(route, fetch(base_url, route, cookie=cookie).body):
+            return route, (
+                f"the first session {PO_OVERVIEW} lists whose own JSON reports a running turn "
+                f"({session}), read with this installation's PO cookie"
+            )
+    listed = f"{len(sessions)} open session(s)" if len(sessions) > 1 else "one open session"
+    return "", (
+        f"{PO_OVERVIEW} lists {listed} and none of them has a turn running, so no PO page on this "
+        f"installation is polling anything"
     )
 
 
@@ -434,8 +511,10 @@ def prepare(base_url: str, data_dir_argument: str | None) -> Scenario:
     """Prove the specified scenario can be reproduced here, before a single clock starts.
 
     Every step raises :class:`Unmeasurable` on failure, so a run that gets past this point has an
-    installation that answers, a data plane, a readable token, a session, and one poll of that
-    session that actually returned. Nothing downstream has to re-check any of it.
+    installation that answers, a data plane, a readable token, a session with a turn running, and
+    one poll of that session that actually returned — the probe in :func:`choose_poll_target` is
+    that poll, made at the route the measurement will repeat. Nothing downstream re-checks any of
+    it.
     """
     data_dir, data_dir_source = resolve_data_dir(data_dir_argument)
     try:
@@ -444,10 +523,6 @@ def prepare(base_url: str, data_dir_argument: str | None) -> Scenario:
         raise Unmeasurable(f"{base_url} is not reachable: {exc}") from None
     cookie = po_cookie(data_dir)
     poll_target, poll_explanation = choose_poll_target(base_url, cookie)
-    if poll_target:
-        # One poll, made here, so that "the session can be polled" is a fact this run established
-        # rather than an assumption the concurrent phase inherits.
-        fetch(base_url, poll_target, cookie=cookie)
     return Scenario(
         base_url=base_url,
         data_dir=data_dir,
@@ -496,12 +571,11 @@ def measure_warm(base_url: str, route: str) -> dict[str, Any]:
 class SessionPoll:
     """The `/po` poll an operator's open session page makes, for the concurrency measurement.
 
-    A read of the selected session on the cadence the page itself uses. It is not measured itself:
-    what is measured is what the dashboard costs *while* that poll is in flight, which is the whole
-    reason the poll exists here.
+    A read of the running session on the cadence the page itself uses. It is not measured itself:
+    what is measured is what the dashboard costs beside it.
 
-    Two properties of this class carry the concurrency measurement, and on a fast installation they
-    pull against each other — which is the trap every earlier version of this file fell into.
+    Two properties carry the concurrency measurement, and both are things this class *does* rather
+    than things it hopes for.
 
     *The cadence is real.* A poll is scheduled :data:`POLL_INTERVAL_SECONDS` after the previous
     poll **started** — the anchor `setInterval` uses, since a browser's timer does not wait for the
@@ -510,15 +584,23 @@ class SessionPoll:
     the poll altogether ends the wait, and then no further poll is made at all. So an observed
     interval cannot come out short, and :func:`require_cadence` checks that it did not anyway.
 
-    *Every round overlaps a poll.* A round hands its barrier to :meth:`arm`, and its four requests
-    wait there. The poll thread reaches that same barrier when its next poll falls **due**, so the
-    round is released by a poll that was going to happen then regardless — rather than by a poll
-    dragged forward to meet the round. The round pays up to one interval of waiting before its
-    clocks start, and that wait is not part of any number.
+    *Every round is launched by a due poll.* A round hands its barrier to :meth:`arm`, and its four
+    requests wait there. The poll thread does not touch that barrier until its next poll falls
+    **due** and has been issued and recorded; only then does it release the round. That is program
+    order inside one thread, so it is true at any installation speed, and it is what the round's
+    `launched_at` records.
 
-    The version this replaces did both at once and so did neither: `arm` set an event the poll
-    thread was sleeping on, so on a fast installation the rounds ran back to back, the polls fired
-    two milliseconds apart, and the output still said "every 3 s".
+    What it deliberately does not promise is temporal overlap. An earlier version released the poll
+    and the round from the barrier together to force a poll to be in flight during every round;
+    with a two-millisecond poll and a three-millisecond round, whether the two requests are
+    genuinely simultaneous is a coin toss, and one run in five failed on it. Overlap is therefore
+    measured — :meth:`overlapping` — and reported per round, and it is zero on a fast installation
+    because the poll has answered before the round starts, which is an accurate reading rather than
+    a fault.
+
+    The version before that one shortened the cadence instead: `arm` set an event the poll thread
+    was sleeping on, so the rounds ran back to back, the polls fired two milliseconds apart, and
+    the output still said "every 3 s".
     """
 
     def __init__(self, base_url: str, route: str, cookie: str) -> None:
@@ -530,10 +612,13 @@ class SessionPoll:
         self.failure: Unmeasurable | None = None
         self._lock = threading.Lock()
         self._gate: threading.Barrier | None = None
-        #: Set once the poll released by the current round has been recorded. Without it the
-        #: caller could compute overlap before the poll thread had written its window down and
-        #: read back a round that nothing overlapped — the record lagging the fact, not the fact.
-        self._gated_done: threading.Event | None = None
+        #: What the poll thread writes the launching poll into before it releases the round.
+        self._launch: Launch | None = None
+        #: The start of a poll that is under way and whose window is therefore not written down
+        #: yet. A poll still in flight when a round ends would otherwise be missing from that
+        #: round's count, because a window is only recorded once the answer is in. It is used for
+        #: the in-flight question alone; no recorded window is ever back-dated to it.
+        self._pending: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="po-poll", daemon=True)
 
@@ -553,29 +638,28 @@ class SessionPoll:
             starts = [start for start, _end in self.windows]
         return [later - earlier for earlier, later in zip(starts, starts[1:], strict=False)]
 
-    def _take_gate(self) -> tuple[threading.Barrier | None, threading.Event | None]:
+    def _take_gate(self) -> tuple[threading.Barrier | None, Launch | None]:
         with self._lock:
             gate, self._gate = self._gate, None
-            done, self._gated_done = self._gated_done, None
-            return gate, done
+            launch, self._launch = self._launch, None
+            return gate, launch
 
-    def arm(self, gate: threading.Barrier) -> threading.Event:
+    def arm(self, gate: threading.Barrier) -> Launch:
         """Hand the poll thread a round's barrier. Nothing here hurries the poll.
 
-        The next poll to fall due joins that barrier and releases the round with it. If the poll
-        thread is mid-interval, the round waits out the rest of that interval; if it has already
-        taken this loop's gate, the round waits for the poll after it. Either way the round is
-        released by a due poll, at the cadence, which is the only mechanism that gives overlap
-        without shortening anything.
+        The next poll to fall due is issued and recorded, and that poll's thread then releases this
+        barrier. If the poll thread is mid-interval, the round waits out the rest of that interval;
+        if it has already taken this loop's gate, the round waits for the poll after it. Either way
+        the round is released by a poll that was going to happen then anyway, at the cadence, which
+        is what makes the ordering true without anything being shortened.
 
-        Returns the event that is set once that round's poll has been made *and recorded*, which
-        is what the caller waits on before it asks about overlap.
+        Returns the record the poll thread fills in before it releases the round.
         """
-        done = threading.Event()
+        launch = Launch()
         with self._lock:
             self._gate = gate
-            self._gated_done = done
-        return done
+            self._launch = launch
+        return launch
 
     def _sleep_until(self, due: float) -> bool:
         """Wait until `due` on the sample clock. False means the poll was stopped instead.
@@ -592,46 +676,60 @@ class SessionPoll:
 
     def _run(self) -> None:
         # The first poll is due at once: the run has already proved in `prepare` that this session
-        # answers, and the cadence is anchored from here on the start of each poll.
+        # is running and answers, and the cadence is anchored from here on the start of each poll.
         due = time.perf_counter()
         while not self._stop.is_set():
             if not self._sleep_until(due):
                 return
-            gate, done = self._take_gate()
-            try:
-                if gate is not None:
-                    # Meeting the round here is what produces the overlap: the four requests and
-                    # this poll leave the barrier together, at the moment this poll fell due.
-                    gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
-            except threading.BrokenBarrierError:
-                # The round gave up waiting, or broke the barrier on its own failure. It reports
-                # that; this poll was due, so it is still made, and the cadence carries on.
-                pass
+            gate, launch = self._take_gate()
+            with self._lock:
+                self._pending = time.perf_counter()
             try:
                 sample = fetch(self.base_url, self.route, cookie=self.cookie)
             except Unmeasurable as exc:
                 # Recorded, not swallowed: `check` reports it on the caller's thread. Polling stops
                 # because every further attempt would fail the same way and the run is already void.
                 self.failure = exc
-                if done is not None:
-                    done.set()
+                with self._lock:
+                    self._pending = None
+                if gate is not None:
+                    # A round is waiting at that barrier for a poll that is not coming.
+                    gate.abort()
                 self._stop.set()
                 return
             with self._lock:
+                self._pending = None
                 self.windows.append((sample.started_at, sample.ended_at))
-            if done is not None:
-                done.set()
+            if gate is not None:
+                # The ordering the scenario is defined by, as plain program order: this poll fell
+                # due, was issued and is recorded, and only now are the round's four requests let
+                # go. Nothing about it depends on how the threads are scheduled afterwards.
+                launch = launch if launch is not None else Launch()
+                launch.started_at = sample.started_at
+                launch.issued.set()
+                try:
+                    gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
+                except threading.BrokenBarrierError:
+                    # The round gave up waiting or failed on its own. It reports that; the poll
+                    # beside it was made on the cadence either way.
+                    pass
             due = sample.started_at + POLL_INTERVAL_SECONDS
 
     def overlapping(self, started_at: float, ended_at: float) -> int:
         """How many polls were genuinely in flight during `[started_at, ended_at]`.
 
         In flight means started before that window ended and not finished before it began — the
-        ordinary interval overlap, computed from recorded windows.
+        ordinary interval overlap, computed from recorded windows. A poll still under way when
+        this is asked has no recorded end yet, so it counts when it started before the window
+        closed: it cannot have finished before the window opened, since it has not finished.
         """
         with self._lock:
             windows = list(self.windows)
-        return sum(1 for start, end in windows if start < ended_at and end > started_at)
+            pending = self._pending
+        counted = sum(1 for start, end in windows if start < ended_at and end > started_at)
+        if pending is not None and pending < ended_at:
+            counted += 1
+        return counted
 
     def check(self) -> None:
         """Raise whatever the poll thread hit, on the caller's thread."""
@@ -648,16 +746,17 @@ class SessionPoll:
 
 
 def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
-    """One round: four `GET /` at once, released by the poll that falls due next.
+    """One round: four `GET /` at once, released by the poll that fell due just before them.
 
-    The barrier has five parties — the four request threads and the poll thread — so the round and
-    a selected-session poll begin together. What makes that legitimate rather than a trick is which
-    of the two waits: the requests wait for the poll's own schedule, never the other way round. The
-    round therefore costs up to one interval before its first clock starts, and that wait is
-    outside every number here.
+    The barrier has five parties — the four request threads and the poll thread — and which of them
+    waits is the whole point: the requests wait for the poll's own schedule, never the other way
+    round. The poll thread arrives only after its due poll has been issued and recorded, so the
+    round's `launched_at` is a fact of program order rather than of thread scheduling. The round
+    costs up to one interval before its first clock starts, and that wait is outside every number.
 
-    Overlap is then a property of the mechanism, and the count this returns is still read back off
-    the recorded windows — the output states what happened, not what was arranged.
+    What that ordering does *not* buy is a poll in flight during the round; on a fast installation
+    the poll has answered before the requests start. So the in-flight count is measured here from
+    the recorded windows and reported, and nothing is arranged to make it come out above zero.
     """
     samples: list[Sample | None] = [None] * CONCURRENT_REQUESTS
     failures: list[BaseException] = []
@@ -679,7 +778,7 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
 
     poll.check()
     # Armed before the threads start, so the round is already waiting when the poll comes due.
-    polled = poll.arm(gate)
+    launch = poll.arm(gate)
     threads = [threading.Thread(target=one, args=(index,)) for index in range(CONCURRENT_REQUESTS)]
     for thread in threads:
         thread.start()
@@ -688,12 +787,6 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
     # A poll that died is the likelier cause of a broken barrier than the requests were, and its
     # message names the route and the status, so it is reported first.
     poll.check()
-    # The round's own poll may still be in flight: a dashboard that answers four page requests
-    # faster than one session read is exactly the case this measurement is heading towards. Wait
-    # for it to be recorded before asking about overlap, or the answer would be about the record
-    # rather than about what happened.
-    polled.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
-    poll.check()
     if failures:
         raise Unmeasurable(f"a concurrent GET {CONCURRENT_ROUTE} could not be made: {failures[0]}")
     measured = [sample for sample in samples if sample is not None]
@@ -701,7 +794,11 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
         raise Unmeasurable(f"only {len(measured)} of {CONCURRENT_REQUESTS} concurrent requests were answered")
     started = min(sample.started_at for sample in measured)
     ended = max(sample.ended_at for sample in measured)
-    return Round(samples=measured, overlapping_polls=poll.overlapping(started, ended))
+    return Round(
+        samples=measured,
+        launched_at=launch.started_at if launch.issued.is_set() else None,
+        polls_in_flight=poll.overlapping(started, ended),
+    )
 
 
 def cadence_holds(intervals: list[float]) -> bool:
@@ -744,19 +841,25 @@ def require_cadence(intervals: list[float]) -> None:
     )
 
 
-def require_overlap(rounds: list[Round]) -> None:
-    """Refuse rounds that were not the specified scenario.
+def require_launch(rounds: list[Round]) -> None:
+    """Refuse rounds that no due poll launched.
 
-    The DoD scenario is four concurrent requests *while* the session is polled. A round no poll
-    overlapped measured a quieter thing, so it may neither be judged nor compete to be the worst
-    round — which is why this refuses any of them rather than only the one that happens to be
-    judged.
+    The DoD scenario is four concurrent requests beside a session being polled on the page's
+    cadence. A round that no poll was issued for measured a quieter thing, so it may neither be
+    judged nor compete to be the worst round — which is why this refuses any of them rather than
+    only the one that happens to be judged.
+
+    What it does not refuse is a round with no poll *in flight* during it. That number is measured
+    and printed, and on an installation that answers a session read in two milliseconds it is
+    legitimately zero; requiring it made the instrument's own proof a coin toss, which is a worse
+    thing to publish than an honest zero.
     """
-    barren = [index + 1 for index, item in enumerate(rounds) if item.overlapping_polls < 1]
+    barren = [index + 1 for index, item in enumerate(rounds) if item.launched_at is None]
     if barren:
         raise Unmeasurable(
-            f"round(s) {', '.join(str(number) for number in barren)} were measured with no "
-            f"selected-session poll in flight, so they are not the scenario the thresholds judge"
+            f"round(s) {', '.join(str(number) for number in barren)} ran without a "
+            f"selected-session poll being issued for them, so they are not the scenario the "
+            f"thresholds judge"
         )
 
 
@@ -796,14 +899,16 @@ def _measure(scenario: Scenario, report: Report) -> None:
         )
 
     if not scenario.poll_target:
-        # An installation with no open PO session is not broken, and the warm half above is a real
-        # measurement of it. The concurrent half of the DoD cannot be reproduced here at all, and
-        # measuring four requests against an idle dashboard instead would be a different scenario
-        # reported under the same heading — so the run stops, says so, and cannot come out green.
+        # An installation with no PO session, or none with a turn running, is not broken, and the
+        # warm half above is a real measurement of it. The concurrent half of the DoD cannot be
+        # reproduced here at all: substituting an idle session would put a request no page makes
+        # beside the four, and report it under the same heading. So the run stops, says which of
+        # the two states it found, and cannot come out green.
         raise Unmeasurable(
             f"{scenario.poll_explanation}, so the concurrent scenario — four requests while a "
-            f"session is polled every {POLL_INTERVAL_SECONDS:.0f} s — cannot be reproduced on this "
-            f"installation right now; open a PO session and run this again"
+            f"running session is polled every {POLL_INTERVAL_SECONDS:.0f} s, the way the open page "
+            f"polls it — was not reproduced on this installation; run this again while a PO turn "
+            f"is running"
         )
 
     with SessionPoll(scenario.base_url, scenario.poll_target, scenario.cookie) as poll:
@@ -814,7 +919,7 @@ def _measure(scenario: Scenario, report: Report) -> None:
     report.poll_intervals = poll.intervals()
     poll.check()
     require_cadence(report.poll_intervals)
-    require_overlap(report.concurrent)
+    require_launch(report.concurrent)
 
     # The judged round is the one holding the slowest single request: the DoD asks that *each* of
     # the four answers within 2.0 s, so a scenario that breaches it once in three rounds has not
@@ -862,8 +967,8 @@ def cadence_lines(intervals: list[float]) -> list[str]:
         return [
             observed,
             (
-                f"  the poll ran every {POLL_INTERVAL_SECONDS:.0f} s: no interval was shorter than "
-                f"that, and every round was released by a poll that fell due"
+                f"  the poll ran every {POLL_INTERVAL_SECONDS:.0f} s: no interval between two "
+                f"polls was shorter than that"
             ),
         ]
     return [
@@ -930,11 +1035,24 @@ def render(report: Report, *, unmeasurable: str = "") -> list[str]:
             f"concurrent: {CONCURRENT_REQUESTS} requests at once, {CONCURRENT_ROUNDS} rounds, "
             f"judged on the worst round"
         )
+        lines.append(
+            "  each round is released by a poll issued on the cadence just before it, which is the condition;"
+        )
+        lines.append(
+            "  the in-flight count beside it is measured during the round, and is 0 whenever the "
+            "poll answered first"
+        )
         for index, item in enumerate(report.concurrent, start=1):
             marker = " <- judged" if index - 1 == report.worst_round and not unmeasurable else ""
             durations = ", ".join(f"{sample.duration_ms:.0f}" for sample in item.samples)
+            launched = (
+                "launched by a due poll"
+                if item.launched_at is not None
+                else "NO poll was issued for this round"
+            )
             lines.append(
-                f"  round {index}: {durations} ms [{item.overlapping_polls} poll(s) in flight]{marker}"
+                f"  round {index}: {durations} ms "
+                f"[{launched}; {item.polls_in_flight} poll(s) in flight]{marker}"
             )
     lines.extend(rows(report.measurements[warm_count:]))
     lines.append("")
@@ -965,7 +1083,10 @@ def as_json(report: Report, *, unmeasurable: str = "") -> dict[str, Any]:
         "concurrent_rounds_ms": [
             [sample.duration_ms for sample in item.samples] for item in report.concurrent
         ],
-        "concurrent_overlapping_polls": [item.overlapping_polls for item in report.concurrent],
+        # The condition, and then the measurement. They are separate keys because they answer
+        # different questions: whether the round was the scenario, and what that scenario produced.
+        "concurrent_launched_by_poll": [item.launched_at is not None for item in report.concurrent],
+        "concurrent_polls_in_flight": [item.polls_in_flight for item in report.concurrent],
         "concurrent_worst_round": report.worst_round + 1,
         "measurements": [
             {

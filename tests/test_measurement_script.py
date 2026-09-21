@@ -17,6 +17,7 @@ import ast
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import re
 import sys
@@ -107,7 +108,8 @@ class AgainstAStubDashboard(unittest.TestCase):
         self,
         *,
         missing: tuple[str, ...] = (),
-        sessions: bool = True,
+        listed: tuple[tuple[str, bool], ...] | None = None,
+        session_body: str | None = None,
         session_status: int = 200,
         overview_status: int = 200,
         delays: dict[str, float] | None = None,
@@ -128,7 +130,13 @@ class AgainstAStubDashboard(unittest.TestCase):
         `redirect` is `(path, location)`: that path answers 302 and points somewhere else, which is
         how a case models a front, a proxy or a wrong `--base-url` trying to send the script — and
         the PO cookie it carries — to another installation.
+
+        `listed` is the `/po` overview's sessions as `(id, running)` pairs, in the order the page
+        lists them; the default is the product's interesting case, one session with a turn running.
+        `()` is an installation with no open session at all, and `session_body` replaces the JSON
+        of every session with something a case decides, for the documents the script must refuse.
         """
+        catalogue = ((self.SESSION, True),) if listed is None else listed
         seen: list[tuple[str, str]] = []
         lock = threading.Lock()
 
@@ -150,10 +158,24 @@ class AgainstAStubDashboard(unittest.TestCase):
             if path in missing:
                 return 404, "no such route", delay, ""
             if path == measure.PO_OVERVIEW:
-                link = f'<a class="ref" href="/po/sessions/{self.SESSION}">session</a>' if sessions else ""
-                return overview_status, f"<html>{link}</html>", delay, ""
+                links = "".join(
+                    f'<a class="ref" href="/po/sessions/{session}">session</a>'
+                    for session, _running in catalogue
+                )
+                return overview_status, f"<html>{links}</html>", delay, ""
             if path.startswith("/po/api/sessions/"):
-                return session_status, '{"session": {}}', delay, ""
+                if session_body is not None:
+                    return session_status, session_body, delay, ""
+                # The product's own document shape (`webproto.po_ops.po_session`): `running` is a
+                # top-level boolean, and it is what decides whether a page polls this session.
+                asked = path.rsplit("/", 1)[-1]
+                body = {
+                    "kind": "po_session",
+                    "session": {"session_id": asked},
+                    "turns": [],
+                    "running": dict(catalogue).get(asked, False),
+                }
+                return session_status, json.dumps(body), delay, ""
             return 200, "<html>dashboard</html>", delay, ""
 
         server = StubDashboard(("127.0.0.1", 0), _Stub)
@@ -207,7 +229,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
     them runs the whole three-round scenario. At the real cadence that is nine seconds of waiting
     per case for a property none of them is asserting, so the interval is shortened here — which is
     exactly the shortcut the script refuses to take on a measured run, and is why the cadence is
-    proved at its real three seconds, separately, in `CadenceAndOverlapTests`.
+    proved at its real three seconds, separately, in `CadenceAndLaunchTests`.
     """
 
     #: Short enough to be free, long enough that a poll is not a busy loop against the stub.
@@ -260,9 +282,9 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         added next month is therefore a request that went through the rule, or a red test here.
 
         The transport is the module-level opener, and there is one of it, built with redirects
-        refused. A second opener — or a plain `urlopen`, which follows redirects — would be a
-        request that could leave the installation the caller named, so neither may exist anywhere
-        in this file.
+        refused and with an empty `ProxyHandler`. A second opener — or a plain `urlopen`, which
+        follows redirects and reads the proxy environment — would be a request that could leave the
+        installation the caller named, so neither may exist anywhere in this file.
         """
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
         fetch = next(
@@ -305,8 +327,8 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.assertEqual(len(openers), 1, "one opener, or the redirect rule is not the only rule")
         self.assertEqual(
             [ast.unparse(argument) for argument in openers[0].args],
-            ["_RefuseRedirects()"],
-            "the one opener is built with the redirect handler that refuses",
+            ["_RefuseRedirects()", "urllib.request.ProxyHandler({})"],
+            "the one opener refuses redirects and reads no proxy environment",
         )
 
         built = calls("Sample")
@@ -416,6 +438,71 @@ class MeasurementScriptTests(AgainstAStubDashboard):
                 self.assertNotIn("MEETS", report)
                 self.assertEqual(self.outside.seen, [])  # type: ignore[attr-defined]
 
+    def load_under(self, environment: dict[str, str]) -> ModuleType:
+        """A fresh copy of the script, imported with `environment` already in place.
+
+        The opener is built once, when the module is imported, and the standard library's
+        `ProxyHandler` reads the proxy variables when it is *constructed*. A case that patched the
+        environment after import would therefore pass no matter what the code did. This imports the
+        script again with the variables already set, which is the operator's situation: a shell
+        that had `http_proxy` in it before the command started.
+        """
+        name = f"measure_dashboard_under_{len(sys.modules)}"
+        spec = importlib.util.spec_from_file_location(name, SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        self.addCleanup(sys.modules.pop, name, None)
+        with mock.patch.dict(os.environ, environment, clear=False):
+            spec.loader.exec_module(module)
+        return module
+
+    def test_a_proxy_in_the_environment_never_receives_the_request_or_the_cookie(self) -> None:
+        """Criterion 2's other door: `build_opener` keeps the default `ProxyHandler`.
+
+        With `http_proxy` set, that handler sends every request — and the `Cookie` header the `/po`
+        reads carry — to the proxy, while the output still names the base URL. The reviewer
+        reproduced it against a recording proxy on this interpreter. Here the second local server
+        is the proxy, the script is imported with the variables already set, and the assertion is
+        that the proxy is never spoken to at all while the installation answers normally.
+        """
+        proxy = self.elsewhere()
+        base = self.serve()
+        fresh = self.load_under(
+            {"http_proxy": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "all_proxy": proxy}
+        )
+
+        sample = fresh.fetch(base, measure.PO_OVERVIEW, cookie="secretary_po=probe")
+
+        self.assertEqual(sample.status, 200)
+        self.assertIn(("GET", measure.PO_OVERVIEW), self.server.seen)  # type: ignore[attr-defined]
+        self.assertEqual(
+            self.outside.seen,  # type: ignore[attr-defined]
+            [],
+            "the proxy received the request, and the PO cookie with it",
+        )
+
+    def test_a_whole_run_under_a_proxy_environment_stays_on_the_named_installation(self) -> None:
+        """The same door, end to end: the command completes, and the proxy log is still empty."""
+        proxy = self.elsewhere()
+        base = self.serve()
+        fresh = self.load_under({"http_proxy": proxy, "HTTP_PROXY": proxy})
+
+        with (
+            mock.patch.object(
+                fresh, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
+            ),
+            mock.patch.object(fresh, "po_cookie", return_value="secretary_po=deadbeef"),
+            mock.patch.object(fresh, "WARM_REQUESTS", 2),
+            mock.patch.object(fresh, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = fresh.main(["--base-url", base])
+
+        self.assertEqual(code, fresh.EXIT_MET)
+        self.assertEqual(self.outside.seen, [])  # type: ignore[attr-defined]
+
     def test_the_fetcher_reports_the_redirect_rather_than_the_page_behind_it(self) -> None:
         """`fetch` itself, with no run around it: the 3xx is the answer it saw."""
         outside = self.elsewhere()
@@ -475,7 +562,73 @@ class MeasurementScriptTests(AgainstAStubDashboard):
 
         self.assertEqual(code, measure.EXIT_MET, text)
         self.assertIn(f"/po poll: GET /po/api/sessions/{self.SESSION}", text)
-        self.assertIn(f"the first session /po lists ({self.SESSION})", text)
+        self.assertIn(f"whose own JSON reports a running turn ({self.SESSION})", text)
+
+    # -- the session a page would actually be polling ----------------------------------------
+
+    def test_the_session_it_polls_is_one_whose_own_json_says_a_turn_is_running(self) -> None:
+        """Criterion 4 and 5's fidelity: the page's poll exists only while a turn runs.
+
+        `src/secretary/web/pages.py` installs the 3000 ms `setInterval` inside `if (__RUNNING__)`
+        and clears it when the turn ends, so an idle session is one no browser is polling. Here the
+        overview lists an idle session first and a running one second, and the running one has to
+        be the target — chosen by reading each candidate's own JSON at the route that would be
+        polled, not by believing the overview's markup.
+        """
+        idle, running = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
+        base = self.serve(listed=((idle, False), (running, True)))
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertIn(f"/po poll: GET /po/api/sessions/{running}", text)
+        self.assertIn(f"whose own JSON reports a running turn ({running})", text)
+        polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
+        # The idle one was read once, to find out that it was idle, and never again.
+        self.assertEqual(sum(1 for path in polled if path.endswith(idle)), 1, polled)
+        self.assertGreater(sum(1 for path in polled if path.endswith(running)), 1, polled)
+
+    def test_an_installation_with_only_idle_sessions_judges_nothing_and_exits_two(self) -> None:
+        """The observer's ruling: do not substitute an idle session silently.
+
+        Polling an idle session would put a request no `/po` page makes beside the four, and report
+        it under the heading of the scenario the thresholds judge. The warm numbers are real and are
+        printed; nothing is judged; the line says a turn was what was missing, not a session.
+        """
+        base = self.serve(listed=(("cccccccc-0000-0000-0000-000000000003", False),))
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn("/po poll: none", text)
+        self.assertIn("none of them has a turn running", text)
+        self.assertIn("NOT MEASURED", text)
+        self.assertIn("NOT JUDGED", text)
+        self.assertNotIn("MEETS", text)
+        self.assertNotIn("EXCEEDS", text)
+        self.assertNotIn("concurrent GET /", text)
+        for route in measure.WARM_ROUTES:
+            self.assertIn(f"warm p95 GET {route}", text)
+        # It read that session once to find out, and then stopped: no poll cadence was started.
+        polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
+        self.assertEqual(len(polled), 1, polled)
+
+    def test_a_session_document_it_cannot_read_running_out_of_is_unmeasurable(self) -> None:
+        """A guess about `running` would be a guess about whether the scenario was reproduced."""
+        for body, why in (
+            ('{"kind": "po_session", "session": {}}', "no running field"),
+            ('{"kind": "po_session", "running": "yes"}', "running is not a boolean"),
+            ("not json at all", "not a document"),
+            ("[]", "not an object"),
+        ):
+            with self.subTest(why=why):
+                base = self.serve(session_body=body)
+                with mock.patch.object(measure, "WARM_REQUESTS", 2):
+                    code, text = self.run_main(base)
+                self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+                self.assertIn("/po/api/sessions/", text)
+                self.assertNotIn("MEETS", text)
+                self.assertNotIn("concurrent GET /", text)
 
     def test_no_session_prints_the_warm_half_judges_nothing_and_exits_two(self) -> None:
         """The concurrent scenario cannot be reproduced without a session, so it is not reported.
@@ -485,7 +638,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         idle dashboard are a different scenario, and reporting them under the same heading, green,
         is the hole this whole round is about. Round 1's decision allowed it; round 3's withdrew it.
         """
-        base = self.serve(sessions=False)
+        base = self.serve(listed=())
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
@@ -533,7 +686,9 @@ class MeasurementScriptTests(AgainstAStubDashboard):
 
         self.assertEqual(code, measure.EXIT_EXCEEDED, text)
         rounds = re.findall(
-            r"^  round (\d+): (.*?) ms \[\d+ poll\(s\) in flight\]( <- judged)?$", text, re.MULTILINE
+            r"^  round (\d+): (.*?) ms \[[^];]+; \d+ poll\(s\) in flight\]( <- judged)?$",
+            text,
+            re.MULTILINE,
         )
         self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
         fastest = max(float(value) for value in rounds[0][1].split(", "))
@@ -570,41 +725,53 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.assertIn("404", text)
         self.assertNotIn("MEETS", text)
 
-    def test_every_round_overlaps_a_poll_and_says_how_many(self) -> None:
-        """Overlap, not precedence — the guarantee the readiness gate got wrong.
+    def test_every_round_says_it_was_launched_by_a_poll_and_what_was_in_flight(self) -> None:
+        """The two per-round facts, and which of them is the condition.
 
-        A gate that waits for a *completed* poll deterministically puts that poll *before* the
-        round, so a fast installation could report a poll that overlapped nothing. The round and
-        the poll now leave one barrier together, and the count printed per round is computed from
-        the recorded windows, so the output proves the overlap instead of asserting it.
+        Launched by a due poll is the scenario, and it is program order inside the poll thread, so
+        it holds on any installation. The in-flight count beside it is a measurement of what that
+        produced: against this stub, which answers a session read in a millisecond, the poll has
+        finished before the four requests start, so 0 is the honest reading and the run still
+        stands. Requiring that number instead made the proof a coin toss — one run in five refused
+        a perfectly good measurement — which is why it is reported rather than required.
         """
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_MET, text)
-        counts = [int(value) for value in re.findall(r"\[(\d+) poll\(s\) in flight\]", text)]
-        self.assertEqual(len(counts), measure.CONCURRENT_ROUNDS, text)
-        # Every round, not just the judged one: a round no poll overlapped may not even compete to
-        # be the worst, or a quieter measurement could set the number the thresholds judge.
-        for index, count in enumerate(counts, start=1):
+        rounds = re.findall(r"^  round \d+: .*? ms \[(.*?); (\d+) poll\(s\) in flight\]", text, re.MULTILINE)
+        self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
+        for index, (launched, _count) in enumerate(rounds, start=1):
             with self.subTest(round=index):
-                self.assertGreaterEqual(count, 1, text)
-        # This stub answers instantly, which is the case the previous mechanism failed on.
+                self.assertEqual(launched, "launched by a due poll", text)
+        self.assertIn("the in-flight count beside it is measured during the round", text)
         polled = re.search(r"polled successfully (\d+) time\(s\)", text)
         self.assertIsNotNone(polled, text)
         self.assertGreaterEqual(int(polled.group(1)), measure.CONCURRENT_ROUNDS)
 
-    def test_the_overlap_rule_itself_refuses_a_round_no_poll_was_in_flight_for(self) -> None:
-        """The rule, tested apart from the mechanism that satisfies it."""
-        sample = measure.Sample(route="/", status=200, started_at=10.0, ended_at=11.0)
-        overlapped = measure.Round(samples=[sample], overlapping_polls=1)
-        barren = measure.Round(samples=[sample], overlapping_polls=0)
+    def test_the_launch_rule_refuses_a_round_no_poll_was_issued_for_and_allows_an_empty_flight(
+        self,
+    ) -> None:
+        """The rule, tested apart from the mechanism that satisfies it.
 
-        measure.require_overlap([overlapped, overlapped])
+        This replaces an assertion this card is changing: `require_overlap` used to refuse a round
+        with `overlapping_polls == 0`. The observer withdrew that condition in this round's rework
+        decision, because strict temporal overlap cannot be made deterministic on a fast
+        installation and a flaky proof of the scenario is worse than none. The condition is now the
+        launch, which is program order, and both halves of the change are asserted here: a round
+        with nothing in flight is fine, a round nothing launched is not.
+        """
+        sample = measure.Sample(route="/", status=200, started_at=10.0, ended_at=11.0)
+        launched = measure.Round(samples=[sample], launched_at=9.5, polls_in_flight=1)
+        alone = measure.Round(samples=[sample], launched_at=9.5, polls_in_flight=0)
+        barren = measure.Round(samples=[sample], launched_at=None, polls_in_flight=0)
+
+        measure.require_launch([launched, alone])
         with self.assertRaises(measure.Unmeasurable) as refused:
-            measure.require_overlap([overlapped, barren, overlapped])
+            measure.require_launch([launched, barren, alone])
         self.assertIn("round(s) 2", str(refused.exception))
+        self.assertIn("without a selected-session poll being issued", str(refused.exception))
 
     def test_a_poll_counts_as_in_flight_only_while_it_actually_was(self) -> None:
         """Interval overlap, from recorded windows: started before the end, ended after the start."""
@@ -616,6 +783,13 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         # One that finished before the round started does not count, nor one that began after it.
         self.assertEqual(poll.overlapping(7.0, 9.0), 0)
         self.assertEqual(poll.overlapping(0.5, 21.0), 4)
+
+        # A poll still under way has no recorded end yet, and counts from the moment it started:
+        # it cannot have finished before a window it has not finished at all.
+        poll._pending = 11.5
+        self.assertEqual(poll.overlapping(11.0, 12.0), 1)
+        # A round that had closed before that poll started still does not count it.
+        self.assertEqual(poll.overlapping(11.0, 11.4), 0)
 
     def test_a_late_404_on_the_concurrent_reads_exits_two_after_clean_warm_reads(self) -> None:
         """The reviewer's reproduction: 21 clean warm reads, then 404 on every concurrent read.
@@ -665,30 +839,36 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.assertIn("404", text)
 
 
-class CadenceAndOverlapTests(AgainstAStubDashboard):
-    """Criterion 7: the cadence and the overlap, proved together, at the real three seconds.
+class CadenceAndLaunchTests(AgainstAStubDashboard):
+    """Criterion 7: the cadence and the launch, proved together, at the real three seconds.
 
-    This is the class the four previous rounds of this work did not have, and the reason they kept
-    trading one property for the other. Each is easy alone, and on an installation that answers
-    quickly they pull against each other: a poll genuinely three seconds apart is usually *not* in
-    flight during a round that takes two milliseconds, and the two cheap ways of forcing an overlap
-    — waking the poll early, or widening the round — each destroy the other property. A test that
-    watches only one of them therefore passes while the other is broken, which is exactly what
-    happened: rounds fired back to back, the polls were 2 ms apart, every round reported an
-    overlap, and the output said "every 3 s".
+    This is the class the four previous rounds of this work did not have. The properties it holds
+    are the two that survive on any installation, and the history of this file is the history of
+    trying to hold something stronger. The cadence went first: a version that woke the poll thread
+    when a round was armed ran its rounds back to back, fired the polls 2 ms apart, and still
+    printed "every 3 s". The next version fixed that by releasing the poll and the round from one
+    barrier together — and bought a proof that is a coin toss, because with a 2 ms poll and a 3 ms
+    round whether the two HTTP requests are genuinely simultaneous is up to the scheduler. One run
+    in five refused a perfectly good measurement on it.
 
-    So both are asserted here in one run, off one report, at `POLL_INTERVAL_SECONDS` itself rather
-    than at a convenient stand-in — and twice over: once against a dashboard that answers in
-    milliseconds, which is the case the mechanism has to survive, and once against one slow enough
-    that a round outlasts an interval, which is the installation this sprint starts from.
+    So what is asserted here is what is deterministic, as the rework decision of this round set it:
+    no interval shorter than the cadence, and every round launched by a poll that fell due and was
+    issued before the round was released. How much of a round genuinely had a poll in flight is
+    measured and reported, and asserted only where it is a consequence rather than a hope — in the
+    slow case, where a poll necessarily falls due inside the round.
 
-    These cases are slow by construction. A round is released by the poll that falls due next, so
-    three rounds cost about two intervals of waiting however fast the dashboard is. That waiting is
-    the proof, not an overhead to be tuned away; every other case in this file shortens the
-    interval instead, and says so.
+    Both are taken off one report, at `POLL_INTERVAL_SECONDS` itself rather than a convenient
+    stand-in, and twice over: against a dashboard that answers in milliseconds, which is the case
+    the mechanism has to survive, and against one slow enough that a round outlasts an interval,
+    which is the installation this sprint starts from.
+
+    These cases are slow by construction. A round waits for the poll that falls due next, so three
+    rounds cost about two intervals of waiting however fast the dashboard is. That waiting is the
+    proof, not an overhead to be tuned away; every other case in this file shortens the interval
+    instead, and says so.
     """
 
-    def assert_cadence_and_overlap(self, report: object) -> None:
+    def assert_cadence_and_launch(self, report: object) -> None:
         """Both properties, off one report, with every observed interval checked individually."""
         self.assertEqual(measure.POLL_INTERVAL_SECONDS, 3.0, "the cadence under test is the /po page's own")
         intervals = report.poll_intervals  # type: ignore[attr-defined]
@@ -718,18 +898,25 @@ class CadenceAndOverlapTests(AgainstAStubDashboard):
         self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)  # type: ignore[attr-defined]
         for index, item in enumerate(report.concurrent, start=1):  # type: ignore[attr-defined]
             with self.subTest(round=index):
-                self.assertGreaterEqual(
-                    item.overlapping_polls,
-                    1,
-                    f"round {index} was measured with no session poll in flight",
+                self.assertIsNotNone(
+                    item.launched_at, f"round {index} ran without a poll being issued for it"
                 )
+                # The ordering, read back off the recorded times rather than trusted: the poll this
+                # round was released by started before the round's first request did.
+                self.assertLess(
+                    item.launched_at,
+                    item.started_at,
+                    f"round {index} started before the poll that was supposed to launch it",
+                )
+        measure.require_launch(list(report.concurrent))  # type: ignore[attr-defined]
 
-    def test_a_dashboard_answering_in_milliseconds_keeps_the_cadence_and_still_overlaps(self) -> None:
+    def test_a_dashboard_answering_in_milliseconds_keeps_the_cadence_and_the_launch(self) -> None:
         """The fast case. The mechanism has to hold here, because this is where the sprint is going.
 
-        The whole run is taken once and asserted on twice: the intervals and the overlaps come off
+        The whole run is taken once and asserted on twice: the intervals and the launches come off
         the same report, so there is no arrangement in which one of them was true at a different
-        moment than the other.
+        moment than the other. The run also has to *succeed* here with nothing in flight during a
+        round, which is the reading this stub produces and the thing the previous rule refused.
         """
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
@@ -737,18 +924,24 @@ class CadenceAndOverlapTests(AgainstAStubDashboard):
 
         slowest = max(sample.duration_ms for item in report.concurrent for sample in item.samples)
         self.assertLess(slowest, 1000.0, "this stub is meant to answer in milliseconds")
-        self.assert_cadence_and_overlap(report)
+        self.assert_cadence_and_launch(report)
         self.assertTrue(all(measurement.met for measurement in report.measurements))
+        # The poll answered before the round began, so the honest count is zero and the run stands.
+        self.assertEqual(
+            [item.polls_in_flight for item in report.concurrent], [0] * measure.CONCURRENT_ROUNDS
+        )
         text = "\n".join(measure.render(report))
         self.assertIn("the poll ran every 3 s", text)
         self.assertIn("observed spacing:", text)
+        self.assertIn("[launched by a due poll; 0 poll(s) in flight]", text)
 
     def test_a_round_that_outlasts_the_interval_keeps_both_properties_too(self) -> None:
         """The slow case: a round longer than one interval, which is where this sprint starts.
 
-        A poll falls due in the middle of every round here, so the overlap is two rather than the
-        one the releasing poll provides — and the spacing is still the cadence, because a poll's
-        schedule is anchored on the previous poll rather than on whatever the dashboard is doing.
+        A poll necessarily falls due in the middle of every round here, so this is where an
+        in-flight count above zero is a consequence rather than a hope, and it is asserted — and
+        the spacing is still the cadence, because a poll's schedule is anchored on the previous
+        poll rather than on whatever the dashboard is doing.
         """
         warm = 1
         # GETs on `/`: one warm-up, `warm` timed ones, then the rounds. The rounds are the slow
@@ -766,11 +959,11 @@ class CadenceAndOverlapTests(AgainstAStubDashboard):
                     "this round was supposed to outlast one poll interval",
                 )
                 self.assertGreaterEqual(
-                    item.overlapping_polls,
-                    2,
-                    "a poll fell due inside this round, so it overlapped the releasing poll and that one",
+                    item.polls_in_flight,
+                    1,
+                    "a poll fell due inside this round, so one was genuinely in flight during it",
                 )
-        self.assert_cadence_and_overlap(report)
+        self.assert_cadence_and_launch(report)
         self.assertIn("the poll ran every 3 s", "\n".join(measure.render(report)))
 
     def test_a_run_whose_polls_were_faster_than_the_cadence_is_refused_by_the_command(self) -> None:

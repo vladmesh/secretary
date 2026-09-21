@@ -479,9 +479,10 @@ python3 scripts/measure_dashboard.py --json     # the same facts, as one documen
 
 Run it from a checkout, on the host the installation runs on, as the runtime user. It reads only,
 and only from the installation named by `--base-url`: three dashboard pages and, to reproduce what
-an operator's browser is doing, the `/po` overview and one session's JSON. It makes no POST, starts
-no head, and follows no redirect — a 3xx from any route ends the run instead, because following one
-would time a different installation under this route's name and would hand it this installation's
+an operator's browser is doing, the `/po` overview and one session's JSON. It makes no POST and
+starts no head. It also cannot be sent anywhere else: its one opener follows no redirect — a 3xx
+from any route ends the run instead — and reads no `http_proxy`/`https_proxy` variable, because
+either would time a different installation under this route's name and hand it this installation's
 PO cookie.
 
 It prints, with the Definition of Done threshold beside each number and whether that number meets it:
@@ -501,6 +502,12 @@ It prints, with the Definition of Done threshold beside each number and whether 
   breaches that in one round of three has not met it. Threshold: 2.0 s for each request of the
   worst round.
 
+The session it polls is not just any open one. The `/po` session page installs its three-second
+poll only while a turn is running and clears it when the turn ends, so the command picks the first
+session the overview lists **whose own JSON reports `running: true`**, read at the route that would
+be polled. An installation where nothing is running is one where no page is polling, and the
+concurrent half cannot be reproduced on it at all — see the exit statuses below.
+
 ### The cadence, and how a round is scheduled against it
 
 The concurrent number is only the DoD's number if the four requests ran *while* a session was being
@@ -512,16 +519,26 @@ refuses to judge anything if either of them says no.
   wait. The output prints the spacing that actually occurred (`observed spacing: 3.000 s min, …`)
   and says `the poll ran every 3 s` only where those numbers show it. Polls observed closer
   together than the cadence mean a heavier workload than the DoD names, so the run is refused.
-- **Every round overlaps a poll.** A round is released by a poll that has fallen **due**: the four
-  requests wait for the next poll on its own cadence and start at the moment it is issued. So a
-  round costs up to three seconds of waiting before its first clock starts — that wait is in no
-  number — and the overlap is produced without pulling a poll forward or stretching a round. Each
-  round's line carries `[N poll(s) in flight]`, counted from the recorded start and end of every
-  poll, and a round no poll overlapped is refused.
+- **Every round is launched by a poll that fell due.** The four requests wait for the next poll on
+  the cadence; that poll is issued, and only then are they released. A round therefore costs up to
+  three seconds of waiting before its first clock starts — that wait is in no number — and the
+  ordering holds at any installation speed, because it is the order one thread does two things in.
+  A round that no poll was issued for is refused.
 
-On a fast installation a round takes milliseconds, so the poll it overlaps is the one that released
-it; on a slow one a further poll falls due inside the round and the count rises. Both are the same
-scenario.
+Each round's line reports both facts, and only the first of them is a condition:
+
+```
+round 2: 21772, 22149, 22041, 21642 ms [launched by a due poll; 8 poll(s) in flight]
+```
+
+`launched by a due poll` is the scenario. The **in-flight count** beside it is a measurement of
+what that produced — how many session polls were genuinely running during the round, from their
+recorded start and end times. On a slow installation further polls fall due inside the round and
+the count rises; on a fast one the poll has answered before the four requests start and the count
+is **0**, which is an accurate reading and not a failure. It is printed so the two can be compared
+over time, never required: requiring it would make the command refuse perfectly good measurements
+on a fast dashboard, because whether a two-millisecond poll and a three-millisecond round genuinely
+overlap is up to the scheduler.
 
 ### What it refuses to report
 
@@ -536,13 +553,17 @@ the scenario the DoD names.** So the exit statuses are
 
 Everything else includes: the installation is unreachable; any request on any route answers
 non-2xx, including a 3xx (a missing route, a refusal, a redirect, or the transport's contained 500
-under the load being measured); the data directory or the PO token cannot be resolved or read; the
-polls did not run on the three-second cadence; a round ran with no poll overlapping it; and the
-installation has **no open PO session**. That last one is not a fault of the installation — `/po`
-answered and simply lists nothing — but the concurrent half of the DoD cannot be reproduced without
-it, and measuring four requests against an idle dashboard instead would be a different scenario
-under the same heading. In every case the command prints the numbers it did take, marks every one
-of them `NOT JUDGED`, says plainly what could not be measured, and exits 2.
+under the load being measured); the data directory or the PO token cannot be resolved or read; a
+session's JSON cannot be read for whether it is running; the polls did not run on the three-second
+cadence; a round ran with no poll issued for it; the installation has **no open PO session**; and
+the installation has open sessions but **no turn running in any of them**.
+
+Those last two are not faults of the installation — `/po` answered, and simply lists nothing, or
+lists only sessions no page is polling. The concurrent half of the DoD cannot be reproduced without
+a running session, and polling an idle one instead would put a request no page makes beside the
+four and report it under the same heading. In every case the command prints the numbers it did
+take, marks every one of them `NOT JUDGED`, says in one line what could not be measured, and exits
+2. For the two PO cases, run it again while a PO turn is running.
 
 The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
 command as the runtime user. The data directory is resolved the way the product resolves it:
