@@ -13,11 +13,14 @@ beside it. And no unfiltered audit read passes through `sprint_list`, whichever 
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import Iterator
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary.tasks import TaskAudit
+from secretary.sprints import SPRINT_BOARD_NAME
+from secretary.tasks import TaskAudit, TaskError
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
@@ -44,7 +47,10 @@ def _resume(recorded_at: str, card: str) -> dict[str, Any]:
 
 
 class _NarrowOnlyAudit:
-    """An audit owner that refuses to be read whole and counts every row it hands out."""
+    """An audit owner that refuses to be read whole and counts every row it hands out.
+
+    An empty set in `reads` is the bounded probe: the store is asked, and reads no event.
+    """
 
     def __init__(self, inner: TaskAudit) -> None:
         self.inner = inner
@@ -55,7 +61,7 @@ class _NarrowOnlyAudit:
         references = kwargs.get("references")
         if references is None and not reference:
             raise AssertionError("the sprint listing read the committed audit unfiltered")
-        self.reads.append(set(references or {reference}))
+        self.reads.append(set(references) if references is not None else {reference})
         events = self.inner.events(reference, **kwargs)
         self.rows += len(events)
         return events
@@ -175,6 +181,48 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
         with mock.patch.object(sprint_reads_module, "task_audit_for", return_value=audit):
             return self.reads().sprint_list(statuses=statuses), audit
 
+    # -- the faults ----------------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _board_refuses(self) -> Iterator[None]:
+        original = self.board.call
+        board = self.board.projects[SPRINT_BOARD_NAME]
+
+        def refuse(method: str, **params: Any) -> Any:
+            if method == "getAllTasks" and params.get("project_id") == board:
+                raise TaskError("backend_error", "the sprint board is unavailable", 1)
+            return original(method, **params)
+
+        self.board.call = refuse  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            self.board.call = original  # type: ignore[method-assign]
+
+    @contextlib.contextmanager
+    def _audit_refuses(self) -> Iterator[None]:
+        """The audit owner raising on every read, the way the protocol suites refuse the journal."""
+        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+            yield
+
+    @contextlib.contextmanager
+    def _journal_unopenable(self) -> Iterator[None]:
+        """A journal the store itself cannot open: no patched method, the real open fails."""
+        path = self.data_dir / "board" / "events.ndjson"
+        kept = path.rename(path.with_name("events.kept"))
+        path.mkdir()
+        try:
+            yield
+        finally:
+            path.rmdir()
+            kept.rename(path)
+
+    def _faults(self, *names: str) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        for name in names:
+            stack.enter_context(getattr(self, name)())
+        return stack
+
     def _entry(self, document: dict[str, Any], reference: str) -> dict[str, Any]:
         return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
 
@@ -204,15 +252,54 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
                 _document, audit = self._narrow(statuses)
                 self.assertEqual(audit.reads, [expected])
 
-    def test_the_archive_view_reads_no_journal_at_all(self) -> None:
-        """Criterion 1: closed and stopped sprints are judged against their own record."""
+    def test_the_archive_view_reads_no_event_and_only_probes_the_store(self) -> None:
+        """Criterion 1 as the rework refines it: the mark is backed by a probe, never by a read."""
         for statuses in (["closed", "stopped"], ["closed"], ["stopped"]):
             with self.subTest(statuses=statuses):
                 document, audit = self._narrow(statuses)
-                self.assertEqual(audit.reads, [])
+                self.assertEqual(audit.reads, [set()])
                 self.assertEqual(audit.rows, 0)
                 self.assertTrue(document["sprints"]["items"])
                 self.assertEqual(document["journal"]["source"]["state"], "available")
+
+    def test_the_archive_view_over_an_unavailable_audit_says_so_as_before(self) -> None:
+        """BLOCKER-archive-document-drift: the probe fails where the whole read failed."""
+        for fault in ("_audit_refuses", "_journal_unopenable"):
+            for statuses in (["closed", "stopped"], ["closed"]):
+                with self.subTest(fault=fault, statuses=statuses), self._faults(fault):
+                    narrowed, audit = self._narrow(statuses)
+                    self.assertEqual(audit.reads, [set()])
+                    self.assertEqual(narrowed["journal"]["source"]["state"], "unavailable")
+                    self.assertEqual(narrowed, self._whole_read(statuses))
+
+    def test_a_refused_board_probes_the_audit_and_never_reads_it_whole(self) -> None:
+        """BLOCKER-board-refusal-whole-audit: a large audit, no rows, no unfiltered read."""
+        self._unrelated_history(200)
+        for statuses in VIEWS:
+            with self.subTest(statuses=statuses), self._faults("_board_refuses"):
+                narrowed, audit = self._narrow(statuses)
+                self.assertEqual(audit.reads, [set()])
+                self.assertEqual(audit.rows, 0)
+                self.assertIsNone(narrowed["sprints"]["items"])
+                old = self._whole_read(statuses)
+                self.assertEqual(narrowed["journal"], old["journal"])
+                self.assertEqual(narrowed, old)
+
+    def test_the_document_is_the_whole_read_s_document_when_sources_refuse(self) -> None:
+        """Criterion 2 over the source failures, not only over a readable audit."""
+        for faults in (
+            ("_audit_refuses",),
+            ("_journal_unopenable",),
+            ("_board_refuses",),
+            ("_board_refuses", "_audit_refuses"),
+            ("_board_refuses", "_journal_unopenable"),
+        ):
+            for statuses in VIEWS:
+                with self.subTest(faults=faults, statuses=statuses), self._faults(*faults):
+                    narrowed, _audit = self._narrow(statuses)
+                    self.assertEqual(narrowed, self._whole_read(statuses))
+                    if "_board_refuses" not in faults:
+                        self.assertEqual(narrowed["journal"]["source"]["state"], "unavailable")
 
     def test_the_rows_touched_follow_the_listing_and_not_the_history(self) -> None:
         """Criterion 3: ten times the unrelated history, the same rows read."""
@@ -240,3 +327,28 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
                 document, audit = self._narrow(statuses)
                 self.assertEqual(document["journal"]["source"]["state"], "available")
                 self.assertTrue(audit.reads)
+
+
+class FileJournalProbeTests(SprintProtocolFixture):
+    """On the file journal an empty slice opens the file and reads none of it."""
+
+    def test_the_probe_opens_the_journal_and_decodes_no_line(self) -> None:
+        journal = self.data_dir / "board" / "events.ndjson"
+        journal.write_text(
+            "".join(json.dumps({"ref": f"secretary-{index}", "kind": "created"}) + "\n" for index in range(500)),
+            encoding="utf-8",
+        )
+        audit = TaskAudit(self.data_dir)
+        with mock.patch("secretary.tasks.json.loads", side_effect=AssertionError("a line was decoded")):
+            self.assertEqual(audit.events(references=()), [])
+
+    def test_the_probe_fails_where_a_read_fails_and_not_where_it_does_not(self) -> None:
+        journal = self.data_dir / "board" / "events.ndjson"
+        audit = TaskAudit(self.data_dir)
+        self.assertFalse(journal.exists())
+        self.assertEqual(audit.events(references=()), audit.events())
+        journal.mkdir()
+        with self.assertRaises(IsADirectoryError):
+            audit.events()
+        with self.assertRaises(IsADirectoryError):
+            audit.events(references=())

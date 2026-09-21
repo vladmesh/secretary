@@ -177,6 +177,7 @@ class _Case(unittest.TestCase):
             "task_routing": audit.events(TASK, kind="routing"),
             "created": audit.events(kind="created"),
             "sprint": audit.events(references={SPRINT, *CARDS}),
+            "probe": audit.events(references=()),
             "window": audit.events(since=window),
             "first_page": audit.events_page(end=None, limit=5),
             "older_page": audit.events_page(end=9, limit=5),
@@ -261,6 +262,7 @@ class SliceCostTests(_Case):
 
         capture("sprint", lambda: audit.events(references={SPRINT, *CARDS}))
         capture("task", lambda: audit.events(TASK))
+        capture("probe", lambda: self.assertEqual(audit.events(references=()), []))
         return {name: self.touched(client, *issued[name]) for name in issued}
 
     def test_one_sprint_and_one_task_touch_the_same_rows_over_ten_times_the_history(self) -> None:
@@ -269,6 +271,26 @@ class SliceCostTests(_Case):
 
         self.assertEqual(small, large, f"rows touched grew with unrelated history: {small} -> {large}")
         self.assertEqual(large["task"], len(_oracle_events(self.store(0)[0], TASK)))
+
+    def test_an_empty_slice_is_a_bounded_probe_that_still_asks_the_store(self) -> None:
+        """secretary-1660: no rows, one statement, and nothing read from `requests` at any size."""
+        client, audit = self.store(self.N)
+        issued: list[str] = []
+        original = client._query
+
+        def recording(sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+            issued.append(sql)
+            return original(sql, params)
+
+        with mock.patch.object(client, "_query", recording):
+            self.assertEqual(audit.events(references=()), [])
+        self.assertEqual(len(issued), 1, "an empty slice must still reach the store")
+        self.assertEqual(self.measure(10 * self.N)["probe"], 0)
+        with (
+            mock.patch.object(client, "_query", side_effect=OSError("the store is gone")),
+            self.assertRaises(OSError),
+        ):
+            audit.events(references=())
 
 
 class PageSnapshotTests(unittest.TestCase):

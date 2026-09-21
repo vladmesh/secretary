@@ -1449,10 +1449,9 @@ class SprintReadLayer(ProtocolBoundary):
         journal is read as a slice rather than whole (secretary-1660): only the rows the filter keeps
         are judged, and of those only a non-terminal sprint consults the journal at all -- its own
         ref, its linked cards and its current card (`_journal_references`). A closed or stopped
-        sprint is judged against its own record, so listing only those reads no journal. A sprint
-        board that refused leaves nothing to narrow by, and then the journal is read whole as before.
-        The other documents read it whole, because a comment's delivery is placed by its position in
-        the whole committed stream.
+        sprint is judged against its own record, and a sprint board that refused leaves no rows to
+        judge; either way the slice is empty and reads no event. The other documents read the journal
+        whole, because a comment's delivery is placed by its position in the whole committed stream.
 
         `SprintReader.list(create=False)` and deliberately not `show`: `show` calls
         `ensure_sprint_board`, which creates the sprint board when the installation has none, and a
@@ -1475,9 +1474,9 @@ class SprintReadLayer(ProtocolBoundary):
             data_dir,
             client=client,
             now=now,
-            # With no rows there is nothing to narrow by, and the refusal the document then carries
-            # is the whole read's, exactly as before the slice existed.
-            references=None if listing is None or rows is None else _journal_references(rows, linked),
+            # With no rows there is nothing to narrow by and no verdict needs an event, so the slice
+            # is empty: the journal's mark then comes from the store's bounded probe.
+            references=None if listing is None else _journal_references(rows or [], linked),
         )
         try:
             if rows is None:
@@ -1569,7 +1568,9 @@ class SprintReadLayer(ProtocolBoundary):
 
         With `references` only those refs' events are read, filtered by the store itself
         (`events(references=...)`), so what the read costs follows the slice and not the history
-        beside it. An empty slice opens no store at all: nothing in the document needs the journal.
+        beside it. An empty slice reads no event and is still asked of the store, whose bounded probe
+        fails where a read would have: the journal's mark is always backed by an attempt through the
+        same audit owner, and never by a whole read the document does not need.
 
         Which store that is, is the card client's own answer (`task_audit_for`): `requests` on the
         PostgreSQL backend and `board/events.ndjson` on Kanboard (`docs/BOARD_STORE.md` §7.3). The
@@ -1577,12 +1578,8 @@ class SprintReadLayer(ProtocolBoundary):
         at when this source refuses on the backend that has one.
         """
         try:
-            if references is None:
-                events = task_audit_for(client, data_dir).events()
-            elif references:
-                events = task_audit_for(client, data_dir).events(references=references)
-            else:
-                events = []
+            audit = task_audit_for(client, data_dir)
+            events = audit.events() if references is None else audit.events(references=references)
         except _SOURCE_FAILURES as exc:
             return Reading(
                 SOURCE_JOURNAL,

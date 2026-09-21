@@ -135,9 +135,14 @@ class SqlTaskAudit:
         filter is served by an index of `0012_request_read_indexes`, so what a read costs follows
         the slice it asks for and not the history beside it. On a store the revision has not reached
         yet the answer is the same and only the plan differs.
+
+        An empty `references` answers no rows and still asks the store, with a statement that reads
+        none: a caller whose document needs no events establishes that the audit answers at constant
+        cost, and fails exactly where a read would have (secretary-1660).
         """
         clauses, params = self._committed_filter(reference, kind=kind, references=references, since=since)
         if clauses is None:
+            self._query("SELECT 1 FROM requests WHERE false")
             return []
         rows = self._query(
             f"SELECT intent FROM requests WHERE {' AND '.join(clauses)} ORDER BY {_CLAIM_ORDER}",
