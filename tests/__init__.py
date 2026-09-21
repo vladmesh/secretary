@@ -98,7 +98,9 @@ _LEAK_PREFIXES = ("secretary-", "orca-")
 # per-terminal prompt lock directory (`agent_prompt_transport.terminal_prompt_lock`). A lock file
 # has to outlive its holder, so nothing removes it; here it lives in the suite root and goes with it.
 _PERSISTENT_BY_DESIGN = frozenset({"secretary-agent-prompt-locks"})
-_SUITE_TMP = Path(tempfile.mkdtemp(prefix="secretary-tests-tmp."))
+# Short on purpose: it lengthens every temporary path in the run, and real-head tests put a Unix
+# socket (100-byte address limit) about 70 bytes deep under the temporary directory.
+_SUITE_TMP = Path(tempfile.mkdtemp(prefix="secretary-t"))
 _SUITE_PID = os.getpid()
 os.environ["TMPDIR"] = str(_SUITE_TMP)
 tempfile.tempdir = str(_SUITE_TMP)
