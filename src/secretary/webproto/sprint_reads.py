@@ -1226,7 +1226,9 @@ class SprintReadLayer(ProtocolBoundary):
         now = self._clock()
         wanted = _wanted_statuses(statuses)
         report, installation = self._installation(now=now)
-        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        read = self._read_once(
+            report, installation, self.data_dir(report), now=now, listing=frozenset(wanted)
+        )
 
         def items() -> list[dict[str, Any]]:
             rows, views = read.value(SOURCE_SPRINTS)
@@ -1421,7 +1423,13 @@ class SprintReadLayer(ProtocolBoundary):
     # -- the sources -------------------------------------------------------------------------
 
     def _read_once(
-        self, report: InstanceReport | None, installation: Reading, data_dir: Path, *, now: float
+        self,
+        report: InstanceReport | None,
+        installation: Reading,
+        data_dir: Path,
+        *,
+        now: float,
+        listing: frozenset[str] | None = None,
     ) -> SourceSet:
         """Every source a sprint document is built from, read once each.
 
@@ -1437,6 +1445,15 @@ class SprintReadLayer(ProtocolBoundary):
         inside `status_views` for exactly that reason: sharing a `try` with the board pass made an
         unreadable `board/events.ndjson` look like a sprint board that had failed.
 
+        `listing` is the sprint listing's status filter (empty for every status), and with it the
+        journal is read as a slice rather than whole (secretary-1660): only the rows the filter keeps
+        are judged, and of those only a non-terminal sprint consults the journal at all -- its own
+        ref, its linked cards and its current card (`_journal_references`). A closed or stopped
+        sprint is judged against its own record, so listing only those reads no journal. A sprint
+        board that refused leaves nothing to narrow by, and then the journal is read whole as before.
+        The other documents read it whole, because a comment's delivery is placed by its position in
+        the whole committed stream.
+
         `SprintReader.list(create=False)` and deliberately not `show`: `show` calls
         `ensure_sprint_board`, which creates the sprint board when the installation has none, and a
         read of this layer creates nothing. `linked_cards` reads the Pipeline board through
@@ -1444,19 +1461,34 @@ class SprintReadLayer(ProtocolBoundary):
         """
         client = self._client()
         liveness = self._production(data_dir, now=now)
-        journal = self._journal(data_dir, client=client, now=now)
         reader = SprintReader(client, data_dir=data_dir, thresholds=_thresholds(report))
         cards = self._linked_cards(reader, data_dir, now=now)
+        linked = cards.value if cards.answered else {}
         production: _Production | None = liveness.value if liveness.answered else None
+        rows: list[dict[str, Any]] | None = None
+        refused: Exception | None = None
         try:
-            rows = reader.list(create=False)
+            rows = reader.list(statuses=set(listing or ()), create=False)
+        except _SOURCE_FAILURES as exc:
+            refused = exc
+        journal = self._journal(
+            data_dir,
+            client=client,
+            now=now,
+            # With no rows there is nothing to narrow by, and the refusal the document then carries
+            # is the whole read's, exactly as before the slice existed.
+            references=None if listing is None or rows is None else _journal_references(rows, linked),
+        )
+        try:
+            if rows is None:
+                raise refused or LookupError("the sprint board answered nothing")
             # Every rule about what a sprint's status view is stays in `SprintReader`; this call
             # re-decides none of them, and the observer rows and the headless episodes it takes are
             # the ones `secretary sprint status` already hands it. The journal it would otherwise
             # walk is handed to it, so nothing it does can fail for the journal's reasons.
             views = reader.status_views(
                 rows,
-                cards.value if cards.answered else {},
+                linked,
                 observers=production.observers if production is not None else {},
                 headless=headless_cards(production.payload if production is not None else {}),
                 audit=audit_traversal(journal.value if journal.answered else []),
@@ -1522,11 +1554,22 @@ class SprintReadLayer(ProtocolBoundary):
             )
         return Reading(SOURCE_LIVENESS, sources.available(now), production)
 
-    def _journal(self, data_dir: Path, *, client: Any, now: float) -> Reading:
-        """The committed audit, walked once for the whole document.
+    def _journal(
+        self,
+        data_dir: Path,
+        *,
+        client: Any,
+        now: float,
+        references: set[str] | None = None,
+    ) -> Reading:
+        """The committed audit, walked once for the whole document -- or the slice of it asked for.
 
         A source of its own: it is what the resume-freshness verdict is judged against, it is not
         the sprint board, and an installation can lose one without losing the other.
+
+        With `references` only those refs' events are read, filtered by the store itself
+        (`events(references=...)`), so what the read costs follows the slice and not the history
+        beside it. An empty slice opens no store at all: nothing in the document needs the journal.
 
         Which store that is, is the card client's own answer (`task_audit_for`): `requests` on the
         PostgreSQL backend and `board/events.ndjson` on Kanboard (`docs/BOARD_STORE.md` §7.3). The
@@ -1534,7 +1577,12 @@ class SprintReadLayer(ProtocolBoundary):
         at when this source refuses on the backend that has one.
         """
         try:
-            events = task_audit_for(client, data_dir).events()
+            if references is None:
+                events = task_audit_for(client, data_dir).events()
+            elif references:
+                events = task_audit_for(client, data_dir).events(references=references)
+            else:
+                events = []
         except _SOURCE_FAILURES as exc:
             return Reading(
                 SOURCE_JOURNAL,
@@ -1779,6 +1827,33 @@ def _card_of(
 
 def _said(settled: tuple[str, str]) -> dict[str, Any]:
     return {"state": settled[0], "reason": settled[1]}
+
+
+def _journal_references(
+    rows: list[dict[str, Any]], linked: dict[str, list[dict[str, Any]]]
+) -> set[str]:
+    """The refs whose committed events the sections of these sprint rows can consult.
+
+    Only a non-terminal sprint consults the journal: its resume freshness is judged against the
+    events of its own ref and its linked cards (`SprintReader._resume_freshness`, over the same
+    `linked` it is handed), and its current card's last transition is read by that card's ref
+    (`_last_transition`). A closed or stopped sprint is judged against its own record, and its
+    current card is where it ended, so it adds nothing.
+    """
+    references: set[str] = set()
+    for row in rows:
+        if str(row.get("status") or "") in SPRINT_TERMINAL_STATUSES:
+            continue
+        reference = str(row.get("ref") or "")
+        references.add(reference)
+        references.add(str(row.get("current_task") or ""))
+        references.update(
+            str(card.get("ref") or "")
+            for card in linked.get(reference) or []
+            if isinstance(card, dict)
+        )
+    references.discard("")
+    return references
 
 
 def _wanted_statuses(statuses: Sequence[str] | None) -> set[str]:
