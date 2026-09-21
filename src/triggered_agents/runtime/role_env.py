@@ -64,6 +64,12 @@ def runtime_pythonpath() -> str:
     return str(root / "src")
 
 
+# The process-wide board selector, spelled here because this package may not import `secretary`
+# (`tests/test_architecture.py`).  The name and its two values are the product's, and the launch
+# boundary only reads them; `secretary.board.backend` remains the one place a backend is chosen.
+CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
+POSTGRES_BACKEND = "postgres"
+
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
@@ -76,7 +82,7 @@ NONSECRET_ENV = (
     # The process-wide board selector is ordinary routing configuration.  Every
     # role must receive the same value as the dispatcher and web units or a
     # cutover would create two simultaneous stores.
-    "SECRETARY_CARD_BACKEND",
+    CARD_BACKEND_ENV,
 )
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
 # file, which is itself a file inside one installation.
@@ -132,6 +138,21 @@ SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
     re.IGNORECASE,
 )
+
+
+def board_transport_required(environ: dict[str, str]) -> bool:
+    """Whether a role's launch must still prove a Kanboard JSON-RPC tuple.
+
+    The tuple is the Kanboard backend's transport and nothing else's: an
+    installation the switch points at the PostgreSQL store reaches its board
+    over `board-store.env`, and refusing to exec a head there for a missing
+    `board-transport.env` fences the whole pipeline on a file that backend never
+    reads.  Only an explicit `postgres` lifts the requirement.  An unset or
+    unknown selector keeps it, because a launch boundary is not where a missing
+    selector gets to mean PostgreSQL -- the product's own switch refuses it, and
+    with a reason.
+    """
+    return str(environ.get(CARD_BACKEND_ENV, "") or "").strip() != POSTGRES_BACKEND
 
 
 def is_sensitive_env_name(name: str) -> bool:
@@ -349,7 +370,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         if ns.role in RUFF_ROLES and not ns.workspace:
             raise RoleEnvError(f"role {ns.role!r} requires a workspace-owned Python environment")
         env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
-        if ns.role in BOARD_TRANSPORT_ROLES:
+        if ns.role in BOARD_TRANSPORT_ROLES and board_transport_required(env):
             from .board_transport import BoardTransportError, resolve_for_environ
 
             try:
