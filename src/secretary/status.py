@@ -228,7 +228,13 @@ def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[st
 
 
 def _schedules(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
-    return [row for row in _units(expected, collected, offline=offline) if row["kind"] == "timer"]
+    """Timers, each with systemd's last trigger: the evidence that the schedule actually ran."""
+    triggers = collected.inventory.timer_triggers
+    return [
+        {**row, "last_trigger": None if offline else triggers.get(row["name"])}
+        for row in _units(expected, collected, offline=offline)
+        if row["kind"] == "timer"
+    ]
 
 
 def _external_runtime(expected, collected: CollectResult, *, offline: bool) -> dict[str, Any]:

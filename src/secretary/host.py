@@ -501,6 +501,9 @@ class HostInventory:
     orca_repos: set[str] = field(default_factory=set)
     unit_states: dict[str, tuple[str, str]] = field(default_factory=dict)
     orca_repo_paths: dict[str, str] = field(default_factory=dict)
+    # systemd's LastTriggerUSec per probed timer ("n/a" when it never fired): the evidence that a
+    # schedule ran, which `enabled`/`active` of a waiting timer cannot give.
+    timer_triggers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -771,17 +774,40 @@ class FixtureHostSource(HostSource):
         projects, project_error = self._projects(expected)
         units, unit_error = self._lines("units.txt")
         states, state_error = self._unit_states()
+        triggers, trigger_error = self._timer_triggers()
         repos, repo_error = self._lines("orca-repos.txt")
         errors = {
             kind: reason
             for kind, reason in (
                 ("projects", project_error),
-                ("units", unit_error or state_error),
+                ("units", unit_error or state_error or trigger_error),
                 ("orca repos", repo_error),
             )
             if reason
         }
-        return CollectResult(HostInventory(projects, units, repos, states), errors)
+        return CollectResult(
+            HostInventory(projects, units, repos, states, timer_triggers=triggers), errors
+        )
+
+    def _timer_triggers(self) -> tuple[dict[str, str], str]:
+        """Optional fixture last triggers: ``timer LastTriggerUSec`` per line (the value has spaces)."""
+        try:
+            path = self.root / "timer-triggers.txt"
+            if not path.is_file():
+                return {}, ""
+            triggers: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                name, _, value = line.strip().partition(" ")
+                if not name or name.startswith("#"):
+                    continue
+                if not value.strip():
+                    return {}, "fixture timer triggers are invalid"
+                triggers[name] = value.strip()
+            return triggers, ""
+        except UnicodeError:
+            return {}, "fixture timer triggers are not valid UTF-8"
+        except OSError:
+            return {}, "fixture timer triggers are unreadable"
 
     def _unit_states(self) -> tuple[dict[str, tuple[str, str]], str]:
         """Optional fixture runtime states: ``unit enabled active`` per line."""
@@ -849,12 +875,17 @@ class LiveHostSource(HostSource):
                 inventory.orca_repo_paths,
             )
 
-        units, unit_states, reason = self._units(expected)
+        units, unit_states, triggers, reason = self._units(expected)
         if reason:
             errors["units"] = reason
         else:
             inventory = HostInventory(
-                inventory.projects, units, inventory.orca_repos, unit_states, inventory.orca_repo_paths
+                inventory.projects,
+                units,
+                inventory.orca_repos,
+                unit_states,
+                inventory.orca_repo_paths,
+                timer_triggers=triggers,
             )
 
         repos, repo_paths, reason = self._orca_repos()
@@ -862,7 +893,12 @@ class LiveHostSource(HostSource):
             errors["orca repos"] = reason
         else:
             inventory = HostInventory(
-                inventory.projects, inventory.units, repos, inventory.unit_states, repo_paths
+                inventory.projects,
+                inventory.units,
+                repos,
+                inventory.unit_states,
+                repo_paths,
+                timer_triggers=inventory.timer_triggers,
             )
 
         return CollectResult(inventory=inventory, errors=errors)
@@ -894,7 +930,9 @@ class LiveHostSource(HostSource):
         except OSError:
             return set(), "host.projects_root is not readable"
 
-    def _units(self, expected: Expectations) -> tuple[set[str], dict[str, tuple[str, str]], str]:
+    def _units(
+        self, expected: Expectations
+    ) -> tuple[set[str], dict[str, tuple[str, str]], dict[str, str], str]:
         prefix = expected.unit_prefix
         if not prefix:
             # unmanaged-on-host can only be computed by enumerating a namespace.
@@ -902,12 +940,12 @@ class LiveHostSource(HostSource):
             # ones and silently miss every undescribed host unit, so we refuse
             # to emit a diff that cannot include unmanaged-on-host.
             if expected.units:
-                return set(), {}, "host.unit_prefix is required to compute unmanaged-on-host"
-            return set(), {}, ""
+                return set(), {}, {}, "host.unit_prefix is required to compute unmanaged-on-host"
+            return set(), {}, {}, ""
         result = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
         reason = self._systemctl_error(result)
         if reason:
-            return set(), {}, reason
+            return set(), {}, {}, reason
         names: set[str] = set()
         for line in result.stdout.splitlines():
             fields = line.split()
@@ -915,17 +953,23 @@ class LiveHostSource(HostSource):
             if token.startswith(prefix):
                 names.add(token)
         states: dict[str, tuple[str, str]] = {}
+        triggers: dict[str, str] = {}
         for name in expected.unit_runtime:
             if name not in names and name != expected.external_runtime:
                 continue
             enabled = self._run(["systemctl", "is-enabled", name])
             active = self._run(["systemctl", "is-active", name])
             if not enabled.ran or not active.ran:
-                return set(), {}, enabled.reason or active.reason
+                return set(), {}, {}, enabled.reason or active.reason
             if enabled.stderr.strip() or active.stderr.strip():
-                return set(), {}, "systemctl runtime status unavailable"
+                return set(), {}, {}, "systemctl runtime status unavailable"
             states[name] = (enabled.stdout.strip() or "disabled", active.stdout.strip() or "inactive")
-        return names, states, ""
+            if name.endswith(".timer"):
+                # Best effort: a missing trigger reads as unknown, never as an inventory failure.
+                shown = self._run(["systemctl", "show", "--property=LastTriggerUSec", "--value", name])
+                if shown.ran and shown.returncode == 0 and (value := shown.stdout.strip()):
+                    triggers[name] = value
+        return names, states, triggers, ""
 
     @staticmethod
     def _systemctl_error(result: _CmdResult) -> str:

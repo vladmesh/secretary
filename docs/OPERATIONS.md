@@ -2120,7 +2120,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries without touching provider login state |
 | `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
-| `instance-packing` | keep the instance repository's local Git packing controls bounded |
+| `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `secretary-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |

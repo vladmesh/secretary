@@ -351,6 +351,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_restore_subcommands(subparsers)
 
+    maintenance = subparsers.add_parser(
+        "instance-maintenance",
+        help="pack the instance repository outside any tick (run by its timer)",
+    )
+    _add_instance(maintenance, help="path to an instance dir or instance.yaml")
+    maintenance.set_defaults(handler=run_instance_maintenance)
+
     project = subparsers.add_parser("project")
     project_subcommands = project.add_subparsers(dest="project_command")
     project_add = project_subcommands.add_parser("add")
@@ -1710,6 +1717,19 @@ def run_backup_create(args: argparse.Namespace) -> int:
         print(f"kind: {result.manifest.get('backup_kind', 'full')}")
         print(f"version: {result.manifest['version']}")
     print("status: ok")
+    return 0
+
+
+def run_instance_maintenance(args: argparse.Namespace) -> int:
+    from secretary import instance_maintenance
+    from triggered_agents.runtime.paths import instance_dir
+
+    try:
+        result = instance_maintenance.run(instance_dir(args.instance))
+    except state_repo.StateRepoError as exc:
+        print(json.dumps({"status": "failed", "error": str(exc)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "ok", **result}, sort_keys=True))
     return 0
 
 
