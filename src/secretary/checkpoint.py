@@ -3,7 +3,9 @@
 Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers", "Validation gate",
 "Failure and divergence", "Observability". The writer regenerates the normalized board and runs
 exports, validates the snapshot, and commits `state/board` and `state/runs` into the private
-repo. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
+repo. The board is validated flat in staging and published in the split layout of
+`secretary.board.checkpoint_layout`, so a commit carries only the records and log segments that
+changed. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
 remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
 checkpoint writes cannot overlap a green-card publish against the same checkout.
 
@@ -43,6 +45,13 @@ from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from secretary.board.backend import CARD, board_client
+from secretary.board.checkpoint_layout import (
+    FLAT,
+    CheckpointBoard,
+    CheckpointLayoutError,
+    open_checkpoint_board,
+    publish_split_board,
+)
 from secretary.board.models import Event
 from secretary.data import (
     PIPELINE_STATE_DIR,
@@ -126,6 +135,8 @@ class AnalyticsCheckpoint:
 
     checkpoint_id: str
     directory: Path
+    #: The reader every row read of this cut goes through, in the layout that wrote it.
+    board: CheckpointBoard
 
 
 def _write_analytics_manifest(directory: Path) -> None:
@@ -173,6 +184,10 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
     if not root.is_dir():
         _analytics_failure(root, "analytics checkpoint directory is missing")
 
+    try:
+        board = open_checkpoint_board(root)
+    except CheckpointLayoutError as exc:
+        raise AnalyticsManifestError(str(exc)) from None
     manifest_path = root / ANALYTICS_MANIFEST
     manifest = _read_analytics_json(manifest_path)
     expected_top_level = {"schema", "version", "checkpoint_id", "files"}
@@ -186,6 +201,8 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
     if not _is_int(version) or version not in {1, ANALYTICS_VERSION}:
         _analytics_failure(manifest_path, f"unknown manifest version {manifest['version']!r}")
     files = ANALYTICS_FILES if version == ANALYTICS_VERSION else LEGACY_ANALYTICS_FILES
+    if board.layout != FLAT and files != ANALYTICS_FILES:
+        _analytics_failure(manifest_path, "a split checkpoint must carry the current manifest version")
     checkpoint_id = manifest["checkpoint_id"]
     if not isinstance(checkpoint_id, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_id):
         _analytics_failure(manifest_path, "checkpoint_id must be a lowercase SHA-256 digest")
@@ -223,16 +240,16 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
         _analytics_failure(manifest_path, f"missing manifest entry for {', '.join(missing_entries)}")
     if len(entries) != len(files):
         _analytics_failure(manifest_path, "files must list each required analytics file exactly once")
-    _verify_analytics_directory_files(root, files)
+    _verify_analytics_directory_files(root, board, files)
 
     canonical_entries: list[dict[str, Any]] = []
     for name in files:
-        path = root / name
-        if not path.is_file() or path.is_symlink():
+        path = board.path(name)
+        if not board.has(name) or (board.layout == FLAT and (not path.is_file() or path.is_symlink())):
             _analytics_failure(path, "required analytics file is missing or is not a regular file")
         try:
-            payload = path.read_bytes()
-        except OSError as exc:
+            payload = board.read_bytes(name)
+        except (OSError, CheckpointLayoutError) as exc:
             _analytics_failure(path, f"could not read analytics file: {exc}")
         entry = indexed[name]
         actual_digest = hashlib.sha256(payload).hexdigest()
@@ -251,8 +268,8 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
     expected_id = _analytics_checkpoint_id(canonical_entries)
     if checkpoint_id != expected_id:
         _analytics_failure(manifest_path, "checkpoint_id does not match manifest file entries")
-    _verify_analytics_export_summary(root)
-    return AnalyticsCheckpoint(checkpoint_id=checkpoint_id, directory=root)
+    _verify_analytics_export_summary(board)
+    return AnalyticsCheckpoint(checkpoint_id=checkpoint_id, directory=root, board=board)
 
 
 def _analytics_failure(path: Path, detail: str) -> None:
@@ -289,8 +306,11 @@ def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _verify_analytics_directory_files(root: Path, files: tuple[str, ...]) -> None:
-    allowed = {*files, ANALYTICS_MANIFEST, ".gitignore"}
+def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files: tuple[str, ...]) -> None:
+    if board.layout == FLAT:
+        allowed = {*files, ANALYTICS_MANIFEST, ".gitignore"}
+    else:
+        allowed = {*board.physical_entries(), ANALYTICS_MANIFEST, ".gitignore"}
     try:
         entries = list(root.iterdir())
     except OSError as exc:
@@ -300,11 +320,11 @@ def _verify_analytics_directory_files(root: Path, files: tuple[str, ...]) -> Non
             _analytics_failure(entry, "unlisted file in analytics checkpoint directory")
 
 
-def _verify_analytics_export_summary(root: Path) -> None:
-    export_path = root / "export.json"
+def _verify_analytics_export_summary(board: CheckpointBoard) -> None:
+    export_path = board.path("export.json")
     try:
-        summary = json.loads(export_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
+        summary = json.loads(board.read_text("export.json"))
+    except (OSError, CheckpointLayoutError, ValueError) as exc:
         _analytics_failure(export_path, f"could not parse export summary: {exc}")
     if not isinstance(summary, dict):
         _analytics_failure(export_path, "export summary must be an object")
@@ -313,9 +333,9 @@ def _verify_analytics_export_summary(root: Path) -> None:
         if not _is_int(declared) or declared < 0:
             _analytics_failure(export_path, f"export summary has malformed {key}")
         try:
-            actual = _analytics_line_count((root / name).read_bytes(), root / name)
-        except OSError as exc:
-            _analytics_failure(root / name, f"could not read analytics file: {exc}")
+            actual = _analytics_line_count(board.read_bytes(name), board.path(name))
+        except (OSError, CheckpointLayoutError) as exc:
+            _analytics_failure(board.path(name), f"could not read analytics file: {exc}")
         if declared != actual:
             _analytics_failure(export_path, f"stale {key}: export.json={declared} {name}={actual}")
 
@@ -551,14 +571,11 @@ class CheckpointWriter:
                 runtime_env=self.instance_dir / "runtime.env",
                 secret_values=secret_values,
             )
-            _publish_component_entries(
-                staging,
-                destination,
-                list(staged),
-                f"checkpoint {component}",
-                publish_last=ANALYTICS_MANIFEST if component == "board" else None,
-            )
-            _drop_vanished(destination, entries, staged)
+            if component == "board":
+                _publish_board(staging, destination)
+            else:
+                _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
+                _drop_vanished(destination, entries, staged)
         except RuntimeError as exc:
             _cleanup_staging_dir(staging)
             raise CheckpointBlocked(str(exc)) from None
@@ -634,9 +651,13 @@ class CheckpointWriter:
 
     def _require_tracked(self) -> None:
         """An ignored `state/` stages nothing, which otherwise reads as unchanged."""
-        canon = ["state/board/cards.ndjson", "state/runs/runs.ndjson"]
+        # The board is a directory in the split layout and a set of files in the flat one, so it is
+        # tracked when anything under it is.
+        canon = ["state/board", "state/runs/runs.ndjson"]
         tracked = self._git(["ls-files", "--", *canon], "checkpoint tracked").stdout.split()
-        missing = [path for path in canon if path not in tracked]
+        missing = [
+            path for path in canon if not any(name == path or name.startswith(f"{path}/") for name in tracked)
+        ]
         if missing:
             raise CheckpointBlocked(f"checkpoint is not tracked by the instance repo: {', '.join(missing)}")
 
@@ -1186,6 +1207,29 @@ def _float_field(payload: dict[str, Any], key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
     return float(value)
+
+
+def _publish_board(staging: Path, destination: Path) -> None:
+    """Publish the validated flat board cut into `state/board` in the split layout.
+
+    The staging directory keeps the flat files the gate validated, sealed and scanned; what reaches
+    the instance repository is their split form (`secretary.board.checkpoint_layout`), written part by
+    part so only what changed becomes a new Git object. The seal leaves first and arrives last, so a
+    reader never verifies a half-written cut.
+    """
+    seal = destination / ANALYTICS_MANIFEST
+    try:
+        if seal.exists() or seal.is_symlink():
+            _remove_path(seal)
+    except OSError as exc:
+        raise CheckpointBlocked(f"could not unseal checkpoint board: {exc}") from None
+    try:
+        publish_split_board(staging, destination)
+    except CheckpointLayoutError as exc:
+        raise CheckpointBlocked(f"could not publish checkpoint board: {exc}") from None
+    _publish_component_entries(
+        staging, destination, [ANALYTICS_MANIFEST], "checkpoint board", publish_last=ANALYTICS_MANIFEST
+    )
 
 
 def _drop_vanished(destination: Path, entries: tuple[str, ...], staged: tuple[str, ...]) -> None:

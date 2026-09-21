@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.board.checkpoint_layout import open_checkpoint_board
 from secretary.checkpoint import CheckpointWriter
 from secretary.cli import main as cli_main
 from secretary.data import DataExport
@@ -253,7 +254,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
         # holding the other's paths.
         files = self.head_files()
         self.assertIn(f"state/knowledge/{DOCUMENT}", files)
-        self.assertIn("state/board/cards.ndjson", files)
+        self.assertIn("state/board/cards/0000/00000000.json", files)
         self.assertIn("state/runs/runs.ndjson", files)
         self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
         self.assertEqual(len(git(self.instance_dir, "log", "--format=%H").split()), 3)
@@ -301,7 +302,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
             self.assertEqual(errors, [])
             self.assertIn(f"state/knowledge/{document}", self.head_files())
             self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
-            board = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
+            board = open_checkpoint_board(self.instance_dir / "state" / "board").read_text("cards.ndjson")
             self.assertIn(f"round {round_index}", board)
 
 
