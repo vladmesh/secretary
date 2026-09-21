@@ -404,10 +404,6 @@ class SourceLayoutTests(unittest.TestCase):
 # entry here is a new consumer that decided its backend by default instead of by the switch, so
 # it is added deliberately with its reason or it is a defect.
 KANBOARD_ONLY_CONSTRUCTIONS = {
-    "bootstrap.py": (
-        "it creates the Kanboard service's own board, columns and swimlanes and waits for the "
-        "container to answer; the store has no equivalent to create"
-    ),
     "board/import_board.py": (
         "the importer's subject is the Kanboard board it copies into the store, so the switch "
         "would ask the destination to be the source"
@@ -627,9 +623,12 @@ class CardBackendSwitchTests(unittest.TestCase):
         built = self._constructions()
         self.assertEqual(sorted(built), sorted(KANBOARD_ONLY_CONSTRUCTIONS))
 
-    def test_the_two_kanboard_only_consumers_say_so_in_their_own_source(self) -> None:
-        """`bootstrap` and the importer are Kanboard-only by statement, not by default."""
-        for module in ("bootstrap.py", "board/import_board.py"):
+    def test_the_kanboard_only_consumer_says_so_in_its_own_source(self) -> None:
+        """The importer is Kanboard-only by statement, not by default.
+
+        `bootstrap` was the second one until secretary-1666 made it PostgreSQL-only.
+        """
+        for module in ("board/import_board.py",):
             source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")
             self.assertIn("Kanboard-only", source, module)
 

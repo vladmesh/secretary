@@ -1,0 +1,250 @@
+"""A fresh installation's board is the PostgreSQL store bootstrap leaves, against a real `postgres:16`.
+
+secretary-1666: bootstrap no longer starts Kanboard, waits for it, or shapes a Pipeline board in it,
+and install recovery no longer asks for that board before it restores a checkpoint. What replaces
+all of it is the store bootstrap provisions, migrates and verifies. These tests prove that store is
+enough on its own: a freshly migrated, empty store takes a card and lists it back, and a real install
+recovery on a real bootstrap checkout restores a checkpoint's cards into it at parity.
+
+`provision` itself is the one step not exercised: it drives Docker Compose against the installed
+`/opt/secretary` definition on port 5432. A throwaway container stands in for what it starts, and
+`board-store.env` is written for that container the way `provision` writes it for its own.
+
+There is no skip, for the reason `tests/sql_backend_fixtures.py` gives: a store proof that passes
+because it never reached a database is worth less than none.
+"""
+
+from __future__ import annotations
+
+import getpass
+import os
+import subprocess
+import tempfile
+import unittest
+from contextlib import ExitStack
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import psycopg
+
+from secretary import bootstrap as bootstrap_module
+from secretary import installation
+from secretary.board import store
+from secretary.board.backend import CARD, CARD_BACKEND_ENV, board_client, reset_card_backend
+from secretary.board.store import BoardStoreConfig
+from secretary.data import init_layout
+from secretary.runtime_env import read_runtime_env
+from secretary.tasks import TaskReader, TaskWriter
+from tests.fakes.installation import CARD as CHECKPOINT_CARD
+from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.sql_backend_fixtures import PostgresBoard
+
+STORE_DATABASE = "secretary"
+
+
+def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
+    """`board-store.env` for the throwaway server, private and ignored, as `provision` leaves it."""
+    store.ensure_ignored(instance)
+    path = store.store_path(instance)
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in config.as_environ().items()), encoding="utf-8"
+    )
+    path.chmod(0o600)
+
+
+class FreshStoreCase(unittest.TestCase):
+    """One throwaway server per class: the first migration creates the cluster-wide roles."""
+
+    board: PostgresBoard
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.board = PostgresBoard()
+        cls.addClassCleanup(cls.board.stop)
+        with psycopg.connect(cls.board.config("postgres").for_role("owner").conninfo(), autocommit=True) as c:
+            c.execute(f"CREATE DATABASE {STORE_DATABASE} OWNER {cls.board.config('postgres').owner_user}")
+        cls.config = cls.board.config(STORE_DATABASE)
+
+    def setUp(self) -> None:
+        # The selector is this process's decision; each case makes its own and leaves none behind.
+        previous = os.environ.get(CARD_BACKEND_ENV)
+        reset_card_backend()
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop(CARD_BACKEND_ENV, None)
+            else:
+                os.environ[CARD_BACKEND_ENV] = previous
+            reset_card_backend()
+
+        self.addCleanup(restore)
+        os.environ.pop(CARD_BACKEND_ENV, None)
+        temporary = tempfile.TemporaryDirectory(prefix="fresh-postgres-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def _bootstrap(self, remote: str, target: Path) -> int:
+        """The real `bootstrap`, with only the host edges and Compose provisioning stood in for."""
+
+        def provision(instance: Path, *, allow_create: bool) -> None:
+            self.assertTrue(allow_create)
+            _write_store_file(instance, self.config)
+
+        args = SimpleNamespace(
+            instance_dir=str(target),
+            instance_remote=remote,
+            installation_user=getpass.getuser(),
+            dry_run=False,
+        )
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap._host_supported"),
+            mock.patch("secretary.bootstrap._ensure_installation_user"),
+            mock.patch("secretary.bootstrap._set_installation_owner"),
+            mock.patch("secretary.bootstrap._install_platform"),
+            mock.patch("secretary.bootstrap.provision_board_store", side_effect=provision),
+            mock.patch("builtins.print"),
+        ):
+            return bootstrap_module.bootstrap(args)
+
+
+class EmptyStoreTests(FreshStoreCase):
+    def test_a_freshly_migrated_empty_store_accepts_a_card_create_and_a_card_list(self) -> None:
+        instance = self.root / "instance"
+        instance.mkdir()
+        _git(instance, "init")
+        _write_store_file(instance, self.config)
+        # The two store steps bootstrap runs after `provision`, on a database with no schema at all.
+        bootstrap_module.migrate_instance(instance)
+        bootstrap_module.verify_board_store_roles(instance)
+        data = self.root / "data"
+        init_layout(data)
+
+        os.environ[CARD_BACKEND_ENV] = "postgres"
+        client = board_client(instance, serves=(CARD,))
+        self.addCleanup(client.close)
+        self.assertEqual(TaskReader(client).list(), [])
+        created = TaskWriter(client, data_dir=data).create(
+            role="po",
+            actor="po",
+            project="secretary",
+            task_type="code",
+            title="the first card on a fresh board",
+        )["task"]
+        listed = TaskReader(client).list()
+
+        self.assertEqual(created["ref"], "secretary-1")
+        self.assertEqual([(card["ref"], card["project"]) for card in listed], [("secretary-1", "secretary")])
+        self.assertEqual(listed[0]["audit"]["backend"]["kind"], "postgres")
+
+
+class BootstrapThenRecoveryTests(FreshStoreCase):
+    def test_install_recovery_restores_the_checkpoint_into_the_store_bootstrap_left(self) -> None:
+        source = self.root / "source"
+        remote = self.root / "instance.git"
+        target = self.root / "instance"
+        data = self.root / "data"
+        source.mkdir()
+        _checkpoint(source, data)
+        # The registry the restored card's project has to be in, shaped as in test_postgres_recovery.
+        repository = self.root / "repository"
+        repository.mkdir()
+        (source / "projects").mkdir()
+        (source / "projects" / "secretary.yaml").write_text(
+            f"id: secretary\nrepo: {repository}\nenabled: false\nadapter: secretary\ndefault_branch: main\n",
+            encoding="utf-8",
+        )
+        (source / "adapters").mkdir()
+        (source / "adapters" / "secretary.yaml").write_text(
+            "setup:\n  commands: ['true']\nsmoke:\n  command: 'true'\n"
+            "validation:\n  ci: local\n  command: 'true'\n"
+            "artifact_policy:\n  write_project_files: false\n",
+            encoding="utf-8",
+        )
+        _git(source, "init")
+        _git(source, "config", "user.name", "Test")
+        _git(source, "config", "user.email", "test@example.invalid")
+        _git(source, "add", ".")
+        _git(source, "commit", "-m", "checkpoint")
+        subprocess.run(
+            ["git", "clone", "--bare", str(source), str(remote)], check=True, capture_output=True, text=True
+        )
+        text = (source / "instance.yaml").read_text(encoding="utf-8")
+        (source / "instance.yaml").write_text(text.replace("placeholder", str(remote)), encoding="utf-8")
+        _git(source, "add", "instance.yaml")
+        _git(source, "commit", "-m", "remote identity")
+        _git(source, "push", str(remote), "HEAD:master")
+
+        self.assertEqual(self._bootstrap(str(remote), target), 0)
+        self.assertEqual(read_runtime_env(target)[CARD_BACKEND_ENV], "postgres")
+        self.assertFalse((target / "board-transport.env").exists())
+
+        orca_version = mock.Mock(return_value="orca v1")
+        real_run = installation._run
+
+        def run(argv: list[str], **kwargs: object) -> object:
+            # The host's Orca is not the subject; every other command runs for real.
+            if argv[:1] == ["orca"]:
+                return orca_version(argv)
+            return real_run(argv, **kwargs)
+
+        args = SimpleNamespace(
+            instance_dir=str(target),
+            instance_remote=str(remote),
+            installation_user=getpass.getuser(),
+            recover=True,
+            adopt=False,
+            dry_run=False,
+            runtime_env=None,
+            product_root=str(PRODUCT_ROOT),
+            bootstrap_credential_file=None,
+            bootstrap_credential_stdin=False,
+            recovery_phrase_file=None,
+            recovery_phrase_stdin=False,
+            host_fixture=None,
+        )
+        with ExitStack() as stack:
+            transport = stack.enter_context(mock.patch("secretary.installation.ensure_from_runtime_values"))
+            for patch in (
+                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("secretary.installation._set_installation_owner"),
+                mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
+                mock.patch("secretary.installation._run", side_effect=run),
+                # Project checkouts and CODEX_HOME are host provisioning, not the board.
+                mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
+                mock.patch("secretary.installation.provision_codex_home", return_value=0),
+                mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
+                mock.patch(
+                    "secretary.installation.materialize_host",
+                    return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
+                ),
+                mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
+                mock.patch("secretary.installation.restore_findings", return_value=[]),
+            ):
+                stack.enter_context(patch)
+            result = installation.install(args)
+
+        steps = {step.name: (step.status, step.detail) for step in result.steps}
+        self.assertEqual(result.status, "ok", result.steps)
+        transport.assert_not_called()
+        self.assertEqual(steps["board-transport"][0], "skipped")
+        self.assertEqual(steps["prerequisites"], ("unchanged", "PostgreSQL and Orca are reachable"))
+        self.assertEqual(steps["board"], ("changed", "1 card(s) at parity"))
+        self.assertFalse((target / "board-transport.env").exists())
+        self.assertEqual(read_runtime_env(target)[CARD_BACKEND_ENV], "postgres")
+
+        # Read back through the store the units will use, not through the recovery's own client.
+        os.environ[CARD_BACKEND_ENV] = "postgres"
+        reset_card_backend()
+        client = board_client(target, serves=(CARD,))
+        self.addCleanup(client.close)
+        cards = TaskReader(client).list()
+        self.assertEqual(
+            [(card["ref"], card["title"], card["project"]) for card in cards],
+            [(CHECKPOINT_CARD["reference"], CHECKPOINT_CARD["title"], "secretary")],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

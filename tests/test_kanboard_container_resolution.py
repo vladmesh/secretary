@@ -22,11 +22,12 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.bootstrap import KANBOARD_IMAGE
 from secretary.data import raw_kanboard_dump, resolve_kanboard_container
 from secretary.infra.kanboard_compose import KANBOARD_COMPOSE_SERVICE
 
 STOP_LISTING_TIMEOUT_SECONDS = 30
+# The image bootstrap installed until it stopped installing Kanboard (secretary-1666).
+KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
 
 COMPOSE_TEXT = f"""services:
   {KANBOARD_COMPOSE_SERVICE}:

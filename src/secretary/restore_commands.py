@@ -63,14 +63,8 @@ def add_restore_subcommands(subparsers) -> None:
     board.add_argument("--instance", required=True)
     board.set_defaults(handler=run_restore_board)
 
-    live_board = subparsers.add_parser("board", help="repair the live Pipeline board schema")
+    live_board = subparsers.add_parser("board", help="operate the PostgreSQL board store")
     live_board_subcommands = live_board.add_subparsers(dest="board_command")
-    migrate_assessment = live_board_subcommands.add_parser(
-        "migrate-assessment",
-        help="add the Assessment column to a Pipeline board that already holds cards",
-    )
-    migrate_assessment.add_argument("--instance", required=True)
-    migrate_assessment.set_defaults(handler=run_board_migrate_assessment)
     # `secretary board` is one group, and the PostgreSQL store's import belongs in it rather
     # than in a second top-level command with the same word.  It is registered from its own
     # module so this one keeps knowing nothing about the store.
@@ -158,17 +152,6 @@ def run_restore_board(args: argparse.Namespace) -> int:
 def _board_subcommand_required(args: argparse.Namespace) -> int:
     _print_json({"ok": False, "action": "board", "error": "board subcommand required"})
     return 2
-
-
-@_restore_command("board migrate-assessment")
-def run_board_migrate_assessment(args: argparse.Namespace) -> int:
-    """Add the Assessment column to the board bound to ``--instance``."""
-    from secretary.bootstrap import BootstrapError, migrate_assessment_column
-
-    try:
-        return migrate_assessment_column(Path(args.instance).expanduser())
-    except BootstrapError as exc:
-        raise RestoreError(str(exc)) from None
 
 
 def run_restore_reconcile(args: argparse.Namespace) -> int:

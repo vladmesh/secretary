@@ -335,7 +335,11 @@ class SqlSprintRecords:
                 "SELECT status FROM sprints WHERE ref=%s", (reference,)
             )[0][0]
             reserved = str(status) == "open"
+            from secretary.board.sql_cards import _ensure_project_row
+
             for ordinal, project in enumerate(projects):
+                # §3.1: a fresh store holds no `projects` rows; the reservation names the id.
+                _ensure_project_row(self.client, project)
                 self.client._execute(
                     "INSERT INTO sprint_projects "
                     "(sprint_ref, project_id, reserved, reserved_at, released_at, ordinal) "

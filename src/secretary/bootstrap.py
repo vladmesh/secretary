@@ -1,17 +1,11 @@
-"""Bootstrap the host-owned Kanboard and Orca prerequisites.
+"""Bootstrap the host-owned PostgreSQL board store and Orca prerequisites.
 
-The checkpoint deliberately does not carry these services or their transport
-configuration. They are reproducible host state: this module installs the
-pinned transports, creates the deterministic local board configuration, and
-builds the small Kanboard schema that the task protocol requires.
-
-Every `KanboardClient` below is Kanboard-only **by statement, not by default**.  This module
-creates the Pipeline board, renames its columns, adds `Assessment` to a populated one and waits
-for the container to answer `getVersion`: all four are operations on the Kanboard service itself,
-which the PostgreSQL board store does not have and never will (`docs/BOARD_STORE.md` §2, §6).
-Reading `SECRETARY_CARD_BACKEND` here would therefore be a switch with one branch.  A `postgres`
-installation still bootstraps Kanboard, because the store is populated by importing that board
-(`board/import_board.py`), which is the other place this paragraph applies to.
+The checkpoint deliberately does not carry these services or their credentials. They are
+reproducible host state: this module installs the pinned Docker and Orca runtimes, records
+`SECRETARY_CARD_BACKEND=postgres` in `runtime.env`, provisions the PostgreSQL board store
+(`board/provision.py`), migrates it to this build's schema (`board/migrate.py`) and verifies its
+role contract. That empty, migrated store is the whole board a fresh installation starts from:
+cards come later from `task create` or from install recovery restoring a checkpoint into it.
 """
 
 from __future__ import annotations
@@ -23,22 +17,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from secretary import _proc
 from secretary._fsutil import write_text_atomic
-from secretary.board.checkpoint_layout import CheckpointLayoutError, open_checkpoint_board
+from secretary.board.backend import POSTGRES
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
-from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.host_apply import pinned_orca_executable
-from secretary.infra.kanboard_compose import (
-    KANBOARD_COMPOSE_FILE,
-    KANBOARD_COMPOSE_SERVICE,
-)
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -46,32 +32,10 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
-from secretary.runtime_env import RuntimeEnvMissing, read_runtime_env
-from secretary.tasks import KanboardClient, TaskError, all_project_cards
+from secretary.runtime_env import select_card_backend
 
-KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
 ORCA_VERSION = "v1.4.152"
 ORCA_APPIMAGE_URL = f"https://github.com/stablyai/orca/releases/download/{ORCA_VERSION}/orca-linux.AppImage"
-PIPELINE_COLUMNS = (
-    "Issues",
-    "Ready",
-    "In progress",
-    "Validate",
-    "Assessment",
-    "Blocked",
-    "Done",
-)
-# The layout every live board carried before `Assessment` existed. It is not a supported
-# schema: it is the one older layout `board migrate-assessment` knows how to repair in place,
-# so a populated board sitting on it gets a pointer at that command instead of the generic
-# refusal below.
-LEGACY_PIPELINE_COLUMNS = ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done")
-ASSESSMENT_COLUMN = "Assessment"
-ASSESSMENT_POSITION = PIPELINE_COLUMNS.index(ASSESSMENT_COLUMN) + 1
-# The one half-finished layout the migration itself can leave behind: Kanboard appends a new
-# column at the end, so a committed `addColumn` whose answer was lost, or a reposition that then
-# failed, leaves the six known columns plus a trailing `Assessment`. The next run finishes it.
-PARTIAL_PIPELINE_COLUMNS = (*LEGACY_PIPELINE_COLUMNS, ASSESSMENT_COLUMN)
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -88,239 +52,6 @@ def _host_supported(os_release: Path = Path("/etc/os-release")) -> None:
         raise BootstrapError("could not identify the operating system") from None
     if fields.get("ID", "").strip('"') != "ubuntu" or fields.get("VERSION_ID", "").strip('"') != "24.04":
         raise BootstrapError("bootstrap supports Ubuntu 24.04 only")
-
-
-def _project_lanes(instance: Path) -> set[str]:
-    lanes: set[str] = set()
-    projects = instance / "projects"
-    if not projects.is_dir():
-        return lanes
-    for path in projects.glob("*.yaml"):
-        try:
-            item = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            raise BootstrapError(f"could not read project registry entry {path.name}") from None
-        if isinstance(item, dict):
-            lane = item.get("orca_binding") or item.get("id")
-            if isinstance(lane, str) and lane:
-                lanes.add(lane)
-    try:
-        board = open_checkpoint_board(instance / "state" / "board")
-    except CheckpointLayoutError:
-        raise BootstrapError("could not read checkpoint board swimlanes") from None
-    if board.has("cards.ndjson"):
-        try:
-            for raw in board.read_text("cards.ndjson").splitlines():
-                card = yaml.safe_load(raw)
-                lane = card.get("swimlane") if isinstance(card, dict) else None
-                if isinstance(lane, str) and lane:
-                    lanes.add(lane)
-        except (OSError, CheckpointLayoutError, yaml.YAMLError):
-            raise BootstrapError("could not read checkpoint board swimlanes") from None
-    return lanes
-
-
-def _rename_column(api: KanboardClient, column: dict, title: str) -> None:
-    """Rename one column, refusing to treat a declined updateColumn as done.
-
-    Kanboard answers this call with a boolean, so a rejected rename returns
-    false instead of raising.  Ignoring it would leave the old title on the
-    board while the caller reports a current schema.
-    """
-    if not api.call("updateColumn", column_id=int(column["id"]), title=title):
-        raise BootstrapError(f"Kanboard did not rename the Pipeline column to {title}")
-
-
-def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = None) -> int:
-    """Create the Pipeline board, columns and registry swimlanes without moving cards."""
-    try:
-        api = client or KanboardClient.for_instance(instance)
-        board = api.call("getProjectByName", name="Pipeline")
-        if not isinstance(board, dict) or not board.get("id"):
-            board_id = api.call("createProject", name="Pipeline")
-            if not isinstance(board_id, int) or board_id <= 0:
-                raise BootstrapError("Kanboard did not create the Pipeline board")
-        else:
-            board_id = int(board["id"])
-        columns = api.call("getColumns", project_id=board_id) or []
-        if not isinstance(columns, list):
-            raise BootstrapError("Kanboard returned invalid Pipeline columns")
-        titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
-        if titles != list(PIPELINE_COLUMNS):
-            # A board that holds cards is never reshaped here: renaming a column in place would
-            # silently change what its cards mean, and removing one moves every card it holds to
-            # the trash.  Such a board is a migration job for a human, so name both layouts.
-            tasks = all_project_cards(api, board_id)
-            if tasks:
-                hint = ""
-                if titles == list(LEGACY_PIPELINE_COLUMNS):
-                    hint = (
-                        f"; run `secretary board migrate-assessment --instance {instance}` to add it in place"
-                    )
-                raise BootstrapError(
-                    "Pipeline board has cards but an incompatible column schema: "
-                    f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)}; "
-                    f"migratable: {', '.join(LEGACY_PIPELINE_COLUMNS)})" + hint
-                )
-            for index, title in enumerate(PIPELINE_COLUMNS):
-                if index < len(columns) and isinstance(columns[index], dict) and columns[index].get("id"):
-                    _rename_column(api, columns[index], title)
-                else:
-                    api.call("addColumn", project_id=board_id, title=title)
-            # Kanboard 1.2.46 creates four defaults. Remove surplus only while empty.
-            for column in columns[len(PIPELINE_COLUMNS) :]:
-                if isinstance(column, dict) and column.get("id"):
-                    api.call("removeColumn", column_id=int(column["id"]))
-        lanes = api.call("getActiveSwimlanes", project_id=board_id) or []
-        known = {
-            str(lane.get("name"))
-            for lane in lanes
-            if isinstance(lane, dict) and isinstance(lane.get("name"), str)
-        }
-        for name in sorted(_project_lanes(instance) - known):
-            api.call("addSwimlane", project_id=board_id, name=name)
-        return board_id
-    except TaskError as exc:
-        raise BootstrapError(exc.message) from None
-
-
-def _assessment_column_id(columns: list[Any]) -> int:
-    """The id of the trailing `Assessment` column an interrupted migration left behind."""
-    for column in columns:
-        if isinstance(column, dict) and str(column.get("title") or "") == ASSESSMENT_COLUMN:
-            try:
-                identifier = int(column["id"])
-            except (KeyError, TypeError, ValueError):
-                break
-            if identifier > 0:
-                return identifier
-    raise BootstrapError(f"Kanboard returned no usable id for the {ASSESSMENT_COLUMN} column")
-
-
-def _card_placement(api: KanboardClient, board_id: int) -> dict[int, tuple[int, int]]:
-    """Where every card sits right now: {task id: (column id, position)}.
-
-    Read before and after the migration so a column insert that silently reshuffles or
-    trashes a card is caught here instead of on the board.
-    """
-    placement: dict[int, tuple[int, int]] = {}
-    for card in all_project_cards(api, board_id):
-        try:
-            identifier = int(card.get("id"))
-        except (TypeError, ValueError):
-            raise BootstrapError("Kanboard returned a Pipeline card without an id") from None
-        placement[identifier] = (
-            int(card.get("column_id") or 0),
-            int(card.get("position") or 0),
-        )
-    return placement
-
-
-def migrate_assessment_column(
-    instance: Path | None = None, *, client: KanboardClient | None = None
-) -> dict[str, object]:
-    """Add the `Assessment` column to a populated Pipeline board, in place.
-
-    `ensure_pipeline_board` refuses to reshape a board that holds cards, on purpose: a rename
-    changes what a column's cards mean and a removal trashes them. This is the one repair that
-    is safe on a live board, because it only appends a column and slides it into position.
-
-    Every outcome is retryable. A run that already finished is a no-op; a run whose `addColumn`
-    committed but whose answer was lost (or whose reposition then failed) leaves the board on the
-    one partial layout below, and the next run finishes that column instead of adding a second one.
-    """
-    try:
-        if client is None and instance is None:
-            raise BootstrapError("board migration requires the target instance")
-        api = client or KanboardClient.for_instance(instance)
-        board = api.call("getProjectByName", name="Pipeline")
-        if not isinstance(board, dict) or not board.get("id"):
-            raise BootstrapError("Pipeline board does not exist")
-        board_id = int(board["id"])
-        columns = api.call("getColumns", project_id=board_id) or []
-        if not isinstance(columns, list):
-            raise BootstrapError("Kanboard returned invalid Pipeline columns")
-        titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
-        if titles == list(PIPELINE_COLUMNS):
-            return {
-                "ok": True,
-                "action": "board migrate-assessment",
-                "status": "unchanged",
-                "board_id": board_id,
-                "columns": titles,
-            }
-        before = _card_placement(api, board_id)
-        if titles == list(LEGACY_PIPELINE_COLUMNS):
-            status = "migrated"
-            added = api.call("addColumn", project_id=board_id, title=ASSESSMENT_COLUMN)
-            if not isinstance(added, int) or added <= 0:
-                raise BootstrapError(f"Kanboard did not add the {ASSESSMENT_COLUMN} column")
-        elif titles == list(PARTIAL_PIPELINE_COLUMNS):
-            # The column is on the board but never reached position 5: an earlier run added it and
-            # lost the answer, or the reposition that followed failed. Finish that column rather
-            # than adding a second one.
-            status = "resumed"
-            added = _assessment_column_id(columns)
-        else:
-            raise BootstrapError(
-                "Pipeline board has an unexpected column schema: "
-                f"{', '.join(titles)} (migratable: {', '.join(LEGACY_PIPELINE_COLUMNS)}; "
-                f"resumable: {', '.join(PARTIAL_PIPELINE_COLUMNS)}; "
-                f"expected after migration: {', '.join(PIPELINE_COLUMNS)})"
-            )
-        if not api.call(
-            "changeColumnPosition",
-            project_id=board_id,
-            column_id=added,
-            position=ASSESSMENT_POSITION,
-        ):
-            raise BootstrapError(
-                f"Kanboard did not move {ASSESSMENT_COLUMN} to position {ASSESSMENT_POSITION}"
-            )
-        current = api.call("getColumns", project_id=board_id) or []
-        titles = [str(column.get("title") or "") for column in current if isinstance(column, dict)]
-        if titles != list(PIPELINE_COLUMNS):
-            raise BootstrapError(
-                "Pipeline columns after the migration are "
-                f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)})"
-            )
-        after = _card_placement(api, board_id)
-        if after != before:
-            raise BootstrapError(
-                "the migration moved or lost Pipeline cards: "
-                f"{len(before)} card(s) before, {len(after)} after"
-            )
-        return {
-            "ok": True,
-            "action": "board migrate-assessment",
-            "status": status,
-            "board_id": board_id,
-            "columns": titles,
-            "cards": len(after),
-        }
-    except TaskError as exc:
-        raise BootstrapError(exc.message) from None
-
-
-def _compose_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(
-        path,
-        f"""services:
-  {KANBOARD_COMPOSE_SERVICE}:
-    image: {KANBOARD_IMAGE}
-    restart: unless-stopped
-    ports:
-      - 127.0.0.1:8080:80
-    environment:
-      API_AUTHENTICATION_TOKEN: ${{KANBOARD_API_TOKEN}}
-    volumes:
-      - kanboard-data:/var/www/app/data
-volumes:
-  kanboard-data:
-""",
-    )
-    path.chmod(0o600)
 
 
 def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None:
@@ -437,18 +168,6 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _wait_for_kanboard(instance: Path, *, timeout: int = 90) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            KanboardClient.for_instance(instance).call("getVersion")
-            return
-        except TaskError:
-            if time.monotonic() >= deadline:
-                raise BootstrapError("Kanboard did not become ready") from None
-            time.sleep(1)
-
-
 def _mark_bootstrap_checkout(target: Path) -> None:
     """Mark the one clean checkout that may proceed through its first install."""
     stamp = target / BOOTSTRAP_STAMP
@@ -465,7 +184,6 @@ def _mark_bootstrap_checkout(target: Path) -> None:
 
 def bootstrap(args: argparse.Namespace) -> int:
     target = Path(args.instance_dir).expanduser().resolve()
-    runtime = target / "runtime.env"
     try:
         if not args.dry_run and os.geteuid() != 0:
             raise BootstrapError("host bootstrap must run as root")
@@ -473,51 +191,23 @@ def bootstrap(args: argparse.Namespace) -> int:
             _host_supported()
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
-        clone_detail = _clone_or_reuse(
+        _clone_or_reuse(
             args.instance_remote,
             target,
             recovery=True,
             dry_run=args.dry_run,
             installation_user=args.installation_user,
         )
-        try:
-            values = read_runtime_env(target, require_ignored=False)
-        except RuntimeEnvMissing:
-            values = {}
-        ensure_from_runtime_values(
-            target,
-            legacy_values=values,
-            runtime_env=runtime,
-            dry_run=args.dry_run,
-            allow_default=clone_detail.startswith(("cloned", "would clone")),
-        )
         if not args.dry_run:
             _mark_bootstrap_checkout(target)
+            select_card_backend(target / "runtime.env", POSTGRES)
             _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
-            compose = KANBOARD_COMPOSE_FILE
-            _compose_file(compose)
-            _run(
-                [
-                    "docker",
-                    "compose",
-                    "--env-file",
-                    str(transport_path(target)),
-                    "-f",
-                    str(compose),
-                    "up",
-                    "--detach",
-                ],
-                label="start Kanboard",
-                timeout=180,
-            )
-            _wait_for_kanboard(target)
-            ensure_pipeline_board(target, client=KanboardClient.for_instance(target))
             provision_board_store(target, allow_create=True)
             migrate_instance(target)
             verify_board_store_roles(target)
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
-    except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:
+    except (BootstrapError, InstallError, OSError, RuntimeError) as exc:
         print(f"secretary bootstrap\nstatus: failed: {exc}")
         return 1
