@@ -49,6 +49,7 @@ from secretary.board_transport import (
     ensure_from_runtime_values,
     transport_path,
 )
+from secretary.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import (
@@ -868,10 +869,6 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
-def _read_optional(path: Path) -> str:
-    return path.read_text(encoding="utf-8") if path.is_file() else ""
-
-
 def materialize_checkpoint(
     instance_dir: Path,
     data_dir: Path,
@@ -893,19 +890,19 @@ def materialize_checkpoint(
             )
     board_source = instance_dir / "state" / "board"
     runs_source = instance_dir / "state" / "runs"
-    for required in (board_source / "cards.ndjson", board_source / "export.json"):
-        if not required.is_file():
-            raise InstallError(f"private checkpoint is missing {required.relative_to(instance_dir)}")
+    try:
+        board = open_checkpoint_board(board_source)
+    except CheckpointLayoutError as exc:
+        raise InstallError(f"private checkpoint has an unreadable board layout: {exc}") from None
+    for name in ("cards.ndjson", "export.json"):
+        if not board.has(name):
+            raise InstallError(f"private checkpoint is missing state/board/{name}")
     for name in CHECKPOINT_RUNS:
         if not (runs_source / name).is_file():
             raise InstallError(f"private checkpoint is missing state/runs/{name}")
 
     try:
-        card_lines = [
-            line
-            for line in (board_source / "cards.ndjson").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        card_lines = [line for line in board.read_text("cards.ndjson").splitlines() if line.strip()]
         run_lines = [
             line
             for line in (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
@@ -915,16 +912,22 @@ def materialize_checkpoint(
         # sprints.ndjson; its export.json declares no sprint count either, and the
         # next tick writes both.
         sprint_lines = [
-            line for line in _read_optional(board_source / "sprints.ndjson").splitlines() if line.strip()
+            line
+            for line in (
+                board.read_text("sprints.ndjson") if board.has("sprints.ndjson") else ""
+            ).splitlines()
+            if line.strip()
         ]
         cards = [json.loads(line) for line in card_lines]
         sprints = [json.loads(line) for line in sprint_lines]
         for line in run_lines:
             json.loads(line)
-        board_export = json.loads((board_source / "export.json").read_text(encoding="utf-8"))
+        board_export = json.loads(board.read_text("export.json"))
         run_export = json.loads((runs_source / "export.json").read_text(encoding="utf-8"))
         claims = json.loads((runs_source / "claims.json").read_text(encoding="utf-8"))
         watermarks = json.loads((runs_source / "watermarks.json").read_text(encoding="utf-8"))
+    except CheckpointLayoutError as exc:
+        raise InstallError(f"private checkpoint has an unreadable board layout: {exc}") from None
     except (OSError, UnicodeError, ValueError):
         raise InstallError("private checkpoint contains invalid normalized state") from None
     if not isinstance(board_export, dict) or not isinstance(run_export, dict):
@@ -963,9 +966,8 @@ def materialize_checkpoint(
             write_json(staging / "cards.json", {"version": 1, "cards": cards})
             write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
             for name in CHECKPOINT_BOARD:
-                source = board_source / name
-                if source.is_file():
-                    write_text_atomic(staging / name, source.read_text(encoding="utf-8"))
+                if board.has(name):
+                    write_text_atomic(staging / name, board.read_text(name))
             publish_component_entries(
                 staging,
                 board_target,
@@ -986,7 +988,7 @@ def materialize_checkpoint(
                 list(CHECKPOINT_RUNS),
                 "checkpoint runs materialization",
             )
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, CheckpointLayoutError) as exc:
         raise InstallError(f"could not materialize checkpoint: {exc}") from None
     return len(cards), run_count
 
@@ -1333,13 +1335,31 @@ def _recovery_identity_entry(digest: Any, *, path: bytes, entry_type: bytes, con
 
 def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) -> str:
     digest = hashlib.sha256()
+    # The board is hashed by its logical files, read through the checkpoint reader, so the same
+    # board has the same identity whether a flat or a split checkpoint carries it.
+    try:
+        board: CheckpointBoard | None = open_checkpoint_board(instance_dir / "state" / "board")
+        board_error = b""
+    except CheckpointLayoutError as exc:
+        board, board_error = None, str(exc).encode()
     checkpoint_inputs = [
         *(f"state/board/{name}" for name in CHECKPOINT_BOARD),
         *(f"state/runs/{name}" for name in CHECKPOINT_RUNS),
     ]
     for relative in checkpoint_inputs:
         path = instance_dir / relative
-        if path.is_file():
+        name = relative.removeprefix("state/board/")
+        if name in CHECKPOINT_BOARD:
+            if board is None:
+                entry_type, content = b"invalid", board_error
+            elif not board.has(name):
+                entry_type, content = b"absent", b""
+            else:
+                try:
+                    entry_type, content = b"file", board.read_bytes(name)
+                except (OSError, CheckpointLayoutError) as exc:
+                    entry_type, content = b"invalid", str(exc).encode()
+        elif path.is_file():
             entry_type, content = b"file", path.read_bytes()
         else:
             entry_type, content = b"absent", b""

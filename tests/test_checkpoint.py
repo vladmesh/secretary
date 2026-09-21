@@ -1,9 +1,12 @@
 import contextlib
 import json
+import random
 import shutil
+import string
 import subprocess
 import tempfile
 import unittest
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,12 +42,14 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
     verify_analytics_checkpoint,
 )
+from secretary.checkpoint_layout import CheckpointBoard, open_checkpoint_board
 from secretary.data import DataExport
 from secretary.dispatch.production import _coordinate_checkpoint
 from secretary.routing_journal import attempts
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.tasks import TaskAudit
+from tests.fakes.installation import split_board
 from tests.fakes.tasks import FakeKanboard
 
 
@@ -193,17 +198,39 @@ class CheckpointWriterTests(unittest.TestCase):
     def head_files(self) -> list[str]:
         return git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
 
+    def committed_board(self) -> CheckpointBoard | None:
+        """The board HEAD carries, read through the checkpoint reader; None when it carries none."""
+        if not any(name.startswith("state/board/") for name in self.head_files()):
+            return None
+        extracted = Path(tempfile.mkdtemp(dir=self.tmpdir.name))
+        archive = subprocess.run(
+            ["git", "-C", str(self.instance_dir), "archive", "HEAD", "state/board"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(["tar", "-x", "-C", str(extracted)], input=archive.stdout, check=True)
+        return open_checkpoint_board(extracted / "state" / "board")
+
+    def committed_text(self, name: str) -> str:
+        board = self.committed_board()
+        assert board is not None, "HEAD carries no board checkpoint"
+        return board.read_text(name)
+
+    def published_text(self, name: str) -> str:
+        return open_checkpoint_board(self.instance_dir / "state" / "board").read_text(name)
+
     def test_board_and_runs_land_in_state_as_one_commit(self):
         result = self.write()
 
         self.assertEqual(result.status, "committed")
         self.assertEqual(result.board_cards, 1)
         files = self.head_files()
-        self.assertIn("state/board/cards.ndjson", files)
-        self.assertIn("state/board/events.ndjson", files)
-        self.assertIn("state/board/audit.ndjson", files)
-        self.assertIn("state/board/export.json", files)
+        board = self.committed_board()
+        assert board is not None
+        for name in ("cards.ndjson", "events.ndjson", "audit.ndjson", "export.json"):
+            self.assertTrue(board.has(name), name)
         self.assertIn("state/board/analytics-manifest.json", files)
+        verify_analytics_checkpoint(board.directory)
         self.assertIn("state/runs/runs.ndjson", files)
         self.assertIn("state/runs/claims.json", files)
         self.assertIn("state/runs/watermarks.json", files)
@@ -236,7 +263,7 @@ class CheckpointWriterTests(unittest.TestCase):
     def test_duplicate_fresh_export_leaves_checkpoint_head_index_and_canon_untouched(self):
         self.assertEqual(self.write().status, "committed")
         head = git(self.instance_dir, "rev-parse", "HEAD").strip()
-        canon = (self.instance_dir / "state" / "board" / "cards.ndjson").read_bytes()
+        canon = self.published_text("cards.ndjson")
         self.seed_board([CARD, dict(CARD, id=2, title="collision")])
 
         result = self.write()
@@ -245,19 +272,19 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("duplicate references secretary-637", result.reason)
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head)
         self.assertEqual(git(self.instance_dir, "diff", "--cached", "--name-only"), "")
-        self.assertEqual((self.instance_dir / "state" / "board" / "cards.ndjson").read_bytes(), canon)
+        self.assertEqual(self.published_text("cards.ndjson"), canon)
 
     def test_missing_live_events_publish_as_an_empty_sealed_journal(self):
         self.write()
-        self.assertIn("state/board/events.ndjson", self.head_files())
+        self.assertEqual(self.committed_text("events.ndjson"), "")
 
         (self.data_dir / "board" / "events.ndjson").unlink()
         result = self.write()
 
         self.assertEqual(result.status, "unchanged")
-        self.assertIn("state/board/events.ndjson", self.head_files())
-        self.assertEqual((self.instance_dir / "state" / "board" / "events.ndjson").read_text(), "")
-        self.assertIn("state/board/cards.ndjson", self.head_files())
+        self.assertEqual(self.committed_text("events.ndjson"), "")
+        self.assertEqual(self.published_text("events.ndjson"), "")
+        self.assertEqual(self.committed_text("cards.ndjson"), json.dumps(CARD, sort_keys=True) + "\n")
 
     def test_missing_live_audit_history_blocks_the_checkpoint(self):
         (self.data_dir / "board" / "audit.ndjson").unlink()
@@ -275,18 +302,18 @@ class CheckpointWriterTests(unittest.TestCase):
 
         from secretary import checkpoint as checkpoint_module
 
-        publish = checkpoint_module._publish_component_entries
+        publish = checkpoint_module.publish_split_board
         observed: list[str] = []
 
-        def copy_with_window(staging, destination, entries, label, **kwargs):
-            if label == "checkpoint board":
-                (destination / ANALYTICS_MANIFEST).unlink()
-                with self.assertRaisesRegex(AnalyticsManifestError, "manifest is missing"):
-                    verify_analytics_checkpoint(destination)
-                observed.append("no manifest")
-            return publish(staging, destination, entries, label, **kwargs)
+        def copy_with_window(staging, destination):
+            # The seal left before the first part is rewritten, so this window verifies nothing.
+            self.assertFalse((destination / ANALYTICS_MANIFEST).exists())
+            with self.assertRaisesRegex(AnalyticsManifestError, "manifest is missing"):
+                verify_analytics_checkpoint(destination)
+            observed.append("no manifest")
+            return publish(staging, destination)
 
-        with mock.patch("secretary.checkpoint._publish_component_entries", side_effect=copy_with_window):
+        with mock.patch("secretary.checkpoint.publish_split_board", side_effect=copy_with_window):
             self.assertEqual(self.write().status, "committed")
 
         self.assertEqual(observed, ["no manifest"])
@@ -306,7 +333,7 @@ class CheckpointWriterTests(unittest.TestCase):
         result = self.write()
 
         self.assertEqual(result.status, "committed")
-        committed = git(self.instance_dir, "show", "HEAD:state/board/events.ndjson")
+        committed = self.committed_text("events.ndjson")
         event = BoardEventCanon(self.data_dir).events()[0]
         self.assertEqual(json.loads(committed)["event_id"], event.event_id)
         self.assertEqual(json.loads(committed)["subject"], {"kind": "card", "ref": "secretary-1419"})
@@ -401,8 +428,7 @@ class CheckpointWriterTests(unittest.TestCase):
         result = self.write()
 
         self.assertEqual(result.status, "committed")
-        self.assertIn("state/board/sprints.ndjson", self.head_files())
-        committed = git(self.instance_dir, "show", "HEAD:state/board/sprints.ndjson")
+        committed = self.committed_text("sprints.ndjson")
         self.assertEqual(
             [json.loads(line)["reference"] for line in committed.splitlines() if line.strip()],
             ["sprint:41"],
@@ -432,7 +458,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("board sprint count mismatch", result.reason)
-        self.assertNotIn("state/board/sprints.ndjson", self.head_files())
+        self.assertIsNone(self.committed_board())
 
     def test_board_export_without_sprints_blocks_the_commit(self):
         self.seed_board([CARD], sprints=[SPRINT])
@@ -500,7 +526,7 @@ class CheckpointWriterTests(unittest.TestCase):
         result = self.write()
 
         self.assertEqual(result.status, "committed")
-        committed = git(self.instance_dir, "show", "HEAD:state/board/events.ndjson")
+        committed = self.committed_text("events.ndjson")
         history = attempts([json.loads(line) for line in committed.splitlines() if line.strip()])
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].worker.head, "codex")
@@ -532,7 +558,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("pending", result.reason)
-        self.assertNotIn("state/board/cards.ndjson", self.head_files())
+        self.assertIsNone(self.committed_board())
 
     def test_product_issue_transaction_blocks_the_commit(self):
         journal = self.data_dir / "board" / "product-issue-transactions"
@@ -551,7 +577,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("board export count mismatch", result.reason)
-        self.assertNotIn("state/board/cards.ndjson", self.head_files())
+        self.assertIsNone(self.committed_board())
 
     def test_run_record_mismatch_blocks_the_commit(self):
         self.seed_runs([{"line": 1}], run_record_count=9)
@@ -568,7 +594,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
-        self.assertNotIn("state/board/cards.ndjson", self.head_files())
+        self.assertIsNone(self.committed_board())
 
     def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
         transport = ensure_board_transport(self.instance_dir, allow_default=True).transport
@@ -597,11 +623,11 @@ class CheckpointWriterTests(unittest.TestCase):
         result = self.write()
 
         self.assertEqual(result.status, "committed")
-        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
+        published = self.published_text("cards.ndjson")
         self.assertIn(transport.url, published)
         self.assertIn("KANBOARD_API_USER=jsonrpc", published)
         self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
-        exported = (self.instance_dir / "state" / "board" / "export.json").read_text(encoding="utf-8")
+        exported = self.published_text("export.json")
         self.assertIn(contents, json.loads(exported)["report"])
 
     def test_migrated_board_transport_token_is_redacted_from_the_checkpoint(self):
@@ -745,7 +771,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(blocked.status, "blocked")
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), first.commit)
-        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
+        published = self.published_text("cards.ndjson")
         self.assertNotIn("ghp_", published)
 
     def test_export_failure_blocks_without_touching_state(self):
@@ -773,7 +799,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("state/runs/runs.ndjson", result.reason)
-        self.assertNotIn("state/board/cards.ndjson", self.head_files())
+        self.assertIsNone(self.committed_board())
 
     def test_operator_config_changes_stay_out_of_the_checkpoint_commit(self):
         (self.instance_dir / "instance.yaml").write_text("version: 2\n", encoding="utf-8")
@@ -783,7 +809,143 @@ class CheckpointWriterTests(unittest.TestCase):
 
         committed = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertNotIn("instance.yaml", committed)
-        self.assertIn("state/board/cards.ndjson", committed)
+        self.assertTrue(any(name.startswith("state/board/cards/") for name in committed), committed)
+
+
+def _object_store(repo: Path) -> tuple[int, int]:
+    """(objects, bytes) in a repository's object store, loose and packed, from `git count-objects -v`."""
+    counts = dict(
+        line.split(": ", 1) for line in git(repo, "count-objects", "-v").splitlines() if ": " in line
+    )
+    objects = int(counts["count"]) + int(counts["in-pack"])
+    size = (int(counts["size"]) + int(counts["size-pack"])) * 1024
+    return objects, size
+
+
+class CheckpointGitCostTests(unittest.TestCase):
+    """secretary-1656: a tick's Git cost follows what changed, not the board's size."""
+
+    CARDS = 2000
+
+    # The writer fixture, borrowed without rerunning the writer cases.
+    setUp = CheckpointWriterTests.setUp
+    tearDown = CheckpointWriterTests.tearDown
+    seed_board = CheckpointWriterTests.seed_board
+    seed_runs = CheckpointWriterTests.seed_runs
+    writer = CheckpointWriterTests.writer
+    write = CheckpointWriterTests.write
+    head_files = CheckpointWriterTests.head_files
+    committed_board = CheckpointWriterTests.committed_board
+    committed_text = CheckpointWriterTests.committed_text
+
+    @staticmethod
+    def _prose(rng, size: int) -> str:
+        words: list[str] = []
+        while sum(len(word) + 1 for word in words) < size:
+            words.append("".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(3, 9))))
+        return " ".join(words)
+
+    def seed_large_board(self, *, audit_lines: int) -> list[dict]:
+        rng = random.Random(1656)
+        cards = [
+            dict(CARD, id=number, reference=f"secretary-{number}", description=self._prose(rng, 1500))
+            for number in range(1, self.CARDS + 1)
+        ]
+        self.seed_board(cards, sprints=[SPRINT])
+        self.append_audit(
+            [{"request_id": f"r-{n}", "note": self._prose(rng, 200)} for n in range(audit_lines)]
+        )
+        return cards
+
+    def append_audit(self, rows: list[dict]) -> None:
+        with (self.data_dir / "board" / "audit.ndjson").open("a", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+    def test_checkpoint_over_an_unchanged_board_creates_no_git_object(self):
+        self.seed_large_board(audit_lines=500)
+        self.assertEqual(self.write().status, "committed")
+        before = _object_store(self.instance_dir)
+
+        result = self.write()
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(_object_store(self.instance_dir), before)
+
+    def test_one_card_change_adds_less_than_a_megabyte_of_objects(self):
+        cards = self.seed_large_board(audit_lines=5000)
+        self.assertEqual(self.write().status, "committed")
+        # The fixture is big enough that the old layout, which stored cards.ndjson whole, would
+        # have added more than a megabyte for this change on the cards file alone.
+        flat_cards = (self.data_dir / "board" / "cards.ndjson").read_bytes()
+        self.assertGreater(len(zlib.compress(flat_cards)), 1024 * 1024)
+        objects_before, size_before = _object_store(self.instance_dir)
+
+        cards[1000] = dict(cards[1000], column="Done", title="one card moved")
+        self.seed_board(cards, sprints=[SPRINT])  # rewrites the local export, audit included
+        self.seed_large_board_audit_again()
+        self.append_audit([{"request_id": f"r-new-{n}", "note": "moved"} for n in range(10)])
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+        objects_after, size_after = _object_store(self.instance_dir)
+        self.assertLess(size_after - size_before, 1024 * 1024)
+        # A commit, the trees on the changed paths, one card blob, one audit segment and the seal:
+        # a handful of objects, not one per card.
+        self.assertLess(objects_after - objects_before, 20)
+        committed = self.committed_board()
+        assert committed is not None
+        board = self.data_dir / "board"
+        self.assertEqual(committed.read_bytes("cards.ndjson"), (board / "cards.ndjson").read_bytes())
+        self.assertEqual(committed.read_bytes("audit.ndjson"), (board / "audit.ndjson").read_bytes())
+        verify_analytics_checkpoint(committed.directory)
+
+    def seed_large_board_audit_again(self) -> None:
+        """`seed_board` empties the local audit log; put the committed history back unchanged."""
+        rng = random.Random(1656)
+        for _ in range(self.CARDS):
+            self._prose(rng, 1500)
+        self.append_audit([{"request_id": f"r-{n}", "note": self._prose(rng, 200)} for n in range(5000)])
+
+    def test_appended_log_adds_one_segment_and_a_rewritten_log_is_one_segment_again(self):
+        self.append_audit([{"request_id": "r-1"}])
+        self.assertEqual(self.write().status, "committed")
+        segments = self.instance_dir / "state" / "board" / "audit" / "0000"
+        self.assertEqual(sorted(path.name for path in segments.iterdir()), ["00000000.ndjson"])
+
+        self.append_audit([{"request_id": "r-2"}])
+        self.assertEqual(self.write().status, "committed")
+        self.assertEqual(
+            sorted(path.name for path in segments.iterdir()), ["00000000.ndjson", "00000001.ndjson"]
+        )
+        self.assertEqual((segments / "00000001.ndjson").read_text(), '{"request_id": "r-2"}\n')
+
+        (self.data_dir / "board" / "audit.ndjson").write_text('{"request_id": "r-9"}\n', encoding="utf-8")
+        self.assertEqual(self.write().status, "committed")
+        self.assertEqual(sorted(path.name for path in segments.iterdir()), ["00000000.ndjson"])
+        self.assertEqual(self.committed_text("audit.ndjson"), '{"request_id": "r-9"}\n')
+
+    def test_a_flat_checkpoint_is_converted_to_the_split_layout(self):
+        """The first checkpoint after the upgrade replaces the committed flat files."""
+        flat = self.instance_dir / "state" / "board"
+        flat.mkdir(parents=True)
+        for name in ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json"):
+            shutil.copy(self.data_dir / "board" / name, flat / name)
+        git(self.instance_dir, "add", "state")
+        git(self.instance_dir, "commit", "--quiet", "-m", "flat checkpoint")
+        self.assertEqual(self.committed_board().layout, "flat")
+        self.append_audit([{"request_id": "r-1"}])
+
+        self.assertEqual(self.write().status, "committed")
+
+        board = self.committed_board()
+        assert board is not None
+        self.assertEqual(board.layout, "split")
+        self.assertFalse({"state/board/cards.ndjson", "state/board/audit.ndjson"} & set(self.head_files()))
+        self.assertEqual(
+            board.read_bytes("cards.ndjson"), (self.data_dir / "board" / "cards.ndjson").read_bytes()
+        )
+        self.assertEqual(board.read_text("audit.ndjson"), '{"request_id": "r-1"}\n')
+        verify_analytics_checkpoint(board.directory)
 
 
 class AnalyticsManifestTests(unittest.TestCase):
@@ -816,6 +978,24 @@ class AnalyticsManifestTests(unittest.TestCase):
 
     def write_manifest(self, board: Path, payload: dict) -> None:
         (board / ANALYTICS_MANIFEST).write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    def test_split_layout_carries_the_same_seal_and_tampering_is_caught(self):
+        """secretary-1656: the seal covers logical bytes, so both layouts verify to one identity."""
+        flat_id = verify_analytics_checkpoint(self.board).checkpoint_id
+        split = self.copy_board()
+        split_board(split)
+        self.assertFalse((split / "cards.ndjson").exists())
+
+        self.assertEqual(verify_analytics_checkpoint(split).checkpoint_id, flat_id)
+
+        segment = split / "audit" / "0000" / "00000000.ndjson"
+        segment.write_text('{"request_id":"forged"}\n', encoding="utf-8")
+        with self.assertRaisesRegex(AnalyticsManifestError, "sha256 does not match"):
+            verify_analytics_checkpoint(split)
+        segment.write_text('{"request_id":"request-1"}\n', encoding="utf-8")
+        (split / "cards" / "0000" / "stray.json").write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(AnalyticsManifestError, "unexpected entry"):
+            verify_analytics_checkpoint(split)
 
     def test_baseline_seal_returns_only_checkpoint_metadata(self):
         verified = verify_analytics_checkpoint(self.board)

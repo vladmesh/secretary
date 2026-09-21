@@ -33,6 +33,7 @@ from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board_transport import ensure_from_runtime_values, transport_path
+from secretary.checkpoint_layout import CheckpointLayoutError, open_checkpoint_board
 from secretary.host_apply import pinned_orca_executable
 from secretary.infra.kanboard_compose import (
     KANBOARD_COMPOSE_FILE,
@@ -103,15 +104,18 @@ def _project_lanes(instance: Path) -> set[str]:
             lane = item.get("orca_binding") or item.get("id")
             if isinstance(lane, str) and lane:
                 lanes.add(lane)
-    cards = instance / "state" / "board" / "cards.ndjson"
-    if cards.is_file():
+    try:
+        board = open_checkpoint_board(instance / "state" / "board")
+    except CheckpointLayoutError:
+        raise BootstrapError("could not read checkpoint board swimlanes") from None
+    if board.has("cards.ndjson"):
         try:
-            for raw in cards.read_text(encoding="utf-8").splitlines():
+            for raw in board.read_text("cards.ndjson").splitlines():
                 card = yaml.safe_load(raw)
                 lane = card.get("swimlane") if isinstance(card, dict) else None
                 if isinstance(lane, str) and lane:
                     lanes.add(lane)
-        except (OSError, yaml.YAMLError):
+        except (OSError, CheckpointLayoutError, yaml.YAMLError):
             raise BootstrapError("could not read checkpoint board swimlanes") from None
     return lanes
 

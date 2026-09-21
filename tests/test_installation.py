@@ -44,7 +44,7 @@ from secretary.routing_journal import attempts
 from secretary.runtime_env import RuntimeEnvError
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.upgrade import UpgradeResult, step_host
-from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git
+from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
 
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
@@ -1925,6 +1925,51 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(history[0].reviewer.head, "claude-opus")
             self.assertEqual(history[0].outcome, "red")
 
+    def test_split_and_flat_checkpoints_materialize_the_same_local_board(self):
+        """secretary-1656: one reader serves both layouts, so recovery restores the same bytes."""
+        restored: dict[str, dict[str, bytes]] = {}
+        identities: dict[str, str] = {}
+        for layout in ("flat", "split"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                instance = root / "instance"
+                data = root / "data"
+                instance.mkdir()
+                _checkpoint(instance, data, sprints=[SPRINT])
+                board = instance / "state" / "board"
+                (board / "audit.ndjson").write_text('{"request_id": "r-1"}\n{"request_id": "r-2"}\n')
+                (board / "events.ndjson").write_text('{"event_id": "e-1"}\n', encoding="utf-8")
+                if layout == "split":
+                    split_board(board)
+                    self.assertTrue((board / "layout.json").is_file())
+                    self.assertFalse((board / "cards.ndjson").exists())
+                    self.assertTrue((board / "cards" / "0000" / "00000000.json").is_file())
+                identities[layout] = installation._recovery_identity(instance, [])
+
+                self.assertEqual(materialize_checkpoint(instance, data), (1, 0))
+
+                restored[layout] = {
+                    path.name: path.read_bytes() for path in (data / "board").iterdir() if path.is_file()
+                }
+                self.assertEqual(json.loads(restored[layout]["cards.json"])["cards"], [CARD])
+                self.assertEqual(json.loads(restored[layout]["sprints.json"])["sprints"], [SPRINT])
+        self.assertEqual(restored["split"], restored["flat"])
+        self.assertEqual(identities["split"], identities["flat"])
+
+    def test_broken_split_checkpoint_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            _checkpoint(instance, data, layout="split")
+            # A gap in the record sequence is a checkpoint nobody wrote; it must not restore silently.
+            part = instance / "state" / "board" / "cards" / "0000" / "00000000.json"
+            part.rename(part.with_name("00000001.json"))
+
+            with self.assertRaisesRegex(InstallError, "out of sequence"):
+                materialize_checkpoint(instance, data)
+
     def test_non_secretary_data_target_is_refused_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1941,6 +1986,13 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
     def test_clean_target_clones_then_resumes_recovery_idempotently(self):
+        self._assert_clean_target_recovers(layout="flat")
+
+    def test_clean_target_recovers_from_a_split_layout_checkpoint(self):
+        """secretary-1656: `secretary recover` restores the board from the split layout too."""
+        self._assert_clean_target_recovers(layout="split")
+
+    def _assert_clean_target_recovers(self, *, layout: str) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source"
@@ -1951,7 +2003,7 @@ class InstallationTests(unittest.TestCase):
             bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
             bootstrap.chmod(0o600)
             source.mkdir()
-            _checkpoint(source, data)
+            _checkpoint(source, data, layout=layout)
             _git(source, "init")
             _git(source, "config", "user.name", "Test")
             _git(source, "config", "user.email", "test@example.invalid")

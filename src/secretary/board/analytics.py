@@ -2,7 +2,8 @@
 
 This module deliberately accepts a copied ``state/board`` directory, not an
 installation.  It has no control-plane dependencies: after the manifest
-verifier seals the cut, it reads the checkpoint's NDJSON files and joins an
+verifier seals the cut, it reads the checkpoint's NDJSON files -- through the
+checkpoint reader, in either the flat or the split layout -- and joins an
 outcome to usage only through the outcome's explicit event ids.
 """
 
@@ -96,10 +97,10 @@ def project_analytics_checkpoint(directory: str | Path) -> AnalyticsProjection:
 def _read_ndjson(checkpoint: AnalyticsCheckpoint, name: str) -> list[tuple[int, dict[str, Any]]]:
     if name not in _CHECKPOINT_ROWS:
         raise AssertionError(f"undeclared analytics row file {name}")
-    path = checkpoint.directory / name
+    path = checkpoint.board.path(name)
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        text = checkpoint.board.read_text(name)
+    except (OSError, ValueError) as exc:
         raise AnalyticsProjectionError("analytics_read_failed", path, None, str(exc)) from None
     rows: list[tuple[int, dict[str, Any]]] = []
     for number, line in enumerate(text.splitlines(), start=1):
@@ -129,7 +130,7 @@ def _references(checkpoint: AnalyticsCheckpoint, name: str) -> set[str]:
 
 
 def _events(checkpoint: AnalyticsCheckpoint) -> dict[str, _RecordedEvent]:
-    path = checkpoint.directory / "events.ndjson"
+    path = checkpoint.board.path("events.ndjson")
     events: dict[str, _RecordedEvent] = {}
     requests: dict[str, _RecordedEvent] = {}
     for number, record in _read_ndjson(checkpoint, "events.ndjson"):

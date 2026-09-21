@@ -322,7 +322,7 @@ class TwoWriterTests(unittest.TestCase):
         self.assertEqual(errors, [])
         listed = git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
         self.assertIn("state/memory/facts/global/one.md", listed)
-        self.assertIn("state/board/cards.ndjson", listed)
+        self.assertIn("state/board/cards/0000/00000000.json", listed)
         self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state"), "")
 
 

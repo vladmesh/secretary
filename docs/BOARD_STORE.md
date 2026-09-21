@@ -916,7 +916,8 @@ The selector (§2.2) and the normalized entity identity are process properties, 
   `task_audit_for`, so on `postgres` it is generated from PostgreSQL.
 - `export_board` refuses while the audit owner reports staged requests (§3.9). The Kanboard-only
   staged Product/Issue transaction journal is checked only on Kanboard.
-- `state/board/events.ndjson` is a generated projection of committed audit, read by
+- `events.ndjson` in `state/board` is a generated projection of committed audit, stored as
+  immutable segments ([Recovery](RECOVERY.md#board-checkpoint-layout)) and read by
   `board/analytics.py` from a sealed copy. Live readers never use it as the audit (§7.3).
 - The checkpoint refuses to publish a truncated or rewritten export over a non-empty journal.
 

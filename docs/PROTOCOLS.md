@@ -1449,7 +1449,8 @@ generation.
 
 `secretary.board.analytics.project_analytics_checkpoint(directory)` is the offline reader for one
 copied `state/board` checkpoint. It first calls `verify_analytics_checkpoint(directory)`, and only then
-parses `cards.ndjson`, `sprints.ndjson` and `events.ndjson`. `export.json` is verified only as a count
+parses the logical `cards.ndjson`, `sprints.ndjson` and `events.ndjson`, read through the checkpoint
+reader in either layout ([Recovery](RECOVERY.md#board-checkpoint-layout)). `export.json` is verified only as a count
 summary. The reader has no live board, dispatcher, provider session, comment, transcript or lifecycle
 dependency and never mutates a checkpoint. `cards.ndjson` and `sprints.ndjson` are membership sources
 for typed event subjects; repeated references and rows without a usable reference create no analytics

@@ -35,8 +35,9 @@ The canon is the normalised minimum needed to resume work:
   snapshot, and the `source.yaml` pin (installed heads canon, checkout, exact revision). After a
   restore the pin identifies the heads configuration and product ref that were running; moving the
   snapshot to a new checkout is `secretary upgrade`'s job;
-- board export: `state/board/cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `audit.ndjson`,
-  `export.json` and the analytics seal `analytics-manifest.json`;
+- board export: the logical files `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `audit.ndjson`,
+  `export.json` and the analytics seal `analytics-manifest.json`, stored in `state/board` in the
+  split layout (see [Layout](#layout));
 - run and audit state: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
 - memory facts: `state/memory/facts/**`;
 - knowledge documents: `state/knowledge/**` (free-form markdown, see
@@ -77,7 +78,9 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 <private repository>/
   instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, committed by the operator
   state/                                                             state, committed by the auto-writer
-    board/   cards.ndjson, sprints.ndjson, events.ndjson, audit.ndjson, export.json, analytics-manifest.json
+    board/   layout.json, export.json, analytics-manifest.json,
+             cards/NNNN/NNNNNNNN.json, sprints/NNNN/NNNNNNNN.json      one record per file
+             audit/NNNN/NNNNNNNN.ndjson, events/NNNN/NNNNNNNN.ndjson   immutable segments
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
     knowledge/**   brainstorms, decision logs, incident write-ups
@@ -86,6 +89,30 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 ```
 
 `secrets/installation.key` is the raw installation key, mode `0600`, outside Git and the checkpoint.
+
+### Board checkpoint layout
+
+The local export in the data directory stays flat. Only the copy committed into `state/board` is
+split, so a checkpoint's Git cost follows what changed instead of the size of the board
+(secretary-1656):
+
+- `layout.json` marks the split layout (`secretary.board.checkpoint-layout`, version 2). A directory
+  without it is the flat layout every earlier checkpoint used: one file per logical file.
+- `cards.ndjson` and `sprints.ndjson` are stored one line per file, `<dir>/<index // 1000>/<index>`,
+  in line order. Changing one card rewrites one small blob and the two trees above it; a checkpoint
+  over an unchanged board writes no file and so creates no Git object.
+- `audit.ndjson` and `events.ndjson` only grow, so they are stored as immutable segments. A
+  checkpoint whose log extends the committed one adds one segment holding the appended bytes. A log
+  that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
+  history) is replaced by a single segment.
+- A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
+  an unexpected entry is a broken checkpoint, not a shorter one.
+
+Every consumer of a committed checkpoint reads it through `checkpoint_layout.open_checkpoint_board`,
+which understands both layouts and returns the same logical bytes for the same board. The first
+checkpoint after the upgrade converts a flat checkpoint in place: it writes the split parts and
+removes the flat files in the same commit. Earlier commits keep their flat files; history is never
+rewritten.
 
 Memory facts are stored flat in this repository; the memory writer commits `propose`/`commit`/
 `supersede` into it. `state/memory/facts` is the only canon for every derived form of memory, so the
@@ -126,8 +153,11 @@ users (install, recover, cutover) are also synchronous and bypass the periodic c
 ## Checkpoint readers and freshness
 
 `state/board` and `state/runs` are recovery and offline-analytics artifacts, not a live read model.
-Their in-product readers are `installation.materialize_checkpoint` and `restore.py` during recovery,
-and `board.analytics.project_analytics_checkpoint`, which first verifies the sealed manifest. `status`
+Their in-product readers are `installation.materialize_checkpoint` and the recovery identity during
+recovery, `bootstrap` (checkpoint swimlanes) and `board.analytics.project_analytics_checkpoint`, which
+first verifies the sealed manifest. All of them read the board through the one checkpoint reader
+(see [Board checkpoint layout](#board-checkpoint-layout)); `restore.py` reads the materialised local
+export, not the checkpoint. `status`
 and `doctor` read Git and the dispatcher's production-state telemetry for freshness only.
 
 Live card, sprint, audit and command reads use the selected backend through `TaskReader`, `TaskAudit`
@@ -169,15 +199,17 @@ checkpoint, records the reason in status and retries next tick:
 
 `analytics-manifest.json` is `secretary.board.analytics-checkpoint` version 2, the boundary for
 offline analytics projection. Its object has exactly `schema`, `version`, `checkpoint_id` and `files`.
-`files` has exactly one entry each for `events.ndjson`, `cards.ndjson`, `sprints.ndjson`,
-`audit.ndjson` and `export.json`, each with path, lowercase SHA-256 and byte count; NDJSON entries
+`files` has exactly one entry each for the logical `events.ndjson`, `cards.ndjson`, `sprints.ndjson`,
+`audit.ndjson` and `export.json`, each with path, lowercase SHA-256 and byte count of the logical
+bytes, whichever layout stores them; NDJSON entries
 also record their non-blank line count. `checkpoint_id` is the SHA-256 of the canonical entries.
 Version 1 seals (without `audit.ndjson`) stay readable; new exports are sealed as version 2.
 `export.json` is a count summary, never proof of the cut.
 
-The writer validates all five files (synthesising an empty `events.ndjson` when there are no events),
-validates the staged manifest, removes the prior manifest, replaces the five files and renames the new
-manifest last. A copy taken mid-write has either no manifest or a complete matching cut.
+The writer validates all five files flat in staging (synthesising an empty `events.ndjson` when
+there are no events), validates the staged manifest, removes the prior manifest, writes the changed
+split parts and renames the new manifest last. A copy taken mid-write has either no manifest or a
+complete matching cut.
 
 `verify_analytics_checkpoint(directory)` is read-only and reads only that directory. It rejects
 unknown schemas, missing or extra files, duplicate entries, malformed metadata, digest or count

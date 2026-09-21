@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+
+from secretary.checkpoint_layout import LOGICAL_FILES, publish_split_board
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
@@ -39,7 +43,10 @@ SPRINT = {
 }
 
 
-def _checkpoint(instance: Path, data_dir: Path, *, sprints: list[dict] | None = None) -> None:
+def _checkpoint(
+    instance: Path, data_dir: Path, *, sprints: list[dict] | None = None, layout: str = "flat"
+) -> None:
+    """A committed-checkpoint fixture; `layout="split"` publishes its board the way the writer does."""
     board = instance / "state" / "board"
     runs = instance / "state" / "runs"
     facts = instance / "state" / "memory" / "facts"
@@ -72,6 +79,20 @@ def _checkpoint(instance: Path, data_dir: Path, *, sprints: list[dict] | None = 
         encoding="utf-8",
     )
     (facts / "fact.md").write_text("# recovered fact\n", encoding="utf-8")
+    if layout == "split":
+        split_board(board)
+
+
+def split_board(board: Path) -> None:
+    """Rewrite a flat `state/board` in the split layout; a logical file it lacked becomes empty."""
+    staging = Path(tempfile.mkdtemp(prefix=".split-", dir=board.parent))
+    try:
+        for name in LOGICAL_FILES:
+            source = board / name
+            (staging / name).write_bytes(source.read_bytes() if source.is_file() else b"")
+        publish_split_board(staging, board)
+    finally:
+        shutil.rmtree(staging)
 
 
 def _git(root: Path, *args: str) -> None:
