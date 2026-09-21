@@ -180,6 +180,8 @@ class _Case(unittest.TestCase):
             "window": audit.events(since=window),
             "first_page": audit.events_page(end=None, limit=5),
             "older_page": audit.events_page(end=9, limit=5),
+            "cursor_start": audit.events_after(None, limit=5),
+            "cursor_page": audit.events_after(audit.events_after(None, limit=7)[-1][0], limit=5),
             "owner": audit.event_id_owner("evt-usage-1"),
             "pending": audit.pending_events(),
             "status": audit.status(),
@@ -261,6 +263,9 @@ class SliceCostTests(_Case):
 
         capture("sprint", lambda: audit.events(references={SPRINT, *CARDS}))
         capture("task", lambda: audit.events(TASK))
+        # The budget pass's cursor page, from a position in the middle of the history.
+        middle = audit.events_after(None, limit=unrelated // 2)[-1][0]
+        capture("budget_page", lambda: audit.events_after(middle, limit=50))
         return {name: self.touched(client, *issued[name]) for name in issued}
 
     def test_one_sprint_and_one_task_touch_the_same_rows_over_ten_times_the_history(self) -> None:
@@ -351,6 +356,21 @@ class SameAnswersTests(_Case):
                         (len(everything), everything[max(0, stop - limit) : stop]),
                     )
         self.assertEqual(audit.events_page(end=len(everything) + 1, limit=5), (len(everything), []))
+        for limit in (1, 7, 500):
+            with self.subTest(cursor_limit=limit):
+                walked: list[dict[str, Any]] = []
+                after: list[str] | None = None
+                while page := audit.events_after(after, limit=limit):
+                    self.assertLessEqual(len(page), limit)
+                    walked += [event for _position, _settled, event in page]
+                    after = page[-1][0]
+                self.assertEqual(walked, everything)
+        positions = audit.events_after(None, limit=len(settled))
+        self.assertEqual([(event, at) for _position, at, event in positions], settled)
+        self.assertEqual([position[2] for position, _at, _event in positions], [e["request_id"] for e in everything])
+        for foreign in (["3"], ["not a time", "x", "y"], ["2026-09-01T00:00:00", "2026-09-01T00:00:00", "a"]):
+            with self.subTest(foreign_position=foreign):
+                self.assertEqual(audit.events_after(foreign, limit=3), positions[:3])
         full = audit._occurrence_projection_records()
         for kinds, owed in (((USAGE,), False), ((OUTCOME,), False), ((OUTCOME,), True)):
             with self.subTest(kinds=kinds, owed=owed):

@@ -114,6 +114,8 @@ from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRe
 def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
     """Every audit read under this scope must name a reference set, a window or a page bound.
 
+    A cursor read (`events_after`, the budget pass) must name a bounded page.
+
     secretary-1658: nothing the production tick runs may read the whole committed audit. Both
     audit owners are patched at the class, so a read by any instance under the scope is seen; a
     violation is recorded (the tick swallows some exceptions into its own outcomes) and raised.
@@ -138,8 +140,17 @@ def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
                 raise AssertionError("an unfiltered occurrence projection under the tick")
             return _projection(self, kinds, **options)
 
+        after = owner.events_after
+
+        def guarded_after(self, position, *, limit, _after=after):  # type: ignore[no-untyped-def]
+            if not isinstance(limit, int) or not 0 < limit <= 1000:
+                violations.append("".join(traceback.format_stack(limit=8)))
+                raise AssertionError("an unbounded cursor read under the tick")
+            return _after(self, position, limit=limit)
+
         patches += [
             mock.patch.object(owner, "events", guarded_events),
+            mock.patch.object(owner, "events_after", guarded_after),
             mock.patch.object(owner, "_occurrence_projection_records", guarded_projection),
         ]
     for patch in patches:

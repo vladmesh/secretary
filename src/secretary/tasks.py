@@ -1403,6 +1403,19 @@ class TaskAudit:
         if wanted is not None and not wanted:
             return []
         result: list[dict[str, Any]] = []
+        for event in self._journal():
+            if reference and event.get("ref") != reference:
+                continue
+            if wanted is not None and event.get("ref") not in wanted:
+                continue
+            if kind and event.get("kind") != kind and _event_action(event) != kind:
+                continue
+            result.append(event)
+        return result
+
+    def _journal(self) -> list[dict[str, Any]]:
+        """Every readable committed event, in append order: the file backend has no index."""
+        result: list[dict[str, Any]] = []
         try:
             with open(self.events_path, encoding="utf-8") as events:
                 for line in events:
@@ -1412,15 +1425,8 @@ class TaskAudit:
                         event = json.loads(line)
                     except ValueError:
                         continue
-                    if not isinstance(event, dict):
-                        continue
-                    if reference and event.get("ref") != reference:
-                        continue
-                    if wanted is not None and event.get("ref") not in wanted:
-                        continue
-                    if kind and event.get("kind") != kind and _event_action(event) != kind:
-                        continue
-                    result.append(event)
+                    if isinstance(event, dict):
+                        result.append(event)
         except FileNotFoundError:
             return []
         return result
@@ -1433,6 +1439,23 @@ class TaskAudit:
         if stop > total or limit <= 0:
             return total, []
         return total, records[max(0, stop - limit) : stop]
+
+    def events_after(
+        self, after: list[str] | None, *, limit: int
+    ) -> list[tuple[list[str], datetime | None, dict[str, Any]]]:
+        """Up to `limit` committed events past the position `after`, each with its own position.
+
+        A position here is the event's ordinal in `events()`, which only grows because the journal
+        is only appended to. A journal line records no settle time, so every event is answered as
+        settled (`None`). A position that is not one of this journal's starts from the beginning.
+        """
+        try:
+            start = int(after[0]) if after and len(after) == 1 else 0
+        except (TypeError, ValueError):
+            start = 0
+        start = max(start, 0)
+        records = self._journal()[start : start + max(limit, 0)]
+        return [([str(start + offset + 1)], None, event) for offset, event in enumerate(records)]
 
     def _anchor_intact(self) -> bool:
         """Лежит ли последняя прочитанная строка всё там же.
