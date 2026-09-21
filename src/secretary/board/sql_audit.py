@@ -83,6 +83,29 @@ _CLAIMING_EFFECT_TABLES = (
 )
 
 
+#: Who writes a refusal, and how many deterministic ids a refusal tries before giving up.
+_REFUSAL_ACTOR = {"role": "dispatcher", "id": "stale-audit-settlement"}
+_REFUSAL_CANDIDATES = 64
+
+
+def _refusal_ids(request_id: str) -> Iterator[str]:
+    """The ids a refusal of `request_id` may take, in order; the first free one is used."""
+    base = REFUSAL_PREFIX + request_id
+    yield base
+    for attempt in range(1, _REFUSAL_CANDIDATES):
+        yield f"{base}#{attempt}"
+
+
+def _is_refusal_of(record: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """Whether a stored record is this settlement's refusal of the same stale row."""
+    stored = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    return (
+        record.get("kind") == REFUSAL_KIND
+        and record.get("actor") == _REFUSAL_ACTOR
+        and all(stored.get(key) == payload[key] for key in ("refused_request_id", "refused_event_id", "staged_at"))
+    )
+
+
 def _kinds_answering(kind: str) -> set[str]:
     """Every stored `kind` a `kind=` narrowing matches: itself, and each whose action it is."""
     from secretary.tasks import _MARKER_EVENT_ACTIONS
@@ -498,7 +521,12 @@ class SqlTaskAudit:
                     "reason": reason,
                 }
                 if present:
-                    self._claim_row(request_id, record, status="committed")
+                    # Only this staged row, which the lock above holds: never an upsert over an id.
+                    self._execute(
+                        "UPDATE requests SET status = 'committed', settled_at = %s "
+                        "WHERE request_id = %s AND status = 'staged'",
+                        (_now(), request_id),
+                    )
                     self._write_board_event(request_id, record)
                 else:
                     self._refuse(request_id, record, outcome, entity_kind=entity_kind)
@@ -541,37 +569,83 @@ class SqlTaskAudit:
     def _refuse(
         self, request_id: str, record: dict[str, Any], outcome: dict[str, Any], *, entity_kind: str | None
     ) -> None:
+        """Discard the stale row and commit its refusal under an id nobody else owns.
+
+        Request ids are one installation-wide namespace and callers choose their own, so no prefix
+        is reserved: `audit-refused:<id>` may already belong to another record. The refusal is
+        inserted with `ON CONFLICT DO NOTHING`; when the id is taken by anything but this very
+        refusal, the next deterministic candidate (`...#1`, `#2`, ...) is tried. A record another
+        request owns is never written over. `refusal()` finds it by content, not by its id.
+        """
         settled = _now()
         self._execute(
             "UPDATE requests SET status = 'discarded', settled_at = %s WHERE request_id = %s",
             (settled, request_id),
         )
-        refusal_id = REFUSAL_PREFIX + request_id
-        refusal = {
-            "event_id": "evt_" + hashlib.sha256(refusal_id.encode("utf-8")).hexdigest()[:32],
-            "schema_version": 1,
-            "occurred_at": settled.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "actor": {"role": "dispatcher", "id": "stale-audit-settlement"},
-            "kind": REFUSAL_KIND,
-            "outcome": "refused",
-            "task_id": "",
-            "ref": str(record.get("ref") or outcome["ref"] or ""),
-            "subject": {"kind": entity_kind or "card"},
-            "backend": {"kind": "postgres", "task_id": None, "revision": "not_written"},
-            "request_id": refusal_id,
-            "payload": {
-                "refused_request_id": request_id,
-                "refused_kind": outcome["kind"],
-                "refused_event_id": str(record.get("event_id") or ""),
-                "staged_at": outcome["staged_at"],
-                "reason": outcome["reason"],
-            },
+        payload = {
+            "refused_request_id": request_id,
+            "refused_kind": outcome["kind"],
+            "refused_event_id": str(record.get("event_id") or ""),
+            "staged_at": outcome["staged_at"],
+            "reason": outcome["reason"],
         }
-        self._claim_row(refusal_id, refusal, status="committed")
+        for refusal_id in _refusal_ids(request_id):
+            refusal = {
+                "event_id": "evt_" + hashlib.sha256(refusal_id.encode("utf-8")).hexdigest()[:32],
+                "schema_version": 1,
+                "occurred_at": settled.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "actor": dict(_REFUSAL_ACTOR),
+                "kind": REFUSAL_KIND,
+                "outcome": "refused",
+                "task_id": "",
+                "ref": str(record.get("ref") or outcome["ref"] or ""),
+                "subject": {"kind": entity_kind or "card"},
+                "backend": {"kind": "postgres", "task_id": None, "revision": "not_written"},
+                "request_id": refusal_id,
+                "payload": payload,
+            }
+            inserted = self._query(
+                "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
+                "ref, created_at, settled_at) VALUES (%s, %s, %s::jsonb, 'committed', false, %s, %s, %s, %s) "
+                "ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+                (
+                    refusal_id,
+                    REFUSAL_KIND,
+                    json.dumps(refusal, sort_keys=True),
+                    entity_kind or "card",
+                    refusal["ref"] or None,
+                    settled,
+                    settled,
+                ),
+            )
+            if inserted:
+                return
+            owner = self._query(
+                "SELECT intent, status FROM requests WHERE request_id = %s", (refusal_id,)
+            )
+            if owner and owner[0][1] == "committed" and _is_refusal_of(self._document(owner[0][0]), payload):
+                return
+        from secretary.tasks import TaskError
+
+        raise TaskError(
+            "backend_error",
+            f"no free request id is left for the refusal of stale staged request {request_id}",
+            1,
+        )
 
     def refusal(self, request_id: str) -> dict[str, Any] | None:
-        """The committed refusal of a stale staged `request_id`, if settlement refused it."""
-        return self.committed_event(REFUSAL_PREFIX + request_id)
+        """The committed refusal of a stale staged `request_id`, found by what it says, not its id."""
+        rows = self._query(
+            "SELECT intent FROM requests WHERE status = 'committed' AND intent->>'kind' = %s "
+            "AND intent->'actor'->>'id' = %s AND intent->'payload'->>'refused_request_id' = %s "
+            "ORDER BY settled_at, request_id",
+            (REFUSAL_KIND, _REFUSAL_ACTOR["id"], request_id),
+        )
+        for (intent,) in rows:
+            document = self._document(intent)
+            if str(document.get("request_id") or "") in set(_refusal_ids(request_id)):
+                return document
+        return None
 
     def _write_board_event(self, request_id: str, event: dict[str, Any]) -> None:
         """Mirror a typed occurrence into `board_events`; a generic record has no row there."""

@@ -163,6 +163,55 @@ class StaleStagedSettlementTests(SettlementCase):
         self.assertIn("refused when its stale staged record was settled", retried.exception.message)
         self.assertEqual(self.status_of("req-lost"), "discarded")
 
+    def requests_snapshot(self) -> list[tuple[Any, ...]]:
+        return self.client._query(
+            "SELECT request_id, operation, intent::text, status, protocol, entity_kind, ref, "
+            "created_at, settled_at FROM requests ORDER BY request_id"
+        )
+
+    def test_a_refusal_never_writes_over_a_record_that_owns_its_id(self) -> None:
+        """The reviewer's collision: a caller already committed `audit-refused:req-lost`."""
+        self.charge("audit-refused:req-lost")
+        owner_before = [row for row in self.requests_snapshot() if row[0] == "audit-refused:req-lost"]
+        record = dict(self.charge("req-template"))
+        record.update({"request_id": "req-lost", "event_id": "evt_lost"})
+        self.audit.stage("req-lost", record)
+        self.age("req-lost", STALE_MINUTES)
+
+        outcomes = self.audit.settle_stale_staged()
+
+        self.assertEqual([o["outcome"] for o in outcomes], ["refused"])
+        owner_after = [row for row in self.requests_snapshot() if row[0] == "audit-refused:req-lost"]
+        self.assertEqual(owner_after, owner_before, "the owner of the id stays byte-identical")
+        self.assertEqual(self.audit.committed_event("audit-refused:req-lost")["kind"], "budget_recorded")
+        self.assertEqual(self.status_of("req-lost"), "discarded")
+        refusal = self.audit.refusal("req-lost")
+        assert refusal is not None
+        self.assertEqual(refusal["request_id"], "audit-refused:req-lost#1")
+        self.assertEqual(refusal["kind"], REFUSAL_KIND)
+        self.assertEqual(refusal["payload"]["refused_request_id"], "req-lost")
+        self.assertIn(refusal, self.audit.events(self.sprint, kind=REFUSAL_KIND))
+        with self.assertRaises(TaskError) as retried:
+            self.audit.stage("req-lost", record)
+        self.assertIn("its effect is absent", retried.exception.message)
+
+    def test_a_second_settlement_pass_writes_nothing_new(self) -> None:
+        record = dict(self.charge("req-template"))
+        record.update({"request_id": "req-lost", "event_id": "evt_lost"})
+        self.audit.stage("req-lost", record)
+        self.age("req-lost", STALE_MINUTES)
+        self.charge("req-present")
+        self.died_after_its_effect("req-present")
+        self.age("req-present", STALE_MINUTES)
+        self.assertEqual(len(self.audit.settle_stale_staged()), 2)
+        settled = self.requests_snapshot()
+        budget = self.budget_rows()
+
+        self.assertEqual(self.audit.settle_stale_staged(), [])
+
+        self.assertEqual(self.requests_snapshot(), settled)
+        self.assertEqual(self.budget_rows(), budget)
+
     def test_a_row_whose_effect_cannot_be_proven_is_refused_rather_than_guessed(self) -> None:
         BoardEventCanon(self.tmp, audit=self.audit).stage("req-transition", self.card_event("evt_transition"))
         self.age("req-transition", STALE_MINUTES)
