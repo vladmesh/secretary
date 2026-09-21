@@ -558,6 +558,14 @@ class AutomationSpecTests(unittest.TestCase):
             self.assertIn("--disabled", create_argv(specs[role]))
 
 
+# The board-transport step materializes the Kanboard JSON-RPC tuple, which only the Kanboard
+# backend reads; the suite runs on PostgreSQL (`tests/__init__.py`), where the step is a recorded
+# no-op.  These cases are about the Kanboard migration itself, so they select that backend for
+# their own duration.  The step reads the selector straight from the environment, so no process
+# cache needs resetting.  They go away with the Kanboard transport.
+_ON_KANBOARD = mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": "kanboard"})
+
+
 class UpgradeStepTests(unittest.TestCase):
     def setUp(self) -> None:
         self.memory_probe = mock.patch("secretary.upgrade.probe_memory").start()
@@ -669,6 +677,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "unchanged")
         self.assertIn("1 unavailable project registrations deferred", result.detail)
 
+    @_ON_KANBOARD
     def test_board_transport_step_imports_retires_and_reports_every_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -691,6 +700,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("retired legacy runtime values", result.detail)
         self.assertEqual(retired, "")
 
+    @_ON_KANBOARD
     def test_board_transport_step_fails_closed_without_writing_on_mismatch_or_missing_tuple(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -756,6 +766,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(result.status, "skipped")
             self.assertFalse((instance / "board-transport.env").exists())
 
+    @_ON_KANBOARD
     def test_board_transport_step_dry_run_and_insecure_runtime_do_not_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -777,6 +788,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(insecure.status, "failed")
         self.assertIn("permissions are too broad", insecure.detail)
 
+    @_ON_KANBOARD
     def test_board_transport_step_reports_an_already_configured_transport_as_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -793,6 +805,7 @@ class UpgradeStepTests(unittest.TestCase):
             result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
         self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
 
+    @_ON_KANBOARD
     def test_board_transport_step_ignores_unrelated_padded_runtime_lines_after_migration(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)

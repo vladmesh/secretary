@@ -808,11 +808,13 @@ class InstallationTests(unittest.TestCase):
             with (
                 mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
                 mock.patch("secretary.installation._run"),
+                mock.patch("secretary.installation.board_client") as selected,
                 mock.patch("secretary.installation.TaskReader") as reader,
             ):
                 check_prerequisites(transport=transport, instance_dir=Path(tmp))
 
-        self.assertEqual(reader.call_args.args[0]._transport, transport)
+        self.assertEqual(selected.call_args.kwargs["transport"], transport)
+        self.assertIs(reader.call_args.args[0], selected.return_value)
 
     def test_only_an_absent_runtime_env_is_ignored_for_an_unlocked_store(self):
         target = Path(tempfile.mkdtemp())
@@ -1700,7 +1702,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.os.geteuid", return_value=0),
             mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
             mock.patch("secretary.installation._run") as run,
-            mock.patch("secretary.tasks.KanboardClient"),
+            mock.patch("secretary.installation.board_client"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
             check_prerequisites(DEFAULT_TRANSPORT, Path("/tmp/instance"), "dev")
