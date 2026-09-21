@@ -475,7 +475,7 @@ class _AuditOnce:
         self._audit = audit
 
     def events(self, references: set[str] | None = None) -> list[dict[str, Any]]:
-        """The committed audit, or with `references` only the records of those refs.
+        """The committed records of these refs; an audit owner is never read whole from here.
 
         A walked audit is narrowed here; an audit owner is asked for the slice itself, so a
         summary of one sprint reads that sprint's records and not the history (secretary-1658).
@@ -485,10 +485,9 @@ class _AuditOnce:
                 return self._events
             return [event for event in self._events if event.get("ref") in references]
         if self._audit is not None:
-            if references is not None:
-                return self._audit.events(references=references)
-            self._events = self._audit.events()
-            return self._events
+            if references is None:
+                raise TypeError("an audit owner is read by the refs of a sprint, never whole")
+            return self._audit.events(references=references)
         return []
 
 

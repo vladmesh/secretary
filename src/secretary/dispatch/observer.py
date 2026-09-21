@@ -988,10 +988,12 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         # contains everything in this batch. A comment committed after the audit read belongs to
         # the next batch.
         #
-        # The read is narrowed to this sprint and its cards (secretary-1658), so the cards are
-        # listed once to name the slice before it is read. A card linked between that listing and
-        # the snapshot widens the slice and the read is taken again; one the slice still misses
-        # after that, or a cursor it does not hold, sends the read back to the whole stream.
+        # The read is narrowed to this sprint and its cards (secretary-1658), and nothing under
+        # the tick reads the whole stream: the cards are listed once to name the slice before it
+        # is read, and a card linked between that listing and the snapshot widens the slice and
+        # the read is taken again. Links still moving after that leave this tick's state
+        # unestablished, and the next tick reads again. A cursor the slice does not hold is looked
+        # up by its own id and its ref joins the slice.
         refs = _linked_refs(runtime.sprints.show(ref, include_resume_freshness=False))
         for _attempt in range(_OBSERVER_SLICE_ATTEMPTS):
             events = runtime.audit.events(references=refs | {ref})
@@ -1001,15 +1003,15 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
                 break
             refs |= linked
         else:
-            events = runtime.audit.events()
-        refs = linked
-        held = {_event_id(event) for event in events}
+            return {"known": False, "pending": False, "reason": "linked cards changed while the audit was read"}
         delivery = record.delivery
         wanted = {delivery.acknowledged_through}
         if delivery.stage != DeliveryStage.IDLE:
             wanted.add(delivery.through_event)
-        if not {event_id for event_id in wanted if event_id} <= held:
-            events = runtime.audit.events()
+        missing = {event_id for event_id in wanted if event_id} - {_event_id(event) for event in events}
+        if missing:
+            events = runtime.audit.events(references=refs | {ref} | _cursor_refs(runtime.audit, missing))
+        refs = linked
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
     try:
@@ -1092,6 +1094,24 @@ def _event_id(event: dict[str, Any] | None) -> str:
 
 #: How many times the observer's narrowed audit read is retaken while cards are being linked.
 _OBSERVER_SLICE_ATTEMPTS = 3
+
+
+def _cursor_refs(audit: Any, event_ids: set[str]) -> set[str]:
+    """The refs of the committed records these cursor ids name, each found by its own key.
+
+    A cursor carries an event's id, which is its request id or its typed `event_id`; the first is
+    the primary key and the second is `event_id_owner`'s index. An id neither finds adds nothing,
+    and the caller's existing refusal of an unavailable cursor stands.
+    """
+    refs: set[str] = set()
+    for event_id in event_ids:
+        record = audit.committed_event(event_id)
+        if record is None:
+            owner = audit.event_id_owner(event_id)
+            record = audit.committed_event(owner) if owner else None
+        if isinstance(record, dict) and str(record.get("ref") or ""):
+            refs.add(str(record["ref"]))
+    return refs
 
 
 def _linked_refs(sprint: dict[str, Any]) -> set[str]:

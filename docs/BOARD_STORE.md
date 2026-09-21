@@ -973,8 +973,10 @@ applies them in SQL, each served by an index of `0012_request_read_indexes`: a r
 `requests.ref`, a kind by `intent->>'kind'` including the released action spellings
 (`_event_action`), a window by `settled_at`, a page by the committed claim-order index, and a
 projection's slice (its kind, records sharing an `event_id` with it, records owing an outcome) in
-one statement. Callers on the dispatcher tick and the web request path use them; whole-history
-readers remain only off those paths. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
+one statement; a page and its count are one statement too, so they share a snapshot. Nothing the
+production tick runs reads the audit without a reference set, a window or a page bound
+(`tests/test_dispatcher_observer.py::unfiltered_audit_reads_raise` guards it); whole-history readers
+such as restore stay off the tick and the web request path. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
 
 **Card edges.** `TaskWriter._transition_card` and `TaskWriter.retire_done` run inside
 `TaskWriter._mutation()`. On PostgreSQL the claim, the state/archive change, the caller's finishing

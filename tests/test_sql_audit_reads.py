@@ -271,6 +271,50 @@ class SliceCostTests(_Case):
         self.assertEqual(large["task"], len(_oracle_events(self.store(0)[0], TASK)))
 
 
+class PageSnapshotTests(unittest.TestCase):
+    """One traversal of `/commands` pages skips and repeats nothing while commands commit.
+
+    A second connection commits a new record after every statement the reading connection issues,
+    which is where a command commit lands when the count and the page are two statements: page one
+    then counts the old total and reads past a record the next page will not reach.
+    """
+
+    def test_a_commit_between_page_reads_skips_or_repeats_no_row(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        config = BOARD.fresh_database().for_role("owner")
+        reader = SqlCardClient(config, Path(root.name))
+        self.addCleanup(reader.close)
+        writer = SqlCardClient(config, Path(root.name))
+        self.addCleanup(writer.close)
+        audit, other = SqlTaskAudit(reader), SqlTaskAudit(writer)
+        for index in range(23):
+            other.append(f"seed-{index}", _record(f"seed-{index}", f"card-{index % 3}", "commented"))
+        before = [event["request_id"] for event in _oracle_events(reader)]
+        reader._commit_unless_nested()
+        commits = iter(range(1000))
+        original = reader._query
+
+        def interleaved(sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+            rows = original(sql, params)
+            reader._commit_unless_nested()
+            index = next(commits)
+            other.append(f"late-{index}", _record(f"late-{index}", "card-late", "commented"))
+            return rows
+
+        seen: list[str] = []
+        end: int | None = None
+        with mock.patch.object(reader, "_query", interleaved):
+            while end != 0:
+                total, page = audit.events_page(end=end, limit=5)
+                stop = total if end is None else end
+                seen = [event["request_id"] for event in page] + seen
+                end = max(0, stop - 5)
+
+        self.assertGreater(next(commits), 4, "commands committed while the traversal read")
+        self.assertEqual(seen, before)
+
+
 class SameAnswersTests(_Case):
     """AC3: the SQL-filtered reads answer what read-all-then-filter answered."""
 

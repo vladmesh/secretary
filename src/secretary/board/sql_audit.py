@@ -175,23 +175,26 @@ class SqlTaskAudit:
     def events_page(self, *, end: int | None, limit: int) -> tuple[int, list[dict[str, Any]]]:
         """How many records are committed, and the ordinals `[end - limit, end)` of `events()`.
 
-        The count is an index-only scan, and the page is read newest first from the committed
+        One statement, so the count and the page come from one snapshot: counted and read in two,
+        a command committing in between shifts the ordinals and a traversal skips or repeats a
+        row. The count is an index-only scan, and the page is read newest first from the committed
         claim-order index, so the rows fetched are the page and the pages above it rather than the
         whole history. `end` past the count answers no rows; the caller refuses it.
         """
-        total = int(self._query("SELECT count(*) FROM requests WHERE status = 'committed'")[0][0])
-        stop = total if end is None else end
-        if stop > total or limit <= 0:
-            return total, []
-        start = max(0, stop - limit)
-        if stop <= start:
-            return total, []
+        stop = "COALESCE(%s::bigint, total.n)"
         rows = self._query(
-            "SELECT intent FROM requests WHERE status = 'committed' "
-            f"ORDER BY {_CLAIM_ORDER_DESC} LIMIT %s OFFSET %s",
-            (stop - start, total - stop),
+            "WITH total AS (SELECT count(*) AS n FROM requests WHERE status = 'committed') "
+            "SELECT total.n, page.intent FROM total LEFT JOIN LATERAL ("
+            "SELECT intent, settled_at, created_at, request_id FROM requests "
+            f"WHERE status = 'committed' AND {stop} <= total.n "
+            f"ORDER BY {_CLAIM_ORDER_DESC} "
+            f"LIMIT GREATEST(LEAST(%s::bigint, {stop}), 0) OFFSET GREATEST(total.n - {stop}, 0)"
+            ") AS page ON true "
+            "ORDER BY page.settled_at, page.created_at, page.request_id",
+            (end, limit, end, end),
         )
-        return total, [self._document(intent) for (intent,) in reversed(rows)]
+        total = int(rows[0][0])
+        return total, [self._document(intent) for _total, intent in rows if intent is not None]
 
     def pending_events(self) -> list[dict[str, Any]]:
         return [

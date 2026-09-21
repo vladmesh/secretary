@@ -1627,6 +1627,12 @@ BUDGET_WINDOW_KEY = "sprint_budget_window"
 #: request id, so one read twice is skipped by that id and costs one primary-key lookup.
 BUDGET_WINDOW_OVERLAP = timedelta(hours=1)
 
+#: Where a pass with no stored bound (the first after an upgrade, or a lost production state)
+#: starts. Every older event was charged or marked by the passes that read the whole history
+#: before secretary-1658; what a week does not reach is an event whose sprint has not been found
+#: for a week, which those passes retried without end and never charged either.
+BUDGET_WINDOW_BOOTSTRAP = timedelta(days=7)
+
 
 def _budget_window_since(payload: dict[str, Any] | None) -> datetime | None:
     window = payload.get(BUDGET_WINDOW_KEY) if isinstance(payload, dict) else None
@@ -1640,10 +1646,11 @@ def _budget_window_since(payload: dict[str, Any] | None) -> datetime | None:
 def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Charge each durable card event once, using its audit identity as the budget request id.
 
-    With the production `payload` the pass reads a window of the audit, from shortly before the
-    previous complete pass started, rather than the whole history (secretary-1658). A pass that
-    leaves an event eligible (its sprint could not be looked up) keeps the old bound, so that event
-    is read again; a payload without a bound, or none at all, reads everything.
+    The pass reads a window of the audit, from shortly before the previous complete pass started,
+    and never the whole history (secretary-1658): nothing under the tick may. With the production
+    `payload` the bound is kept there; without a stored bound the window is the last
+    `BUDGET_WINDOW_BOOTSTRAP`. A pass that leaves an event eligible (its sprint could not be looked
+    up) keeps the old bound, so that event is read again.
     """
     started = datetime.now(UTC)
     instance = getattr(runtime.catalog, "instance", {})
@@ -1653,8 +1660,8 @@ def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None
         data_dir=Path(getattr(runtime, "data_dir", None) or Path(runtime.audit.board_dir).parent),
         thresholds=thresholds,
     )
-    since = _budget_window_since(payload)
-    events = runtime.audit.events(since=since) if since is not None else runtime.audit.events()
+    since = _budget_window_since(payload) or started - BUDGET_WINDOW_BOOTSTRAP
+    events = runtime.audit.events(since=since)
     outcomes: list[dict[str, Any]] = []
     sprint_cache: dict[str, str | None] = {}
     deferred = False
@@ -1712,8 +1719,9 @@ def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None
                 "hard_stopped": result["sprint"]["status"] == "stopped",
             }
         )
-    if isinstance(payload, dict) and not deferred:
-        payload[BUDGET_WINDOW_KEY] = {"since": (started - BUDGET_WINDOW_OVERLAP).isoformat()}
+    if isinstance(payload, dict):
+        kept = since if deferred else started - BUDGET_WINDOW_OVERLAP
+        payload[BUDGET_WINDOW_KEY] = {"since": kept.isoformat()}
     return outcomes
 
 
