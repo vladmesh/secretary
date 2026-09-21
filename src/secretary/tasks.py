@@ -227,6 +227,28 @@ def _event_action(event: dict[str, Any]) -> str:
     return _MARKER_EVENT_ACTIONS.get(str(event.get("kind") or ""), str(event.get("kind") or ""))
 
 
+def _projection_slice(
+    records: list[tuple[dict[str, Any], bool]], kinds: frozenset[str], outcome_owed: bool
+) -> list[tuple[dict[str, Any], bool]]:
+    """The records an occurrence projection over `kinds` is decided from, in their read order."""
+    own = [record for record, _pending in records if record.get("kind") in kinds]
+    request_ids = {record.get("request_id") for record in own if isinstance(record.get("request_id"), str)}
+    event_ids = {record.get("event_id") for record in own if isinstance(record.get("event_id"), str)}
+
+    def kept(record: dict[str, Any]) -> bool:
+        if record.get("kind") in kinds:
+            return True
+        request_id, event_id = record.get("request_id"), record.get("event_id")
+        if (isinstance(request_id, str) and request_id in request_ids) or (
+            isinstance(event_id, str) and event_id in event_ids
+        ):
+            return True
+        data = record.get("data")
+        return outcome_owed and isinstance(data, dict) and "attempt_outcome_owed" in data
+
+    return [(record, pending) for record, pending in records if kept(record)]
+
+
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     """Read a legacy payload or the typed marker data without rewriting history."""
     if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
@@ -1297,13 +1319,26 @@ class TaskAudit:
                 continue
         return result
 
-    def _occurrence_projection_records(self) -> list[tuple[dict[str, Any], bool]]:
+    def _occurrence_projection_records(
+        self, kinds: Iterable[str] | None = None, *, outcome_owed: bool = False
+    ) -> list[tuple[dict[str, Any], bool]]:
         """Read committed and pending audit records atomically for a fail-closed projection.
 
         Generic audit readers retain their released best-effort behaviour. The usage projection
         cannot skip an unreadable record, because that record may be the causal boundary a later
         phase must subtract.
+
+        `kinds` narrows to the slice `SqlTaskAudit` answers for the same arguments: records of those
+        kinds, records sharing a request id or an event id with one of them and, with
+        `outcome_owed`, records carrying an `attempt_outcome_owed` obligation. The whole journal is
+        still read and checked here; only the answer is narrowed.
         """
+        records = self._occurrence_projection_all()
+        if kinds is None:
+            return records
+        return _projection_slice(records, frozenset(str(kind) for kind in kinds), outcome_owed)
+
+    def _occurrence_projection_all(self) -> list[tuple[dict[str, Any], bool]]:
         result: list[tuple[dict[str, Any], bool]] = []
         with self._locked_audit():
             try:
@@ -1349,8 +1384,24 @@ class TaskAudit:
             return committed
         return self.pending_event(request_id)
 
-    def events(self, reference: str = "", *, kind: str = "") -> list[dict[str, Any]]:
-        """Committed events in append order, optionally narrowed to one card and/or kind."""
+    def events(
+        self,
+        reference: str = "",
+        *,
+        kind: str = "",
+        references: Iterable[str] | None = None,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Committed events in append order, optionally narrowed to one card and/or kind.
+
+        `references` narrows to a set of refs. `since` is a lower bound the SQL store applies to its
+        settle time; a journal line records none, so here it narrows nothing and every caller that
+        passes it must already be idempotent over what it sees again.
+        """
+        del since
+        wanted = None if references is None else {str(item) for item in references if item}
+        if wanted is not None and not wanted:
+            return []
         result: list[dict[str, Any]] = []
         try:
             with open(self.events_path, encoding="utf-8") as events:
@@ -1365,12 +1416,23 @@ class TaskAudit:
                         continue
                     if reference and event.get("ref") != reference:
                         continue
+                    if wanted is not None and event.get("ref") not in wanted:
+                        continue
                     if kind and event.get("kind") != kind and _event_action(event) != kind:
                         continue
                     result.append(event)
         except FileNotFoundError:
             return []
         return result
+
+    def events_page(self, *, end: int | None, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        """How many events are committed, and the ordinals `[end - limit, end)` of `events()`."""
+        records = self.events()
+        total = len(records)
+        stop = total if end is None else end
+        if stop > total or limit <= 0:
+            return total, []
+        return total, records[max(0, stop - limit) : stop]
 
     def _anchor_intact(self) -> bool:
         """Лежит ли последняя прочитанная строка всё там же.

@@ -9,6 +9,7 @@ import json
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -432,7 +433,7 @@ def _production_tick_work(
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     try:
-        outcomes += _reconcile_sprint_budget(runtime)
+        outcomes += _reconcile_sprint_budget(runtime, payload)
     except Exception as exc:
         errors.append(_unexpected_error("", exc))
     # Reconcile after budget accounting so hard stops prevent replacement launches.
@@ -1617,8 +1618,34 @@ def _unexpected_error(reference: str, exc: Exception) -> dict[str, str]:
     }
 
 
-def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
-    """Charge each durable card event once, using its audit identity as the budget request id."""
+#: Where the production state keeps the lower bound of the next budget pass's audit window.
+BUDGET_WINDOW_KEY = "sprint_budget_window"
+
+#: How far behind the previous pass's start the next window begins. A record's settle time is
+#: taken when its statement runs and it becomes visible when its transaction commits, so a record
+#: can surface behind a moment a pass has already read past. Every event is charged under its own
+#: request id, so one read twice is skipped by that id and costs one primary-key lookup.
+BUDGET_WINDOW_OVERLAP = timedelta(hours=1)
+
+
+def _budget_window_since(payload: dict[str, Any] | None) -> datetime | None:
+    window = payload.get(BUDGET_WINDOW_KEY) if isinstance(payload, dict) else None
+    try:
+        since = datetime.fromisoformat(str(window["since"])) if isinstance(window, dict) else None
+    except (KeyError, ValueError):
+        return None
+    return since if since is not None and since.tzinfo is not None else None
+
+
+def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Charge each durable card event once, using its audit identity as the budget request id.
+
+    With the production `payload` the pass reads a window of the audit, from shortly before the
+    previous complete pass started, rather than the whole history (secretary-1658). A pass that
+    leaves an event eligible (its sprint could not be looked up) keeps the old bound, so that event
+    is read again; a payload without a bound, or none at all, reads everything.
+    """
+    started = datetime.now(UTC)
     instance = getattr(runtime.catalog, "instance", {})
     thresholds = budget_thresholds(instance if isinstance(instance, dict) else None)
     writer = SprintWriter(
@@ -1626,10 +1653,11 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         data_dir=Path(getattr(runtime, "data_dir", None) or Path(runtime.audit.board_dir).parent),
         thresholds=thresholds,
     )
-    events = runtime.audit.events()
-    committed = {str(event.get("request_id") or "") for event in events}
+    since = _budget_window_since(payload)
+    events = runtime.audit.events(since=since) if since is not None else runtime.audit.events()
     outcomes: list[dict[str, Any]] = []
     sprint_cache: dict[str, str | None] = {}
+    deferred = False
     for event in events:
         reference = str(event.get("ref") or "")
         if not reference or reference.startswith("sprint:"):
@@ -1655,12 +1683,13 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         if not identity:
             continue
         request_id = "sprint-budget-" + identity
-        if request_id in committed:
+        if runtime.audit.committed_event(request_id) is not None:
             continue
         sprint = _event_sprint(runtime, event, sprint_cache)
         if sprint is None:
             # A transient board failure must remain eligible for the next tick.  Only a successful
             # lookup that proves the card is unlinked gets a durable terminal marker below.
+            deferred = True
             continue
         if not sprint:
             _record_unlinked_budget_event(runtime, event, request_id, identity, event_type)
@@ -1683,6 +1712,8 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
                 "hard_stopped": result["sprint"]["status"] == "stopped",
             }
         )
+    if isinstance(payload, dict) and not deferred:
+        payload[BUDGET_WINDOW_KEY] = {"since": (started - BUDGET_WINDOW_OVERLAP).isoformat()}
     return outcomes
 
 

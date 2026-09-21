@@ -454,6 +454,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0012_request_read_indexes",
                 "0011_card_kinds",
                 "0010_po_session_close",
                 "0009_po_requests",

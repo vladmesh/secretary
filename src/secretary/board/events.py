@@ -190,7 +190,7 @@ class BoardEventCanon:
         and event ids each own one immutable payload; an exact committed-plus-pending copy is one
         occurrence whose export is already visible, while conflicting ownership fails closed.
         """
-        records = self.audit._occurrence_projection_records()
+        records = self.audit._occurrence_projection_records((EventKind.ATTEMPT_USAGE.value,))
         by_request: dict[str, tuple[Event, AttemptUsagePayload, bool]] = {}
         request_claims: dict[str, tuple[dict[str, Any], bool]] = {}
         event_claims: dict[str, tuple[str, bool]] = {}
@@ -275,7 +275,7 @@ class BoardEventCanon:
         owner is therefore an analytics diagnostic, even if it chose another
         request id. Every occurrence crosses the typed payload boundary once.
         """
-        records = self.audit._occurrence_projection_records()
+        records = self.audit._occurrence_projection_records((EventKind.ATTEMPT_OUTCOME.value,))
         by_key: dict[
             tuple[str, str, int], tuple[str, Event, AttemptOutcomePayload, bool]
         ] = {}
@@ -326,7 +326,9 @@ class BoardEventCanon:
         generic event reader, so unrelated observer work is not made to poll
         the audit merely because outcome recovery exists.
         """
-        records = self.audit._occurrence_projection_records()
+        records = self.audit._occurrence_projection_records(
+            (EventKind.ATTEMPT_OUTCOME.value,), outcome_owed=True
+        )
         committed_keys: set[tuple[str, str, int]] = set()
         for record, pending in records:
             if pending or record.get("kind") != EventKind.ATTEMPT_OUTCOME.value:

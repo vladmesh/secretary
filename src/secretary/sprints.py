@@ -474,10 +474,19 @@ class _AuditOnce:
         self._events: list[dict[str, Any]] | None = events
         self._audit = audit
 
-    def events(self) -> list[dict[str, Any]]:
+    def events(self, references: set[str] | None = None) -> list[dict[str, Any]]:
+        """The committed audit, or with `references` only the records of those refs.
+
+        A walked audit is narrowed here; an audit owner is asked for the slice itself, so a
+        summary of one sprint reads that sprint's records and not the history (secretary-1658).
+        """
         if self._events is not None:
-            return self._events
+            if references is None:
+                return self._events
+            return [event for event in self._events if event.get("ref") in references]
         if self._audit is not None:
+            if references is not None:
+                return self._audit.events(references=references)
             self._events = self._audit.events()
             return self._events
         return []
@@ -824,7 +833,11 @@ class SprintReader:
                 for card in sprint.get("cards") or []
                 if isinstance(card, dict) and str(card.get("ref") or "")
             }
-            source = audit.events() if audit is not None else (self.audit.events() if self.audit else [])
+            slice_refs = refs | {str(sprint["ref"])}
+            if audit is not None:
+                source = audit.events(slice_refs)
+            else:
+                source = self.audit.events(references=slice_refs) if self.audit else []
             for event in source:
                 if is_significant_observer_event(event, linked_refs=refs, sprint_ref=sprint["ref"]):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))

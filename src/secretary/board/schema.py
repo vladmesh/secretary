@@ -698,6 +698,35 @@ class Request(Base):
         # The target of every child's composite claim key.  Redundant with the primary key by
         # design, exactly as the scoped sprint keys of §3.3 are.
         sa.UniqueConstraint("request_id", "ref", name="requests_ref_identity"),
+        # `0012`: every narrowing `SqlTaskAudit` reads with, so a read costs its slice.
+        sa.Index(
+            "requests_committed_by_ref",
+            "ref",
+            "settled_at",
+            "created_at",
+            "request_id",
+            postgresql_where=sa.text("status = 'committed'"),
+        ),
+        sa.Index(
+            "requests_committed_in_claim_order",
+            "settled_at",
+            "created_at",
+            "request_id",
+            postgresql_where=sa.text("status = 'committed'"),
+        ),
+        sa.Index(
+            "requests_staged_in_claim_order",
+            "created_at",
+            "request_id",
+            postgresql_where=sa.text("status = 'staged'"),
+        ),
+        sa.Index("requests_by_kind", sa.text("(intent ->> 'kind')"), "status"),
+        sa.Index("requests_by_event_id", sa.text("(intent ->> 'event_id')"), "created_at", "request_id"),
+        sa.Index(
+            "requests_owing_outcome",
+            "request_id",
+            postgresql_where=sa.text("(intent -> 'data') ? 'attempt_outcome_owed'"),
+        ),
     )
 
 
