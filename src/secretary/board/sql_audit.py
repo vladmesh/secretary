@@ -20,9 +20,15 @@ id is reused for a different operation.  What changes is where the claim lives.
 * **The per-card marker lock** is a PostgreSQL advisory lock rather than a file lock, so it is
   released by the connection rather than by a process that might die holding a file.
 
-What is **not** implemented, because §7.3 says it ceases to exist: nothing here can leave an
-effect applied and a record unwritten.  The card effect and this claim are statements of one
-transaction (§7.1), so `reconcile` has nothing to repair and answers `(0, 0)`.
+What is **not** implemented, because §7.3 says it ceases to exist: a card effect and its claim
+are statements of one transaction (§7.1), so `reconcile` has nothing to repair and answers `(0, 0)`.
+
+What *can* outlive its writer is a claim staged on its own, outside a transaction: `stage` and
+`claim` commit a `staged` row by themselves when no transaction is open, and a process that dies
+before `append` or `discard` leaves it staged for good, blocking every checkpoint.
+`settle_stale_staged` is the later tick's answer (secretary-1664): a row staged longer than
+`STALE_STAGED_GRACE_SECONDS` is committed when its effect is proven present, and otherwise refused
+terminally, never by applying the effect.
 """
 
 from __future__ import annotations
@@ -47,6 +53,36 @@ _CLAIM_ORDER = "settled_at, created_at, request_id"
 _CLAIM_ORDER_DESC = "settled_at DESC, created_at DESC, request_id DESC"
 
 
+#: How long a staged row may stay staged before `settle_stale_staged` settles it. A live claim is
+#: settled by its own writer in seconds; this is far past that, and short enough that the next
+#: checkpoint after it (five minutes at most) still publishes inside the 30-minute RPO.
+STALE_STAGED_GRACE_SECONDS = 15 * 60
+
+#: The committed record that says a stale staged row was refused, under `<prefix><request id>`.
+REFUSAL_KIND = "audit_refused"
+REFUSAL_PREFIX = "audit-refused:"
+
+#: Records whose effect is the record itself: their writer stages and appends with no board write
+#: in between, so the frozen intent is all there is to prove. Typed occurrences by `EventKind`,
+#: generic records by `kind`; any generic record marked `backend.revision == "not_written"`
+#: (guard decisions, product-run events) says the same thing about itself.
+_RECORD_ONLY_TYPED = frozenset({EventKind.ATTEMPT_USAGE.value, EventKind.ATTEMPT_OUTCOME.value})
+_RECORD_ONLY_GENERIC = frozenset(
+    {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context", "routing"}
+)
+
+#: The effect tables whose rows claim the request that wrote them (`request_id` column). A row
+#: there is the effect, present, and it is written in the same statement as the effect itself.
+_CLAIMING_EFFECT_TABLES = (
+    "sprint_budget_events",
+    "sprint_comments",
+    "sprint_decisions",
+    "task_comments",
+    "issue_comments",
+    "product_comments",
+)
+
+
 def _kinds_answering(kind: str) -> set[str]:
     """Every stored `kind` a `kind=` narrowing matches: itself, and each whose action it is."""
     from secretary.tasks import _MARKER_EVENT_ACTIONS
@@ -65,6 +101,12 @@ def _advisory_key(text: str) -> int:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _stamp(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(value or "")
 
 
 class SqlTaskAudit:
@@ -282,6 +324,18 @@ class SqlTaskAudit:
             return committed, None, False
         pending = self.pending_event(request_id)
         if pending is None:
+            if self._record(request_id, "discarded") is not None:
+                if operation == "discard":
+                    return None, None, False
+                from secretary.tasks import TaskError
+
+                refusal = self.refusal(request_id) or {}
+                reason = (refusal.get("payload") or {}).get("reason") or "no reason recorded"
+                raise TaskError(
+                    "validation",
+                    f"request id was refused when its stale staged record was settled: {reason}",
+                    2,
+                )
             return None, None, False
         if operation == "reconcile" and self._is_protocol_event(pending):
             self._require_same_event(pending, {})
@@ -384,6 +438,140 @@ class SqlTaskAudit:
     def reconcile(self) -> tuple[int, int]:
         """Nothing to repair: §7.1 makes the effect and the record one transaction (§7.3)."""
         return 0, 0
+
+    # --- stale staged rows -----------------------------------------------------------
+
+    def oldest_pending(self) -> dict[str, Any] | None:
+        """The oldest staged row, for a gate that has to say what it is blocked on and since when."""
+        rows = self._query(
+            "SELECT request_id, operation, created_at FROM requests WHERE status = 'staged' "
+            "ORDER BY created_at, request_id LIMIT 1"
+        )
+        if not rows:
+            return None
+        request_id, kind, created_at = rows[0]
+        return {"request_id": request_id, "kind": kind, "staged_at": _stamp(created_at)}
+
+    def settle_stale_staged(
+        self, *, grace_seconds: float = STALE_STAGED_GRACE_SECONDS, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Commit or terminally refuse every row staged longer than `grace_seconds`.
+
+        Each row is settled in its own transaction under the request-namespace lock, re-read there,
+        so a writer finishing it concurrently wins and a row younger than the grace is never read
+        for settling. Nothing here applies an effect: a row is committed only when its effect is
+        proven present (`_stale_verdict`), and every other row -- effect absent, or not provable
+        from the store -- is refused. A refusal marks the row `discarded`, which makes its request
+        id terminal (`_pending_owner`), and commits an `audit_refused` record under
+        `audit-refused:<request id>` naming it and the reason, so it is in the history and the
+        checkpoint export. Returns one outcome per settled row.
+        """
+        cutoff = (now or _now()).timestamp() - float(grace_seconds)
+        candidates = [
+            request_id
+            for (request_id,) in self._query(
+                "SELECT request_id FROM requests WHERE status = 'staged' "
+                "AND created_at < to_timestamp(%s) ORDER BY created_at, request_id",
+                (cutoff,),
+            )
+        ]
+        outcomes: list[dict[str, Any]] = []
+        for request_id in candidates:
+            with self.client.transaction(), self._locked():
+                rows = self._query(
+                    "SELECT intent, created_at, entity_kind, ref FROM requests "
+                    "WHERE request_id = %s AND status = 'staged' AND created_at < to_timestamp(%s) "
+                    "FOR UPDATE",
+                    (request_id, cutoff),
+                )
+                if not rows:
+                    continue
+                intent, created_at, entity_kind, ref = rows[0]
+                record = self._document(intent)
+                present, reason = self._stale_verdict(request_id, record)
+                outcome = {
+                    "request_id": request_id,
+                    "kind": str(record.get("kind") or ""),
+                    "ref": ref or "",
+                    "staged_at": _stamp(created_at),
+                    "outcome": "committed" if present else "refused",
+                    "reason": reason,
+                }
+                if present:
+                    self._claim_row(request_id, record, status="committed")
+                    self._write_board_event(request_id, record)
+                else:
+                    self._refuse(request_id, record, outcome, entity_kind=entity_kind)
+            outcomes.append(outcome)
+        return outcomes
+
+    def _stale_verdict(self, request_id: str, record: dict[str, Any]) -> tuple[bool, str]:
+        """Whether a stale staged record's effect is present, and the sentence that says why."""
+        kind = str(record.get("kind") or "")
+        backend = record.get("backend") if isinstance(record.get("backend"), dict) else {}
+        if self._is_protocol_event(record):
+            if kind in _RECORD_ONLY_TYPED:
+                return True, f"{kind} is a record-only occurrence: the staged record is its whole effect"
+        elif kind in _RECORD_ONLY_GENERIC or backend.get("revision") == "not_written":
+            return True, f"{kind} is a record-only audit record: the staged record is its whole effect"
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        claimed = [
+            table
+            for table in _CLAIMING_EFFECT_TABLES
+            if self._query(f"SELECT 1 FROM {table} WHERE request_id = %s LIMIT 1", (request_id,))
+        ]
+        compound = kind == "budget_recorded" and bool(payload.get("hard_limit_stop"))
+        if claimed and not compound:
+            return True, f"its effect is present: {', '.join(claimed)} holds a row claiming {request_id}"
+        if kind == "budget_recorded" and not compound:
+            return False, (
+                "its effect is absent: a budget charge writes exactly one sprint_budget_events row "
+                f"claiming its request, and none claims {request_id}"
+            )
+        if compound:
+            return False, (
+                "its effect cannot be verified: a hard-limit budget charge also stops the sprint, "
+                "and the store holds no row proving that half; refused rather than guessed"
+            )
+        return False, (
+            f"its effect cannot be verified: no row in the store claims {request_id} and a "
+            f"{kind or 'record'} effect is not provable from its record; refused rather than guessed"
+        )
+
+    def _refuse(
+        self, request_id: str, record: dict[str, Any], outcome: dict[str, Any], *, entity_kind: str | None
+    ) -> None:
+        settled = _now()
+        self._execute(
+            "UPDATE requests SET status = 'discarded', settled_at = %s WHERE request_id = %s",
+            (settled, request_id),
+        )
+        refusal_id = REFUSAL_PREFIX + request_id
+        refusal = {
+            "event_id": "evt_" + hashlib.sha256(refusal_id.encode("utf-8")).hexdigest()[:32],
+            "schema_version": 1,
+            "occurred_at": settled.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "actor": {"role": "dispatcher", "id": "stale-audit-settlement"},
+            "kind": REFUSAL_KIND,
+            "outcome": "refused",
+            "task_id": "",
+            "ref": str(record.get("ref") or outcome["ref"] or ""),
+            "subject": {"kind": entity_kind or "card"},
+            "backend": {"kind": "postgres", "task_id": None, "revision": "not_written"},
+            "request_id": refusal_id,
+            "payload": {
+                "refused_request_id": request_id,
+                "refused_kind": outcome["kind"],
+                "refused_event_id": str(record.get("event_id") or ""),
+                "staged_at": outcome["staged_at"],
+                "reason": outcome["reason"],
+            },
+        }
+        self._claim_row(refusal_id, refusal, status="committed")
+
+    def refusal(self, request_id: str) -> dict[str, Any] | None:
+        """The committed refusal of a stale staged `request_id`, if settlement refused it."""
+        return self.committed_event(REFUSAL_PREFIX + request_id)
 
     def _write_board_event(self, request_id: str, event: dict[str, Any]) -> None:
         """Mirror a typed occurrence into `board_events`; a generic record has no row there."""

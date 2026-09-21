@@ -616,7 +616,18 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   belongs to another operation or payload"`; same and committed → replay, nothing written; same
   and staged → the existing claim is returned.
 - A generic stage may replace a generic staged record, never a protocol one (`requests.protocol`).
-- `discard` deletes a staged non-protocol row. `SqlTaskAudit` never writes `discarded`.
+- `discard` deletes a staged non-protocol row.
+- A row staged outside a transaction whose writer died stays `staged`. The checkpoint writer calls
+  `settle_stale_staged` before its gate counts staged rows, and settles each row staged longer than
+  `STALE_STAGED_GRACE_SECONDS` (15 min). It commits the row when its effect is proven present: the
+  record is its whole effect (`attempt.usage`, `attempt.outcome`, guard decisions, `routing`,
+  `outcome_round_context`, anything marked `backend.revision = "not_written"`), or an effect table
+  (`sprint_budget_events`, `sprint_comments`, `sprint_decisions`, `task_comments`,
+  `issue_comments`, `product_comments`) holds a row claiming its request id. Every other row is
+  refused, whether its effect is absent or cannot be proven. Refusal sets the row to `discarded`,
+  which is the only writer of that status, and commits an `audit_refused` record under
+  `audit-refused:<request id>` that carries the reason. A `discarded` request id is terminal:
+  `stage`, `claim` and `append` refuse it. Settlement never applies an effect.
 - A pending-request count is `SELECT count(*) FROM requests WHERE status = 'staged'`; it is the
   export gate (§6.3) and `secretary task verify-audit`'s answer.
 - One advisory lock (`secretary.board.requests`) serializes separate claims outside a transaction;
@@ -960,7 +971,7 @@ per-card lock for marker comments.
 | `TaskAudit.event_id_owner` | lookup by `intent->>'event_id'` in `requests`, served by `requests_by_event_id` |
 | `_require_same_event` | same comparison against `requests.intent` |
 | `MutationEventTransaction` stage → effect → confirm → finish → commit | one transaction (§7.1) |
-| `BoardEventPending` and `recover_*` for half-applied board writes | none: a rolled-back mutation leaves nothing; `reconcile` answers `(0, 0)` |
+| `BoardEventPending` and `recover_*` for half-applied board writes | none: a rolled-back mutation leaves nothing; `reconcile` answers `(0, 0)`; a claim staged outside a transaction by a writer that died is settled by the checkpoint tick (`settle_stale_staged`, §3.9) |
 | `ProductIssueTransaction` staged documents | none; Product/Issue effects and claims are one transaction |
 | `marker_comment_lock` (file lock per card) | advisory lock per card marker |
 

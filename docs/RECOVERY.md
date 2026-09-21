@@ -309,6 +309,14 @@ A blocked checkpoint degrades the production tick and its telemetry; the dispatc
 next tick. If the push window was due, the push is recorded as withheld instead of sending an older
 snapshot. Unit health and the steward must not read such a tick as healthy.
 
+Past the 30-minute RPO, `doctor` and the dashboard lamp report a red `checkpoint.rpo_exceeded`
+finding that names what stopped publication. If preparation is failing, that is the gate's reason
+and the time it began failing (`failing_since_at`); otherwise it is the push failure. A blocked gate
+commits nothing, so the unpushed lag stays at zero while it is blocked. For that case the exposure
+is counted from the last successful preparation. On PostgreSQL the gate first settles audit rows left
+staged by a dead writer (`docs/BOARD_STORE.md` §3.9). A stale row therefore blocks for the grace
+period plus one tick, not until an operator repairs it.
+
 `status --json` has a `secret_store` section: initialised or not, secret count, last catalog change,
 whether a usable installation key exists, and a materialisation-target summary, with no value, key or
 phrase. `doctor` raises a finding when catalog and values diverge, when the key is missing or unusable

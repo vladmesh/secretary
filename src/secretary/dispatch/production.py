@@ -746,12 +746,20 @@ def _write_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[s
         result.pop("last_failure_epoch", None)
         result.pop("last_failure_at", None)
         result.pop("last_failure_reason", None)
+        result.pop("failing_since_epoch", None)
+        result.pop("failing_since_at", None)
     else:
+        # `last_failure_*` moves with every failed run; `failing_since_*` keeps the first failure
+        # after the last success, so doctor can say since when the checkpoint has not published.
+        since = _number(state.get("failing_since_epoch")) if state.get("last_failure_reason") else 0.0
+        since = since or now
         result.update(
             {
                 "last_failure_epoch": now,
                 "last_failure_at": _checkpoint_rfc3339(now),
                 "last_failure_reason": reason or "checkpoint preparation failed",
+                "failing_since_epoch": since,
+                "failing_since_at": _checkpoint_rfc3339(since),
                 "retry_pending": True,
             }
         )

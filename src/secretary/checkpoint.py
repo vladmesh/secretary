@@ -123,6 +123,23 @@ DEFAULT_REMOTE = "origin"
 PUSH_TIMEOUT_SECONDS = 60
 
 
+def _oldest_pending_text(audit_owner: Any) -> str:
+    """`; oldest <kind> <request id> staged since <time>`, where the audit owner can say it."""
+    oldest = getattr(audit_owner, "oldest_pending", None)
+    if not callable(oldest):
+        return ""
+    try:
+        record = oldest()
+    except TaskError:
+        return ""
+    if not record:
+        return ""
+    return (
+        f"; oldest {record.get('kind') or 'record'} {record.get('request_id')} "
+        f"staged since {record.get('staged_at')}"
+    )
+
+
 class CheckpointBlocked(Exception):
     """The snapshot did not pass the gate; nothing is committed this tick."""
 
@@ -402,6 +419,8 @@ class CheckpointWriter:
         # client -- supplies its own board through. It is not a mode: with none given the writer
         # asks the switch for this installation's own client, exactly as `export_board` does.
         self._client = client
+        #: What the last run settled of the stale staged audit rows (`_settle_stale_staged`).
+        self.settled: tuple[dict[str, Any], ...] = ()
 
     def _audit_owner(self) -> tuple[Any, Any]:
         """The card client of this installation and the audit owner that client names.
@@ -444,6 +463,7 @@ class CheckpointWriter:
         client, audit_owner = self._audit_owner()
         backend = getattr(client, "backend_kind", "kanboard")
         try:
+            self._settle_stale_staged(audit_owner)
             audit = audit_owner.status()
         except TaskError as exc:
             raise CheckpointBlocked(
@@ -452,6 +472,7 @@ class CheckpointWriter:
         if not audit["ok"]:
             raise CheckpointBlocked(
                 f"the {backend} task audit has {audit['pending']} unresolved pending record(s)"
+                + _oldest_pending_text(audit_owner)
             )
         if backend != "postgres":
             # The private staged Product/Issue journal is the Kanboard implementation's; on the
@@ -488,6 +509,18 @@ class CheckpointWriter:
             secret_values=secret_values,
         )
         return self._commit(board_cards=board, run_records=runs)
+
+    def _settle_stale_staged(self, audit_owner: Any) -> None:
+        """Let this tick settle what a dead writer left staged, before the gate counts it.
+
+        Only an audit owner that can prove an effect from its store offers this (`SqlTaskAudit`);
+        the file journal keeps its operator repair, `secretary task reconcile-audit`. A row younger
+        than the owner's grace is left alone and still blocks this checkpoint, as it always has.
+        """
+        settle = getattr(audit_owner, "settle_stale_staged", None)
+        if not callable(settle):
+            return
+        self.settled = tuple(settle())
 
     def _collect_abandoned_staging(self) -> None:
         """Remove staging an earlier run left behind.
@@ -1006,6 +1039,10 @@ def checkpoint_snapshot(
         failed_at = str(write.get("at") or "")
         failed_epoch = _float_field(write, "attempted_epoch")
         failure_reason = str(write.get("reason") or "")
+    failing_since_at = str(write.get("failing_since_at") or "") if failure_reason else ""
+    failing_since_epoch = _float_field(write, "failing_since_epoch") if failure_reason else 0.0
+    if failure_reason and failing_since_epoch <= 0:
+        failing_since_at, failing_since_epoch = failed_at, failed_epoch
     skipped_at = str(write.get("skip_at") or "")
     skipped_epoch = _float_field(write, "skip_epoch")
     next_due_at = str(write.get("next_due_at") or "")
@@ -1019,6 +1056,20 @@ def checkpoint_snapshot(
         max(0, int((stamp - attempted_epoch) // 60))
         if attempted_epoch > 0
         else (_age_minutes(attempted_at, stamp) if attempted_at else None)
+    )
+    lag_minutes = _age_minutes(oldest_at, stamp)
+    unpublished = _unpublished_minutes(
+        lag_minutes,
+        failing=bool(failure_reason),
+        successful_age=successful_age,
+        failing_since_epoch=failing_since_epoch,
+        now=stamp,
+    )
+    rpo_reason = _rpo_reason(
+        failure_reason=failure_reason,
+        failing_since_at=failing_since_at,
+        push=push,
+        attempted_at=attempted_at,
     )
     return {
         "last_commit": commit,
@@ -1057,7 +1108,14 @@ def checkpoint_snapshot(
         # The RPO exposure is the age of the oldest change the remote lacks, not
         # the time since the last push: a quiet instance with nothing to push is
         # not behind.
-        "lag_minutes": _age_minutes(oldest_at, stamp),
+        "lag_minutes": lag_minutes,
+        # How long no checkpoint has reached the remote: the unpushed lag, or, while preparation
+        # fails, the time since the last preparation that succeeded -- a blocked gate commits
+        # nothing, so the lag alone would read zero for as long as the gate stays shut.
+        "unpublished_minutes": unpublished,
+        "rpo_exceeded": unpublished is not None and unpublished > PUSH_INTERVAL_SECONDS // 60,
+        "rpo_reason": rpo_reason,
+        "checkpoint_failing_since_at": failing_since_at,
         "push_status": str(push.get("status") or "pending"),
         "push_reason": str(push.get("reason") or ""),
         "push_failures": int(_float_field(push, "failures")),
@@ -1065,6 +1123,51 @@ def checkpoint_snapshot(
         "blocked_reason": failure_reason,
         "credential": _credential_snapshot(Path(instance_dir), _object_field(push, "credential"), stamp),
     }
+
+
+def _unpublished_minutes(
+    lag_minutes: int | None,
+    *,
+    failing: bool,
+    successful_age: int | None,
+    failing_since_epoch: float,
+    now: float,
+) -> int | None:
+    exposure = [lag_minutes] if lag_minutes is not None else []
+    if failing:
+        if successful_age is not None:
+            exposure.append(successful_age)
+        elif failing_since_epoch > 0:
+            exposure.append(max(0, int((now - failing_since_epoch) // 60)))
+    return max(exposure) if exposure else None
+
+
+def _rpo_reason(
+    *, failure_reason: str, failing_since_at: str, push: dict[str, Any], attempted_at: str
+) -> str:
+    """Why the remote lacks a checkpoint, in the words of the step that stopped it."""
+    if failure_reason:
+        since = f" since {failing_since_at}" if failing_since_at else ""
+        return f"checkpoint gate blocked{since}: {failure_reason}"
+    push_reason = str(push.get("reason") or "")
+    if push.get("remote_diverged") or push.get("status") == "diverged":
+        return f"remote diverged: {push_reason or 'push stopped, resolve by hand'}"
+    if push.get("status") == "failed":
+        return f"checkpoint push failed at {attempted_at or 'unknown time'}: {push_reason or 'reason unavailable'}"
+    if push_reason:
+        return f"checkpoint push {push.get('status') or 'pending'}: {push_reason}"
+    last = str(push.get("last_push_at") or "")
+    return f"no push has delivered the pending commits (last push {last or 'never'})"
+
+
+def rpo_problem(snapshot: dict[str, Any]) -> str:
+    """The sentence of a checkpoint past its RPO, or "" when it is inside it."""
+    if not snapshot.get("rpo_exceeded"):
+        return ""
+    return (
+        f"checkpoint has not published for {snapshot.get('unpublished_minutes')} min, past the "
+        f"{PUSH_INTERVAL_SECONDS // 60} min RPO: {snapshot.get('rpo_reason') or 'reason unavailable'}"
+    )
 
 
 def _object_field(value: dict[str, Any], name: str) -> dict[str, Any]:
