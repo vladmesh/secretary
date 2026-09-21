@@ -122,8 +122,10 @@ PYTHONPATH=$PWD/src python3 -m unittest ...
 ## Board reads are hermetic by construction, not by a patch
 
 There is no default Kanboard fake to install, because there is nothing to shadow. A board client cannot be built from ambient environment variables at all: every
-client comes from `KanboardClient.for_instance(<instance dir>)`, which resolves the local
-`board-transport.env` of that instance and raises `backend_unavailable` when it is absent.
+client comes from `secretary.board.backend.board_client(<instance dir>)`, which resolves that
+instance's local `board-store.env` (PostgreSQL, the backend `tests/__init__.py` pins for the
+suite) or `board-transport.env` (Kanboard, for a case that opts in) and raises
+`backend_unavailable` when it is absent.
 A worker, reviewer or operator shell that inherits a live installation's `KANBOARD_*`
 variables therefore cannot turn the unit suite into a client of that board — the variables
 are simply not a source of transport configuration.
@@ -132,6 +134,11 @@ are simply not a source of transport configuration.
 `KANBOARD_*` in the environment and a temporary instance that has no transport file, the
 status read fails closed with `backend_unavailable` while a patched `urlopen` turns any
 accidental dial-out into a loud failure.
+
+A CLI test that needs a board injects it where the backend is chosen for both implementations
+— the `board_client`/`card_client` name the command or its layer binds (for example
+`secretary.task_commands.card_client`, or `board_injected()` on the sprint fixtures) — never
+at `KanboardClient.for_instance`, which the PostgreSQL pin never reaches.
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
 `collect_status(report, offline=True, sprint_client=FakeKanboard())` is the seam, and

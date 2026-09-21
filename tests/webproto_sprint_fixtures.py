@@ -9,11 +9,14 @@ module; see `tests/test_architecture.py::SourceLayoutTests`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import yaml
 
@@ -114,6 +117,25 @@ class SprintProtocolFixture(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    #: The two layers a `secretary sprint ...` protocol command builds bind `board_client` by
+    #: name, so the fixture's board is injected at each binding.
+    BOARD_CLIENT_SEAMS = (
+        "secretary.webproto.sprint_reads.board_client",
+        "secretary.webproto.sprint_ops.board_client",
+    )
+
+    @contextlib.contextmanager
+    def board_injected(self) -> Iterator[None]:
+        """Serve the fixture's board wherever a command asks the backend switch for one.
+
+        `board_client` is where the card backend is chosen for both implementations, so the
+        command's own client is replaced there rather than at a Kanboard-only constructor.
+        """
+        with contextlib.ExitStack() as stack:
+            for target in self.BOARD_CLIENT_SEAMS:
+                stack.enter_context(mock.patch(target, return_value=self.board))
+            yield
 
     # -- the layers under test -----------------------------------------------------------------
 

@@ -9,19 +9,26 @@ Orca installed and red on a bare CI runner (or vice versa) purely from
 process discovery order (secretary-705, secretary-738, secretary-748).
 
 Board reads need no patch here. A client is built only by
-``KanboardClient.for_instance(<instance dir>)``, from that instance's local
-``board-transport.env``; ambient ``KANBOARD_*`` variables are not a source of
-transport configuration, so a worker/reviewer/operator shell that inherits a
-live installation's environment cannot turn the unit suite into a client of
-that board (secretary-1026). ``tests/test_hermetic_kanboard.py`` proves it.
+``secretary.board.backend.board_client(<instance dir>)``, from that
+instance's own local configuration: ``board-store.env`` for PostgreSQL, and
+``board-transport.env`` when a case opts into Kanboard. Ambient ``KANBOARD_*``
+variables are not a source of transport configuration, so a
+worker/reviewer/operator shell that inherits a live installation's
+environment cannot turn the unit suite into a client of that board
+(secretary-1026). ``tests/test_hermetic_kanboard.py`` proves it for the
+Kanboard path. A test that needs a board injects it where the backend is
+chosen for both implementations -- ``board_client``/``card_client`` or the
+reader/writer constructor the command uses -- rather than at a Kanboard-only
+constructor.
 
 *Which* backend a client is built for does need one, and it is a variable
 rather than a patch: ``SECRETARY_CARD_BACKEND`` is the one named place the
-card backend is chosen in, and production requires it explicitly. The live
-installation exports ``postgres`` there. Inherited, it points every
-construction through the switch at a store the suite has not got. The suite
-therefore pins its own explicit ``kanboard`` selector before any test module
-is imported. ``tests/test_hermetic_card_backend.py`` proves it.
+card backend is chosen in, and production requires it explicitly. The suite
+runs on the backend production ships, so it pins its own explicit
+``postgres`` selector before any test module is imported, overriding
+whatever an inherited shell exported. A case about Kanboard behaviour opts
+into ``kanboard`` for its own duration.
+``tests/test_hermetic_card_backend.py`` proves it.
 
 Codex runtime state needs one more default, for the same reason and in the
 same shape. Since secretary-1173 every Codex head is an interactive TUI, so
@@ -156,12 +163,12 @@ _SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeli
 os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 
-# The suite is deliberately a Kanboard run, but there is no product default any more: a missing
+# The suite runs on the backend production ships, and there is no product default: a missing
 # selector is a configuration error. Pin the test backend explicitly before any module is imported.
-# Set it unconditionally so an operator shell exporting the live PostgreSQL selector cannot redirect
-# the suite to a store its fixtures do not own. Individual PostgreSQL cases override it for their own
-# duration and reset the process cache around the change.
-os.environ["SECRETARY_CARD_BACKEND"] = "kanboard"
+# Set it unconditionally so an operator shell exporting a different selector cannot redirect the
+# suite. Individual Kanboard cases override it for their own duration and reset the process cache
+# around the change.
+os.environ["SECRETARY_CARD_BACKEND"] = "postgres"
 
 _find_orca_patcher = mock.patch("secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA)
 _find_orca_patcher.start()

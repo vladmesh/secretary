@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
+from unittest import mock
 
 from secretary.product_issues import ProductIssueStore
 from secretary.sprint_observer import (
@@ -354,6 +355,26 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
             data_dir=self.tmp.name,
             instance=self.instance,
         )
+
+    #: Where a `secretary sprint ...` command asks the backend switch for its board: the
+    #: `board_client` name bound by the command group and by each protocol layer it builds.
+    BOARD_CLIENT_SEAMS: ClassVar[tuple[str, ...]] = (
+        "secretary.sprint_commands.board_client",
+        "secretary.webproto.sprint_reads.board_client",
+        "secretary.webproto.sprint_ops.board_client",
+    )
+
+    @contextlib.contextmanager
+    def board_injected(self) -> Iterator[None]:
+        """Serve this fixture's client wherever a CLI command asks `board_client` for one.
+
+        `board_client` is where the card backend is chosen for both implementations, so the
+        command's client is replaced there rather than at a Kanboard-only constructor.
+        """
+        with contextlib.ExitStack() as stack:
+            for target in self.BOARD_CLIENT_SEAMS:
+                stack.enter_context(mock.patch(target, return_value=self.client))
+            yield
 
     def sprint_reader(self) -> SprintReader:
         return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
