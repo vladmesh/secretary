@@ -131,6 +131,7 @@ unit tests/test_sprint_restore.py
 unit tests/test_sprint_executors.py
 unit tests/test_sprint_fixture_guards.py
 unit tests/test_sprint_listing_budget.py
+unit tests/test_sprint_list_journal_slice.py
 unit tests/test_sprint_read.py
 unit tests/test_sprint_admission.py
 unit tests/test_sprint_close_model.py

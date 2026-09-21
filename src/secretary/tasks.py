@@ -1397,10 +1397,19 @@ class TaskAudit:
         `references` narrows to a set of refs. `since` is a lower bound the SQL store applies to its
         settle time; a journal line records none, so here it narrows nothing and every caller that
         passes it must already be idempotent over what it sees again.
+
+        An empty `references` answers no rows and still opens the journal, reading none of it: a
+        caller whose document needs no events establishes that the journal answers, and fails
+        exactly where a read would have (secretary-1660).
         """
         del since
         wanted = None if references is None else {str(item) for item in references if item}
         if wanted is not None and not wanted:
+            try:
+                with open(self.events_path, encoding="utf-8"):
+                    pass
+            except FileNotFoundError:
+                pass
             return []
         result: list[dict[str, Any]] = []
         try:
