@@ -110,6 +110,7 @@ class AgainstAStubDashboard(unittest.TestCase):
         missing: tuple[str, ...] = (),
         listed: tuple[tuple[str, bool], ...] | None = None,
         session_body: str | None = None,
+        running_reads: int | None = None,
         session_status: int = 200,
         overview_status: int = 200,
         delays: dict[str, float] | None = None,
@@ -135,6 +136,8 @@ class AgainstAStubDashboard(unittest.TestCase):
         lists them; the default is the product's interesting case, one session with a turn running.
         `()` is an installation with no open session at all, and `session_body` replaces the JSON
         of every session with something a case decides, for the documents the script must refuse.
+        `running_reads` ends a running turn: that many reads of a session answer `running: true`,
+        and every read after them answers `false`, the way a turn that finishes mid-run looks.
         """
         catalogue = ((self.SESSION, True),) if listed is None else listed
         seen: list[tuple[str, str]] = []
@@ -173,7 +176,8 @@ class AgainstAStubDashboard(unittest.TestCase):
                     "kind": "po_session",
                     "session": {"session_id": asked},
                     "turns": [],
-                    "running": dict(catalogue).get(asked, False),
+                    "running": bool(dict(catalogue).get(asked, False))
+                    and (running_reads is None or counted <= running_reads),
                 }
                 return session_status, json.dumps(body), delay, ""
             return 200, "<html>dashboard</html>", delay, ""
@@ -786,7 +790,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
 
         # A poll still under way has no recorded end yet, and counts from the moment it started:
         # it cannot have finished before a window it has not finished at all.
-        poll._pending = 11.5
+        poll._pending = {1: 11.5}
         self.assertEqual(poll.overlapping(11.0, 12.0), 1)
         # A round that had closed before that poll started still does not count it.
         self.assertEqual(poll.overlapping(11.0, 11.4), 0)
@@ -868,32 +872,36 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
     instead, and says so.
     """
 
-    def assert_cadence_and_launch(self, report: object) -> None:
-        """Both properties, off one report, with every observed interval checked individually."""
-        self.assertEqual(measure.POLL_INTERVAL_SECONDS, 3.0, "the cadence under test is the /po page's own")
-        intervals = report.poll_intervals  # type: ignore[attr-defined]
+    def assert_on_schedule(self, report: object) -> None:
+        """Every start against its own schedule, both ways, and every gap between starts too."""
+        offsets = report.poll_offsets  # type: ignore[attr-defined]
         self.assertGreaterEqual(
-            len(intervals),
-            measure.CONCURRENT_ROUNDS - 1,
-            "each round is released by its own due poll, so a real run has at least this many gaps",
+            len(offsets), measure.CONCURRENT_ROUNDS, "each round is released by its own due poll"
         )
-        for index, spacing in enumerate(intervals, start=1):
+        for index, offset in enumerate(offsets, start=1):
+            with self.subTest(poll=index):
+                self.assertLessEqual(
+                    abs(offset),
+                    measure.CADENCE_TOLERANCE_SECONDS,
+                    f"a poll started {offset * 1000:+.1f} ms against its schedule",
+                )
+        # Two-sided on the gaps as well: an absolute schedule keeps every gap within two
+        # tolerances of the interval, so neither the old early-wake defect (gaps of ~2 ms) nor the
+        # stretch this round removes (gaps as long as a slow read) could pass.
+        for index, spacing in enumerate(report.poll_intervals, start=1):  # type: ignore[attr-defined]
             with self.subTest(interval=index):
-                self.assertGreaterEqual(
+                self.assertAlmostEqual(
                     spacing,
-                    measure.POLL_INTERVAL_SECONDS - measure.CADENCE_TOLERANCE_SECONDS,
-                    f"poll {index + 1} came {spacing:.4f} s after poll {index}: the cadence was shortened",
+                    measure.POLL_INTERVAL_SECONDS,
+                    delta=2 * measure.CADENCE_TOLERANCE_SECONDS,
+                    msg=f"poll {index + 1} started {spacing:.4f} s after poll {index}",
                 )
-                # "About three seconds": the schedule cannot run early, so the only way a gap grows
-                # is the machine being busy. The bound is loose enough that a loaded CI runner does
-                # not fail it and tight enough that the defect this class exists for — gaps of
-                # about two milliseconds — could never pass it.
-                self.assertLess(
-                    spacing,
-                    measure.POLL_INTERVAL_SECONDS + 1.0,
-                    f"poll {index + 1} came {spacing:.4f} s after poll {index}, which is not this cadence",
-                )
-        self.assertTrue(measure.cadence_holds(intervals), intervals)
+        self.assertTrue(measure.cadence_holds(offsets), offsets)
+
+    def assert_cadence_and_launch(self, report: object) -> None:
+        """Both properties, off one report, with every observed start checked individually."""
+        self.assertEqual(measure.POLL_INTERVAL_SECONDS, 3.0, "the cadence under test is the /po page's own")
+        self.assert_on_schedule(report)
 
         self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)  # type: ignore[attr-defined]
         for index, item in enumerate(report.concurrent, start=1):  # type: ignore[attr-defined]
@@ -931,7 +939,7 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
             [item.polls_in_flight for item in report.concurrent], [0] * measure.CONCURRENT_ROUNDS
         )
         text = "\n".join(measure.render(report))
-        self.assertIn("the poll ran every 3 s", text)
+        self.assertIn("the poll started every 3 s", text)
         self.assertIn("observed spacing:", text)
         self.assertIn("[launched by a due poll; 0 poll(s) in flight]", text)
 
@@ -964,61 +972,166 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
                     "a poll fell due inside this round, so one was genuinely in flight during it",
                 )
         self.assert_cadence_and_launch(report)
-        self.assertIn("the poll ran every 3 s", "\n".join(measure.render(report)))
+        self.assertIn("the poll started every 3 s", "\n".join(measure.render(report)))
 
     def test_a_run_whose_polls_were_faster_than_the_cadence_is_refused_by_the_command(self) -> None:
-        """The defect put back deliberately, to show what the command now does with it.
+        """The first defect put back deliberately, to show what the command now does with it.
 
-        `arm` used to set the event the poll thread was waiting on, so arming a round ended that
-        round's interval early and the polls fired back to back. The seam that decides when a poll
-        happens is `_sleep_until`; making it return at once reproduces that run exactly. What is
-        asserted is not the internals but the outcome: exit 2, the numbers printed and unjudged,
-        and no sentence anywhere claiming a cadence.
+        `arm` used to set the event the poll thread was waiting on, so polls fired back to back.
+        The seam that decides when a poll starts is `_sleep_until`; making it return after two
+        milliseconds instead of at the schedule reproduces that run. What is asserted is the
+        outcome: exit 2, the numbers printed and unjudged, and no sentence claiming a cadence.
         """
-        base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": 0.002})
+
+        def hurried(poll: object, _due: float) -> bool:
+            time.sleep(0.002)
+            return not poll._stop.is_set()  # type: ignore[attr-defined]
+
+        base = self.serve()
         with (
-            mock.patch.object(measure.SessionPoll, "_sleep_until", lambda self, due: not self._stop.is_set()),
+            mock.patch.object(measure.SessionPoll, "_sleep_until", hurried),
             mock.patch.object(measure, "WARM_REQUESTS", 2),
         ):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
-        self.assertIn("shorter than the 3 s cadence", text)
+        self.assertIn("early against its 3 s schedule", text)
         self.assertIn("the 3 s cadence did NOT hold", text)
-        self.assertNotIn("the poll ran every", text)
+        self.assertNotIn("the poll started every", text)
         self.assertNotIn("MEETS", text)
         self.assertIn("NOT JUDGED", text)
 
-    def test_the_cadence_rule_refuses_intervals_shorter_than_the_cadence(self) -> None:
-        """The rule itself, apart from the mechanism that satisfies it."""
-        interval = measure.POLL_INTERVAL_SECONDS
-        measure.require_cadence([interval, interval + 0.4])
+    def test_the_cadence_rule_is_two_sided_on_every_start(self) -> None:
+        """The rule itself, apart from the mechanism that satisfies it.
 
-        with self.assertRaises(measure.Unmeasurable) as refused:
-            measure.require_cadence([interval, 0.003])
-        self.assertIn("0.003", str(refused.exception))
+        This replaces an assertion this card changed this round. The rule used to be a lower bound
+        on intervals only — `min(intervals) >= interval - tolerance` — which accepted any stretch,
+        and a stretch is a lighter load than the page's. The rework decision made it two-sided on
+        starts, so both directions are asserted here: early is refused, late is refused, and a run
+        with fewer polls than rounds is not a cadence at all.
+        """
+        tolerance = measure.CADENCE_TOLERANCE_SECONDS
+        measure.require_cadence([0.0, 0.004, -0.001, tolerance])
 
-        # The intervals the reviewer actually recorded against the previous version.
-        with self.assertRaises(measure.Unmeasurable):
-            measure.require_cadence([0.0022, 0.0032, 0.0029])
+        with self.assertRaises(measure.Unmeasurable) as late:
+            measure.require_cadence([0.001, 0.002, 0.120 + tolerance])
+        self.assertIn("late", str(late.exception))
+
+        with self.assertRaises(measure.Unmeasurable) as early:
+            measure.require_cadence([0.0, -2.998, -5.996])
+        self.assertIn("early", str(early.exception))
 
         with self.assertRaises(measure.Unmeasurable) as few:
-            measure.require_cadence([interval])
-        self.assertIn("too few", str(few.exception))
+            measure.require_cadence([0.0])
+        self.assertIn("fewer than one per round", str(few.exception))
 
-    def test_the_output_claims_the_cadence_only_where_the_intervals_show_it(self) -> None:
+    def test_the_output_claims_the_cadence_only_where_the_starts_show_it(self) -> None:
         """Criterion 4's second half: the sentence and the refusal read the same predicate."""
         interval = measure.POLL_INTERVAL_SECONDS
-        held = "\n".join(measure.cadence_lines([interval, interval + 0.01]))
-        self.assertIn("the poll ran every 3 s", held)
+        held = "\n".join(measure.cadence_lines([interval, interval + 0.01], [0.001, 0.002, 0.011]))
+        self.assertIn("the poll started every 3 s", held)
         self.assertIn("observed spacing:", held)
+        self.assertIn("start against schedule: furthest +11.0 ms", held)
 
-        broken = "\n".join(measure.cadence_lines([0.0022, 0.0032]))
-        self.assertNotIn("the poll ran every", broken)
-        self.assertIn("did NOT hold", broken)
-        self.assertIn("0.002", broken)
+        stretched = "\n".join(measure.cadence_lines([3.5, 3.5], [0.0, 0.5, 1.0]))
+        self.assertNotIn("the poll started every", stretched)
+        self.assertIn("did NOT hold", stretched)
 
-        self.assertNotIn("every 3 s", "\n".join(measure.cadence_lines([])))
+        self.assertNotIn("every 3 s", "\n".join(measure.cadence_lines([], [])))
+
+
+class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
+    """The two things a real `/po` page does that a quiet stub never shows.
+
+    Both are run at a scaled cadence: the property is about the timer's control flow, not about
+    three seconds, and the real interval is already proved in `CadenceAndLaunchTests`.
+    """
+
+    def test_a_session_read_slower_than_the_interval_does_not_stretch_the_cadence(self) -> None:
+        """The reviewer's reproduction, which the previous version failed.
+
+        The page's `setInterval(async () => { await fetch(...) }, 3000)` starts a read every
+        interval whether or not the last one has answered. A poll loop that waited for each answer
+        started its next poll only after a slow read came back, so every gap became as long as the
+        read and the load fell below the page's while the output said the cadence held. Here the
+        session endpoint is slower than the interval, and the starts still have to be on schedule —
+        which means the reads overlap each other, and that is asserted too.
+        """
+        for interval, read in ((0.05, 0.12), (0.2, 0.5)):
+            with self.subTest(interval=interval, read=read):
+                base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": read})
+                with (
+                    mock.patch.object(measure, "POLL_INTERVAL_SECONDS", interval),
+                    mock.patch.object(measure, "WARM_REQUESTS", 2),
+                ):
+                    report = measure.run(base, None)
+
+                self.assertTrue(measure.cadence_holds(report.poll_offsets), report.poll_offsets)
+                # The discriminating number: the old loop's gaps were at least one read long.
+                self.assertLess(max(report.poll_intervals), read, report.poll_intervals)
+                # Reads overlapped each other, as they do under the page's timer.
+                windows = report.poll_windows
+                self.assertTrue(
+                    any(later[0] < earlier[1] for earlier, later in zip(windows, windows[1:], strict=False)),
+                    "no read was still outstanding when the next one started",
+                )
+                for index, item in enumerate(report.concurrent, start=1):
+                    self.assertIsNotNone(item.launched_at, f"round {index}")
+                    self.assertLess(item.launched_at, item.started_at, f"round {index}")
+
+    def test_a_turn_that_ends_mid_run_is_reported_and_the_run_still_stands(self) -> None:
+        """The observer's ruling on an ended turn: detect it, say so, do not abort.
+
+        When the turn ends the real page clears its timer, which is zero load. This keeps polling
+        on schedule, which is more than zero, so the load stays at or above the page's and a MEETS
+        is still sound — refusing would only turn a sound result into an unmeasurable one. What is
+        required is that the run notices: every poll's `running` is read, and one line names the
+        round the turn ended in and says polling continued.
+        """
+        # Read 1 is the selection probe; read 2 is the first poll; from read 3 on the turn is over.
+        base = self.serve(running_reads=2)
+        with (
+            mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
+            mock.patch.object(measure, "WARM_REQUESTS", 2),
+        ):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertRegex(
+            text,
+            r"the turn ended (before|during|after) round \d \(a poll answered running: false\); "
+            r"polling continued on schedule, at least as heavy as the page",
+        )
+        self.assertEqual(text.count("the turn ended"), 1, text)
+
+    def test_a_turn_that_stays_running_prints_no_ended_line(self) -> None:
+        base = self.serve()
+        with (
+            mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
+            mock.patch.object(measure, "WARM_REQUESTS", 2),
+        ):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertNotIn("the turn ended", text)
+        self.assertIn(
+            "this is a load no lighter than an open /po page on a running turn, so a number that "
+            "meets its threshold under it is sound, and one that exceeds it may be conservative",
+            text,
+        )
+
+    def test_where_the_turn_ended_is_named_against_the_rounds(self) -> None:
+        sample = measure.Sample(route="/", status=200, started_at=10.0, ended_at=11.0)
+        later = measure.Sample(route="/", status=200, started_at=20.0, ended_at=21.0)
+        rounds = [
+            measure.Round(samples=[sample], launched_at=9.9, polls_in_flight=0),
+            measure.Round(samples=[later], launched_at=19.9, polls_in_flight=0),
+        ]
+        self.assertEqual(measure.turn_ended_phrase(None, rounds), "")
+        self.assertEqual(measure.turn_ended_phrase(5.0, rounds), "before round 1")
+        self.assertEqual(measure.turn_ended_phrase(10.5, rounds), "during round 1")
+        self.assertEqual(measure.turn_ended_phrase(15.0, rounds), "before round 2")
+        self.assertEqual(measure.turn_ended_phrase(30.0, rounds), "after round 2")
 
 
 class DataDirectoryResolutionTests(unittest.TestCase):

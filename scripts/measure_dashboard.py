@@ -43,12 +43,19 @@ That rule lives in exactly four places, and nowhere else:
      How many polls were genuinely **in flight** during the round is measured from the recorded
      windows and printed per round — it is a fact about the run, not a condition on it, and on a
      fast installation it is legitimately zero.
-  4. :func:`require_cadence` proves the *cadence*: the spacing actually observed between polls is
-     what is judged and what is printed, never the constant. Nothing in this file can shorten an
-     interval — :meth:`SessionPoll._sleep_until` waits out an absolute deadline and only a full
-     stop can end that wait — and if a shorter spacing is observed anyway, the run is refused
-     rather than reported. A previous version woke the poll thread when a round was armed, so the
-     polls fired milliseconds apart while the output still said "every 3 s".
+  4. :func:`require_cadence` proves the *cadence*: every poll's actual start is compared with its
+     scheduled one, both ways, and the run is refused if any is off by more than the tolerance.
+     Starts follow an independent three-second schedule, as the page's `setInterval` does, so an
+     outstanding slow read can neither delay the next start nor stretch an interval. Earlier
+     versions got this wrong in both directions: one woke the poll early so polls fired
+     milliseconds apart, and the next waited for each answer, so a slow read stretched the cadence
+     and lightened the load, while the output said "every 3 s" both times.
+
+The concurrent poll is held to a one-sided standard: **its load is never lighter than an open `/po`
+page on a running turn**, and need not be an identical copy of it. A MEETS under at least the
+page's load is a sound MEETS; a heavier load can only make an EXCEEDS conservative. That is why a
+turn ending mid-run is reported rather than refused — the page would stop polling, and this keeps
+polling, which is more load, not less.
 
 **This script only reads, and only from the installation it was given.** Every request it makes
 is a GET or a HEAD, and the whole list is :data:`READ_REQUESTS` below. There is no POST, nothing
@@ -119,15 +126,16 @@ WARM_REQUESTS = 20
 #: real operator leaves open keeps polling its session.
 CONCURRENT_REQUESTS = 4
 #: The cadence being modelled: `src/secretary/web/pages.py` polls the selected session from the
-#: open `/po` page with `setInterval(..., 3000)`, anchored on the start of the previous poll rather
-#: than on when its answer came back. This script reproduces that schedule and never shortens it.
+#: open `/po` page with `setInterval(async () => { await fetch(...) }, 3000)`, which starts a read
+#: every three seconds whether or not the previous one has answered. This script starts its polls on
+#: the same independent schedule, and never shortens or stretches it.
 POLL_INTERVAL_SECONDS = 3.0
-#: How much shorter than the cadence an observed interval may be before the run is refused. The
-#: schedule makes a short interval impossible by construction (:meth:`SessionPoll._sleep_until`
-#: waits out an absolute deadline), so this is a guard on the fact rather than a working tolerance:
-#: if the spacing is ever observed short, something shortened the cadence and the scenario the
-#: thresholds judge did not happen.
-CADENCE_TOLERANCE_SECONDS = 0.05
+#: How far a poll's actual start may be from its scheduled one, either way, before the run is
+#: refused. The timer cannot start a poll early by construction (:meth:`SessionPoll._sleep_until`),
+#: and nothing it does waits on a read, so what this absorbs is a thread waking up and a
+#: connection starting. Late is the direction that matters — a late start is a lighter load than
+#: the page's — and 100 ms is a thirtieth of the interval.
+CADENCE_TOLERANCE_SECONDS = 0.1
 #: How many times that scenario is repeated. One round of it is not a measurement: the first
 #: baseline taken with this script came out 17 s, 27–29 s and 38–41 s on three runs of the same
 #: unchanged installation, a factor of 2.4, and a later card cannot close or refuse a 2.0 s item on
@@ -272,9 +280,16 @@ class Report:
     measurements: list[Measurement] = field(default_factory=list)
     #: Polls of the selected session that answered 2xx over the whole concurrent phase.
     poll_requests: int = 0
-    #: The spacing observed between consecutive polls, in seconds. What the cadence is reported
-    #: from: the constant states the schedule, these state the run.
+    #: Start and end of every poll that answered, in start order.
+    poll_windows: list[tuple[float, float]] = field(default_factory=list)
+    #: The spacing observed between consecutive poll starts, in seconds.
     poll_intervals: list[float] = field(default_factory=list)
+    #: Each poll's actual start minus its scheduled one, in seconds. What the cadence is judged
+    #: from: the constant states the schedule, these state the run.
+    poll_offsets: list[float] = field(default_factory=list)
+    #: Where in the concurrent phase the selected turn was first seen ended ("during round 2"), or
+    #: empty if every poll found it running.
+    turn_ended: str = ""
 
 
 # -- the one place a request is made ---------------------------------------------------------
@@ -569,58 +584,66 @@ def measure_warm(base_url: str, route: str) -> dict[str, Any]:
 
 
 class SessionPoll:
-    """The `/po` poll an operator's open session page makes, for the concurrency measurement.
+    """The `/po` poll an operator's open session page makes, as a load beside the four requests.
 
-    A read of the running session on the cadence the page itself uses. It is not measured itself:
-    what is measured is what the dashboard costs beside it.
+    **The standard this class is held to is one-sided: its load is never lighter than an open `/po`
+    page on a running turn.** It need not be an exact copy of the page. The Definition of Done asks
+    whether four concurrent `GET /` answer within 2.0 s while a page polls, and a MEETS answers that
+    soundly as long as the load beside the four is at least the page's; a heavier load can at worst
+    produce a conservative EXCEEDS, never a false MEETS. Every property below is there to keep the
+    load from being lighter.
 
-    Two properties carry the concurrency measurement, and both are things this class *does* rather
-    than things it hopes for.
+    *Starts follow an independent schedule.* The page polls with `setInterval(async () => { await
+    fetch(...) }, 3000)`, which starts a read every three seconds whether or not the last one has
+    answered. So a timer thread here starts poll *k* at `anchor + k * POLL_INTERVAL_SECONDS` —
+    absolute, so nothing accumulates — on a worker thread of its own, and never waits for an
+    outstanding read. Slow reads therefore overlap each other exactly as they would under the page.
+    The version this replaces scheduled the next poll from the previous one's start only after its
+    answer came back, so a read slower than the interval stretched every interval and the load fell
+    below the page's while the output still said "every 3 s".
 
-    *The cadence is real.* A poll is scheduled :data:`POLL_INTERVAL_SECONDS` after the previous
-    poll **started** — the anchor `setInterval` uses, since a browser's timer does not wait for the
-    answer — and :meth:`_sleep_until` waits that deadline out against the same clock the samples
-    are timed with. There is no wake and no caller that can ask for a poll sooner; only stopping
-    the poll altogether ends the wait, and then no further poll is made at all. So an observed
-    interval cannot come out short, and :func:`require_cadence` checks that it did not anyway.
+    *Every round is launched by a due poll.* A round hands its barrier to :meth:`arm`. The worker
+    thread for the next poll that falls due takes it, issues its read, records it, and only then
+    releases the round's four requests. That is program order inside one thread, so it holds at any
+    installation speed.
 
-    *Every round is launched by a due poll.* A round hands its barrier to :meth:`arm`, and its four
-    requests wait there. The poll thread does not touch that barrier until its next poll falls
-    **due** and has been issued and recorded; only then does it release the round. That is program
-    order inside one thread, so it is true at any installation speed, and it is what the round's
-    `launched_at` records.
+    *Every start is checked against its schedule, both ways.* Each poll records how far its actual
+    start was from its scheduled one, and :func:`require_cadence` refuses a run where any start is
+    further off than :data:`CADENCE_TOLERANCE_SECONDS` — early would be a different cadence, and late
+    would be the lighter load this class exists to rule out.
 
-    What it deliberately does not promise is temporal overlap. An earlier version released the poll
-    and the round from the barrier together to force a poll to be in flight during every round;
-    with a two-millisecond poll and a three-millisecond round, whether the two requests are
-    genuinely simultaneous is a coin toss, and one run in five failed on it. Overlap is therefore
-    measured — :meth:`overlapping` — and reported per round, and it is zero on a fast installation
-    because the poll has answered before the round starts, which is an accurate reading rather than
-    a fault.
+    *A turn that ends is noticed and not obeyed.* Every poll's `running` is read. When the turn
+    ends, the real page clears its timer — zero load. This keeps polling on schedule, which is more
+    than zero, so the one-sided standard still holds and the run is not refused; the output says in
+    which round it happened.
 
-    The version before that one shortened the cadence instead: `arm` set an event the poll thread
-    was sleeping on, so the rounds ran back to back, the polls fired two milliseconds apart, and
-    the output still said "every 3 s".
+    How many polls were genuinely in flight during each round is measured and reported, not
+    required: on a fast installation the launching poll has answered before the round starts.
     """
 
     def __init__(self, base_url: str, route: str, cookie: str) -> None:
         self.base_url = base_url
         self.route = route
         self.cookie = cookie
-        #: Start and end of every poll that answered, as `time.perf_counter` readings.
+        #: Start and end of every poll that answered, as `time.perf_counter` readings, in the order
+        #: they answered — which with overlapping reads is not the order they started in.
         self.windows: list[tuple[float, float]] = []
+        #: For every poll that answered, its actual start minus its scheduled one, in seconds.
+        self.offsets: list[float] = []
+        #: The start of the earliest poll whose answer said no turn was running, if any did.
+        self.turn_ended_at: float | None = None
         self.failure: Unmeasurable | None = None
         self._lock = threading.Lock()
         self._gate: threading.Barrier | None = None
-        #: What the poll thread writes the launching poll into before it releases the round.
+        #: What the launching poll's worker writes into before it releases the round.
         self._launch: Launch | None = None
-        #: The start of a poll that is under way and whose window is therefore not written down
-        #: yet. A poll still in flight when a round ends would otherwise be missing from that
-        #: round's count, because a window is only recorded once the answer is in. It is used for
-        #: the in-flight question alone; no recorded window is ever back-dated to it.
-        self._pending: float | None = None
+        #: The starts of polls under way, whose windows are not written down yet. A poll still in
+        #: flight when a round ends would otherwise be missing from that round's count. Used for
+        #: the in-flight question alone; no recorded window is ever back-dated to one of these.
+        self._pending: dict[int, float] = {}
+        self._workers: list[threading.Thread] = []
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="po-poll", daemon=True)
+        self._timer = threading.Thread(target=self._run, name="po-poll-timer", daemon=True)
 
     @property
     def successes(self) -> int:
@@ -628,14 +651,14 @@ class SessionPoll:
             return len(self.windows)
 
     def intervals(self) -> list[float]:
-        """The spacing actually observed between consecutive polls, in seconds.
+        """The spacing actually observed between consecutive poll starts, in seconds.
 
-        Start to start, because that is what the cadence schedules and what a `setInterval` does.
-        This is the only thing the output is allowed to describe the cadence from: the constant
-        says what was asked for, and these say what happened.
+        Start to start, in start order, because that is what the schedule governs and what a
+        `setInterval` does. Printed beside the offsets so a reader sees the spacing, not only the
+        verdict on it.
         """
         with self._lock:
-            starts = [start for start, _end in self.windows]
+            starts = sorted(start for start, _end in self.windows)
         return [later - earlier for earlier, later in zip(starts, starts[1:], strict=False)]
 
     def _take_gate(self) -> tuple[threading.Barrier | None, Launch | None]:
@@ -645,15 +668,14 @@ class SessionPoll:
             return gate, launch
 
     def arm(self, gate: threading.Barrier) -> Launch:
-        """Hand the poll thread a round's barrier. Nothing here hurries the poll.
+        """Hand the next due poll a round's barrier. Nothing here hurries the poll.
 
-        The next poll to fall due is issued and recorded, and that poll's thread then releases this
-        barrier. If the poll thread is mid-interval, the round waits out the rest of that interval;
-        if it has already taken this loop's gate, the round waits for the poll after it. Either way
-        the round is released by a poll that was going to happen then anyway, at the cadence, which
-        is what makes the ordering true without anything being shortened.
+        The next poll to fall due is issued and recorded, and that poll's worker then releases this
+        barrier. If the timer is mid-interval, the round waits out the rest of it; if the timer has
+        already taken this slot's gate, the round waits for the slot after. Either way the round is
+        released by a poll that was going to start then anyway.
 
-        Returns the record the poll thread fills in before it releases the round.
+        Returns the record the launching poll fills in before it releases the round.
         """
         launch = Launch()
         with self._lock:
@@ -665,7 +687,7 @@ class SessionPoll:
         """Wait until `due` on the sample clock. False means the poll was stopped instead.
 
         Looped against `time.perf_counter` rather than trusting one timed wait, so this cannot
-        return early and hand back an interval shorter than the cadence.
+        return early and start a poll ahead of its schedule.
         """
         while True:
             remaining = due - time.perf_counter()
@@ -675,45 +697,61 @@ class SessionPoll:
                 return False
 
     def _run(self) -> None:
-        # The first poll is due at once: the run has already proved in `prepare` that this session
-        # is running and answers, and the cadence is anchored from here on the start of each poll.
-        due = time.perf_counter()
+        """The timer: start poll *k* at `anchor + k * interval`, whatever earlier polls are doing."""
+        # The first poll is due at once: `prepare` has already proved this session is running and
+        # answers. The schedule is absolute from here, so a late wake-up does not push later ones.
+        anchor = time.perf_counter()
+        slot = 0
         while not self._stop.is_set():
+            due = anchor + slot * POLL_INTERVAL_SECONDS
             if not self._sleep_until(due):
                 return
             gate, launch = self._take_gate()
+            worker = threading.Thread(
+                target=self._poll, args=(slot, due, gate, launch), name=f"po-poll-{slot}", daemon=True
+            )
             with self._lock:
-                self._pending = time.perf_counter()
-            try:
-                sample = fetch(self.base_url, self.route, cookie=self.cookie)
-            except Unmeasurable as exc:
-                # Recorded, not swallowed: `check` reports it on the caller's thread. Polling stops
-                # because every further attempt would fail the same way and the run is already void.
-                self.failure = exc
-                with self._lock:
-                    self._pending = None
-                if gate is not None:
-                    # A round is waiting at that barrier for a poll that is not coming.
-                    gate.abort()
-                self._stop.set()
-                return
+                self._workers.append(worker)
+            worker.start()
+            slot += 1
+
+    def _poll(self, slot: int, due: float, gate: threading.Barrier | None, launch: Launch | None) -> None:
+        """One poll, on its own thread, so that no outstanding read can hold up the next start."""
+        with self._lock:
+            self._pending[slot] = time.perf_counter()
+        try:
+            sample = fetch(self.base_url, self.route, cookie=self.cookie)
+            running = session_is_running(self.route, sample.body)
+        except Unmeasurable as exc:
+            # Recorded, not swallowed: `check` reports it on the caller's thread. Scheduling stops
+            # because every further poll would fail the same way and the run is already void.
             with self._lock:
-                self._pending = None
-                self.windows.append((sample.started_at, sample.ended_at))
+                self._pending.pop(slot, None)
+                if self.failure is None:
+                    self.failure = exc
             if gate is not None:
-                # The ordering the scenario is defined by, as plain program order: this poll fell
-                # due, was issued and is recorded, and only now are the round's four requests let
-                # go. Nothing about it depends on how the threads are scheduled afterwards.
-                launch = launch if launch is not None else Launch()
-                launch.started_at = sample.started_at
-                launch.issued.set()
-                try:
-                    gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
-                except threading.BrokenBarrierError:
-                    # The round gave up waiting or failed on its own. It reports that; the poll
-                    # beside it was made on the cadence either way.
-                    pass
-            due = sample.started_at + POLL_INTERVAL_SECONDS
+                # A round is waiting at that barrier for a poll that is not coming.
+                gate.abort()
+            self._stop.set()
+            return
+        with self._lock:
+            self._pending.pop(slot, None)
+            self.windows.append((sample.started_at, sample.ended_at))
+            self.offsets.append(sample.started_at - due)
+            if not running and (self.turn_ended_at is None or sample.started_at < self.turn_ended_at):
+                self.turn_ended_at = sample.started_at
+        if gate is not None:
+            # The ordering the scenario is defined by, as program order: this poll fell due, was
+            # issued and is recorded, and only now are the round's four requests let go.
+            launch = launch if launch is not None else Launch()
+            launch.started_at = sample.started_at
+            launch.issued.set()
+            try:
+                gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
+            except threading.BrokenBarrierError:
+                # The round gave up waiting or failed on its own. It reports that; the poll
+                # beside it was made on schedule either way.
+                pass
 
     def overlapping(self, started_at: float, ended_at: float) -> int:
         """How many polls were genuinely in flight during `[started_at, ended_at]`.
@@ -725,24 +763,28 @@ class SessionPoll:
         """
         with self._lock:
             windows = list(self.windows)
-            pending = self._pending
+            pending = list(self._pending.values())
         counted = sum(1 for start, end in windows if start < ended_at and end > started_at)
-        if pending is not None and pending < ended_at:
-            counted += 1
-        return counted
+        return counted + sum(1 for start in pending if start < ended_at)
 
     def check(self) -> None:
-        """Raise whatever the poll thread hit, on the caller's thread."""
+        """Raise whatever a poll hit, on the caller's thread."""
         if self.failure is not None:
             raise self.failure
 
     def __enter__(self) -> Self:
-        self._thread.start()
+        self._timer.start()
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        # No new start after this; the reads already under way are waited for, so the record of
+        # every poll this run made — its start, its end, its `running` — is complete when it is read.
         self._stop.set()
-        self._thread.join(timeout=REQUEST_TIMEOUT_SECONDS)
+        self._timer.join(timeout=REQUEST_TIMEOUT_SECONDS)
+        with self._lock:
+            workers = list(self._workers)
+        for worker in workers:
+            worker.join(timeout=REQUEST_TIMEOUT_SECONDS)
 
 
 def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
@@ -801,44 +843,57 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
     )
 
 
-def cadence_holds(intervals: list[float]) -> bool:
-    """Did the polls actually run on the cadence this scenario models?
+def cadence_holds(offsets: list[float]) -> bool:
+    """Did every poll start on its schedule, within the tolerance, either way?
 
     One predicate, two callers: :func:`require_cadence` refuses a run it is false for, and
     :func:`render` prints the cadence as observed only where it is true. They cannot disagree, so
-    the output cannot claim a cadence the run did not have — which is exactly what happened when
-    the claim was a sentence in the code and the schedule was something else.
+    the output cannot claim a cadence the run did not have.
 
-    Enough intervals to be a cadence at all means one per round beyond the first: each round is
-    released by its own due poll, so a run that reproduced the scenario has at least that many.
+    Two-sided on purpose. A lower bound on intervals alone let a slow read stretch the cadence —
+    the lighter-than-the-page load this scenario must never be — and still pass. And there must be
+    at least one poll per round, since each round is released by its own due poll.
     """
-    if len(intervals) < CONCURRENT_ROUNDS - 1:
+    if len(offsets) < CONCURRENT_ROUNDS:
         return False
-    return min(intervals) >= POLL_INTERVAL_SECONDS - CADENCE_TOLERANCE_SECONDS
+    return max(abs(offset) for offset in offsets) <= CADENCE_TOLERANCE_SECONDS
 
 
-def require_cadence(intervals: list[float]) -> None:
-    """Refuse a run whose polls were not the cadence the scenario models.
+def require_cadence(offsets: list[float]) -> None:
+    """Refuse a run whose polls did not start on the three-second schedule.
 
-    The four concurrent requests are judged against 2.0 s *while a session is polled every three
-    seconds*. Polls that fired faster than that are a heavier workload than the DoD names, and
-    polls that are too few to have a spacing are not a cadence at all. Either way the numbers are
-    real and the scenario is not the specified one, so they are printed and not judged.
+    Late starts are a lighter load than the page's, and a MEETS under a lighter load is not sound.
+    Early starts are a different cadence. Too few polls are not a cadence at all. In every case the
+    numbers are real, and they are printed without a verdict.
     """
-    if cadence_holds(intervals):
+    if cadence_holds(offsets):
         return
-    if len(intervals) < CONCURRENT_ROUNDS - 1:
+    if len(offsets) < CONCURRENT_ROUNDS:
         raise Unmeasurable(
-            f"only {len(intervals) + 1} poll(s) were made during the concurrent rounds, which is "
-            f"too few to show the {POLL_INTERVAL_SECONDS:.0f} s cadence this scenario is defined "
-            f"with, so the rounds cannot be judged as that scenario"
+            f"only {len(offsets)} poll(s) were made during the concurrent rounds, fewer than one "
+            f"per round, so the {POLL_INTERVAL_SECONDS:g} s cadence this scenario is defined "
+            f"with was not shown"
         )
+    furthest = max(offsets, key=abs)
+    direction = "late" if furthest > 0 else "early"
     raise Unmeasurable(
-        f"the polls were observed {min(intervals):.3f} s apart at the closest, shorter than the "
-        f"{POLL_INTERVAL_SECONDS:.0f} s cadence this scenario models; the rounds therefore ran "
-        f"against a busier installation than the thresholds judge, and nothing here may be reported "
-        f"as that scenario"
+        f"a poll started {abs(furthest) * 1000:.0f} ms {direction} against its "
+        f"{POLL_INTERVAL_SECONDS:g} s schedule, beyond the {CADENCE_TOLERANCE_SECONDS * 1000:.0f} "
+        f"ms the timer is allowed; the polls were therefore not the page's cadence, and nothing "
+        f"here may be reported as that scenario"
     )
+
+
+def turn_ended_phrase(turn_ended_at: float | None, rounds: list[Round]) -> str:
+    """Where in the concurrent phase a poll first found the turn ended, as a reader wants it."""
+    if turn_ended_at is None:
+        return ""
+    for number, item in enumerate(rounds, start=1):
+        if turn_ended_at < item.started_at:
+            return f"before round {number}"
+        if turn_ended_at <= item.ended_at:
+            return f"during round {number}"
+    return f"after round {len(rounds)}"
 
 
 def require_launch(rounds: list[Round]) -> None:
@@ -906,7 +961,7 @@ def _measure(scenario: Scenario, report: Report) -> None:
         # the two states it found, and cannot come out green.
         raise Unmeasurable(
             f"{scenario.poll_explanation}, so the concurrent scenario — four requests while a "
-            f"running session is polled every {POLL_INTERVAL_SECONDS:.0f} s, the way the open page "
+            f"running session is polled every {POLL_INTERVAL_SECONDS:g} s, the way the open page "
             f"polls it — was not reproduced on this installation; run this again while a PO turn "
             f"is running"
         )
@@ -916,9 +971,14 @@ def _measure(scenario: Scenario, report: Report) -> None:
     # Read after the block, so the poll thread has been stopped and joined and the record of what
     # it did is final rather than a snapshot of a thread still running.
     report.poll_requests = poll.successes
+    report.poll_windows = sorted(poll.windows)
     report.poll_intervals = poll.intervals()
+    report.poll_offsets = list(poll.offsets)
+    # Noticed and reported, not refused: the page would stop polling here, and this did not, which
+    # keeps the load at or above the page's — the one-sided standard a MEETS rests on.
+    report.turn_ended = turn_ended_phrase(poll.turn_ended_at, report.concurrent)
     poll.check()
-    require_cadence(report.poll_intervals)
+    require_cadence(report.poll_offsets)
     require_launch(report.concurrent)
 
     # The judged round is the one holding the slowest single request: the DoD asks that *each* of
@@ -944,40 +1004,38 @@ def _measure(scenario: Scenario, report: Report) -> None:
 # -- what it prints --------------------------------------------------------------------------
 
 
-def cadence_lines(intervals: list[float]) -> list[str]:
+def cadence_lines(intervals: list[float], offsets: list[float]) -> list[str]:
     """What the run is allowed to say about the cadence, which is only what it observed.
 
-    The spacing is printed whether or not it held, because it is a fact of the run either way, and
-    the sentence naming the cadence is printed only where :func:`cadence_holds` is true — the same
-    predicate the run is refused by. There is no path through this file that prints the cadence as
-    a claim and gets it from the constant.
+    The spacing and the start offsets are printed whether or not they held, because they are facts
+    of the run either way, and the sentence naming the cadence is printed only where
+    :func:`cadence_holds` is true — the same predicate the run is refused by. There is no path
+    through this file that prints the cadence as a claim and gets it from the constant.
     """
-    if not intervals:
-        return [
-            (
-                "  observed spacing: not observed — fewer than two polls were made, so this run "
-                "shows no cadence at all"
-            )
-        ]
-    observed = (
-        f"  observed spacing: {min(intervals):.3f} s min, {statistics.median(intervals):.3f} s "
-        f"median, {max(intervals):.3f} s max over {len(intervals)} interval(s)"
+    if not offsets:
+        return ["  observed spacing: not observed — no poll answered, so this run shows no cadence at all"]
+    lines = []
+    if intervals:
+        lines.append(
+            f"  observed spacing: {min(intervals):.3f} s min, {statistics.median(intervals):.3f} s "
+            f"median, {max(intervals):.3f} s max over {len(intervals)} interval(s)"
+        )
+    furthest = max(offsets, key=abs)
+    lines.append(
+        f"  start against schedule: furthest {furthest * 1000:+.1f} ms over {len(offsets)} poll(s), "
+        f"allowed ±{CADENCE_TOLERANCE_SECONDS * 1000:.0f} ms"
     )
-    if cadence_holds(intervals):
-        return [
-            observed,
-            (
-                f"  the poll ran every {POLL_INTERVAL_SECONDS:.0f} s: no interval between two "
-                f"polls was shorter than that"
-            ),
-        ]
-    return [
-        observed,
-        (
-            f"  the {POLL_INTERVAL_SECONDS:.0f} s cadence did NOT hold on this run, so nothing "
+    if cadence_holds(offsets):
+        lines.append(
+            f"  the poll started every {POLL_INTERVAL_SECONDS:g} s on its own schedule, whether "
+            f"or not the previous read had answered"
+        )
+    else:
+        lines.append(
+            f"  the {POLL_INTERVAL_SECONDS:g} s cadence did NOT hold on this run, so nothing "
             f"here is the scenario the thresholds judge"
-        ),
-    ]
+        )
+    return lines
 
 
 def render(report: Report, *, unmeasurable: str = "") -> list[str]:
@@ -994,11 +1052,20 @@ def render(report: Report, *, unmeasurable: str = "") -> list[str]:
         lines.append(f"/po poll: GET {report.poll_target}")
         lines.append(f"  chosen as {report.poll_explanation}")
         lines.append(
-            f"  scheduled {POLL_INTERVAL_SECONDS:.0f} s apart, which is the cadence the /po page "
-            f"itself polls on"
+            f"  started every {POLL_INTERVAL_SECONDS:g} s on an independent schedule, as the /po "
+            f"page's setInterval does"
+        )
+        lines.append(
+            "  this is a load no lighter than an open /po page on a running turn, so a number that "
+            "meets its threshold under it is sound, and one that exceeds it may be conservative"
         )
         lines.append(f"  polled successfully {report.poll_requests} time(s) during the concurrent rounds")
-        lines.extend(cadence_lines(report.poll_intervals))
+        lines.extend(cadence_lines(report.poll_intervals, report.poll_offsets))
+        if report.turn_ended:
+            lines.append(
+                f"  the turn ended {report.turn_ended} (a poll answered running: false); polling "
+                f"continued on schedule, at least as heavy as the page, which stops polling there"
+            )
     else:
         lines.append(f"/po poll: none — {report.poll_explanation or 'no session was selected'}")
     if unmeasurable:
@@ -1078,7 +1145,9 @@ def as_json(report: Report, *, unmeasurable: str = "") -> dict[str, Any]:
         "poll_requests": report.poll_requests,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         "poll_intervals_s": report.poll_intervals,
-        "poll_cadence_held": cadence_holds(report.poll_intervals),
+        "poll_start_offsets_s": report.poll_offsets,
+        "poll_cadence_held": cadence_holds(report.poll_offsets),
+        "poll_turn_ended": report.turn_ended,
         "warm": report.warm,
         "concurrent_rounds_ms": [
             [sample.duration_ms for sample in item.samples] for item in report.concurrent

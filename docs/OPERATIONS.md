@@ -514,11 +514,15 @@ The concurrent number is only the DoD's number if the four requests ran *while* 
 polled every three seconds. Two things in the output say whether that happened, and the command
 refuses to judge anything if either of them says no.
 
-- **The cadence is observed, not asserted.** Each poll is scheduled three seconds after the
-  previous poll started — the anchor a browser's `setInterval` uses — and nothing shortens that
-  wait. The output prints the spacing that actually occurred (`observed spacing: 3.000 s min, …`)
-  and says `the poll ran every 3 s` only where those numbers show it. Polls observed closer
-  together than the cadence mean a heavier workload than the DoD names, so the run is refused.
+- **The cadence is an independent schedule, and it is observed.** The page polls with
+  `setInterval(async () => { await fetch(...) }, 3000)`, which starts a read every three seconds
+  whether or not the previous one has answered. The command does the same: poll *k* starts at
+  `anchor + 3k` s on a thread of its own, so a slow session read neither delays the next start nor
+  stretches an interval, and slow reads overlap each other as they would under the page. Every
+  poll's actual start is compared with its scheduled one, both ways, and the run is refused if any
+  is more than 100 ms off. The output prints the spacing and the furthest offset
+  (`start against schedule: furthest +1.2 ms …`) and says `the poll started every 3 s` only where
+  those numbers show it.
 - **Every round is launched by a poll that fell due.** The four requests wait for the next poll on
   the cadence; that poll is issued, and only then are they released. A round therefore costs up to
   three seconds of waiting before its first clock starts — that wait is in no number — and the
@@ -540,6 +544,22 @@ over time, never required: requiring it would make the command refuse perfectly 
 on a fast dashboard, because whether a two-millisecond poll and a three-millisecond round genuinely
 overlap is up to the scheduler.
 
+### The load is never lighter than the page's
+
+The concurrent poll is held to a one-sided standard: **it is a load no lighter than an open `/po`
+page on a running turn, so a number that meets its threshold under it is sound, and one that
+exceeds it may be conservative.** The command prints that sentence with the poll it chose. It
+need not be an exact copy of the page — a heavier load can at worst turn a pass into a
+conservative fail, never a fail into a false pass.
+
+That standard is why a turn that **ends during the run** is reported and not refused. The page
+clears its timer when a poll answers `running: false`, which is zero load from then on; the command
+keeps polling on schedule, which is more. It reads `running` from every poll and prints one line
+naming where it happened — `the turn ended during round 2 (a poll answered running: false);
+polling continued on schedule, at least as heavy as the page, which stops polling there` — and the
+run stands. The session still has to be running when it is selected: that is what makes it a
+session a real page is polling at the start.
+
 ### What it refuses to report
 
 The rule the whole script is built around: **no number is judged MEETS unless it came from exactly
@@ -554,8 +574,9 @@ the scenario the DoD names.** So the exit statuses are
 Everything else includes: the installation is unreachable; any request on any route answers
 non-2xx, including a 3xx (a missing route, a refusal, a redirect, or the transport's contained 500
 under the load being measured); the data directory or the PO token cannot be resolved or read; a
-session's JSON cannot be read for whether it is running; the polls did not run on the three-second
-cadence; a round ran with no poll issued for it; the installation has **no open PO session**; and
+session's JSON cannot be read for whether it is running, at selection or in any later poll; a
+poll started more than 100 ms off its three-second schedule, either way; a round ran with no poll
+issued for it; the installation has **no open PO session**; and
 the installation has open sessions but **no turn running in any of them**.
 
 Those last two are not faults of the installation — `/po` answered, and simply lists nothing, or
