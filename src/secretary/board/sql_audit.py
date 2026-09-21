@@ -196,41 +196,6 @@ class SqlTaskAudit:
         total = int(rows[0][0])
         return total, [self._document(intent) for _total, intent in rows if intent is not None]
 
-    def events_after(
-        self, after: list[str] | None, *, limit: int
-    ) -> list[tuple[list[str], datetime | None, dict[str, Any]]]:
-        """Up to `limit` committed records past the position `after`, in claim order.
-
-        A position is a record's claim-order key, `[settled_at, created_at, request_id]`, so a
-        reader that keeps the last one it passed resumes with a keyset read of the committed
-        claim-order index: a page, whatever the history behind it. Each record comes with its
-        position and settle time. A position that is not one of this store's starts from the
-        beginning, which a caller that is idempotent over what it sees again can afford.
-        """
-        position = self._claim_position(after)
-        keyset = "" if position is None else f" AND ({_CLAIM_ORDER}) > (%s, %s, %s)"
-        rows = self._query(
-            "SELECT settled_at, created_at, request_id, intent FROM requests "
-            f"WHERE status = 'committed'{keyset} ORDER BY {_CLAIM_ORDER} LIMIT %s",
-            (*(position or ()), max(limit, 0)),
-        )
-        return [
-            ([settled.isoformat(), created.isoformat(), str(request_id)], settled, self._document(intent))
-            for settled, created, request_id, intent in rows
-        ]
-
-    @staticmethod
-    def _claim_position(after: list[str] | None) -> tuple[datetime, datetime, str] | None:
-        if not after or len(after) != 3:
-            return None
-        try:
-            settled, created = datetime.fromisoformat(after[0]), datetime.fromisoformat(after[1])
-        except (TypeError, ValueError):
-            return None
-        if settled.tzinfo is None or created.tzinfo is None:
-            return None
-        return settled, created, str(after[2])
-
     def pending_events(self) -> list[dict[str, Any]]:
         return [
             self._document(intent)

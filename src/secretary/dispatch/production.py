@@ -9,7 +9,6 @@ import json
 import time
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -433,7 +432,7 @@ def _production_tick_work(
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     try:
-        outcomes += _reconcile_sprint_budget(runtime, payload)
+        outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:
         errors.append(_unexpected_error("", exc))
     # Reconcile after budget accounting so hard stops prevent replacement launches.
@@ -1618,45 +1617,8 @@ def _unexpected_error(reference: str, exc: Exception) -> dict[str, str]:
     }
 
 
-#: Where the production state keeps the budget pass's durable cursor: the audit position it has
-#: passed (`after`) and the request ids of events it passed without resolving (`deferred`).
-BUDGET_CURSOR_KEY = "sprint_budget_cursor"
-
-#: How many committed records one pass reads past the cursor, and how many deferred events it
-#: retries. A backlog (the first pass after an upgrade starts at the beginning of history) drains
-#: one page per tick: charging each durable event once takes precedence over charging it soon.
-BUDGET_PAGE_LIMIT = 500
-
-#: How long after its settle time a record may still become visible. The settle time is taken when
-#: the statement runs and the record is seen when its transaction commits, so a record can surface
-#: behind one a pass has already read. The cursor passes only records settled at least this long
-#: before the pass started; a newer record is processed and read again by the next pass, which its
-#: charge's request id makes a primary-key lookup.
-BUDGET_CURSOR_SETTLE_MARGIN = timedelta(hours=1)
-
-
-def _budget_cursor(payload: dict[str, Any] | None) -> tuple[list[str] | None, list[str]]:
-    cursor = payload.get(BUDGET_CURSOR_KEY) if isinstance(payload, dict) else None
-    if not isinstance(cursor, dict):
-        return None, []
-    after = cursor.get("after")
-    after = [str(item) for item in after] if isinstance(after, list) and after else None
-    deferred = cursor.get("deferred")
-    deferred = [str(item) for item in deferred if item] if isinstance(deferred, list) else []
-    return after, list(dict.fromkeys(deferred))
-
-
-def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Charge each durable card event once, using its audit identity as the budget request id.
-
-    The pass reads the committed audit through one durable cursor kept in the production `payload`
-    (secretary-1658): one bounded page past it per tick, in claim order, and never the whole
-    history. Without a stored cursor it starts at the beginning of history. The cursor passes an
-    event only once the event is resolved — charged, already charged, terminally unlinked or not
-    a budget event — or recorded in the cursor's deferred set, which every pass retries by request
-    id (the primary key) until its card can be looked up. Nothing is dropped for being old.
-    """
-    started = datetime.now(UTC)
+def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
+    """Charge each durable card event once, using its audit identity as the budget request id."""
     instance = getattr(runtime.catalog, "instance", {})
     thresholds = budget_thresholds(instance if isinstance(instance, dict) else None)
     writer = SprintWriter(
@@ -1664,112 +1626,64 @@ def _reconcile_sprint_budget(runtime: Any, payload: dict[str, Any] | None = None
         data_dir=Path(getattr(runtime, "data_dir", None) or Path(runtime.audit.board_dir).parent),
         thresholds=thresholds,
     )
-    after, deferred = _budget_cursor(payload)
+    events = runtime.audit.events()
+    committed = {str(event.get("request_id") or "") for event in events}
     outcomes: list[dict[str, Any]] = []
     sprint_cache: dict[str, str | None] = {}
-    # The deferred set first, oldest first and bounded like the page; what stays deferred goes to
-    # the back so a set larger than one page is retried in turn.
-    retried, waiting = deferred[:BUDGET_PAGE_LIMIT], deferred[BUDGET_PAGE_LIMIT:]
-    still: list[str] = []
-    for request_id in retried:
-        event = runtime.audit.committed_event(request_id)
-        if event is None:
+    for event in events:
+        reference = str(event.get("ref") or "")
+        if not reference or reference.startswith("sprint:"):
+            continue
+        try:
+            event_type = _budget_event_type(event)
+        except TerminalTaxonomyValidationError as exc:
+            # A corrupt observation is not a lifecycle concern and must not
+            # prevent later durable events from reaching their budget seam.
             outcomes.append(
                 {
                     "status": "degraded",
                     "step": "sprint-budget",
-                    "action": "deferred-event-missing",
-                    "ref": "",
-                    "reason": f"deferred audit record {request_id} is not committed",
+                    "action": "terminal-taxonomy-invalid",
+                    "ref": reference,
+                    "reason": str(exc),
                 }
             )
             continue
-        if _charge_budget_event(runtime, writer, event, sprint_cache, outcomes):
-            still.append(request_id)
-    deferred = waiting + still
-    stable = started - BUDGET_CURSOR_SETTLE_MARGIN
-    passing = True
-    for position, settled, event in runtime.audit.events_after(after, limit=BUDGET_PAGE_LIMIT):
-        unresolved = _charge_budget_event(runtime, writer, event, sprint_cache, outcomes)
-        passing = passing and (settled is None or settled <= stable)
-        if not passing:
+        if event_type is None:
             continue
-        if unresolved:
-            # The SQL position ends in the row's request id; a journal position is an ordinal.
-            identity = str(event.get("request_id") or (position[2] if len(position) == 3 else ""))
-            if not identity:
-                # Nothing to retry it by, so the cursor waits in front of it instead.
-                passing = False
-                continue
-            if identity not in deferred:
-                deferred.append(identity)
-        after = position
-    if isinstance(payload, dict):
-        payload[BUDGET_CURSOR_KEY] = {"after": after, "deferred": deferred}
-    return outcomes
-
-
-def _charge_budget_event(
-    runtime: Any,
-    writer: SprintWriter,
-    event: dict[str, Any],
-    sprint_cache: dict[str, str | None],
-    outcomes: list[dict[str, Any]],
-) -> bool:
-    """Resolve one audit record for the budget; `True` while its card's sprint cannot be looked up."""
-    reference = str(event.get("ref") or "")
-    if not reference or reference.startswith("sprint:"):
-        return False
-    try:
-        event_type = _budget_event_type(event)
-    except TerminalTaxonomyValidationError as exc:
-        # A corrupt observation is not a lifecycle concern and must not
-        # prevent later durable events from reaching their budget seam.
+        identity = str(event.get("event_id") or event.get("request_id") or "")
+        if not identity:
+            continue
+        request_id = "sprint-budget-" + identity
+        if request_id in committed:
+            continue
+        sprint = _event_sprint(runtime, event, sprint_cache)
+        if sprint is None:
+            # A transient board failure must remain eligible for the next tick.  Only a successful
+            # lookup that proves the card is unlinked gets a durable terminal marker below.
+            continue
+        if not sprint:
+            _record_unlinked_budget_event(runtime, event, request_id, identity, event_type)
+            continue
+        result = writer.record_budget(
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=sprint,
+            event_type=event_type,
+            request_id=request_id,
+            source_event_id=identity,
+        )
         outcomes.append(
             {
-                "status": "degraded",
+                "status": "ok",
                 "step": "sprint-budget",
-                "action": "terminal-taxonomy-invalid",
+                "sprint": sprint,
                 "ref": reference,
-                "reason": str(exc),
+                "event_type": event_type,
+                "hard_stopped": result["sprint"]["status"] == "stopped",
             }
         )
-        return False
-    if event_type is None:
-        return False
-    identity = str(event.get("event_id") or event.get("request_id") or "")
-    if not identity:
-        return False
-    request_id = "sprint-budget-" + identity
-    if runtime.audit.committed_event(request_id) is not None:
-        return False
-    sprint = _event_sprint(runtime, event, sprint_cache)
-    if sprint is None:
-        # A transient board failure keeps the event eligible: deferred, never dropped.  Only a
-        # successful lookup that proves the card is unlinked gets a durable terminal marker below.
-        return True
-    if not sprint:
-        _record_unlinked_budget_event(runtime, event, request_id, identity, event_type)
-        return False
-    result = writer.record_budget(
-        role="dispatcher",
-        actor=runtime.owner,
-        reference=sprint,
-        event_type=event_type,
-        request_id=request_id,
-        source_event_id=identity,
-    )
-    outcomes.append(
-        {
-            "status": "ok",
-            "step": "sprint-budget",
-            "sprint": sprint,
-            "ref": reference,
-            "event_type": event_type,
-            "hard_stopped": result["sprint"]["status"] == "stopped",
-        }
-    )
-    return False
+    return outcomes
 
 
 def _event_sprint(runtime: Any, event: dict[str, Any], cache: dict[str, str | None]) -> str | None:

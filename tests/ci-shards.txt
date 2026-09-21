@@ -7,7 +7,6 @@ unit tests/test_card_backend_switch.py
 integration-board tests/test_audit_backend_canon.py
 integration-board tests/test_attempt_usage.py
 unit tests/test_attempt_usage_payload.py
-unit tests/test_sprint_budget_window.py
 integration-board tests/test_attempt_outcome.py
 unit tests/test_attempt_outcome_payload.py
 unit tests/test_outcome_round_context.py

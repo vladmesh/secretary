@@ -32,7 +32,6 @@ cost the whole history, on the dispatcher tick and on web requests alike.
 over N and over 10×N unrelated records and requires the rows touched to be equal. The same module
 proves that every query the audit issues has an index (`IndexAvailabilityTests`) and that the
 narrowed reads answer exactly what the old read-all-then-filter answered (`SameAnswersTests`).
-The budget pass's cursor page is measured the same way in `SliceCostTests`.
 
 ## What would make us revisit it
 
@@ -43,11 +42,10 @@ The budget pass's cursor page is measured the same way in `SliceCostTests`.
 - `requests` reaching a size where its disk footprint, backup time or `restore` replay time is
   itself an operational problem — as an order of magnitude, several GB or a backup that no
   longer fits its window.
-- The budget pass's deferred set growing without bound. The pass reads the audit through one
-  durable cursor, a page per tick (`dispatch/production.py::_reconcile_sprint_budget`), and an
-  event whose card cannot be looked up waits in the cursor's deferred set, retried by request id
-  each tick, rather than holding the cursor back. A set that keeps growing means cards that stay
-  unreadable, and its retries become the cost that follows history.
+- The budget pass (`dispatch/production.py::_reconcile_sprint_budget`) still reads the whole
+  committed audit every tick. It is the one known exception on the tick, kept as it was until its
+  own card (secretary-1658's successor B in sprint:1449: an indexed set of uncharged budget
+  events, read a page per tick) gives it a bounded read; until then its cost follows history.
 
 Any of these reopens the question as a separate decision. Rotation or archiving would then need
 its own design for what recovery replays from, and is not done piecemeal.
