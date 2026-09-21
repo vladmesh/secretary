@@ -317,56 +317,85 @@ class ProductIssueRecords:
         return True
 
     def metadata(self, task_id: int) -> dict[str, str]:
-        key = int(task_id)
-        if key in self.staged:
-            # A staged create carries no typed values yet, and says so rather than guessing: the
-            # host reads this row with `allow_incomplete` while it finishes the create.
-            return {}
-        kind = record_key_kind(key)
-        identifier = self.identifier_for(kind, key)
-        if kind == "product":
-            rows = self.client._query(
-                "SELECT extensions FROM products WHERE product_id = %s", (identifier,)
+        return self.metadata_of([int(task_id)])[int(task_id)]
+
+    def _stored(self, kind: str, keys: list[int], columns: str) -> dict[int, tuple[Any, ...]]:
+        """`identifier_for` for many keys: each key's row, its identity checked against the key."""
+        column, table = ("product_id", "products") if kind == "product" else ("issue_id", "issues")
+        rows = {
+            int(values[0]): values[1:]
+            for values in self.client._query(
+                f"SELECT board_key, {column}, {columns} FROM {table} "
+                "WHERE board_key = ANY(%s::bigint[])",
+                (keys,),
             )
-            if not rows:  # pragma: no cover - `identifier_for` already proved the row
-                raise self._error(f"no product carries the board key {task_id}")
-            projects = [
-                row[0]
-                for row in self.client._query(
-                    "SELECT project_id FROM product_projects WHERE product_id = %s "
-                    "ORDER BY project_id",
-                    (identifier,),
-                )
-            ]
-            meta = {
-                "record_type": "product",
-                "product_id": identifier,
-                "product_projects": json.dumps(projects, separators=(",", ":")),
-            }
-            bag = rows[0][0] if isinstance(rows[0][0], dict) else json.loads(rows[0][0] or "{}")
-            for name, value in (bag.get("kanboard") or {}).items():
-                if name not in PRODUCT_KEYS:
-                    meta[name] = _text(value)
-            return meta
-        rows = self.client._query(
-            "SELECT product_id, issue_kind, priority, close_reason, extensions FROM issues "
-            "WHERE issue_id = %s",
-            (identifier,),
-        )
-        product_id, issue_kind, priority, close_reason, extensions = rows[0]
-        meta = {
-            "record_type": "issue",
-            "issue_product": _text(product_id),
-            "issue_kind": _text(issue_kind),
-            "issue_priority": _text(priority),
         }
-        if close_reason:
-            meta["issue_closed_reason"] = _text(close_reason)
-        bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
-        for name, value in (bag.get("kanboard") or {}).items():
-            if name not in ISSUE_KEYS:
-                meta[name] = _text(value)
-        return meta
+        for key in keys:
+            if key not in rows:
+                raise self._error(f"no {kind} carries the board key {key}")
+            if record_key(kind, str(rows[key][0])) != key:
+                raise self._error(f"{kind} {str(rows[key][0])!r} carries an invalid board key")
+        return rows
+
+    def _by_kind(self, task_ids: list[int]) -> tuple[list[int], dict[str, list[int]]]:
+        """Split keys into the staged creates and the stored rows of each table."""
+        staged: list[int] = []
+        stored: dict[str, list[int]] = {"product": [], "issue": []}
+        for key in map(int, task_ids):
+            if key in self.staged:
+                staged.append(key)
+            else:
+                stored[str(record_key_kind(key))].append(key)
+        return staged, stored
+
+    def metadata_of(self, task_ids: list[int]) -> dict[int, dict[str, str]]:
+        """Product and Issue metadata for every key, in one read per table."""
+        staged, stored = self._by_kind(task_ids)
+        # A staged create carries no typed values yet, and says so rather than guessing: the host
+        # reads this row with `allow_incomplete` while it finishes the create.
+        result: dict[int, dict[str, str]] = {key: {} for key in staged}
+        if stored["product"]:
+            products = self._stored("product", stored["product"], "extensions")
+            projects = _grouped(self.client._query(
+                "SELECT product_id, project_id FROM product_projects "
+                "WHERE product_id = ANY(%s::text[]) ORDER BY product_id, project_id",
+                ([str(products[key][0]) for key in stored["product"]],),
+            ))
+            for key in stored["product"]:
+                identifier, extensions = products[key]
+                identifier = str(identifier)
+                meta = {
+                    "record_type": "product",
+                    "product_id": identifier,
+                    "product_projects": json.dumps(
+                        projects.get(identifier, []), separators=(",", ":")
+                    ),
+                }
+                bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+                for name, value in (bag.get("kanboard") or {}).items():
+                    if name not in PRODUCT_KEYS:
+                        meta[name] = _text(value)
+                result[key] = meta
+        if stored["issue"]:
+            issues = self._stored(
+                "issue", stored["issue"], "product_id, issue_kind, priority, close_reason, extensions"
+            )
+            for key in stored["issue"]:
+                _identifier, product_id, issue_kind, priority, close_reason, extensions = issues[key]
+                meta = {
+                    "record_type": "issue",
+                    "issue_product": _text(product_id),
+                    "issue_kind": _text(issue_kind),
+                    "issue_priority": _text(priority),
+                }
+                if close_reason:
+                    meta["issue_closed_reason"] = _text(close_reason)
+                bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+                for name, value in (bag.get("kanboard") or {}).items():
+                    if name not in ISSUE_KEYS:
+                        meta[name] = _text(value)
+                result[key] = meta
+        return result
 
     def save_metadata(self, task_id: int, values: dict[str, Any]) -> bool:
         key = int(task_id)
@@ -547,20 +576,28 @@ class ProductIssueRecords:
         return None
 
     def comments(self, task_id: int) -> list[dict[str, Any]]:
-        key = int(task_id)
-        if key in self.staged:
-            return []
-        kind = record_key_kind(key)
-        identifier = self.identifier_for(kind, key)
-        table, column = self._comment_table(kind)
-        return [
-            {"id": identifier_value, "date_creation": _epoch(created), "comment": body}
-            for identifier_value, body, created in self.client._query(
-                f"SELECT comment_id, body, created_at FROM {table} WHERE {column} = %s "
-                "ORDER BY created_at, comment_id",
-                (identifier,),
-            )
-        ]
+        return self.comments_of([int(task_id)])[int(task_id)]
+
+    def comments_of(self, task_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Product and Issue comments for every key, in one read per table."""
+        staged, stored = self._by_kind(task_ids)
+        result: dict[int, list[dict[str, Any]]] = {key: [] for key in staged}
+        for kind, keys in stored.items():
+            if not keys:
+                continue
+            identifiers = {key: str(values[0]) for key, values in self._stored(kind, keys, "1").items()}
+            table, column = self._comment_table(kind)
+            comments = _grouped(self.client._query(
+                f"SELECT {column}, comment_id, body, created_at FROM {table} "
+                f"WHERE {column} = ANY(%s::text[]) ORDER BY {column}, created_at, comment_id",
+                ([identifiers[key] for key in keys],),
+            ))
+            for key in keys:
+                result[key] = [
+                    {"id": identifier_value, "date_creation": _epoch(created), "comment": body}
+                    for identifier_value, body, created in comments.get(identifiers[key], [])
+                ]
+        return result
 
     def create_comment(self, task_id: int, content: str) -> int:
         key = int(task_id)
@@ -598,6 +635,12 @@ def _epoch(value: Any) -> str:
     from secretary.board.sql_cards import _epoch as card_epoch
 
     return card_epoch(value)
+
+
+def _grouped(rows: Any) -> dict[Any, list[Any]]:
+    from secretary.board.sql_cards import _grouped as card_grouped
+
+    return card_grouped(rows)
 
 
 def _now() -> Any:

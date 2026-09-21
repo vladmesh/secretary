@@ -27,6 +27,12 @@ def _rfc3339(value: datetime | None) -> str:
     return "" if value is None else value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _grouped(rows: Any) -> dict[Any, list[Any]]:
+    from secretary.board.sql_cards import _grouped as card_grouped
+
+    return card_grouped(rows)
+
+
 def sprint_key(reference: str) -> int:
     """A stable positive transport handle; it is not the Sprint identity."""
     return record_key("sprint", reference)
@@ -136,70 +142,117 @@ class SqlSprintRecords:
         return True
 
     def metadata(self, task_id: int) -> dict[str, str]:
-        key = int(task_id)
-        if key in self.staged:
-            return dict(self.staged[key]["metadata"])
-        reference = self._reference(key)
-        row = self.client._query(
-            "SELECT goal, definition_of_done, product_id, status, observer, worker_pin, reviewer_pin, "
-            "current_task_ref, source_audit FROM sprints WHERE ref = %s", (reference,)
-        )[0]
-        goal, dod, product, status, observer, worker, reviewer, current, source = row
-        values: dict[str, str] = {
-            "sprint_goal": str(goal), "sprint_definition_of_done": str(dod),
-            "sprint_status": str(status), "sprint_current_task": str(current or ""),
+        return self.metadata_of([int(task_id)])[int(task_id)]
+
+    def _references(self, keys: list[int]) -> dict[int, tuple[Any, ...]]:
+        """The stored `sprints` row of every key, refusing a key no unique Sprint carries."""
+        stored: dict[int, list[tuple[Any, ...]]] = {}
+        for values in self.client._query(
+            "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
+            "worker_pin, reviewer_pin, current_task_ref, source_audit FROM sprints "
+            "WHERE board_key = ANY(%s::bigint[])",
+            (keys,),
+        ):
+            stored.setdefault(int(values[0]), []).append(values[1:])
+        for key in keys:
+            staged = [row for staged_key, row in self.staged.items() if staged_key == key]
+            if len(stored.get(key, [])) + len(staged) != 1:
+                raise self._error(f"no unique Sprint carries transport key {key}")
+        return {key: rows[0] for key, rows in stored.items()}
+
+    def metadata_of(self, task_ids: list[int]) -> dict[int, dict[str, str]]:
+        """Sprint metadata for every key: one `sprints` read and one per child table."""
+        result = {
+            key: dict(self.staged[key]["metadata"]) for key in map(int, task_ids) if key in self.staged
         }
-        repositories = [r[0] for r in self.client._query(
-            "SELECT r.path FROM sprint_repositories sr JOIN repositories r USING (repository_id) "
-            "WHERE sr.sprint_ref = %s ORDER BY sr.ordinal", (reference,)
-        )]
-        values["sprint_repositories"] = json.dumps(repositories, separators=(",", ":"))
-        if product is not None:
-            values["sprint_product"] = str(product)
-        issues = [f"issue:{r[0]}" for r in self.client._query(
-            "SELECT issue_id FROM sprint_issues WHERE sprint_ref = %s ORDER BY ordinal", (reference,)
-        )]
-        if product is not None or issues:
-            values["sprint_issues"] = json.dumps(issues, separators=(",", ":"))
-        projects = [r[0] for r in self.client._query(
-            "SELECT project_id FROM sprint_projects WHERE sprint_ref = %s "
-            "AND (%s <> 'open' OR reserved) ORDER BY ordinal, project_id",
-            (reference, str(status)),
-        )]
-        if product is not None or projects:
-            values["sprint_reservations"] = json.dumps(projects, separators=(",", ":"))
-        if observer is not None:
-            values["sprint_observer"] = json.dumps(observer, sort_keys=True, separators=(",", ":"))
-        if worker is not None:
-            values["sprint_worker"] = str(worker)
-        if reviewer is not None:
-            values["sprint_reviewer"] = str(reviewer)
-        if source is not None:
-            values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
-        resume = self.client._query(
-            "SELECT selected_step, selected_why, rejected_alternatives, current_task, dod_state, "
-            "next_safe_step, recorded_at, recorded_at_source FROM sprint_resumes WHERE resume_id = "
-            "(SELECT resume_id FROM sprints WHERE ref = %s)", (reference,)
-        )
-        if resume:
-            names = ("selected_step", "selected_why", "rejected_alternatives", "current_task", "dod_state", "next_safe_step")
-            document = dict(zip(names, resume[0][:6], strict=True))
-            document["recorded_at"] = str(resume[0][7] or _rfc3339(resume[0][6]))
-            values["sprint_resume"] = json.dumps(document, separators=(",", ":"))
-        else:
-            values["sprint_resume"] = ""
-        counts = {str(kind): int(count) for kind, count in self.client._query(
-            "SELECT event_type, count(*) FROM sprint_budget_events WHERE sprint_ref = %s AND charged "
-            "GROUP BY event_type", (reference,)
-        )}
-        values["sprint_budget"] = json.dumps({"by_type": counts}, separators=(",", ":"))
-        uncharged = {str(kind): int(count) for kind, count in self.client._query(
-            "SELECT event_type, count(*) FROM sprint_budget_events WHERE sprint_ref = %s AND NOT charged "
-            "GROUP BY event_type", (reference,)
-        )}
-        if uncharged:
-            values["sprint_budget_uncharged"] = json.dumps(uncharged, separators=(",", ":"))
-        return values
+        keys = [key for key in map(int, task_ids) if key not in self.staged]
+        if not keys:
+            return result
+        rows = self._references(keys)
+        references = [str(rows[key][0]) for key in keys]
+        # Imported Sprints carry tied ordinals.  The per-Sprint read broke those ties in storage
+        # order, so the set-based read breaks them by `ctid` to answer the same list.
+        repositories = _grouped(self.client._query(
+            "SELECT sr.sprint_ref, r.path FROM sprint_repositories sr JOIN repositories r "
+            "USING (repository_id) WHERE sr.sprint_ref = ANY(%s::text[]) "
+            "ORDER BY sr.sprint_ref, sr.ordinal, sr.ctid",
+            (references,),
+        ))
+        issues = _grouped(self.client._query(
+            "SELECT sprint_ref, issue_id FROM sprint_issues WHERE sprint_ref = ANY(%s::text[]) "
+            "ORDER BY sprint_ref, ordinal, ctid",
+            (references,),
+        ))
+        projects = _grouped(self.client._query(
+            "SELECT sprint_ref, project_id, reserved FROM sprint_projects "
+            "WHERE sprint_ref = ANY(%s::text[]) ORDER BY sprint_ref, ordinal, project_id",
+            (references,),
+        ))
+        resumes = {
+            str(values[0]): values[1:]
+            for values in self.client._query(
+                "SELECT s.ref, r.selected_step, r.selected_why, r.rejected_alternatives, "
+                "r.current_task, r.dod_state, r.next_safe_step, r.recorded_at, r.recorded_at_source "
+                "FROM sprints s JOIN sprint_resumes r ON r.resume_id = s.resume_id "
+                "WHERE s.ref = ANY(%s::text[])",
+                (references,),
+            )
+        }
+        budgets: dict[tuple[str, bool], dict[str, int]] = {}
+        for reference, charged, kind, count in self.client._query(
+            "SELECT sprint_ref, charged, event_type, count(*) FROM sprint_budget_events "
+            "WHERE sprint_ref = ANY(%s::text[]) GROUP BY sprint_ref, charged, event_type "
+            "ORDER BY sprint_ref, charged, event_type",
+            (references,),
+        ):
+            budgets.setdefault((str(reference), bool(charged)), {})[str(kind)] = int(count)
+        for key in keys:
+            reference, goal, dod, product, status, observer, worker, reviewer, current, source = rows[key]
+            reference = str(reference)
+            values: dict[str, str] = {
+                "sprint_goal": str(goal), "sprint_definition_of_done": str(dod),
+                "sprint_status": str(status), "sprint_current_task": str(current or ""),
+            }
+            values["sprint_repositories"] = json.dumps(
+                repositories.get(reference, []), separators=(",", ":")
+            )
+            if product is not None:
+                values["sprint_product"] = str(product)
+            linked = [f"issue:{issue}" for issue in issues.get(reference, [])]
+            if product is not None or linked:
+                values["sprint_issues"] = json.dumps(linked, separators=(",", ":"))
+            # A closed Sprint lists every project it ever held; an open one only what it holds now.
+            held = [
+                project
+                for project, reserved in projects.get(reference, [])
+                if str(status) != "open" or reserved
+            ]
+            if product is not None or held:
+                values["sprint_reservations"] = json.dumps(held, separators=(",", ":"))
+            if observer is not None:
+                values["sprint_observer"] = json.dumps(observer, sort_keys=True, separators=(",", ":"))
+            if worker is not None:
+                values["sprint_worker"] = str(worker)
+            if reviewer is not None:
+                values["sprint_reviewer"] = str(reviewer)
+            if source is not None:
+                values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
+            resume = resumes.get(reference)
+            if resume:
+                names = ("selected_step", "selected_why", "rejected_alternatives", "current_task", "dod_state", "next_safe_step")
+                document = dict(zip(names, resume[:6], strict=True))
+                document["recorded_at"] = str(resume[7] or _rfc3339(resume[6]))
+                values["sprint_resume"] = json.dumps(document, separators=(",", ":"))
+            else:
+                values["sprint_resume"] = ""
+            values["sprint_budget"] = json.dumps(
+                {"by_type": budgets.get((reference, True), {})}, separators=(",", ":")
+            )
+            uncharged = budgets.get((reference, False))
+            if uncharged:
+                values["sprint_budget_uncharged"] = json.dumps(uncharged, separators=(",", ":"))
+            result[key] = values
+        return result
 
     def save_metadata(self, task_id: int, values: dict[str, Any]) -> bool:
         key = int(task_id)
@@ -429,14 +482,28 @@ class SqlSprintRecords:
                             )
 
     def comments(self, task_id: int) -> list[dict[str, Any]]:
-        reference = self._reference(int(task_id))
-        return [
-            {"id": identifier, "date_creation": _epoch(created), "comment": body}
-            for identifier, body, created in self.client._query(
-                "SELECT comment_id, body, created_at FROM sprint_comments WHERE sprint_ref=%s ORDER BY created_at, comment_id",
-                (reference,),
-            )
-        ]
+        return self.comments_of([int(task_id)])[int(task_id)]
+
+    def comments_of(self, task_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Sprint comments for every key, in one read after the key resolution."""
+        keys = [int(task_id) for task_id in task_ids]
+        rows = self._references(keys)
+        references = {
+            key: str(rows[key][0]) if key in rows else str(self.staged[key]["reference"])
+            for key in keys
+        }
+        comments = _grouped(self.client._query(
+            "SELECT sprint_ref, comment_id, body, created_at FROM sprint_comments "
+            "WHERE sprint_ref = ANY(%s::text[]) ORDER BY sprint_ref, created_at, comment_id",
+            (list(references.values()),),
+        ))
+        return {
+            key: [
+                {"id": identifier, "date_creation": _epoch(created), "comment": body}
+                for identifier, body, created in comments.get(references[key], [])
+            ]
+            for key in keys
+        }
 
     def create_comment(self, task_id: int, content: str, *, created_at: Any = None) -> int:
         reference = self._reference(int(task_id))

@@ -193,6 +193,29 @@ def _rfc3339(value: datetime | None) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+#: The per-record reads `call_batch` answers set-based rather than call by call.
+_BULK_READS = ("getTaskMetadata", "getAllComments")
+
+
+def _batch_key(task_id: Any) -> Any:
+    """The identity a batch answer is filed under: the integer key, or the raw value if none."""
+    try:
+        return int(task_id)
+    except (TypeError, ValueError):
+        return task_id
+
+
+def _grouped(rows: Iterable[tuple[Any, ...]]) -> dict[Any, list[Any]]:
+    """Rows keyed by their first column, each group in the order the statement returned it.
+
+    A group holds the bare second column when a row has two columns, else the remaining tuple.
+    """
+    groups: dict[Any, list[Any]] = {}
+    for owner, *rest in rows:
+        groups.setdefault(owner, []).append(rest[0] if len(rest) == 1 else tuple(rest))
+    return groups
+
+
 def _task_number_of(ref: str) -> int:
     match = re.search(r"(\d+)$", ref)
     if match is None:
@@ -327,8 +350,65 @@ class SqlCardClient:
         return handler(**params)
 
     def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
-        """The batched read, which is one round trip here because there is no round trip."""
-        return [self.call(method, **arguments) for method, arguments in calls]
+        """Run the calls and answer in call order.
+
+        A batch made only of per-record reads (`getTaskMetadata`, `getAllComments`) is answered
+        set-based: one statement per table for every record the batch names, whatever their
+        number, so a whole-board listing costs what one record costs.  A batch holding anything
+        else runs call by call, which keeps its writes in the order the caller gave them.
+        """
+        prepared = [(method, dict(arguments)) for method, arguments in calls]
+        if not all(method in _BULK_READS for method, _ in prepared):
+            return [self.call(method, **arguments) for method, arguments in prepared]
+        wanted: dict[str, list[Any]] = {method: [] for method in _BULK_READS}
+        for method, arguments in prepared:
+            wanted[method].append(arguments["task_id"])
+        answers = {
+            "getTaskMetadata": self._metadata_of(wanted["getTaskMetadata"]),
+            "getAllComments": self._comments_of(wanted["getAllComments"]),
+        }
+        return [answers[method][_batch_key(arguments["task_id"])] for method, arguments in prepared]
+
+    def _metadata_of(self, task_ids: list[Any]) -> dict[Any, dict[str, str]]:
+        """`getTaskMetadata` for every id, keyed by `_batch_key`, in bounded statements."""
+        return self._by_kind(
+            task_ids,
+            card=self._card_metadata,
+            sprint=self.sprints.metadata_of,
+            record=self.records.metadata_of,
+        )
+
+    def _comments_of(self, task_ids: list[Any]) -> dict[Any, list[dict[str, Any]]]:
+        """`getAllComments` for every id, keyed by `_batch_key`, in bounded statements."""
+        return self._by_kind(
+            task_ids,
+            card=self._card_comments,
+            sprint=self.sprints.comments_of,
+            record=self.records.comments_of,
+        )
+
+    @staticmethod
+    def _by_kind(task_ids: list[Any], *, card: Any, sprint: Any, record: Any) -> dict[Any, Any]:
+        """Route each id to the table family its key names, one set-based read per family."""
+        groups: dict[str, list[int]] = {"card": [], "sprint": [], "record": []}
+        seen: set[Any] = set()
+        for task_id in task_ids:
+            key = _batch_key(task_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            kind = record_key_kind(task_id)
+            if kind == "sprint":
+                groups["sprint"].append(int(task_id))
+            elif kind is not None:
+                groups["record"].append(int(task_id))
+            else:
+                groups["card"].append(task_id)
+        answers: dict[Any, Any] = {}
+        for family, read in (("card", card), ("sprint", sprint), ("record", record)):
+            if groups[family]:
+                answers.update(read(groups[family]))
+        return answers
 
     def restore_card_rows(self) -> list[dict[str, Any]]:
         """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
@@ -498,6 +578,22 @@ class SqlCardClient:
             raise SqlCardError(f"two cards carry transport key {key}")
         return rows[0][0]
 
+    @staticmethod
+    def _card_keys(task_ids: list[Any]) -> list[int]:
+        keys = []
+        for task_id in task_ids:
+            key = card_transport_key(task_id)
+            if key is None:
+                raise SqlCardError(f"no Card transport key is {task_id!r}")
+            keys.append(key)
+        return keys
+
+    @staticmethod
+    def _missing_card(keys: list[int], found: dict[int, Any]) -> None:
+        for key in keys:
+            if key not in found:
+                raise SqlCardError(f"no card carries transport key {key}")
+
     def _rpc_createTask(
         self,
         *,
@@ -615,21 +711,43 @@ class SqlCardClient:
     # --- metadata --------------------------------------------------------------------
 
     def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
-        kind = record_key_kind(task_id)
-        if kind == "sprint":
-            return self.sprints.metadata(int(task_id))
-        if kind is not None:
-            return self.records.metadata(int(task_id))
-        ref = self._ref_of(task_id)
-        rows = self._query(
-            "SELECT project_id, task_type, claim_worker, slug, base_branch, seed_ref, complexity, "
-            "family_preference, head_override, review_head_override, resolved_worker_head, "
-            "resolved_review_head, routing_reason, codex_launch_mode, sprint_ref, retry_same, "
-            "retry_switch, quota_snapshot_at, extensions, review, live_impact FROM tasks "
-            "WHERE task_ref = %s",
-            (ref,),
-        )
-        values = rows[0]
+        return self._metadata_of([task_id])[_batch_key(task_id)]
+
+    def _card_metadata(self, task_ids: list[Any]) -> dict[int, dict[str, str]]:
+        """Card metadata for every transport key: one `tasks` read and one per satellite."""
+        keys = self._card_keys(task_ids)
+        rows = {
+            int(values[0]): values[1:]
+            for values in self._query(
+                "SELECT board_key, task_ref, project_id, task_type, claim_worker, slug, base_branch, "
+                "seed_ref, complexity, family_preference, head_override, review_head_override, "
+                "resolved_worker_head, resolved_review_head, routing_reason, codex_launch_mode, "
+                "sprint_ref, retry_same, retry_switch, quota_snapshot_at, extensions, review, "
+                "live_impact FROM tasks WHERE board_key = ANY(%s::bigint[])",
+                (keys,),
+            )
+        }
+        self._missing_card(keys, rows)
+        refs = [str(rows[key][0]) for key in keys]
+        heads = _grouped(self._query(
+            "SELECT task_ref, head FROM task_retry_heads WHERE task_ref = ANY(%s::text[]) "
+            "ORDER BY task_ref, ordinal",
+            (refs,),
+        ))
+        blocked = _grouped(self._query(
+            "SELECT task_ref, depends_on FROM task_dependencies WHERE task_ref = ANY(%s::text[]) "
+            "ORDER BY task_ref, depends_on",
+            (refs,),
+        ))
+        supersedes = _grouped(self._query(
+            "SELECT task_ref, supersedes FROM task_supersessions WHERE task_ref = ANY(%s::text[])",
+            (refs,),
+        ))
+        issues = _grouped(self._query(
+            "SELECT task_ref, issue_id FROM task_issues WHERE task_ref = ANY(%s::text[]) "
+            "ORDER BY task_ref, issue_id",
+            (refs,),
+        ))
         names = (
             "project",
             "task_type",
@@ -647,44 +765,36 @@ class SqlCardClient:
             "codex_launch_mode",
             "sprint_ref",
         )
-        meta: dict[str, str] = {}
-        for name, value in zip(names, values[: len(names)], strict=True):
-            if value is not None and _text(value):
-                meta[name] = _text(value)
-        for name, value in (("retry_same", values[15]), ("retry_switch", values[16])):
-            if value:
-                meta[name] = str(value)
-        if values[17] is not None:
-            meta["quota_snapshot_at"] = _rfc3339(values[17])
-        if values[19] is not None:
-            meta["review"] = _text(values[19])
-        if values[20]:
-            meta["live_impact"] = "1"
-        heads = [row[0] for row in self._query(
-            "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", (ref,)
-        )]
-        if heads:
-            meta["retry_heads"] = ",".join(heads)
-        blocked = [row[0] for row in self._query(
-            "SELECT depends_on FROM task_dependencies WHERE task_ref = %s ORDER BY depends_on", (ref,)
-        )]
-        if blocked:
-            meta["blocked_by"] = ",".join(blocked)
-        supersedes = self._query(
-            "SELECT supersedes FROM task_supersessions WHERE task_ref = %s", (ref,)
-        )
-        if supersedes:
-            meta["supersedes"] = supersedes[0][0]
-        issues = self._query(
-            "SELECT issue_id FROM task_issues WHERE task_ref = %s ORDER BY issue_id", (ref,)
-        )
-        if issues:
-            meta["issues"] = ",".join(f"issue:{issue_id}" for (issue_id,) in issues)
-        bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
-        for key, value in (bag.get("kanboard") or {}).items():
-            if key != "swimlane":
-                meta[key] = _text(value)
-        return meta
+        result: dict[int, dict[str, str]] = {}
+        for key in keys:
+            ref, *values = rows[key]
+            meta: dict[str, str] = {}
+            for name, value in zip(names, values[: len(names)], strict=True):
+                if value is not None and _text(value):
+                    meta[name] = _text(value)
+            for name, value in (("retry_same", values[15]), ("retry_switch", values[16])):
+                if value:
+                    meta[name] = str(value)
+            if values[17] is not None:
+                meta["quota_snapshot_at"] = _rfc3339(values[17])
+            if values[19] is not None:
+                meta["review"] = _text(values[19])
+            if values[20]:
+                meta["live_impact"] = "1"
+            if heads.get(ref):
+                meta["retry_heads"] = ",".join(heads[ref])
+            if blocked.get(ref):
+                meta["blocked_by"] = ",".join(blocked[ref])
+            if supersedes.get(ref):
+                meta["supersedes"] = supersedes[ref][0]
+            if issues.get(ref):
+                meta["issues"] = ",".join(f"issue:{issue_id}" for issue_id in issues[ref])
+            bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
+            for name, value in (bag.get("kanboard") or {}).items():
+                if name != "swimlane":
+                    meta[name] = _text(value)
+            result[key] = meta
+        return result
 
     def _rpc_saveTaskMetadata(self, *, task_id: int, values: dict[str, Any]) -> bool:
         kind = record_key_kind(task_id)
@@ -798,20 +908,30 @@ class SqlCardClient:
     # --- comments --------------------------------------------------------------------
 
     def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:
-        kind = record_key_kind(task_id)
-        if kind == "sprint":
-            return self.sprints.comments(int(task_id))
-        if kind is not None:
-            return self.records.comments(int(task_id))
-        ref = self._ref_of(task_id)
-        return [
-            {"id": identifier, "date_creation": _epoch(created), "comment": body}
-            for identifier, body, created in self._query(
-                "SELECT comment_id, body, created_at FROM task_comments WHERE task_ref = %s "
-                "ORDER BY created_at, comment_id",
-                (ref,),
+        return self._comments_of([task_id])[_batch_key(task_id)]
+
+    def _card_comments(self, task_ids: list[Any]) -> dict[int, list[dict[str, Any]]]:
+        """Card comments for every transport key, in one read after the key resolution."""
+        keys = self._card_keys(task_ids)
+        refs = {
+            int(key): str(ref)
+            for key, ref in self._query(
+                "SELECT board_key, task_ref FROM tasks WHERE board_key = ANY(%s::bigint[])", (keys,)
             )
-        ]
+        }
+        self._missing_card(keys, refs)
+        comments = _grouped(self._query(
+            "SELECT task_ref, comment_id, body, created_at FROM task_comments "
+            "WHERE task_ref = ANY(%s::text[]) ORDER BY task_ref, created_at, comment_id",
+            ([refs[key] for key in keys],),
+        ))
+        return {
+            key: [
+                {"id": identifier, "date_creation": _epoch(created), "comment": body}
+                for identifier, body, created in comments.get(refs[key], [])
+            ]
+            for key in keys
+        }
 
     def _rpc_createComment(
         self, *, task_id: int, content: str, user_id: int = 0, created_at: Any = None
