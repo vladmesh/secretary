@@ -41,6 +41,7 @@ from tests.restore_fixtures import (
     _write_checksums,
     _write_instance_to,
     create_backup,
+    on_kanboard_archive,
 )
 
 _UNSET = object()
@@ -251,6 +252,7 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
 
 
 class RestoreEndToEndTests(unittest.TestCase):
+    @on_kanboard_archive
     def test_fixture_backup_restores_to_green_doctor_without_the_source_data_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -307,6 +309,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual((data_dir / "memory" / "export.ndjson").read_text(), fixture.export)
             self.assertFalse((data_dir / "memory" / "facts").exists())
 
+    @on_kanboard_archive
     def test_core_archive_restores_normalized_board_without_a_raw_dump(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -350,6 +353,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(sorted(task["title"] for task in client.tasks), ["First", "Second"])
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
+    @on_kanboard_archive
     def test_restore_rejects_a_truncated_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -370,6 +374,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             )
             self.assertFalse(data_dir.exists())
 
+    @on_kanboard_archive
     def test_restore_rejects_a_corrupted_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -401,6 +406,7 @@ class RestoreEndToEndTests(unittest.TestCase):
 class RestoreEndToEndOfflineTests(unittest.TestCase):
     """Chain-level negatives that only need local plain archives."""
 
+    @on_kanboard_archive
     def test_restore_rejects_an_unsupported_archive_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -414,6 +420,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 )
             self.assertFalse(data_dir.exists())
 
+    @on_kanboard_archive
     def test_restore_refuses_a_non_empty_target_and_leaves_it_untouched(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -430,6 +437,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 )
             self.assertEqual(marker.read_text(), '{"version": 1, "cards": []}')
 
+    @on_kanboard_archive
     def test_board_failure_keeps_the_chain_red_until_it_is_repaired(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -462,6 +470,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 1)
 
+    @on_kanboard_archive
     def test_reconcile_failure_keeps_the_chain_red(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -483,6 +492,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 1)
 
+    @on_kanboard_archive
     def test_derived_host_state_is_never_restored_as_canon(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -24,7 +24,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-import secretary.dispatch.bootstrap as dispatcher_bootstrap
 from secretary import host
 from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
@@ -870,12 +869,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
     def writer_state_path(self) -> Path:
         """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
         args = build_parser().parse_args(["dispatcher", "production-tick", "--instance", str(self.instance)])
-        with (
-            mock.patch("secretary.tasks.KanboardClient"),
-            mock.patch(
-                "secretary.dispatch.bootstrap.board_client", wraps=dispatcher_bootstrap.board_client
-            ) as selected,
-        ):
+        with mock.patch("secretary.dispatch.bootstrap.board_client") as selected:
             runtime = runtime_from_args(
                 args.instance,
                 args.data_dir,

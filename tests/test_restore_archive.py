@@ -30,6 +30,7 @@ from tests.restore_fixtures import (
     _write_instance,
     _write_instance_to,
     create_backup,
+    on_kanboard_archive,
 )
 
 
@@ -494,6 +495,7 @@ class RestoreArchiveTests(unittest.TestCase):
             self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
             self.assertEqual(_git_history(data_dir / "memory" / "facts"), expected_history)
 
+    @on_kanboard_archive
     def test_create_backups_round_trip_through_restore(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

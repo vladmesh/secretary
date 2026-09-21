@@ -384,7 +384,7 @@ class NoStoreCase(unittest.TestCase):
             self.assertTrue((target / ".git").is_dir())
             self.assertTrue((target / "instance.yaml").is_file())
             self.assertTrue((target / "state").is_dir())
-            self.assertIn("Kanboard prerequisite failed", output.getvalue())
+            self.assertIn("PostgreSQL prerequisite failed", output.getvalue())
             self.assertIn("skipped   runtime-env", output.getvalue())
             self.assertIn("skipped   secret-store", output.getvalue())
 

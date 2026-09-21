@@ -1,18 +1,45 @@
 from __future__ import annotations
 
+import functools
 import json
+import os
 import shutil
 import subprocess
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 from secretary import state_repo
 from secretary._fsutil import sha256_file
 from secretary.backup import BackupResult, create_backups
 from secretary.backup_policy import ARCHIVE_ROOT
+from secretary.board.backend import CARD_BACKEND_ENV, KANBOARD, reset_card_backend
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
 from tests.fakes.sprints import SprintKanboard
 from tests.fakes.tasks import WriteKanboard
+
+
+def on_kanboard_archive(test: Callable[..., Any]) -> Callable[..., Any]:
+    """Run one case on the Kanboard backend: it writes or restores the version-1 archive.
+
+    The suite runs on PostgreSQL (`tests/__init__.py`), whose archive carries a `pg_dump` of a real
+    store. A case built on the version-1 archive -- the raw Kanboard dump `raw_kanboard_dump`
+    stages -- means the Kanboard backup path, so it selects that backend for its own duration and
+    resets the process cache around the change. It goes away with the Kanboard backup path.
+    """
+
+    @functools.wraps(test)
+    def pinned(*args: Any, **kwargs: Any) -> Any:
+        with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: KANBOARD}):
+            reset_card_backend()
+            try:
+                return test(*args, **kwargs)
+            finally:
+                reset_card_backend()
+
+    return pinned
 
 
 def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -> BackupResult:
