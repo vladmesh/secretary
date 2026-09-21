@@ -15,7 +15,7 @@ from unittest import mock
 from secretary.backup import create_backups, estimate_archive_bytes, verify_backup
 from secretary.backup_policy import POLICIES, POSTGRES_FULL_POLICY, should_skip_data_entry
 from secretary.data import DataExport
-from tests.restore_fixtures import create_backup
+from tests.restore_fixtures import create_backup, on_kanboard_archive
 
 
 class BackupTests(unittest.TestCase):
@@ -27,6 +27,7 @@ class BackupTests(unittest.TestCase):
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
+    @on_kanboard_archive
     def test_create_writes_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -103,6 +104,7 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/instance/runtime.env", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
 
+    @on_kanboard_archive
     def test_create_excludes_memory_journal_hooks_and_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -198,6 +200,7 @@ class BackupTests(unittest.TestCase):
         ):
             return create_backup(instance)
 
+    @on_kanboard_archive
     def test_estimate_covers_the_archive_and_leaves_the_model_cache_out(self):
         cache_bytes = 4 * 1024 * 1024
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -212,6 +215,7 @@ class BackupTests(unittest.TestCase):
             self.assertGreaterEqual(estimate, result.archive.stat().st_size)
             self.assertLess(estimate, cache_bytes)
 
+    @on_kanboard_archive
     def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
         from secretary.backup_policy import is_memory_model_cache_entry
         from secretary.restore import restore_backup
@@ -254,6 +258,7 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
 
+    @on_kanboard_archive
     def test_create_anchors_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -275,6 +280,7 @@ class BackupTests(unittest.TestCase):
             self.assertTrue((instance / "secretary-data" / "backups").exists())
             self.assertFalse((root / "secretary-data").exists())
 
+    @on_kanboard_archive
     def test_create_ignores_invalid_project_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -313,6 +319,7 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
 
+    @on_kanboard_archive
     def test_create_resumes_pipeline_when_snapshot_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -486,6 +493,7 @@ class BackupTests(unittest.TestCase):
                     exclude_workspace=Path("/ws/backup"),
                 )
 
+    @on_kanboard_archive
     def test_create_claimed_worker_excludes_caller_workspace(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -530,6 +538,7 @@ class BackupTests(unittest.TestCase):
                     allow_claimed_worker=True,
                 )
 
+    @on_kanboard_archive
     def test_create_rejects_preexisting_freeze(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -556,6 +565,7 @@ class BackupTests(unittest.TestCase):
             ):
                 create_backup(instance)
 
+    @on_kanboard_archive
     def test_create_releases_lock_when_preexisting_freeze_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -587,6 +597,7 @@ class BackupTests(unittest.TestCase):
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
 
+    @on_kanboard_archive
     def test_create_rejects_preexisting_drain_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -606,6 +617,7 @@ class BackupTests(unittest.TestCase):
 
             pipeline_action.assert_not_called()
 
+    @on_kanboard_archive
     def test_create_rejects_concurrent_create(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -624,6 +636,7 @@ class BackupTests(unittest.TestCase):
                 os.close(fd)
             self.assertEqual(sorted(path.name for path in lock_path.parent.iterdir()), [".create.lock"])
 
+    @on_kanboard_archive
     def test_create_publishes_archive_without_clobbering_existing_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -666,6 +679,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar")
             self.assertTrue(result.archive.is_file())
 
+    @on_kanboard_archive
     def test_create_both_uses_one_pause_and_writes_core_and_full_archives(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -723,6 +737,7 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/runs/runs.ndjson", core_names)
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", full_names)
 
+    @on_kanboard_archive
     def test_failed_create_does_not_leave_zero_length_final_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -739,6 +754,7 @@ class BackupTests(unittest.TestCase):
 
             self.assertEqual(list((data_dir / "backups").glob("*.tar")), [])
 
+    @on_kanboard_archive
     def test_core_filters_done_cards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -785,6 +801,7 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
             self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", names)
 
+    @on_kanboard_archive
     def test_retention_keeps_one_core_and_removes_old_full(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1273,6 +1290,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
+    @on_kanboard_archive
     def test_create_exports_facts_from_the_private_repo(self):
         from secretary import state_repo
 

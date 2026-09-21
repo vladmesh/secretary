@@ -1360,10 +1360,7 @@ class SprintReadCommandTests(SprintProtocolFixture):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch(
-                "secretary.tasks.KanboardClient.for_instance",
-                return_value=self.board,
-            ),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -1922,12 +1919,7 @@ class CommentCommandTests(CommentFixture):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch(
-                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
-            ),
-            mock.patch(
-                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
-            ),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3245,12 +3237,7 @@ class CloseCommandTests(CloseFixture):
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch(
-                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
-            ),
-            mock.patch(
-                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
-            ),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):

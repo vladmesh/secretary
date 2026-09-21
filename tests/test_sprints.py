@@ -2987,7 +2987,7 @@ class SprintTests(SprintFixture):
     def test_cli_create_and_list_return_stable_json(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3040,7 +3040,7 @@ class SprintTests(SprintFixture):
         output, errors = io.StringIO(), io.StringIO()
 
         with (
-            mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3318,7 +3318,7 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
     def _status_json(self, ref: str) -> dict:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -5469,7 +5469,7 @@ class SprintCloseDecisionTests(SprintFixture):
         output, errors = io.StringIO(), io.StringIO()
 
         with (
-            mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -5519,7 +5519,7 @@ class SprintCloseDecisionTests(SprintFixture):
         output, errors = io.StringIO(), io.StringIO()
 
         with (
-            mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
+            self.board_injected(),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):

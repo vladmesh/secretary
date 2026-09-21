@@ -4,11 +4,11 @@
 (`secretary.board.backend`), and production requires that choice explicitly. The live installation
 exports `postgres` there — into every worker, reviewer and operator pane — so a suite that inherits
 the name silently runs every construction that goes through the switch against a store it has not
-got. `tests/__init__.py` closes that by setting the suite's own explicit `kanboard` selector before
-any test module is imported. These tests hold both ends of it: the selector is explicit and
-Kanboard, a case that means PostgreSQL can still opt in for its own duration, and the pin survives a
-shell that exported the live value — which is checked in a child process, because by the time this
-one runs `tests` is long imported.
+got. `tests/__init__.py` closes that by setting the suite's own explicit `postgres` selector — the
+backend production ships — before any test module is imported. These tests hold both ends of it:
+the selector is explicit and PostgreSQL, a case that means Kanboard can still opt in for its own
+duration, and the pin survives a shell that exported a different value — which is checked in a
+child process, because by the time this one runs `tests` is long imported.
 """
 
 from __future__ import annotations
@@ -31,22 +31,22 @@ class SuiteCardBackendTests(unittest.TestCase):
         backend.reset_card_backend()
         self.addCleanup(backend.reset_card_backend)
 
-    def test_the_suite_pins_kanboard_explicitly(self) -> None:
-        self.assertEqual(os.environ[backend.CARD_BACKEND_ENV], backend.KANBOARD)
-        self.assertEqual(backend.card_backend(), backend.KANBOARD)
+    def test_the_suite_pins_postgres_explicitly(self) -> None:
+        self.assertEqual(os.environ[backend.CARD_BACKEND_ENV], backend.POSTGRES)
+        self.assertEqual(backend.card_backend(), backend.POSTGRES)
         self.assertEqual(backend.card_backend_status()["source"], backend.CARD_BACKEND_ENV)
 
-    def test_a_case_that_means_postgres_still_opts_in_for_its_own_duration(self) -> None:
-        """The suite pin does not prevent a focused PostgreSQL case from choosing its backend."""
+    def test_a_case_that_means_kanboard_still_opts_in_for_its_own_duration(self) -> None:
+        """The suite pin does not prevent a focused Kanboard case from choosing its backend."""
         previous = os.environ[backend.CARD_BACKEND_ENV]
-        os.environ[backend.CARD_BACKEND_ENV] = backend.POSTGRES
+        os.environ[backend.CARD_BACKEND_ENV] = backend.KANBOARD
         self.addCleanup(os.environ.__setitem__, backend.CARD_BACKEND_ENV, previous)
         backend.reset_card_backend()
-        self.assertEqual(backend.card_backend(), backend.POSTGRES)
+        self.assertEqual(backend.card_backend(), backend.KANBOARD)
 
-    def test_importing_the_suite_replaces_the_live_selector_an_operator_shell_exports(self) -> None:
+    def test_importing_the_suite_replaces_the_selector_an_operator_shell_exports(self) -> None:
         env = dict(os.environ)
-        env[backend.CARD_BACKEND_ENV] = backend.POSTGRES
+        env[backend.CARD_BACKEND_ENV] = backend.KANBOARD
         env["PYTHONPATH"] = os.pathsep.join(
             [str(_REPO_ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
         )
@@ -64,7 +64,7 @@ class SuiteCardBackendTests(unittest.TestCase):
             timeout=120,
         )
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip().splitlines()[-1], f"'{backend.KANBOARD}' {backend.KANBOARD}")
+        self.assertEqual(done.stdout.strip().splitlines()[-1], f"'{backend.POSTGRES}' {backend.POSTGRES}")
 
 
 if __name__ == "__main__":
