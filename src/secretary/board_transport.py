@@ -199,13 +199,28 @@ def ensure_from_runtime_values(
 
 
 def findings(instance_dir: Path | str) -> list[str]:
-    """Public, non-secret transport health evidence for status and doctor."""
+    """Public, non-secret transport health evidence for status and doctor.
+
+    Health is judged against the board this installation actually serves.  Under
+    the PostgreSQL backend the JSON-RPC tuple is not its transport at all, so an
+    absent or unusable one is not a defect and must not show up red: that board
+    is reached through `board-store.env`, whose own evidence is
+    `board.store.findings`.  What stays a finding on both backends is the file
+    being *tracked* in the instance repository, which is a statement about the
+    repository rather than about reachability.
+    """
+    from secretary.board.backend import POSTGRES, card_backend_status
+
     path = transport_path(instance_dir)
     if state_repo.is_tracked(path.parent, f"/{TRANSPORT_FILE}"):
         return [
             "board transport configuration is tracked in the instance repository; "
             "remove it from tracked history and rerun upgrade"
         ]
+    # `card_backend_status` reports rather than refuses, so a missing or unusable selector leaves
+    # the Kanboard evidence exactly as it was instead of making health reporting itself fail.
+    if card_backend_status().get("backend") == POSTGRES:
+        return []
     # A pre-transport checkout has no lifecycle marker yet; it is not an unhealthy
     # configured installation. Once the durable ignore entry exists, absence is a finding.
     if (

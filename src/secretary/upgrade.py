@@ -21,7 +21,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,13 @@ from secretary.automations import (
     apply_automations,
     load_specs,
     workspaces_root,
+)
+from secretary.board.backend import (
+    CARD_BACKEND_ENV,
+    POSTGRES,
+    BoardBackend,
+    BoardBackendError,
+    parse_card_backend,
 )
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
@@ -1489,21 +1496,52 @@ def step_verify(context: UpgradeContext) -> StepResult:
     return StepResult("verify", "unchanged", detail)
 
 
-def step_board_transport(context: UpgradeContext) -> StepResult:
-    """Migrate old runtime values once, or create the deterministic local config."""
+def _selected_card_backend(values: Mapping[str, str]) -> BoardBackend | None:
+    """Which backend this installation serves cards from, for a step that must not refuse.
+
+    The one named place is ``SECRETARY_CARD_BACKEND`` (``board/backend.py``). An operator command
+    is bound to its instance's value before the handler runs (``secretary.cli.main``) and that
+    value comes from the instance's own ``runtime.env``, so both spellings are the same selector
+    and the bound process environment wins for the same reason it wins there. ``None`` says the
+    installation has selected nothing this build recognizes -- a pre-switch checkout, or a value
+    the product's own switch will refuse with a reason -- and a materializer step is not the place
+    to decide what that means, so its caller keeps today's behaviour.
+    """
+    raw = os.environ.get(CARD_BACKEND_ENV) or values.get(CARD_BACKEND_ENV)
     try:
-        try:
-            values = read_runtime_env(context.instance_path, require_ignored=False)
-        except RuntimeEnvMissing:
-            values = {}
-        outcome = ensure_from_runtime_values(
-            context.instance_path,
-            legacy_values=values,
-            runtime_env=context.instance_path / "runtime.env",
-            dry_run=context.dry_run,
-        )
-    except (BoardTransportError, RuntimeEnvError) as exc:
+        return parse_card_backend(raw)
+    except BoardBackendError:
+        return None
+
+
+def step_board_transport(context: UpgradeContext) -> StepResult:
+    """Migrate old runtime values once, or create the deterministic local config.
+
+    The Kanboard JSON-RPC tuple is one backend's transport.  An installation the
+    switch points at the PostgreSQL store reaches its board through
+    `board-store.env`, so materializing a `board-transport.env` there states a
+    dependency that installation does not have; the step records that and does
+    nothing instead.  The ownership reconciliation below is not part of that
+    decision — `runtime.env`, `.gitignore` and `.git` belong to the runtime user
+    on every backend — so it runs either way, and is a no-op for absent paths.
+    """
+    try:
+        values = read_runtime_env(context.instance_path, require_ignored=False)
+    except RuntimeEnvMissing:
+        values = {}
+    except RuntimeEnvError as exc:
         return StepResult("board-transport", "failed", str(exc))
+    outcome = None
+    if _selected_card_backend(values) is not POSTGRES:
+        try:
+            outcome = ensure_from_runtime_values(
+                context.instance_path,
+                legacy_values=values,
+                runtime_env=context.instance_path / "runtime.env",
+                dry_run=context.dry_run,
+            )
+        except (BoardTransportError, RuntimeEnvError) as exc:
+            return StepResult("board-transport", "failed", str(exc))
     if not context.dry_run:
         try:
             _set_runtime_owner(context.instance_path / "runtime.env", context.runtime_user)
@@ -1512,6 +1550,12 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
             _set_runtime_owner(context.instance_path / ".git", context.runtime_user)
         except GitError as exc:
             return StepResult("board-transport", "failed", str(exc))
+    if outcome is None:
+        return StepResult(
+            "board-transport",
+            "skipped",
+            f"{CARD_BACKEND_ENV}={POSTGRES}; the Kanboard JSON-RPC tuple is not this board's transport",
+        )
     return StepResult(
         "board-transport",
         "unchanged" if not outcome.changed else "would-change" if context.dry_run else "changed",

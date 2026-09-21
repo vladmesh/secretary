@@ -362,5 +362,57 @@ class BoardTransportTests(unittest.TestCase):
         )
 
 
+class BackendAwareFindingsTests(unittest.TestCase):
+    """Transport health is evidence about the board this installation actually serves."""
+
+    def setUp(self) -> None:
+        from secretary.board import backend
+
+        backend.reset_card_backend()
+        self.addCleanup(backend.reset_card_backend)
+
+    def _selector(self, value: str):
+        return mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": value}, clear=False)
+
+    @staticmethod
+    def _instance(tmp: str) -> Path:
+        instance = Path(tmp)
+        for args in (
+            ("init", "--quiet"),
+            ("config", "user.name", "Test"),
+            ("config", "user.email", "test@example.invalid"),
+        ):
+            subprocess.run(["git", "-C", str(instance), *args], check=True)
+        return instance
+
+    def test_an_absent_tuple_is_a_finding_on_kanboard_and_silence_on_postgres(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance(tmp)
+            (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
+            self.assertFalse(transport_path(instance).exists())
+            with self._selector("kanboard"):
+                reported = findings(instance)
+            self.assertEqual(len(reported), 1)
+            self.assertIn("missing", reported[0])
+            from secretary.board import backend
+
+            backend.reset_card_backend()
+            with self._selector("postgres"):
+                self.assertEqual(findings(instance), [])
+
+    def test_a_tracked_tuple_stays_a_finding_on_every_backend(self) -> None:
+        """Tracking configuration in the instance repository is a repository defect, not a board one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = self._instance(tmp)
+            path = instance / "board-transport.env"
+            path.write_text("not a transport\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(instance), "add", "board-transport.env"], check=True)
+            subprocess.run(["git", "-C", str(instance), "commit", "--quiet", "-m", "tracked"], check=True)
+            with self._selector("postgres"):
+                reported = findings(instance)
+        self.assertEqual(len(reported), 1)
+        self.assertIn("tracked", reported[0])
+
+
 if __name__ == "__main__":
     unittest.main()

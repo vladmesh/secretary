@@ -719,6 +719,43 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(missing.status, "failed")
         self.assertIn("refuse to guess", missing.detail)
 
+    def test_board_transport_step_is_a_recorded_no_op_on_the_postgres_backend(self):
+        """The JSON-RPC tuple is one backend's transport, so the other one is not missing it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            runtime = instance / "runtime.env"
+            body = (
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n"
+            )
+            runtime.write_text(body, encoding="utf-8")
+            runtime.chmod(0o600)
+            with mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": "postgres"}, clear=False):
+                result = upgrade.step_board_transport(
+                    self.context(FakeUnitInstaller(), instance_path=instance)
+                )
+            self.assertEqual(result.status, "skipped")
+            self.assertIn("SECRETARY_CARD_BACKEND=postgres", result.detail)
+            # Nothing was materialized and nothing was retired out of runtime.env.
+            self.assertFalse((instance / "board-transport.env").exists())
+            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
+
+    def test_board_transport_step_reads_the_selector_the_instance_declares(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            runtime = instance / "runtime.env"
+            runtime.write_text("SECRETARY_CARD_BACKEND=postgres\n", encoding="utf-8")
+            runtime.chmod(0o600)
+            environment = {k: v for k, v in os.environ.items() if k != "SECRETARY_CARD_BACKEND"}
+            with mock.patch.dict(os.environ, environment, clear=True):
+                result = upgrade.step_board_transport(
+                    self.context(FakeUnitInstaller(), instance_path=instance)
+                )
+            self.assertEqual(result.status, "skipped")
+            self.assertFalse((instance / "board-transport.env").exists())
+
     def test_board_transport_step_dry_run_and_insecure_runtime_do_not_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
