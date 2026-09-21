@@ -266,6 +266,14 @@ class MaintenanceUnitTests(unittest.TestCase):
             service,
         )
         self.assertIn("IOSchedulingClass=idle\n", service)
+        # systemd's default 90 s start timeout must not cut the pack short: the unit's own bound
+        # sits above the product's, with a margin, so the product's refusal fires first.
+        timeouts = [
+            line.partition("=")[2] for line in service.splitlines() if line.startswith("TimeoutStartSec=")
+        ]
+        self.assertEqual(len(timeouts), 1)
+        product_bound = instance_maintenance.GC_TIMEOUT_SECONDS + instance_maintenance.REFLOG_TIMEOUT_SECONDS
+        self.assertGreaterEqual(int(timeouts[0]), product_bound + 15 * 60)
         # Fired by its timer only: an [Install] section would let it start at boot.
         self.assertNotIn("[Install]", service)
 
