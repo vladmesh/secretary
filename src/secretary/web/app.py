@@ -23,12 +23,14 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from http.cookies import CookieError, SimpleCookie
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote
 
 from secretary.web import pages
+from secretary.web.doctor import DoctorLayer
 from secretary.web.statuses import status_for
 from secretary.webproto.errors import OperationPending, ReadError, ValidationRefused
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
@@ -287,6 +289,7 @@ class WebApp:
             pages.limits_source(self._limits_section),
             pages.doctor_source(self._doctor_section),
             pages.from_post(method == "POST"),
+            self._one_health_reading(),
         ):
             return self._handle(method, path, query=query, body=body, headers=headers)
 
@@ -565,6 +568,18 @@ class WebApp:
         if self.provider_usage is None:
             return None
         return self._or_reason(self.provider_usage.usage_snapshot)
+
+    def _one_health_reading(self) -> AbstractContextManager[None]:
+        """One health reading for this whole request: the dashboard's panel and the lamp alike.
+
+        The panel reads health through the read layer and the lamp through the doctor layer, and
+        both land on the doctor layer's cache. Pinned here, around the request, the second lookup
+        answers with the first one's reading even when the cache window expires between them. A
+        doctor that is not the cached layer -- none, or a test's fake -- has nothing to pin.
+        """
+        if isinstance(self.doctor, DoctorLayer):
+            return self.doctor.one_reading()
+        return nullcontext()
 
     def _doctor_section(self) -> dict[str, Any] | None:
         """The recorded health for a page, or `None` when this process was built without it.

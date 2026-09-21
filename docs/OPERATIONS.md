@@ -1695,7 +1695,9 @@ that nothing read is unknown health.
 
 The dashboard's health panel reads that same cached reading, not a collection of its own: one cache,
 one window, so the panel and the lamp cannot disagree, and the panel is up to one minute stale exactly
-as the lamp is. A warm dashboard render starts no subprocess and opens no `board/*.ndjson`. For the same
+as the lamp is. A cache refresh is one collection however many requests arrive during it (they wait
+for it and share it), and one response draws its panel and its lamp from one reading even when the
+window expires mid-request. A warm dashboard render starts no subprocess and opens no `board/*.ndjson`. For the same
 reason `web-serve` runs the board store's git-exclusion guard (`board-store.env` untracked and ignored)
 once at start-up instead of on every request; a refusal it finds there holds for the life of the
 process, and a store repaired or created later is picked up by restarting `secretary-web.service`.

@@ -22,8 +22,13 @@ and within one window the two are one reading.
 
 from __future__ import annotations
 
+import copy
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from secretary.webproto.errors import ReadError
@@ -42,6 +47,29 @@ UNREADABLE_CODE = "health.unreadable"
 DOCTOR_NOT_BUILT = "this web process was built without the doctor layer"
 
 
+@dataclass(frozen=True, slots=True)
+class HealthReading:
+    """One published reading: when it was collected, what it was, and the lamp's document for it.
+
+    Published once and never changed: nothing is written into it after the cache holds it, and a
+    caller receives copies of its documents (:meth:`DoctorLayer.health_snapshot`), so no reader can
+    change what another reader of the same window sees.
+    """
+
+    observed: float
+    snapshot: dict[str, Any] | ReadError
+    document: dict[str, Any]
+
+
+class _Pin:
+    """The reading one request has taken, held for the rest of that request."""
+
+    __slots__ = ("reading",)
+
+    def __init__(self) -> None:
+        self.reading: HealthReading | None = None
+
+
 class DoctorLayer:
     """One cached reading of recorded health, as the lamp, the doctor page and the dashboard read it.
 
@@ -49,6 +77,16 @@ class DoctorLayer:
     raised -- beside the lamp's classification of it. :meth:`health_snapshot` hands out that
     reading, which is how the dashboard's health panel reads this same cache (`ReadLayer`'s
     `health_reader`): one collection, one window, so the panel and the lamp cannot disagree.
+
+    Two rules make that hold under a threaded server:
+
+    * **At most one collection in flight.** A miss or an expiry collects under a lock; a request
+      arriving meanwhile waits for that collection and receives its reading instead of starting
+      its own.
+    * **One reading per response.** Inside :meth:`one_reading` -- which the transport opens around
+      every request -- the first lookup pins its reading and every later lookup of that request
+      answers with it, so a panel and a lamp rendered on either side of an expiry are still one
+      reading.
     """
 
     def __init__(
@@ -59,30 +97,56 @@ class DoctorLayer:
     ) -> None:
         self.read_health = read_health
         self.now = now
-        self._cached: tuple[float, dict[str, Any] | ReadError, dict[str, Any]] | None = None
+        self._cached: HealthReading | None = None
+        self._lock = threading.Lock()
+        self._pin: ContextVar[_Pin | None] = ContextVar(f"doctor-reading-{id(self)}", default=None)
 
     def doctor_snapshot(self) -> dict[str, Any]:
         """The current colour and the problems behind it, collected at most once per window."""
-        return self._reading()[2]
+        return copy.deepcopy(self._reading().document)
 
     def health_snapshot(self) -> dict[str, Any]:
         """The recorded-health reading the lamp is classified from, out of the same cache."""
-        reading = self._reading()[1]
-        if isinstance(reading, ReadError):
-            raise reading
+        snapshot = self._reading().snapshot
+        if isinstance(snapshot, ReadError):
+            raise snapshot
+        return copy.deepcopy(snapshot)
+
+    @contextmanager
+    def one_reading(self) -> Iterator[None]:
+        """Pin one reading for the span of one request: every lookup inside answers with the first.
+
+        Lazy: a request that never asks for health -- a JSON route -- takes and pins nothing.
+        """
+        token = self._pin.set(_Pin())
+        try:
+            yield
+        finally:
+            self._pin.reset(token)
+
+    def _reading(self) -> HealthReading:
+        pin = self._pin.get()
+        if pin is not None and pin.reading is not None:
+            return pin.reading
+        reading = self._current()
+        if pin is not None:
+            pin.reading = reading
         return reading
 
-    def _reading(self) -> tuple[float, dict[str, Any] | ReadError, dict[str, Any]]:
-        observed = self.now()
-        if self._cached is not None and observed - self._cached[0] < CACHE_SECONDS:
+    def _current(self) -> HealthReading:
+        """The reading of the current window, collecting it -- once, under the lock -- if due."""
+        with self._lock:
+            observed = self.now()
+            cached = self._cached
+            if cached is not None and observed - cached.observed < CACHE_SECONDS:
+                return cached
+            snapshot: dict[str, Any] | ReadError
+            try:
+                snapshot = self.read_health()
+            except ReadError as exc:
+                snapshot = exc
+            self._cached = HealthReading(observed, snapshot, _classify(snapshot))
             return self._cached
-        reading: dict[str, Any] | ReadError
-        try:
-            reading = self.read_health()
-        except ReadError as exc:
-            reading = exc
-        self._cached = (observed, reading, _classify(reading))
-        return self._cached
 
 
 def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:

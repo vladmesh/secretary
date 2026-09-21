@@ -13,6 +13,8 @@ span of the read, so the assertion is about the path taken rather than about a c
 from __future__ import annotations
 
 import re
+import threading
+import time
 import unittest
 from typing import Any
 from unittest import mock
@@ -537,6 +539,95 @@ class OneReadingTests(SprintProtocolFixture):
         self.assertIn("a.service is failed", page)
         self.assertIn("lamp lamp-red", page)
         self.assertEqual(self.collected, 2)
+
+    def test_concurrent_requests_over_an_expired_cache_share_exactly_one_collection(self) -> None:
+        """The reviewer's shape: a fixed clock, an expired cache, requests racing a blocked collector.
+
+        Each collection answers with a status of its own, so a second collection would show as a
+        page carrying a different reading than the others.
+        """
+        app = self.app()
+        app.handle("GET", "/")
+        self.assertEqual(self.collected, 1)
+        self.clock += CACHE_SECONDS + 1  # expired, and fixed from here on
+
+        entered = threading.Event()
+        release = threading.Event()
+        answers = [PAUSED_ONLY, EVERY_PROBLEM, NOTHING_WRONG, NOTHING_WRONG]
+
+        def blocked(report: Any, **kwargs: Any) -> dict[str, Any]:
+            self.collected += 1
+            answer = answers[min(self.collected - 2, len(answers) - 1)]
+            entered.set()
+            self.assertTrue(release.wait(10), "the collector was never released")
+            return answer
+
+        pages_seen: dict[int, str] = {}
+
+        def request(index: int) -> None:
+            pages_seen[index] = app.handle("GET", "/").body.decode("utf-8")
+
+        with mock.patch("secretary.webproto.reads.collect_status", blocked):
+            first = threading.Thread(target=request, args=(0,))
+            first.start()
+            self.assertTrue(entered.wait(10), "the first request never reached the collector")
+            others = [threading.Thread(target=request, args=(index,)) for index in range(1, 4)]
+            for thread in others:
+                thread.start()
+            # Give the others time to reach the lock while the collection is still in flight.
+            time.sleep(0.2)
+            release.set()
+            for thread in (first, *others):
+                thread.join(10)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(self.collected, 2, "one collection at start, and exactly one for the expiry")
+        self.assertEqual(len(pages_seen), 4)
+        for index, page in pages_seen.items():
+            with self.subTest(request=index):
+                # Every request received the one reading: paused only, a yellow lamp, one problem.
+                self.assertIn("the pipeline is paused (drain)", page)
+                self.assertNotIn("a.service is failed", page)
+                self.assertIn("lamp lamp-yellow", page)
+
+    def test_one_response_renders_its_panel_and_its_lamp_from_one_reading_across_an_expiry(
+        self,
+    ) -> None:
+        """The window expires mid-request, after the panel was read and before the lamp is drawn."""
+        test = self
+
+        class ExpiringPause:
+            """The pause read, which the dashboard makes between its snapshot and its page."""
+
+            def pause_state(self) -> dict[str, Any]:
+                test.clock += CACHE_SECONDS + 1
+                test.status = EVERY_PROBLEM
+                raise InstallationUnavailable("not part of this test")
+
+        app = self.app()
+        app.pause_reads = ExpiringPause()
+
+        page = app.handle("GET", "/").body.decode("utf-8")
+
+        self.assertEqual(self.collected, 1, "the lamp did not look the reading up a second time")
+        self.assertIn("nothing needs attention.", page)
+        self.assertIn("lamp lamp-green", page)
+        self.assertNotIn("a.service is failed", page)
+
+        # The next request is a new response, and it takes the new window's reading for both.
+        app.pause_reads = Recording(pause_state=InstallationUnavailable("not part of this test"))
+        page = app.handle("GET", "/").body.decode("utf-8")
+        self.assertEqual(self.collected, 2)
+        self.assertIn("a.service is failed", page)
+        self.assertIn("lamp lamp-red", page)
+
+    def test_a_published_reading_is_not_changed_by_what_a_reader_does_with_it(self) -> None:
+        self.doctor.health_snapshot()["health"]["status"]["problems"].append("scribbled")
+        self.doctor.doctor_snapshot()["problems"].append({"code": "scribbled"})
+
+        self.assertNotIn("scribbled", self.doctor.health_snapshot()["health"]["status"]["problems"])
+        self.assertEqual(self.doctor.doctor_snapshot()["problems"], [])
+        self.assertEqual(self.collected, 1)
 
     def test_health_that_cannot_be_read_is_unavailable_in_the_panel_and_red_in_the_lamp(self) -> None:
         def refuse(report: Any, **kwargs: Any) -> dict[str, Any]:
