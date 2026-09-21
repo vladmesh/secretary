@@ -1721,7 +1721,7 @@ def run_backup_create(args: argparse.Namespace) -> int:
 
 
 def run_instance_maintenance(args: argparse.Namespace) -> int:
-    from secretary import instance_maintenance
+    from secretary.infra import instance_maintenance
     from triggered_agents.runtime.paths import instance_dir
 
     try:

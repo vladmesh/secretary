@@ -14,7 +14,7 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from secretary import instance_maintenance, state_repo
+from secretary import state_repo
 from secretary.checkpoint import CheckpointWriter
 from secretary.cli import main
 from secretary.config import validate_instance
@@ -29,6 +29,7 @@ from secretary.host import (
     packaging_root,
 )
 from secretary.host_apply import resolve_packaged
+from secretary.infra import instance_maintenance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNITS = REPO_ROOT / "packaging" / "systemd"
