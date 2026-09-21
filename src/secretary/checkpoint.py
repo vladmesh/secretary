@@ -96,6 +96,8 @@ BOARD_ENTRIES = (
 BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "audit.ndjson", "export.json")
 RUNS_ENTRIES = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 RUNS_REQUIRED = RUNS_ENTRIES
+# The components `_publish` stages, in the order it publishes them.
+CHECKPOINT_COMPONENTS = ("board", "runs")
 
 # Derived neighbours of the canon. They are never copied into `state/`; the
 # ignore files keep them out if anything else drops them there.
@@ -438,6 +440,7 @@ class CheckpointWriter:
         return replace(result, duration_ms=round((time.perf_counter() - started) * 1000.0, 3))
 
     def _write(self) -> CheckpointResult:
+        self._collect_abandoned_staging()
         client, audit_owner = self._audit_owner()
         backend = getattr(client, "backend_kind", "kanboard")
         try:
@@ -485,6 +488,19 @@ class CheckpointWriter:
             secret_values=secret_values,
         )
         return self._commit(board_cards=board, run_records=runs)
+
+    def _collect_abandoned_staging(self) -> None:
+        """Remove staging an earlier run left behind.
+
+        Called under the state-repo lock: only one writer holds it, so a staging directory that
+        exists now belongs to no live run. Only directories named exactly as `_publish` names its
+        staging are touched.
+        """
+        parent = self.instance_dir / "state"
+        for component in CHECKPOINT_COMPONENTS:
+            for candidate in parent.glob(f".{component}-checkpoint-*.tmp"):
+                if candidate.is_dir() and not candidate.is_symlink():
+                    _cleanup_staging_dir(candidate)
 
     def _regenerate(self) -> tuple[int, int]:
         """Rebuild the exports from the live board and pipeline runtime state."""
@@ -577,11 +593,11 @@ class CheckpointWriter:
                 _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
                 _drop_vanished(destination, entries, staged)
         except RuntimeError as exc:
-            _cleanup_staging_dir(staging)
             raise CheckpointBlocked(str(exc)) from None
-        except CheckpointBlocked:
+        finally:
+            # Staging never outlives its run, whatever leaves this block: a published cut has
+            # already moved out of it, and any failure leaves only a partial copy behind.
             _cleanup_staging_dir(staging)
-            raise
 
         _write_text_atomic(destination / ".gitignore", "".join(f"{line}\n" for line in ignore))
 

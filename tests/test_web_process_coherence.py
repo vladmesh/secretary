@@ -75,6 +75,17 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+# Every context this module builds gets its instance and data directories under one scratch root the
+# module owns, so a run leaves nothing behind in the temporary directory (secretary-1663).
+_SCRATCH: tempfile.TemporaryDirectory[str] | None = None
+
+
+def setUpModule() -> None:
+    global _SCRATCH
+    _SCRATCH = tempfile.TemporaryDirectory(prefix="secretary-web-process-coherence-")
+    unittest.addModuleCleanup(_SCRATCH.cleanup)
+
+
 class _Report:
     """The slice of an InstanceReport the host and process steps read."""
 
@@ -90,7 +101,8 @@ def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
     if report is None or instance_path is None:
         root = getattr(units, "_web_receipt_test_root", None)
         if root is None:
-            root = Path(tempfile.mkdtemp(prefix="secretary-web-process-coherence-"))
+            assert _SCRATCH is not None, "the module scratch root is created in setUpModule"
+            root = Path(tempfile.mkdtemp(dir=_SCRATCH.name))
             units._web_receipt_test_root = root
         if instance_path is None:
             instance_path = root / "instance"

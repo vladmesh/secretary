@@ -76,11 +76,63 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+# The suite's own temporary directory, and the guard that keeps it from leaking (secretary-1663).
+# Every `tempfile` call in this process and every child that inherits TMPDIR lands under one root
+# the run claims here, before any other default below and before any test module is imported, so
+# the run leaves the host's temporary directory as it found it: the root is removed at exit. The
+# host's `/tmp` is shared with the live pipeline, which writes its own `secretary-*` and `orca-*`
+# files there concurrently, so a before/after count of `/tmp` cannot tell a test's leak from the
+# pipeline's work; a root only this run writes to can. Whatever `secretary-*` or `orca-*` entry is
+# still in it once every other exit handler has run is a test that did not clean up after itself,
+# and the run fails naming it. A test that writes to `/tmp` by absolute path bypasses TMPDIR and
+# this guard alike, so such a test owns its own cleanup. `tests/test_suite_tmp_guard.py` proves the rest.
+_LEAK_PREFIXES = ("secretary-", "orca-")
+# Production state that is persistent by design and that tests reach through production code: the
+# per-terminal prompt lock directory (`agent_prompt_transport.terminal_prompt_lock`). A lock file
+# has to outlive its holder, so nothing removes it; here it lives in the suite root and goes with it.
+_PERSISTENT_BY_DESIGN = frozenset({"secretary-agent-prompt-locks"})
+# Short on purpose: it lengthens every temporary path in the run, and real-head tests put a Unix
+# socket (100-byte address limit) about 70 bytes deep under the temporary directory.
+_SUITE_TMP = Path(tempfile.mkdtemp(prefix="secretary-t"))
+_SUITE_PID = os.getpid()
+os.environ["TMPDIR"] = str(_SUITE_TMP)
+tempfile.tempdir = str(_SUITE_TMP)
+
+
+def suite_tmp_leaks(root: Path) -> list[str]:
+    """The `secretary-*` and `orca-*` entries a run left in its temporary root."""
+    try:
+        names = sorted(entry.name for entry in root.iterdir())
+    except FileNotFoundError:
+        return []
+    return [name for name in names if name.startswith(_LEAK_PREFIXES) and name not in _PERSISTENT_BY_DESIGN]
+
+
+def _guard_suite_tmp() -> None:
+    # Registered before every other exit handler of the suite, so it runs after all of them.
+    if os.getpid() != _SUITE_PID:
+        return
+    leaks = suite_tmp_leaks(_SUITE_TMP)
+    shutil.rmtree(_SUITE_TMP, ignore_errors=True)
+    if not leaks:
+        return
+    sys.stdout.flush()
+    sys.stderr.write(
+        "\nFAILED: the test run left temporary entries behind (secretary-1663); each is a test "
+        "that created it and did not remove it:\n" + "".join(f"  {name}\n" for name in leaks)
+    )
+    sys.stderr.flush()
+    os._exit(1)
+
+
+atexit.register(_guard_suite_tmp)
 
 # The throwaway CODEX_HOME described above. Created here rather than per test so
 # that a bring-up reached from anywhere in the suite -- including one whose
