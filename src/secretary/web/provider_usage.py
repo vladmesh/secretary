@@ -21,6 +21,13 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 STALE_AFTER_SECONDS = 15 * 60
 CACHE_SECONDS = 5 * 60
+# The Codex fallback reads a fixed amount however large ~/.codex/sessions grows: it descends the
+# sessions/YYYY/MM/DD directories newest-first, opens at most CODEX_FALLBACK_FILES rollouts and reads
+# only the last CODEX_TAIL_BYTES of each.  On the production tree (2,478 rollouts, 2026-09-21) the
+# last rate-limit line sat at most 157 KB before the end of a file, the median 1.4 KB.
+CODEX_FALLBACK_FILES = 20
+CODEX_FALLBACK_LISTINGS = 32
+CODEX_TAIL_BYTES = 256 * 1024
 
 
 def _iso(epoch: float | str | None) -> str | None:
@@ -200,17 +207,8 @@ class ProviderUsageLayer:
         return fallback
 
     def _latest_codex_event(self) -> tuple[dict[str, Any], float] | None:
-        root = self.home / ".codex" / "sessions"
-        try:
-            files = sorted(root.rglob("rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-        except OSError:
-            return None
-        for path in files[:20]:
-            try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for line in reversed(lines):
+        for path, mtime in self._newest_codex_rollouts():
+            for line in self._tail_lines(path):
                 try:
                     event = json.loads(line)
                     limits = event["payload"]["info"]["rate_limits"]
@@ -221,9 +219,81 @@ class ProviderUsageLayer:
                     try:
                         source_time = datetime.fromisoformat(timestamp).timestamp()
                     except (AttributeError, ValueError):
-                        source_time = path.stat().st_mtime
+                        source_time = mtime
                     return limits, source_time
         return None
+
+    def _newest_codex_rollouts(self) -> list[tuple[Path, float]]:
+        """Return up to CODEX_FALLBACK_FILES rollouts from the newest days, newest mtime first.
+
+        Directories are listed newest-first, at most CODEX_FALLBACK_LISTINGS of them; within a day the
+        file name (which starts with the session's start time) picks the newest ones.
+        """
+        budget = [CODEX_FALLBACK_LISTINGS]
+        found: list[Path] = []
+
+        def listing(path: Path) -> list[os.DirEntry[str]]:
+            if budget[0] <= 0:
+                return []
+            budget[0] -= 1
+            try:
+                with os.scandir(path) as entries:
+                    return list(entries)
+            except OSError:
+                return []
+
+        def dated(entries: list[os.DirEntry[str]]) -> list[os.DirEntry[str]]:
+            directories = []
+            for entry in entries:
+                try:
+                    if entry.name.isdigit() and entry.is_dir():
+                        directories.append(entry)
+                except OSError:
+                    continue
+            return sorted(directories, key=lambda entry: entry.name, reverse=True)
+
+        def descend(path: Path, depth: int) -> None:
+            entries = listing(path)
+            if depth == 3:
+                names = sorted(
+                    (
+                        entry.name
+                        for entry in entries
+                        if entry.name.startswith("rollout-") and entry.name.endswith(".jsonl")
+                    ),
+                    reverse=True,
+                )
+                found.extend(path / name for name in names[: CODEX_FALLBACK_FILES - len(found)])
+                return
+            for entry in dated(entries):
+                if len(found) >= CODEX_FALLBACK_FILES or budget[0] <= 0:
+                    return
+                descend(path / entry.name, depth + 1)
+
+        descend(self.home / ".codex" / "sessions", 0)
+        dated_files = []
+        for path in found:
+            try:
+                dated_files.append((path, path.stat().st_mtime))
+            except OSError:
+                continue
+        return sorted(dated_files, key=lambda item: item[1], reverse=True)
+
+    @staticmethod
+    def _tail_lines(path: Path) -> list[str]:
+        """Return the complete lines in the last CODEX_TAIL_BYTES of a file, last line first."""
+        try:
+            with open(path, "rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                start = max(0, size - CODEX_TAIL_BYTES)
+                handle.seek(start)
+                tail = handle.read(CODEX_TAIL_BYTES)
+        except OSError:
+            return []
+        lines = tail.split(b"\n")
+        if start > 0:
+            lines = lines[1:]
+        return [line.decode("utf-8", errors="replace") for line in reversed(lines) if line.strip()]
 
     @staticmethod
     def _available(
