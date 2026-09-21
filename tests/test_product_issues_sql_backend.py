@@ -320,7 +320,9 @@ class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStore
 
         with mock.patch.object(self.client, "_query", side_effect=traced):
             self.client.call("getTaskMetadata", task_id=first_key)
-        self.assertTrue(any("WHERE board_key = %s" in sql for sql in statements))
+        # The lookup stays on the indexed key; since the reads went set-based it names the keys
+        # as one array parameter, which the unique index on `board_key` answers the same way.
+        self.assertTrue(any("WHERE board_key = ANY(%s::bigint[])" in sql for sql in statements))
         self.assertFalse(any(sql.strip() == "SELECT product_id FROM products" for sql in statements))
 
         with (
