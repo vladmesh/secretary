@@ -123,7 +123,7 @@ class BootstrapTests(unittest.TestCase):
             mock.patch("secretary.bootstrap._ensure_installation_user"),
             mock.patch("secretary.bootstrap._clone_or_reuse", clone),
             mock.patch("secretary.bootstrap._install_platform", steps.install_platform),
-            mock.patch("secretary.bootstrap._set_installation_owner"),
+            mock.patch("secretary.bootstrap._set_installation_owner", steps.set_owner),
             mock.patch("secretary.bootstrap.provision_board_store", steps.provision),
             mock.patch("secretary.bootstrap.migrate_instance", steps.migrate),
             mock.patch("secretary.bootstrap.verify_board_store_roles", steps.verify),
@@ -150,6 +150,8 @@ class BootstrapTests(unittest.TestCase):
                     mock.call.provision(target, allow_create=True),
                     mock.call.migrate(target),
                     mock.call.verify(target),
+                    # The handoff comes after provisioning, so it covers `board-store.env`.
+                    mock.call.set_owner(target, "dev"),
                 ],
             )
             self.assertFalse((target / "board-transport.env").exists())
@@ -208,6 +210,76 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(steps.mock_calls, [])
             self.assertFalse((target / "runtime.env").exists())
+
+    def test_the_real_provision_leaves_board_store_env_to_the_installation_user_at_0600(self) -> None:
+        """Real `provision` materializes `board-store.env` as root; bootstrap then hands it over.
+
+        Only the Docker edges of `provision` are stood in for. The test cannot switch users, so
+        it runs `_set_installation_owner` for real with root's view of the host and records the
+        uid and gid each `chown` receives, and when, relative to the store steps.
+        """
+        from secretary.board import provision as provision_module
+        from secretary.board import store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            compose = Path(temporary) / "opt" / "postgres-compose.yml"
+            events: list[tuple[object, ...]] = []
+            account = SimpleNamespace(pw_uid=4242, pw_gid=4343)
+
+            def chown(path: object, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+                events.append(("chown", Path(str(path)), uid, gid))
+
+            def step(name: str):
+                def record(instance: Path, *args: object, **kwargs: object) -> None:
+                    events.append((name, Path(instance)))
+                    # The store file has to exist, private, before anything reads it.
+                    store_file = store.store_path(instance)
+                    self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
+
+                return record
+
+            args = SimpleNamespace(
+                instance_dir=str(target), instance_remote="remote", installation_user="dev", dry_run=False
+            )
+            kwdefaults = dict(provision_module.provision.__kwdefaults__ or {})
+            kwdefaults["compose_path"] = compose
+            with (
+                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+                mock.patch("secretary.bootstrap._host_supported"),
+                mock.patch("secretary.bootstrap._ensure_installation_user"),
+                mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=self._clone),
+                mock.patch("secretary.bootstrap._install_platform"),
+                # `provision` itself runs; only Docker is answered for it.
+                mock.patch.object(provision_module.provision, "__kwdefaults__", kwdefaults),
+                mock.patch("secretary.board.provision._exists", return_value=False),
+                mock.patch("secretary.board.provision._run", return_value="container-id"),
+                mock.patch("secretary.board.provision._inspect_container"),
+                mock.patch("secretary.board.provision._wait_ready"),
+                mock.patch("secretary.bootstrap.migrate_instance", side_effect=step("migrate")),
+                mock.patch("secretary.bootstrap.verify_board_store_roles", side_effect=step("verify")),
+                # `_set_installation_owner` runs for real, as root would, against a stand-in account.
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown", side_effect=chown),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(bootstrap(args), 0)
+
+            store_file = store.store_path(target)
+            self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
+            self.assertIn("SECRETARY_DB_APP_PASSWORD=", store_file.read_text(encoding="utf-8"))
+            names = [event[0] for event in events]
+            handed = [event for event in events if event[0] == "chown" and event[1] == store_file]
+            self.assertEqual(handed, [("chown", store_file, 4242, 4343)])
+            # In order: the store steps first, then the handoff of the file they needed.
+            self.assertLess(names.index("verify"), events.index(handed[0]))
+            for other in ("runtime.env", ".gitignore", BOOTSTRAP_STAMP):
+                self.assertIn(("chown", target / other, 4242, 4343), events, other)
+            # The Compose definition is root's, outside the instance, and is never handed over.
+            self.assertTrue(compose.is_file())
+            self.assertEqual(compose.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(any(event[0] == "chown" and event[1] == compose for event in events))
 
     def test_rejects_unsupported_host_before_creating_user_or_checkout(self) -> None:
         args = SimpleNamespace(

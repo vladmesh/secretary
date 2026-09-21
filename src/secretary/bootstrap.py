@@ -201,11 +201,14 @@ def bootstrap(args: argparse.Namespace) -> int:
         if not args.dry_run:
             _mark_bootstrap_checkout(target)
             select_card_backend(target / "runtime.env", POSTGRES)
-            _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
             provision_board_store(target, allow_create=True)
             migrate_instance(target)
             verify_board_store_roles(target)
+            # Last, so the handoff covers what provisioning created as root under the instance:
+            # `board-store.env` (0600, read by every role and instance-bound CLI) and its
+            # `.gitignore` entry. The Compose definition stays root's in /opt/secretary.
+            _set_installation_owner(target, args.installation_user)
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, OSError, RuntimeError) as exc:
