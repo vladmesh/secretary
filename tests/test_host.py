@@ -1626,6 +1626,7 @@ class DoctorHostCliTests(unittest.TestCase):
             "  unit_prefix: secretary-\n"
             "  components:\n"
             "    curator: {enabled: false}\n"
+            "    instance-maintenance: {enabled: false}\n"
             "    memory: {enabled: false}\n"
             "    retro: {enabled: false}\n"
             "    steward: {enabled: false}\n"

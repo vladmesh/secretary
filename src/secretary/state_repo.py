@@ -45,10 +45,15 @@ RECOVERY_RECONCILIATION_MESSAGE = "recovery(instance): reconcile retained head r
 # These are deliberately repository-local controls for the private instance
 # checkout. They reduce Git's peak packing appetite; they are not a process RSS
 # limit and must never escape into a user's global configuration or a project.
+# The last two switch off the implicit `gc --auto` every `git commit` would
+# otherwise start inside a checkpoint tick; `secretary instance-maintenance`,
+# fired by its own timer, packs the repository instead.
 PACKING_CONTROLS = (
     ("pack.threads", "1"),
     ("pack.windowMemory", "128m"),
     ("pack.deltaCacheSize", "64m"),
+    ("gc.auto", "0"),
+    ("maintenance.auto", "false"),
 )
 
 # Variables with which the caller's environment selects a *different* repository than

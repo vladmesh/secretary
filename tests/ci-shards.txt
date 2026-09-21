@@ -140,6 +140,7 @@ integration-board tests/test_sql_board_bulk_reads.py
 unit tests/test_sprints.py
 unit tests/test_sprint_guard_outside_sprint.py
 unit tests/test_state_repo.py
+unit tests/test_instance_maintenance.py
 unit tests/test_status.py
 unit tests/test_measurement_script.py
 unit tests/test_web_command_protocol.py

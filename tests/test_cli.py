@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import state_repo
 from secretary.cli import MEMORY_EXIT_PERMISSION, build_parser, main
 from tests.head_registry import write_installed_pair
 
@@ -54,9 +55,8 @@ def init_instance_repo(instance_dir: Path) -> None:
     git(instance_dir, "config", "user.name", "operator")
     git(instance_dir, "config", "user.email", "operator@example.invalid")
     git(instance_dir, "config", "commit.gpgsign", "false")
-    git(instance_dir, "config", "--local", "pack.threads", "1")
-    git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
-    git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
+    for key, value in state_repo.PACKING_CONTROLS:
+        git(instance_dir, "config", "--local", key, value)
     git(instance_dir, "add", "instance.yaml")
     git(instance_dir, "commit", "--quiet", "-m", "config")
 
@@ -192,9 +192,8 @@ class CliTests(unittest.TestCase):
         git(instance_dir, "init", "--quiet", "--initial-branch", "main")
         git(instance_dir, "config", "user.name", "operator")
         git(instance_dir, "config", "user.email", "operator@example.invalid")
-        git(instance_dir, "config", "--local", "pack.threads", "1")
-        git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
-        git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
+        for key, value in state_repo.PACKING_CONTROLS:
+            git(instance_dir, "config", "--local", key, value)
         git(instance_dir, "add", "instance.yaml")
         git(instance_dir, "commit", "--quiet", "-m", "config")
         self.run_cli(["data", "init", "--instance", str(instance_dir)])

@@ -173,11 +173,25 @@ only these settings in the private instance repository (never global config, nev
 pack.threads=1
 pack.windowMemory=128m
 pack.deltaCacheSize=64m
+gc.auto=0
+maintenance.auto=false
 ```
 
 `doctor` names missing, drifted or duplicate values with the exact remediation. To roll back, run
 `git -C INSTANCE config --local --unset-all` for each key. These settings constrain packing; they are
 not a hard memory limit.
+
+`gc.auto=0` and `maintenance.auto=false` stop every `git commit` from starting Git's implicit
+`gc --auto`, which would otherwise pack the repository inside whichever checkpoint tick first crosses
+the loose-object threshold. Packing runs from `secretary-instance-maintenance.timer` instead (daily,
+`Persistent=true`): its service runs `secretary instance-maintenance`, which is `git gc --auto` with
+Git's stock thresholds (6,700 loose objects, 50 packs) restated on the command line, so a quiet day
+costs one object count. That packing step takes no state-repo lock: it touches objects only, and the
+two ref-writing parts of `gc` (`pack-refs`, reflog expiry) are switched off for it. Reflogs are then
+expired as a separate step under the state-repo lock, the only moment a checkpoint can wait on
+maintenance, bounded at 60 seconds. `secretary status` lists the timer under `host.schedules` with
+`last_trigger`, and the service under `host.units` reads `failed` after a failed run; the run's
+before/after object counts are in its journal.
 
 ## Validation gate
 

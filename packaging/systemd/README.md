@@ -28,6 +28,11 @@ venv's isolated `runtime_preflight.py`. The preflight runs by pathname before th
 point can import an editable package, refuses foreign or task-workspace provenance with the existing
 production-state diagnostic, and execs the tick only after a valid observation. It is materialized
 with the unit through `reconcile apply` or `secretary upgrade`; do not copy or edit it on the host.
+`secretary-instance-maintenance.timer` fires daily (`Persistent=true`) a one-shot
+`secretary instance-maintenance` at idle CPU and I/O priority: Git's own `gc --auto` heuristic run
+outside any tick, because the lifecycle sets `gc.auto=0` in the instance repository so that no
+checkpoint commit packs. The packing step takes no state-repo lock; only the short reflog expiry
+after it does ([Recovery](../../docs/RECOVERY.md#local-git-packing-controls)).
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance
 embedding model. `secretary-web.service` runs the web transport on `127.0.0.1:8787` — that host is
 not a default the unit may relax — and `secretary-web-front.service` runs the distribution's Caddy that

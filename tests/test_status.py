@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import state_repo
 from secretary.cli import main
 from secretary.config import validate, validate_instance
 from secretary.head_registry import (
@@ -41,9 +42,8 @@ def _init_instance_repo(instance_dir: Path, instance_yaml: str) -> None:
     _git(instance_dir, "config", "user.name", "operator")
     _git(instance_dir, "config", "user.email", "operator@example.invalid")
     _git(instance_dir, "config", "commit.gpgsign", "false")
-    _git(instance_dir, "config", "--local", "pack.threads", "1")
-    _git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
-    _git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
+    for key, value in state_repo.PACKING_CONTROLS:
+        _git(instance_dir, "config", "--local", key, value)
     _git(instance_dir, "add", "instance.yaml")
     _git(instance_dir, "commit", "--quiet", "-m", "config")
 
