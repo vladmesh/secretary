@@ -87,8 +87,8 @@ from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.retired_board import legacy_runtime_lines
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
-from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
+from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from secretary.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (

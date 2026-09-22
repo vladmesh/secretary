@@ -656,7 +656,7 @@ class SeamGrepTests(unittest.TestCase):
         the call apiece — a head that is not a legacy one is stopped through its own backend there,
         and only the legacy and headless cases reach this verb.
         """
-        from triggered_agents.runtime import orca_legacy_head
+        from secretary.runtime import orca_legacy_head
         from secretary.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))

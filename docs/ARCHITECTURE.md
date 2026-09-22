@@ -178,7 +178,7 @@ Done retention. The generic runtime owns only the port interfaces and does not i
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
 infer success from a pane, a socket write or process existence. The backend is chosen per head
 profile from the closed set `orca-legacy | local-pty` (absent means `orca-legacy`), and
-`triggered_agents.runtime.head_runtime_backends` is the only place a name becomes a backend.
+`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
 
 - `OrcaLegacyHeadRuntime` runs heads in Orca panes. Its readiness probe and conditional stop narrow
   races but cannot make observe-then-stop atomic.

@@ -1774,7 +1774,7 @@ class LocalPtyHeadRuntime:
             return ()
         return tuple(event for event in events if int(event.get("seq") or 0) > floor)
 
-    def _unreachable_refusal(self, address: _Address, run: HeadRun, exc: Exception) -> _Refusal:
+    def _unreachable_refusal(self, address: _Address, run: HeadRun, exc: BaseException) -> _Refusal:
         """A payload that was never admitted, because the supervisor could not be spoken to."""
         return _Refusal(
             status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
@@ -1919,7 +1919,7 @@ class LocalPtyHeadRuntime:
             status=HEAD_ALIVE,
             run=stopped.run,
             reason=f"{message}; the head it left behind could not be stopped",
-            failure=HeadSpawnAborted(message, run=stopped.run),
+            failure=HeadSpawnAborted(message, run=stopped.run),  # type: ignore[arg-type]  # unconfirmed stop receipts carry the run in practice; moved as-is
             evidence=report or (refusal.evidence if refusal is not None else None),
             epoch=epoch,
         )
@@ -2039,7 +2039,7 @@ class LocalPtyHeadRuntime:
         epoch: int,
         lease: Any,
         rotatable: bool,
-        exc: Exception,
+        exc: BaseException,
     ) -> ObserveReceipt:
         """A socket that did not answer, classified by the head's process rather than by the socket.
 

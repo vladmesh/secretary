@@ -70,12 +70,12 @@ from secretary.webproto.agents import (
 from secretary.webproto.runs import CLAIMED, UNRESOLVED, ProductRun
 
 # Re-exported for the operation layer, which records the journal's path on every run it starts.
-from triggered_agents.runtime.local_pty_head import JOURNAL_NAME as JOURNAL_NAME
+from secretary.runtime.local_pty_head import JOURNAL_NAME as JOURNAL_NAME
 
 # The substrate's own names for the record that carries a head's exit status and for the file it is
 # written to, reached through the one backend that owns that package rather than around it, so this
 # reader and that writer cannot disagree about either.
-from triggered_agents.runtime.local_pty_head import RUN_EXITED, head_run_journal
+from secretary.runtime.local_pty_head import RUN_EXITED, head_run_journal
 
 #: The three values that *name an ending*. `running` is not one, and `unknown` is the absence of
 #: one, so a run that is over while the evidence says either of those is recorded

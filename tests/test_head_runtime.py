@@ -61,7 +61,7 @@ from secretary.runtime.head import (
     TurnLeaseError,
 )
 from secretary.runtime.head import operations as head_operations
-from triggered_agents.runtime.orca_legacy_head import (
+from secretary.runtime.orca_legacy_head import (
     STOP_ACTIVITY_SINCE,
     STOP_TURN_IN_FLIGHT,
     OrcaLegacyHeadRuntime,

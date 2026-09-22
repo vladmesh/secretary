@@ -1189,7 +1189,7 @@ class LifecycleTests(ProductRuntimeFixture):
         because it starts and stops none. The lifecycle claim itself, a real head ended by a
         recovered record and confirmed gone, is executed in `RealHeadOwnershipTests`.
         """
-        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
+        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
 
         run_id = self.start(request_id="req-address")["run"]["run_id"]
         stored = RunStore(self.data_dir).get(run_id)
@@ -1403,7 +1403,7 @@ class RealHeadFixture(ProductRuntimeFixture):
     def real_backend(self):
         """The real supervised backend, over this fixture's own data directory, reaped afterwards."""
         from secretary.dispatch.watchdog import head_process_status
-        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
+        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
 
         root = self.data_dir / "webproto" / "heads"
         self.addCleanup(self._reap, root)
@@ -1482,7 +1482,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
             head_process_status,
         )
         from secretary.runtime.head.command import HeadCommand
-        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
+        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
 
         root = self.data_dir / "webproto" / "heads"
         backend = LocalPtyHeadRuntime(root, head_process_status=head_process_status)
@@ -1677,7 +1677,7 @@ class RealBackendContractTests(RealHeadFixture):
 
 
 def _journal_of(run_dir: Path) -> tuple[dict[str, Any], ...]:
-    from triggered_agents.runtime.local_pty_head import head_run_journal
+    from secretary.runtime.local_pty_head import head_run_journal
 
     return head_run_journal(run_dir)
 
@@ -1920,7 +1920,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
     FORBIDDEN_IMPORTS = frozenset(
         """
         triggered_agents.runtime.orca_rpc secretary.runtime.pane_host
-        triggered_agents.runtime.orca_legacy_head secretary.runtime.tui_delivery
+        secretary.runtime.orca_legacy_head secretary.runtime.tui_delivery
         secretary.dispatch.head_status secretary.dispatch.host secretary.dispatch.review
         orca
         """.split()

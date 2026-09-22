@@ -71,7 +71,7 @@ from secretary.runtime.head.local_pty.journal import (
     read_tail,
 )
 from tests.support.head_runtime_contract import HeadRuntimeContract
-from triggered_agents.runtime.local_pty_head import (
+from secretary.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
     DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
     DELIVER_STATE_UNKNOWN,
@@ -1865,7 +1865,7 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         A name that comes back is a decision somebody has to make again, and this fails when it is
         made silently.
         """
-        source = (REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py").read_text(
+        source = (REPO / "src" / "secretary" / "runtime" / "local_pty_head.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(source)
@@ -2180,7 +2180,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
 
     def test_the_substrate_is_reached_only_through_its_one_backend(self) -> None:
         package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
+        backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
@@ -2207,7 +2207,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         """
         sites = {}
         for path in sorted((REPO / "src").rglob("*.py")):
-            if path == REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py":
+            if path == REPO / "src" / "secretary" / "runtime" / "local_pty_head.py":
                 continue  # the class's own module, where it is defined rather than built
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for holder in ast.walk(tree):
