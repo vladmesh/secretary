@@ -15,12 +15,12 @@ from secretary.board.backend import card_client
 from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.config import instance_data_dir
+from secretary.runtime.paths import default_instance_path
 from secretary.tasks import TaskError, TaskReader, TaskWriter
 from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.paths import default_instance_path
 from triggered_agents.runtime.state import BoardUnavailable
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})

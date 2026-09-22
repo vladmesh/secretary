@@ -15,13 +15,17 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 
 - `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
-  packages: `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `schemas`, `web`,
+  packages: `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`, `schemas`, `web`,
   `webfront`, `webproto`.
 - `src/triggered_agents` is a legacy namespace. It holds runtime primitives Secretary uses directly
   (head runtimes, session-manager and delivery helpers, the mechanical-role driver, the curator,
   steward and retro agents). New shared runtime code goes into `secretary`. The only allowed imports
   from `triggered_agents` into `secretary` are the ones listed in the test: production telemetry and
   curator discovery reading `secretary.config`, and `secretary.sprints`.
+- `src/secretary/runtime` is the home of the head-runtime utilities being moved out of
+  `triggered_agents.runtime` (so far: `paths`, `references`, `prompt_document`, `launch_prefix`,
+  `shared_state`, `claude_sessions`, `claude_env`). It never imports `triggered_agents`;
+  `triggered_agents` may import it, and that is the only new direction the architecture test admits.
 
 The target package layout is feature-first. Modules move there one feature at a time, keeping
 compatibility imports where an installed command depends on an old path:

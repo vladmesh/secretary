@@ -31,7 +31,7 @@ from typing import Any
 from secretary.config import DataDirError, instance_data_dir
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.po.workspace import workspace_dir
-from triggered_agents.runtime.paths import configured_product_root
+from secretary.runtime.paths import configured_product_root
 
 ROOT = Path(__file__).resolve().parents[2]
 # Manifest shipped by this checkout; hosts use their configured product checkout instead.

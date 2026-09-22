@@ -109,7 +109,7 @@ class ContentIdentity:
 # import the configured package first and only afterwards *append* the workspace root to
 # `sys.path`, which could never make a src-layout candidate importable and would have been too late
 # if it could: by then the package object was already bound. Every head runs with
-# `PYTHONPATH=$TA_SECRETARY_REPO/src` (see `triggered_agents/runtime/launch_prefix.py`) and every
+# `PYTHONPATH=$TA_SECRETARY_REPO/src` (see `secretary/runtime/launch_prefix.py`) and every
 # worktree shares one venv holding an editable install of the production checkout, so the check
 # process imported production sources, ran the candidate's test files against them, printed OK and
 # exited 0. `candidate_import_refusal()` then honestly refused the receipt, which made `--reuse`

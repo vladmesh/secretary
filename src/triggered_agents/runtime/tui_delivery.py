@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.runtime.prompt_document import NUDGE_FILE_MODE
+
 from .agent_prompt_transport import (
     AGENT_PROMPT_TRANSPORT_VERSION,
     TRANSPORT_POLICY,
@@ -33,7 +35,6 @@ from .agent_prompt_transport import (
 )
 from .pane_host import PaneHost
 from .pane_host import pane_host as resolve_pane_host
-from .prompt_document import NUDGE_FILE_MODE
 from .tui_delivery_types import RunJson
 
 TUI_IDLE_TIMEOUT_MS = int(

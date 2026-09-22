@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+from secretary.runtime.claude_sessions import claude_project_dir_name
 from tests.fakes.triggered_dispatch import FakeSessionHost
 from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
@@ -19,7 +20,6 @@ from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
-from triggered_agents.runtime.claude_sessions import claude_project_dir_name
 from triggered_agents.runtime.head import HeadSpec
 from triggered_agents.runtime.pane_host import Pane, PaneHostError
 

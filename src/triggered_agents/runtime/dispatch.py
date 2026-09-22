@@ -130,8 +130,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from . import claude_env, finalizer, orca_rpc
-from .claude_sessions import claude_session_paths
+from secretary.runtime import claude_env
+from secretary.runtime.claude_sessions import claude_session_paths
+
+from . import finalizer, orca_rpc
 from .codex_preflight import (
     CodexPreflightError,
     preflight_codex_launch,

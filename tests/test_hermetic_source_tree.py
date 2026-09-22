@@ -7,7 +7,7 @@ the host's board, the host's Codex home and the host's pipeline state. Nothing c
 basic dependency of all -- which *sources* the run imported.
 
 That gap was not theoretical. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
-(`triggered_agents/runtime/launch_prefix.py`), and every worktree on this host runs on one shared
+(`secretary/runtime/launch_prefix.py`), and every worktree on this host runs on one shared
 venv whose editable install points at the production checkout's `src`. Both of those outrank a
 worktree's own sources for a src-layout project, which has nothing importable at its root. So a
 worker could run the broad suite inside a candidate worktree and watch it pass, while the code it

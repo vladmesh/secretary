@@ -15,10 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import pause as dispatcher_pause
 from secretary import role_env as secretary_role_env
+from secretary.dispatch import pause as dispatcher_pause
+from secretary.runtime import launch_prefix, paths
 from triggered_agents.agents.pipeline import health
-from triggered_agents.runtime import paths
 from triggered_agents.runtime import role_env as runtime_role_env
 
 
@@ -131,6 +131,22 @@ class LauncherCheckoutTests(unittest.TestCase):
             command = runtime_role_env.wrap_shell_command("steward", "true")
 
         self.assertIn("PYTHONPATH=/srv/configured/src", command)
+
+
+class LaunchPrefixRenderingTests(unittest.TestCase):
+    """The PYTHONPATH prefix is rendered into card text and head commands, so its bytes are durable."""
+
+    def test_the_shell_form_is_the_published_expression(self) -> None:
+        self.assertEqual(
+            launch_prefix.pythonpath_prefix(),
+            'PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}/src${PYTHONPATH:+:$PYTHONPATH}"',
+        )
+
+    def test_the_resolved_form_writes_the_configured_checkout(self) -> None:
+        self.assertEqual(
+            launch_prefix.pythonpath_prefix({"TA_SECRETARY_REPO": "/opt/secretary"}),
+            'PYTHONPATH=/opt/secretary/src"${PYTHONPATH:+:$PYTHONPATH}"',
+        )
 
 
 class OpenRouterKeyTests(unittest.TestCase):

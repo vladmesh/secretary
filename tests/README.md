@@ -101,7 +101,7 @@ a resolved path, as `test_pipeline_paths.py:LegacyMirrorPathTests` does.
 
 Every seam above keeps a *host* fact out of the run. This one checks which sources the run
 imported. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
-(`src/triggered_agents/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
+(`src/secretary/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
 one shared venv whose editable install points at the production checkout's `src`. Both outrank a
 worktree's own sources for a src-layout project, which has nothing importable at its root -- so a
 suite run inside a candidate worktree can pass while exercising production's `secretary` with

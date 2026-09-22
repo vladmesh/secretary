@@ -32,8 +32,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from secretary.runtime.paths import component_enabled, configured_product_root
+
 from . import production_telemetry
-from .paths import component_enabled, configured_product_root
 from .state import AgentState
 
 _ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent

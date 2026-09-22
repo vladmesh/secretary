@@ -989,7 +989,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
     """issue:8b39e60e4df361c6138e: the standard shape must import the candidate, by construction.
 
     This reproduces the live shape exactly, because nothing weaker reproduced the defect. A head's
-    shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src` (`triggered_agents/runtime/launch_prefix.py`)
+    shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src` (`secretary/runtime/launch_prefix.py`)
     and every worktree runs on one shared venv that holds an editable install of the production
     checkout, so a src-layout candidate -- which has nothing importable at its own root -- was
     checked by a process that imported *production* sources and ran the candidate's test files

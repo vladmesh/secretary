@@ -51,6 +51,11 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuationStage,
     head_run_binding,
 )
+from secretary.runtime.prompt_document import (
+    NUDGE_FILE_MODE,
+    NUDGE_MAX_BYTES,
+    PromptDocumentError,
+)
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
@@ -79,11 +84,6 @@ from triggered_agents.runtime.head import (
     with_pid_heartbeat,
 )
 from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
-from triggered_agents.runtime.prompt_document import (
-    NUDGE_FILE_MODE,
-    NUDGE_MAX_BYTES,
-    PromptDocumentError,
-)
 from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 

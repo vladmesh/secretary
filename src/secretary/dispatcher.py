@@ -225,7 +225,7 @@ from triggered_agents.runtime.head import (
 from triggered_agents.runtime.head import (
     HeadSpec,
 )
-from triggered_agents.runtime.launch_prefix import pythonpath_prefix
+from secretary.runtime.launch_prefix import pythonpath_prefix
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"

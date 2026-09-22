@@ -27,7 +27,7 @@ from pathlib import Path
 
 from secretary import state_repo
 from secretary._fsutil import stage_text
-from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
+from secretary.runtime.paths import instance_dir as normalize_instance_dir
 
 STORE_FILE = "board-store.env"
 

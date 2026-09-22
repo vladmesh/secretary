@@ -26,7 +26,7 @@ from typing import Any
 from secretary import _proc
 from secretary.observer_root import observer_root_repo
 from secretary.projects.availability import ProjectAvailability
-from triggered_agents.runtime.paths import component_enabled, configured_product_root
+from secretary.runtime.paths import component_enabled, configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
 UNIT_SUFFIXES = (".service", ".timer")

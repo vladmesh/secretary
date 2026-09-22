@@ -22,7 +22,9 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict
 
-from ...runtime import production_telemetry, shared_state
+from secretary.runtime import shared_state
+
+from ...runtime import production_telemetry
 from ...runtime.state import AgentState
 from ..pipeline import naming as pipeline_naming
 

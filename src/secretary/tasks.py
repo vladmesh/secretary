@@ -85,7 +85,7 @@ from secretary.projects.integration_base import (
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.redact import redact
-from triggered_agents.runtime.references import (
+from secretary.runtime.references import (
     BoardRowsUnavailable,
     board_rows,
     next_reference,

@@ -15,7 +15,7 @@ from secretary.dispatch.worker_lifecycle import (
     ContinuationProviderCondition,
     head_run_binding,
 )
-from triggered_agents.runtime.claude_sessions import (
+from secretary.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )

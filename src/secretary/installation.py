@@ -66,6 +66,8 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
+from secretary.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
+from secretary.runtime.shared_state import resolve_pipeline_state_dir
 from secretary.runtime_env import (
     RuntimeEnvError,
     RuntimeEnvMissing,
@@ -91,8 +93,6 @@ from secretary.upgrade import (
     run_steps,
     step_host,
 )
-from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
-from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")

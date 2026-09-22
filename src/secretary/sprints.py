@@ -56,6 +56,7 @@ from secretary.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
+from secretary.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -84,7 +85,6 @@ from secretary.tasks import (
     reference_allocation_lock,
     task_audit_for,
 )
-from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 
 if TYPE_CHECKING:
     from secretary.board.sql_cards import SqlCardClient
