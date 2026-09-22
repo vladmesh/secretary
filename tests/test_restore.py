@@ -166,6 +166,33 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual(client.card_count(), 1)
 
+    def test_a_restored_card_and_its_comment_carry_the_postgres_card_identity(self) -> None:
+        """secretary-1669 review: restore events are new writes, so they name the one card backend."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="secretary-42", comments=[{"text": "[worker]\nkept"}])
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = card_store(self, empty_seed())
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
+            identity = TaskReader(client).show("secretary-42")["id"]
+            self.assertEqual(identity, "task_postgres_12")
+            events = {
+                event["kind"]: event
+                for event in task_audit_for(client).events("secretary-42")
+                if event["kind"] in {"restored_bulk", "restored_comment"}
+            }
+            self.assertEqual(set(events), {"restored_bulk", "restored_comment"})
+            for kind, event in events.items():
+                with self.subTest(kind=kind):
+                    self.assertEqual(event["task_id"], identity)
+                    self.assertEqual(event["backend"]["kind"], "postgres")
+                    self.assertEqual(event["backend"]["task_id"], 12)
+
     def test_import_never_enters_the_interactive_comment_writers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"

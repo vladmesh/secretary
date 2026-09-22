@@ -40,7 +40,7 @@ from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointWriter
 from secretary.sprints import SprintReader
 from secretary.task_commands import run_task_verify_audit
-from secretary.tasks import TaskAudit, TaskError, task_audit_for
+from secretary.tasks import TaskError, task_audit_for
 from secretary.webproto.command_reads import (
     STATE_COMMITTED,
     STATE_NOT_FOUND,
@@ -192,7 +192,6 @@ class CommandReadTests(SqlAuditCase):
         self.assertEqual([row["event_id"] for row in items], ["evt_report"])
         self.assertEqual(items[0]["result"]["reason"], "claimed for the worker")
         self.assertFalse(self.journal().exists())
-        self.assertEqual(TaskAudit(self.data_dir).events(), [])
 
     def test_a_staged_request_is_pending_and_not_a_history_row(self) -> None:
         self.stale_projection()
@@ -481,7 +480,8 @@ class CardHistoryReadTests(SqlAuditCase):
 
         self.assertEqual(page["source"]["state"], "available")
         self.assertEqual([row["kind"] for row in page["items"]], ["card.started", STARTED])
-        self.assertEqual(TaskAudit(self.data_dir).events(self.REF), [])
+        # The projection stays as it was left: the history above came from the store alone.
+        self.assertEqual(self.journal().read_text(encoding="utf-8"), "")
 
     def test_a_stale_projection_is_in_no_page_and_in_no_snapshot(self) -> None:
         self.commit("req-1", event_id="evt_1", minute=1)

@@ -40,8 +40,10 @@ from secretary.dispatch.attempt_usage import (
     predecessor_boundary,
     provider_usage_source,
 )
-from secretary.tasks import TaskAudit, TaskError, is_significant_card_event
+from secretary.tasks import TaskError, is_significant_card_event, task_audit_for
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.sql_backend_fixtures import card_store
 
 DIGEST = "a" * 64
 USAGE_FIXTURES = Path(__file__).parent / "fixtures" / "attempt_usage"
@@ -1014,13 +1016,17 @@ class AttemptUsageEventTests(unittest.TestCase):
 
 
 class AttemptUsageProjectionTests(unittest.TestCase):
-    """The repository view joins export visibility without changing occurrence semantics."""
+    """The repository view joins export visibility without changing occurrence semantics.
+
+    The canon is the card audit of a real store; a committed and a staged record under one request
+    id, or one event id under two, are states its keys refuse, so they are not arranged here.
+    """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.audit = TaskAudit(self.root)
+        self.audit = task_audit_for(card_store(self, dispatcher_seed(), instance_dir=self.root))
         self.canon = BoardEventCanon(self.root, audit=self.audit)
 
     def test_committed_and_pending_occurrences_share_one_validated_view(self) -> None:
@@ -1045,40 +1051,6 @@ class AttemptUsageProjectionTests(unittest.TestCase):
         self.assertEqual([item.pending for item in projected], [False, True])
         self.assertEqual(projected[1].event.data, pending.data)
 
-    def test_an_exact_committed_pending_duplicate_is_one_exported_occurrence(self) -> None:
-        event = usage_event()
-        record = event.to_record("same-request")
-        self.audit.append("same-request", record)
-        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
-        self.audit._atomic_json(self.audit._pending_path("same-request"), record)
-
-        projected = self.canon.attempt_usage_occurrences(ref=CARD_REF)
-
-        self.assertEqual(len(projected), 1)
-        self.assertFalse(projected[0].pending)
-
-    def test_conflicting_request_payload_fails_closed(self) -> None:
-        committed = usage_event()
-        self.audit.append("same-request", committed.to_record("same-request"))
-        conflict = usage_event(
-            tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 101, "output": 20},
-            session_totals=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 551, "output": 81},
-        )
-        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
-        self.audit._atomic_json(self.audit._pending_path("same-request"), conflict.to_record("same-request"))
-
-        with self.assertRaisesRegex(ValueError, "conflicting event payloads"):
-            self.canon.attempt_usage_occurrences(ref=CARD_REF)
-
-    def test_one_event_id_cannot_have_two_request_owners(self) -> None:
-        event = usage_event()
-        self.audit.append("first-request", event.to_record("first-request"))
-        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
-        self.audit._atomic_json(self.audit._pending_path("second-request"), event.to_record("second-request"))
-
-        with self.assertRaisesRegex(ValueError, "conflicting request owners"):
-            self.canon.attempt_usage_occurrences(ref=CARD_REF)
-
     def test_one_causal_phase_cannot_have_two_occurrence_owners(self) -> None:
         first = usage_event()
         second = Event(
@@ -1095,13 +1067,6 @@ class AttemptUsageProjectionTests(unittest.TestCase):
         self.canon.stage("second-request", second)
 
         with self.assertRaisesRegex(ValueError, "conflicting occurrence owners"):
-            self.canon.attempt_usage_occurrences(ref=CARD_REF)
-
-    def test_unreadable_pending_evidence_fails_closed(self) -> None:
-        self.audit.stage("broken", usage_event().to_record("broken"))
-        Path(self.audit._pending_path("broken")).write_text("{", encoding="utf-8")
-
-        with self.assertRaisesRegex(ValueError, "pending audit record .* is unreadable"):
             self.canon.attempt_usage_occurrences(ref=CARD_REF)
 
 

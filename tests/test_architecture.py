@@ -535,6 +535,46 @@ class FileAuditOwnershipTests(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
+    def test_the_card_path_writes_no_retired_backend_identity(self) -> None:
+        """A new card write names the PostgreSQL backend; `task_kanboard_<n>` is only ever read.
+
+        The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
+        or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and
+        secretary-1669's first submission restored cards under the retired identity that way. The
+        one allowed use is `task_restore._restored_backend`, which answers the identity Sprint and
+        Product/Issue records still carry.
+        """
+        allowed = {("task_restore.py", "_restored_backend")}
+        for module in CARD_PATH_MODULES:
+            tree = ast.parse((ROOT / "src" / "secretary" / module).read_text(encoding="utf-8"))
+            found: list[int] = []
+            for holder in ast.walk(tree):
+                if not isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                if (module, holder.name) in allowed:
+                    continue
+                for node in ast.walk(holder):
+                    retired = (isinstance(node, ast.Name) and node.id == "KANBOARD") or (
+                        isinstance(node, ast.Attribute) and node.attr == "KANBOARD"
+                    )
+                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "entity_id":
+                        retired = retired or any(
+                            isinstance(argument, ast.Constant) and argument.value == "kanboard"
+                            for argument in node.args
+                        )
+                    if isinstance(node, ast.Dict):
+                        retired = retired or any(
+                            isinstance(key, ast.Constant)
+                            and key.value == "kind"
+                            and isinstance(value, ast.Constant)
+                            and value.value == "kanboard"
+                            for key, value in zip(node.keys, node.values, strict=True)
+                        )
+                    if retired:
+                        found.append(node.lineno)
+            with self.subTest(module=module):
+                self.assertEqual(sorted(set(found)), [], f"{module} writes the retired Kanboard identity")
+
     def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
         """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""
         from secretary.sprints import _AuditOnce

@@ -1733,7 +1733,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_production_scan_skips_project_with_active_code_task(self) -> None:
         self.board.move(12, "in_progress")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "secretary-510-pilot",
                 "resolved_head": "codex",
@@ -1794,7 +1794,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def blocking_pilot_card(self, *, sprint: str = "") -> None:
         """Leave the pilot card where the tick blocks it: an active claim no production record owns."""
         self.board.move(12, "in_progress")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "foreign-worker",
                 "resolved_head": "codex",
@@ -2121,7 +2121,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_production_active_claim_divergence_blocks_once_and_resumes_queue(self) -> None:
         self.board.move(12, "in_progress")
         self.board.move(13, "blocked")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "foreign-worker",
                 "resolved_head": "codex",
@@ -2238,7 +2238,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_production_validate_recovery_with_review_intent_restarts_missing_reviewer(self) -> None:
         self.board.move(12, "validate")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "secretary-510-pilot",
                 "resolved_head": "codex",
@@ -2272,7 +2272,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_production_review_starting_recovery_does_not_freeze_other_projects(self) -> None:
         self.board.move(12, "validate")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "secretary-510-pilot",
                 "resolved_head": "codex",
@@ -2431,7 +2431,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_new_attempt_ignores_stale_committed_claim_after_ready_reset(self) -> None:
         old_request = self.append_committed_claim("attempt-old")
         self.board.move(12, "ready")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "",
                 "resolved_head": "",
@@ -2482,7 +2482,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         attempt_id = self.attempt_id()
         self.append_committed_claim(attempt_id)
         self.board.move(12, "in_progress")
-        self.board.save_metadata(12, 
+        self.board.save_metadata(12,
             {
                 "claim": "secretary-510-pilot",
                 "resolved_head": "codex",
