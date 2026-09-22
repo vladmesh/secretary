@@ -160,8 +160,7 @@ def _epoch(value: Any) -> datetime:
 def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -> SqlCardClient:
     """Write a Kanboard fake's board into a migrated store and return a client over it.
 
-    The mapping is the importer's (`board/import_board.py`), used the same way it was used on the
-    live board: metadata keys the model names become columns, the rest become
+    Metadata keys the model names become columns, the rest become
     `tasks.extensions.kanboard`, and the swimlane stays in that same bag.  It is deliberately the
     product's own write path — `createTask`, `saveTaskMetadata`, `createComment`,
     `moveTaskPosition` — rather than direct SQL, so a seeding that disagrees with the client is a

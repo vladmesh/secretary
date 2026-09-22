@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import ast
 import json
 import unittest
-from pathlib import Path
 
 from secretary.board.models import SprintState
 from secretary.board.sprint_read import (
@@ -101,20 +99,6 @@ class SprintReadModelTests(unittest.TestCase):
             SprintResume.from_legacy({"selected_step": "x"}, required=True)
         with self.assertRaisesRegex(ValueError, "resume entry must be a JSON object"):
             SprintResume.from_legacy("not-json", required=True)
-
-    def test_board_importer_no_longer_imports_private_sprint_helpers(self) -> None:
-        source = (
-            Path(__file__).resolve().parents[1] / "src" / "secretary" / "board" / "import_board.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        private = [
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "secretary.sprints"
-            for alias in node.names
-            if alias.name.startswith("_")
-        ]
-        self.assertEqual(private, [])
 
 
 if __name__ == "__main__":

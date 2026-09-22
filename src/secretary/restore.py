@@ -201,7 +201,7 @@ def _import_normalized_board(
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed: restored card order")
             _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
-            _import_board_history(data_dir, writer.audit)
+            _restore_board_history(data_dir, writer.audit)
             pending_comments = [
                 event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
             ]
@@ -221,7 +221,7 @@ def _import_normalized_board(
         return len(cards)
 
 
-def _import_board_history(data_dir: Path, audit: Any) -> None:
+def _restore_board_history(data_dir: Path, audit: Any) -> None:
     """Recreate portable committed request/audit history without replaying effects."""
     path = data_dir / "board" / "audit.json"
     try:

@@ -6723,12 +6723,11 @@ class AuditCommittedIndexTests(unittest.TestCase):
 
 
 class LegacyTaskCodecTests(unittest.TestCase):
-    def test_reader_restore_and_importer_share_legacy_task_codec(self) -> None:
+    def test_reader_and_restore_share_legacy_task_codec(self) -> None:
         import importlib
 
         from secretary.board import legacy_codec
 
-        importer = importlib.import_module("secretary.board.import_board")
         restore = importlib.import_module("secretary.restore")
 
         self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
@@ -6743,10 +6742,6 @@ class LegacyTaskCodecTests(unittest.TestCase):
         self.assertIs(restore._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
         self.assertIs(restore._positive_int, legacy_codec.positive_int)
         self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
-        self.assertIs(importer._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
-        self.assertIs(importer._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
-        self.assertIs(importer._enum_or_default, legacy_codec.enum_or_default)
-        self.assertIs(importer._split_heads, legacy_codec.split_heads)
 
     def test_legacy_task_codec_preserves_released_normalization(self) -> None:
         from secretary.board import legacy_codec

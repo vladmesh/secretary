@@ -40,10 +40,8 @@ volumes:
 class ComposeInstallation:
     """Read-only view of the shipped Compose definition as it exists on disk.
 
-    The file lives outside the instance and is installed by root, so both the
-    provisioner and the cutover controller have to answer the same question
-    about it.  They ask it here once instead of restating the literals and the
-    comparisons in a second module.
+    The file lives outside the instance and is installed by root, so the
+    provisioner inspects it rather than trusting that it matches the shipped text.
     """
 
     path: Path

@@ -10,8 +10,7 @@ nowhere else.  `SqlCardClient` therefore answers the same eleven-method board vo
 `tasks`, `task_comments` and their satellites (§3.5, §3.7).  The public behaviour of the two
 classes above it does not change; where their data comes from and where it lands does.
 
-Three mappings do the whole job, and each is the inverse of one the importer already proved on
-live data (`board/import_board.py`):
+Three mappings do the whole job:
 
 * **state ↔ column.**  The store keeps `tasks.state`; the board keeps a column id.  §3.5's seven
   states and `_STATE_BY_COLUMN`'s seven column titles are the same seven, so the virtual board

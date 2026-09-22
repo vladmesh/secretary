@@ -63,16 +63,6 @@ def add_restore_subcommands(subparsers) -> None:
     board.add_argument("--instance", required=True)
     board.set_defaults(handler=run_restore_board)
 
-    live_board = subparsers.add_parser("board", help="operate the PostgreSQL board store")
-    live_board_subcommands = live_board.add_subparsers(dest="board_command")
-    # `secretary board` is one group, and the PostgreSQL store's import belongs in it rather
-    # than in a second top-level command with the same word.  It is registered from its own
-    # module so this one keeps knowing nothing about the store.
-    from secretary.board.import_commands import add_board_store_subcommands
-
-    add_board_store_subcommands(live_board_subcommands)
-    live_board.set_defaults(handler=_board_subcommand_required)
-
     reconcile = subparsers.add_parser("restore-reconcile", help="verify live managed reconcile after restore")
     reconcile.add_argument("--instance", required=True)
     reconcile.set_defaults(handler=run_restore_reconcile)
@@ -147,11 +137,6 @@ def run_restore_board(args: argparse.Namespace) -> int:
     count = import_normalized_board(data_dir, instance=instance_path.parent)
     sprints = restore_state(data_dir).get("sprint_count", 0)
     return {"ok": True, "action": "restore-board", "cards": count, "sprints": sprints}
-
-
-def _board_subcommand_required(args: argparse.Namespace) -> int:
-    _print_json({"ok": False, "action": "board", "error": "board subcommand required"})
-    return 2
 
 
 def run_restore_reconcile(args: argparse.Namespace) -> int:
