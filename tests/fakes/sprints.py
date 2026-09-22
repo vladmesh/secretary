@@ -305,8 +305,8 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
     def board_injected(self) -> Iterator[None]:
         """Serve this fixture's client wherever a CLI command asks `board_client` for one.
 
-        `board_client` is where the card backend is chosen for both implementations, so the
-        command's client is replaced there rather than at a Kanboard-only constructor.
+        `board_client` is the one constructor of a board client, so the command's client is
+        replaced there.
         """
         with contextlib.ExitStack() as stack:
             for target in self.BOARD_CLIENT_SEAMS:

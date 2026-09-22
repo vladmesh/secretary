@@ -14,10 +14,8 @@ silently read one. So the cases put a *stale* projection there — records of a 
 one — and then assert the answer contains none of it.
 
 Nothing here reaches the live installation. The store is a throwaway container database
-(`tests/sql_backend_fixtures.py`), the instance and data directories are temporary, and the backend
-selector is the per-case argument of a client rather than an environment name: the suite's own
-default is `kanboard` (`tests/__init__.py`), and these cases opt in by handing a PostgreSQL client
-to the construction seam every one of these readers already has.
+(`tests/sql_backend_fixtures.py`), the instance and data directories are temporary, and each case
+hands its PostgreSQL client to the construction seam every one of these readers already has.
 """
 
 from __future__ import annotations

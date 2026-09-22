@@ -1,26 +1,17 @@
 # The PostgreSQL board store
 
-Technical reference for the board store: schema, backend selection, transactions, audit mapping,
-migrations, import mechanics, identifiers and store configuration.
+Technical reference for the board store: schema, client construction, transactions, audit mapping,
+migrations, identifiers and store configuration.
 
-The production installation serves Products, Issues, Sprints and Cards from PostgreSQL
-(`SECRETARY_CARD_BACKEND=postgres`). The Kanboard implementation stays in the code for explicit
-rollback (`SECRETARY_CARD_BACKEND=kanboard`); the old Kanboard store is kept as a read-only archive.
-A missing or empty selector is a configuration error rather than an implicit rollback.
+The installation serves Products, Issues, Sprints and Cards from PostgreSQL; it is the only board
+backend. The history of the board that preceded it is archived in the instance repository at
+`state/knowledge/reports/secretary-1674/report.md`.
 
 Related documents:
 
-- module layout and component boundaries: [ARCHITECTURE.md](ARCHITECTURE.md), incl.
-  [Cutover controller](ARCHITECTURE.md#cutover-controller);
-- `secretary cutover` and the audit journal import contracts:
-  [PROTOCOLS.md](PROTOCOLS.md#secretary-cutover),
-  [Audit journal import protocol](PROTOCOLS.md#audit-journal-import-protocol);
-- provisioning, import rehearsal and cutover runbooks:
-  [PostgreSQL board store](OPERATIONS.md#postgresql-board-store),
-  [Rehearsing the complete board import](OPERATIONS.md#rehearsing-the-complete-board-import),
-  [PostgreSQL board-store cutover](OPERATIONS.md#postgresql-board-store-cutover);
-- backup and restore of the store: [Backend-aware cold archives](RECOVERY.md#backend-aware-cold-archives),
-  [Cutover controller state](RECOVERY.md#cutover-controller-state).
+- module layout and component boundaries: [ARCHITECTURE.md](ARCHITECTURE.md);
+- provisioning runbook: [PostgreSQL board store](OPERATIONS.md#postgresql-board-store);
+- backup and restore of the store: [Backend-aware cold archives](RECOVERY.md#backend-aware-cold-archives).
 
 ---
 
@@ -32,50 +23,39 @@ outside it (§3.11).
 
 ---
 
-## 2. Store modules and backend selection
+## 2. Store modules and client construction
 
 ### 2.1 Modules
 
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0007` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0013` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
-| `board/backend.py` | backend selector, `board_client`, entity identities and record keys (§2.2) |
+| `board/backend.py` | `board_client`, entity identities and record keys (§2.2) |
 | `board/sql_cards.py` | `SqlCardClient`: the board vocabulary over cards (§7.1) |
 | `board/sql_product_issues.py`, `board/sql_sprints.py` | Product/Issue and Sprint rows over the same client |
-| `board/sql_audit.py` | `SqlTaskAudit`: the `TaskAudit` contract over `requests`/`board_events` (§7.3) |
-| `board/import_board.py` | Kanboard → PostgreSQL importer and parity (§8) |
+| `board/sql_audit.py` | `SqlTaskAudit`: the audit owner over `requests`/`board_events` (§7.3) |
 | `board/postgres_recovery.py` | PostgreSQL archive restore helpers (see RECOVERY.md) |
 
-### 2.2 Backend selection and client construction
+### 2.2 Client construction
 
-`TaskReader`/`TaskWriter`, `SprintReader`/`SprintWriter` and `ProductIssueStore` each have a
-Kanboard JSON-RPC implementation and a PostgreSQL one. The process chooses between them with
-`SECRETARY_CARD_BACKEND`:
-
-- values `kanboard` or `postgres`; missing, empty and unknown values refuse;
-- read once per process (`card_backend()` caches it);
-- set in protected `<instance>/runtime.env`; the CLI loads it from there, the dispatcher and web
-  units read the same file, and the role environment allowlist passes it to observer, worker,
-  reviewer, steward, retro and curator processes;
-- never inferred from `board-store.env`: that file provides connection material only;
-- no dual write, no read fallback between backends;
-- reported by `secretary status` as `card_backend`.
+`TaskReader`/`TaskWriter`, `SprintReader`/`SprintWriter` and `ProductIssueStore` have one
+implementation, over PostgreSQL. Nothing selects it: `board-store.env` provides the connection
+material and nothing else.
 
 `board/backend.py:board_client(instance, serves=..., role="app")` is the only constructor of a
-board client. `serves` names what the call site needs (`card`, `sprint`, `product/issue`); under
-`postgres` an unknown capability refuses by name. Store and selector failures leave as
-`TaskError` (`backend_error`, `backend_unavailable`), not tracebacks. Two modules build a Kanboard
-client directly: `bootstrap.py` (creates the Kanboard board itself) and `board/import_board.py`
-(reads the Kanboard source). `tests/test_architecture.py` enforces that list.
+board client. `serves` names what the call site needs (`card`, `sprint`, `product/issue`); an
+unknown capability refuses by name. Store failures leave as `TaskError` (`backend_error`,
+`backend_unavailable`), not tracebacks.
 
-**Entity identity in normalized rows.** `<kind>_<backend>_<n>` (`task_kanboard_12`,
-`task_postgres_37`, `sprint_kanboard_9`) is minted only by `entity_id` and read only by
-`entity_number`, which accepts both backends and a bare number. `n` is Kanboard's task id or the
-store's `board_key`. It is not the row's identity; the reference is (§9).
+**Entity identity in normalized rows.** `<kind>_postgres_<n>` (`task_postgres_37`,
+`sprint_postgres_9`) is minted only by `entity_id` and read only by `entity_number`. `n` is the
+store's `board_key`. The reader accepts any lowercase store word and a bare number, because
+recorded history carries identities minted before this store (§9). An identity is not the row's
+identity; the reference is (§9).
 
 **Integer record keys.** The inherited board vocabulary addresses rows by integer. Each row stores
 its key as a unique indexed `board_key`:
@@ -147,15 +127,14 @@ CREATE TABLE product_projects (
 );
 ```
 
-`products.extensions.kanboard` keeps metadata keys outside the known Product columns and the
-`product_projects` set; known keys are filtered before merging, so provenance cannot override
-identity or relationships.
+`products.extensions` keeps metadata keys outside the known Product columns and the
+`product_projects` set under one fixed top-level key (§8); known keys are filtered before merging,
+so provenance cannot override identity or relationships.
 
 `projects` and `repositories` exist so `tasks.project_id`, `sprint_projects.project_id` and
 `sprint_repositories.repository_id` can be foreign keys. They are not canonical: the registry files
 `<instance>/projects/*.yaml` are (§6.2), and `registered_projects()` reads the files. Writers:
 
-- the importer creates rows from the registry and from every id or path history references (§8.3);
 - a Product's project-set write inserts a missing `projects` row with the id only
   (`ON CONFLICT DO NOTHING`);
 - a Sprint's repository-list write inserts a missing `repositories` row with the path only.
@@ -473,8 +452,7 @@ CREATE TABLE product_comments (
 CREATE INDEX product_comments_by_product ON product_comments (product_id, created_at);
 ```
 
-`marker` is a column; `body` is the prose without the `[marker]` prefix line. The importer strips
-the prefix once (§8.1).
+`marker` is a column; `body` is the prose without the `[marker]` prefix line (§8.1).
 
 ### 3.8 Sprint decisions
 
@@ -642,8 +620,8 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | Column | Content |
 |---|---|
 | (J1) `sprints.observer` | tagged observer union (`{"kind":"head","profile":…}`); variants belong to the head registry |
-| (J2) `sprints.source_audit` | provenance of a restored or imported row (`created_at`, `updated_at`, `board`, original spelling) |
-| (J3) `tasks.extensions` | unknown card metadata under `kanboard`, plus importer markers such as `board_never_named` (§8.2, §8.6) |
+| (J2) `sprints.source_audit` | provenance of a restored row (`created_at`, `updated_at`, `board`, original spelling) |
+| (J3) `tasks.extensions` | unknown card metadata under one fixed top-level key (§8.2), plus markers such as `board_never_named` carried by older rows |
 | (J4) `board_events.data` | per-`EventKind` payload, validated by `board/models.py` |
 | (J5) `requests.intent` | the frozen audit record compared on retry |
 | (J6) `issues.extensions` | (J3) for Issues |
@@ -683,15 +661,10 @@ an Alembic revision shipped with the code that emits the new value.
 | `requests.status` | `staged`, `committed`, `discarded` | this schema |
 | `board_events.kind` | the 23 `EventKind` values (§3.9) | `board/models.py:EventKind` |
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
-| `repositories.role` | `primary`, `curator_root` | this schema (§8.3) |
+| `repositories.role` | `primary`, `curator_root` | this schema (§3.1) |
 
-Import rules for these columns:
-
-- a retired `codex_launch_mode` is stored as NULL (as `tasks.py` reads it); the raw value stays in
-  `tasks.extensions`;
-- a journal record whose kind is not an `EventKind` stays a generic `requests` row; a declared
-  protocol event with an unknown kind is refused (§8.8);
-- any other value outside a vocabulary is refused and named in the import report.
+A retired `codex_launch_mode` reads as NULL (`tasks.py`); an audit record whose kind is not an
+`EventKind` stays a generic `requests` row (§3.9).
 
 Open vocabularies (`claim_worker`, `slug`, `base_branch`, pins, comment markers, head/profile
 columns) are not constrained; their values come from the head registry or the operator.
@@ -837,8 +810,8 @@ SECRETARY_DB_READ_PASSWORD=<generated>
 - `store.resolve` / `resolve_role(instance, role)` is the only way to a configured store and
   enforces the git exclusion; a tracked file refuses.
 - Role per connection: `board_client` defaults to `app`; `owner` is used by migration,
-  provisioning and cutover/recovery database administration; `read` by read-only
-  restore/cutover/recovery verification.
+  provisioning and recovery database administration; `read` by read-only restore and recovery
+  verification.
 - Upgrade with no file: board-store steps are skipped. With a broken file: upgrade fails before
   container or migration work.
 
@@ -883,8 +856,8 @@ build their own clients.
 
 ### 5.7 Backup and restore
 
-A PostgreSQL `full` archive carries a custom-format data-only dump (`postgres_dump` component)
-instead of the Kanboard `raw_board` directory; roles and credentials are not in it. Contract and
+A `full` archive carries a custom-format data-only dump (`postgres_dump` component); roles and
+credentials are not in it. Contract and
 procedure: [RECOVERY.md](RECOVERY.md#backend-aware-cold-archives).
 
 ### 5.8 Python dependencies
@@ -904,14 +877,14 @@ functions that need them, so an upgrade can start on a venv that lacks them. Upg
 | Data | Writer |
 |---|---|
 | products, issues, sprints, tasks and their link tables | `secretary_app` through the board protocol: dispatcher tick, CLI commands, `webproto/ops.py`, `webproto/sprint_ops.py` |
-| `projects`, `repositories` (derived, not canonical) | importer; Product project-set and Sprint repository-list writes (§3.1) |
+| `projects`, `repositories` (derived, not canonical) | Product project-set and Sprint repository-list writes (§3.1) |
 | comment tables | the same writers |
 | `sprint_decisions`, close reason, closeout document path | `SprintWriter.close` |
 | `sprint_budget_events` | `SprintWriter.record_budget`, dispatcher |
 | `sprint_resumes` | `SprintWriter.resume`, observer through the CLI |
 | `requests`, `board_events` | `SqlTaskAudit` (§3.9, §7.3) |
 
-The selector (§2.2) and the normalized entity identity are process properties, not data.
+The normalized entity identity (§2.2) is a process property, not data.
 
 ### 6.2 Canonical in files and git snapshots
 
@@ -923,16 +896,15 @@ The selector (§2.2) and the normalized entity identity are process properties, 
 | memory facts | `<instance>/state/memory/facts/**` | memory writer |
 | knowledge, incl. sprint closeouts | `<instance>/state/knowledge/**` | knowledge writer |
 | run journals, claims, watermarks | `<instance>/state/runs/**` | tick writer |
-| board export | `<instance>/state/board/**` | tick writer, generated from the selected backend |
-| runtime config | `instance.yaml`, `runtime.env`, `board-transport.env`, `board-store.env` | operator / bootstrap / reconcile |
+| board export | `<instance>/state/board/**` | tick writer, generated from the store |
+| runtime config | `instance.yaml`, `runtime.env`, `board-store.env` | operator / bootstrap / reconcile |
 | transcripts, artifacts, backups, vector index | `<data>/**` | derived |
 
 ### 6.3 Exports
 
 - The export is generated, never edited. `export_board` reads through `board_client` and
-  `task_audit_for`, so on `postgres` it is generated from PostgreSQL.
-- `export_board` refuses while the audit owner reports staged requests (§3.9). The Kanboard-only
-  staged Product/Issue transaction journal is checked only on Kanboard.
+  `task_audit_for`, so it is generated from PostgreSQL.
+- `export_board` refuses while the audit owner reports staged requests (§3.9).
 - `events.ndjson` in `state/board` is a generated projection of committed audit, stored as
   immutable segments ([Recovery](RECOVERY.md#board-checkpoint-layout)) and read by
   `board/analytics.py` from a sealed copy. Live readers never use it as the audit (§7.3).
@@ -966,25 +938,24 @@ per-card lock for marker comments.
 
 ### 7.3 Idempotency, audit and partial-command recovery
 
-| Kanboard backend | PostgreSQL backend |
+| Concern | Mechanism |
 |---|---|
-| `TaskAudit` request-id index over `events.ndjson`, plus `_product_issue_pending` | `requests.request_id` primary key; comments and budget charges claim it too |
-| committed records in `events.ndjson`, pending in `pending-audit/v2-<sha256>.json`, under `.audit.lock` | `requests.status` and `board_events.committed`, under advisory locks |
-| `BoardEventCanon.stage` / `commit` / `committed(request_id)` | insert/upsert on `requests`, then compare the stored `intent` |
-| `_pending_owner`'s generic-stage replacement | the same rule over staged rows with `NOT protocol` |
-| `TaskAudit.event_id_owner` | lookup by `intent->>'event_id'` in `requests`, served by `requests_by_event_id` |
-| `_require_same_event` | same comparison against `requests.intent` |
-| `MutationEventTransaction` stage → effect → confirm → finish → commit | one transaction (§7.1) |
-| `BoardEventPending` and `recover_*` for half-applied board writes | none: a rolled-back mutation leaves nothing; `reconcile` answers `(0, 0)`; a claim staged outside a transaction by a writer that died is settled by the checkpoint tick (`settle_stale_staged`, §3.9) |
-| `ProductIssueTransaction` staged documents | none; Product/Issue effects and claims are one transaction |
-| `marker_comment_lock` (file lock per card) | advisory lock per card marker |
+| request-id namespace | `requests.request_id` primary key; comments and budget charges claim it too |
+| staged and committed records | `requests.status` and `board_events.committed`, under advisory locks |
+| stage / commit / `committed(request_id)` | insert/upsert on `requests`, then compare the stored `intent` |
+| generic-stage replacement | allowed only over staged rows with `NOT protocol` |
+| `event_id` owner | lookup by `intent->>'event_id'` in `requests`, served by `requests_by_event_id` |
+| same-event check | comparison against `requests.intent` |
+| effect and record | one transaction (§7.1) |
+| half-applied board writes | none: a rolled-back mutation leaves nothing; `reconcile` answers `(0, 0)`; a claim staged outside a transaction by a writer that died is settled by the checkpoint tick (`settle_stale_staged`, §3.9) |
+| Product/Issue effects | one transaction with their claims |
+| marker comments | advisory lock per card marker |
 
-Caller contracts are the same on both backends: same `request_id`, same replay answer, same refusal
-on reuse with another payload, same installation-wide scope.
+Caller contracts: same `request_id`, same replay answer, same refusal on reuse with another
+payload, installation-wide scope.
 
 **Narrowed reads.** `events(reference, kind=, references=, since=)`, `events_page(end=, limit=)` and
-`_occurrence_projection_records(kinds, outcome_owed=)` take their filters on both backends. The
-file journal filters in Python (and ignores `since`, which it has no settle time for); `SqlTaskAudit`
+`_occurrence_projection_records(kinds, outcome_owed=)` take their filters. `SqlTaskAudit`
 applies them in SQL, each served by an index of `0012_request_read_indexes`: a ref or ref set by
 `requests.ref`, a kind by `intent->>'kind'` including the released action spellings
 (`_event_action`), a window by `settled_at`, a page by the committed claim-order index, and a
@@ -999,25 +970,22 @@ whole-history readers such as restore stay off the tick and the web request path
 conditions (`board/budget_candidates.py`, over both the `kind`/`payload` and the
 `record_type`/`transition` shapes) with no committed record under their charge id
 `sprint-budget-<event_id or request_id>`. `SqlTaskAudit` walks `requests_budget_candidates` (`0013`)
-in claim order and probes each charge id through the primary key; the file journal applies the same
-predicate in Python. There is no cursor: a record that commits late, or whose card lookup fails for
+in claim order and probes each charge id through the primary key. There is no cursor: a record that commits late, or whose card lookup fails for
 any number of ticks, stays in the set until it is charged. Every candidate leaves it exactly once, by
 a charge, a `budget_unlinked` marker (card has no sprint) or a `budget_unclassified` marker (the
 classifier types it nothing, or its terminal taxonomy is invalid), each under the charge id. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
 
 **Card edges.** `TaskWriter._transition_card` and `TaskWriter.retire_done` run inside
-`TaskWriter._mutation()`. On PostgreSQL the claim, the state/archive change, the caller's finishing
-writes (claim metadata, Ready reset, reason comment) and the committed event are one transaction.
-A failure is an ordinary refusal with no repair obligation. On Kanboard the effect can outlive its
-record, and the caller gets `audit_pending` (exit 4) with the `recover_*` path.
+`TaskWriter._mutation()`. The claim, the state/archive change, the caller's finishing writes (claim
+metadata, Ready reset, reason comment) and the committed event are one transaction. A failure is an
+ordinary refusal with no repair obligation.
 
-**Audit owner selection.** `tasks.task_audit_for(client, data_dir)` returns
-`SqlTaskAudit(client)` for a PostgreSQL client and `TaskAudit(data_dir)` for Kanboard. SQL is the
-audit canon on PostgreSQL; the file journal is the canon on Kanboard. `TaskWriter`,
-`SprintReader`/`SprintWriter`, `ProductIssueStore`, the dispatcher runtime and its command host take
-the owner from there. Live readers:
+**Audit owner.** `tasks.task_audit_for(client, data_dir)` returns `SqlTaskAudit(client)`; SQL is
+the audit canon and `data_dir` is ignored. `TaskWriter`, `SprintReader`/`SprintWriter`,
+`ProductIssueStore`, the dispatcher runtime and its command host take the owner from there. Live
+readers:
 
-| Reader | Reads on PostgreSQL |
+| Reader | Reads |
 |---|---|
 | `CheckpointWriter` publication gate | staged `requests`; an unavailable card client blocks the checkpoint by name |
 | `secretary task verify-audit` | staged count, backend named; exit 0 clean, 1 pending |
@@ -1027,15 +995,12 @@ the owner from there. Live readers:
 | `SprintReader` / sprint status reads | `requests` via `task_audit_for`; `_AuditOnce` has no data-directory construction |
 | `ReadLayer.task_snapshot` / `task_events` | committed `requests` for the card, paged by ordinal; no file under `<data>/board` is opened |
 
-`tests/test_architecture.py::FileAuditOwnershipTests` lists the allowed file-audit constructions:
-the selector's Kanboard branch, the pre-v2 pending-layout and unmigrated-claim checks in
-`product_issues.py`, and a command host built with no audit (tests only).
+`tests/test_architecture.py::FileAuditOwnershipTests` keeps the list of file-audit constructions
+empty.
 
-**Card event readers.** `ReadLayer._events` is the only selection point: it returns
-`webproto.journal.EventJournal` (byte-offset reader of `board/events.ndjson`) on Kanboard or
-`webproto.journal.CommittedAudit` (ordinal pages over committed audit, no file) on PostgreSQL.
-The cursor names its kind, `offset` or `ordinal`; a cursor of the other kind is refused.
-`EventJournal` may be constructed only there (`tests/test_architecture.py`).
+**Card event readers.** `ReadLayer._events` returns `webproto.journal.CommittedAudit` (ordinal
+pages over committed audit, no file). The cursor names its kind, `ordinal`; a cursor of another
+kind is refused.
 
 ### 7.4 Schema versioning and migrations
 
@@ -1046,8 +1011,7 @@ The cursor names its kind, `offset` or `ordinal`; a cursor of the other kind is 
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0009_po_requests`). `migrate.assert_schema_revision` is used by the importer; cutover,
-  successor preparation and PostgreSQL restore compare against `head_revision()`.
+  (`0013_budget_candidates`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1060,141 +1024,23 @@ The cursor names its kind, `offset` or `ordinal`; a cursor of the other kind is 
 - **Drift check:** `tests/test_board_store_schema.py` migrates a real `postgres:16`, checks the
   §3.13 catalogue and requires an empty Alembic autogenerate diff against the models.
 
-### 7.5 Successor database rotation
+## 8. Metadata the model does not name
 
-The only supported replacement for an occupied, completed import target is rotation inside the same
-cluster and volume. The imported database is fenced, renamed to a bounded name derived from its
-plan and database OID, and kept as evidence that ordinary roles cannot use. A new empty database is
-created under the configured name and owner, migrated and role-verified. There is no row-level
-merge importer. The preserved database must already be at the head revision. Command
-contract and phases: [PROTOCOLS.md](PROTOCOLS.md#secretary-cutover); runbook:
-[OPERATIONS.md](OPERATIONS.md#preparing-a-successor-after-a-completed-import).
+### 8.1 Marker comments
 
----
-
-## 8. Import mapping (Kanboard → PostgreSQL)
-
-`board/import_board.py` (`secretary board import`) reads both Kanboard boards through the product's
-readers, never writes to Kanboard, maps rows onto §3 and writes a report naming every record it
-could not carry. It applies as `secretary_app` to an empty, schema-current target only; a target
-that already holds board rows is refused by table name. Normalizers are imported from `tasks.py`
-and `sprints.py`, not restated.
-
-### 8.1 Metadata and marker comments → columns
-
-| Kanboard source | Becomes |
-|---|---|
-| task metadata `project`, `task_type`, `slug`, `base_branch`, `seed_ref`, `complexity`, `family_preference`, `routing_reason`, `codex_launch_mode`, `review` | `tasks` columns |
-| `live_impact` (`"1"` or absent) | boolean `tasks.live_impact` |
-| `claim` | `tasks.claim_worker`; `claimed_at` NULL (§8.6) |
-| `head`, `review_head`, `resolved_head`, `resolved_review_head` | `head_override`, `review_head_override`, `resolved_worker_head`, `resolved_review_head` |
-| `retry_same`, `retry_switch` | integer columns |
-| `retry_heads` (delimited, `_split_heads`) | `task_retry_heads` rows in order |
-| `blocked_by` | `task_dependencies` (`depends_on` always, `depends_on_task` when the card exists) |
-| `supersedes` | `task_supersessions` |
-| `sprint_ref` | `tasks.sprint_ref` |
-| `record_type` (`task`/`issue`/`product`) | target table |
-| Kanboard column | `tasks.state` via `_STATE_BY_COLUMN` |
-| `is_active = 0` | `tasks.archived` |
-| swimlane | derived from the product; the observed lane stays in `extensions.kanboard.swimlane` as provenance and never overrides placement |
-| `sprint_goal`, `sprint_definition_of_done` | `sprints.goal`, `.definition_of_done` |
-| `sprint_repositories` (paths) | `sprint_repositories` rows (§8.3) |
-| `sprint_product`, `sprint_issues` | `sprints.product_id`, `sprint_issues` rows |
-| `sprint_reservations` | `sprint_projects` rows (§4) |
-| `sprint_status` | `sprints.status` |
-| `sprint_budget`, `sprint_budget_uncharged` | `sprint_budget_events` rows (§8.7) |
-| `sprint_current_task` | `sprints.current_task_ref` |
-| `sprint_resume` | one `sprint_resumes` row |
-| `sprint_source_audit` | `sprints.source_audit` |
-| `sprint_observer`, executor pins | `sprints.observer`, `worker_pin`, `reviewer_pin` |
-| `product_id`, `product_projects` | `products.product_id`, `product_projects`; other keys in `products.extensions.kanboard` |
-| `issue_product`, `issue_kind`, `issue_priority`, `issue_closed_reason` | `issues` columns |
-| `reference_repair` | `tasks.extensions` |
-| `[marker]\nbody` comments | comment tables: `marker` + `body` |
-| typed report/review/decision comments | `board_events` row from the journal **and** a comment row |
-| `[secretary-product-issue-transaction:<digest>]`, `[secretary-sprint-transaction:<digest>]` witness comments | not imported as comments |
-
-**Marker rule.** The first line is a marker only when it is a complete `[token]` line and the token
+The first line of a comment is a marker only when it is a complete `[token]` line and the token
 is a role in `_ROLES`, one of the prefixes `report:`, `review:`, `decision:`, `issue:`,
 `validate:`, `claim:`, `watchdog:`, or one of `sprint:resume`, `archive`, `rejected`,
 `steward:blocked-done`, `provision:request`. Otherwise the body is kept whole and `marker` is NULL.
-`steward:blocked-done` is not the role `steward`. The rule is stricter than
-`tasks._normalize_comment`, which treats any bracketed first line as a marker.
+`steward:blocked-done` is not the role `steward`.
 
-### 8.2 Metadata keys the model does not name
+### 8.2 The extension bag
 
-Keys outside `_KNOWN_METADATA` go to `extensions.kanboard` of the row's table
-(`tasks`/`issues`/`products`). The report lists, per key, how many rows carry it and where it
-landed; a key on many rows indicates a missing column.
-
-### 8.3 Projects and repositories
-
-Registry files bind a project `id` to a `repo` path (plus `remote`, `default_branch`, `adapter`,
-`orca_binding`, `enabled`, optional `curator_roots`). Sprint reservations hold project ids; sprint
-repositories hold paths; cards hold a project id. The importer:
-
-1. creates one `repositories` row per distinct sprint repository path, registered or not;
-2. sets `project_id` and `role` (`primary`, or `curator_root` for a curator root) where a registry
-   entry matches the path, else leaves `project_id` NULL;
-3. creates `projects` rows for every referenced id, with `registry_present = false` when the file
-   no longer exists;
-4. reports repository paths with no project, project ids with no registry file, and registry files
-   no path references. None blocks the import.
-
-Registry files stay canonical (§6.2); admission is unchanged.
-
-### 8.4 Card→issue links
-
-Kanboard stores no card→issue link, so `task_issues` imports empty and the report says
-`task_issues: 0 rows, no source field exists`. A card reaches its issues through its sprint
-(`tasks.sprint_ref` → `sprint_issues.sprint_ref`).
-
-### 8.5 Sprint close decisions
-
-- Closes on PostgreSQL write `sprint_decisions` in the close transaction.
-- For imported closed sprints the importer materializes decisions from surviving staged transaction
-  documents under `<data>/board/product-issue-transactions/`.
-- Where no document survives no row is invented; the report lists the sprint under "sprints closed
-  without a recoverable decision document", and the knowledge closeout remains the record.
-
-### 8.6 Absent and empty fields
-
-- `claimed_at`, `resolved_worker_family`, `resolved_review_family`: NULL for imported rows.
-- `position`: imported as-is; afterwards an ordering integer.
-- Card with no `project`: `tasks.project_id` NULL.
-- Card with no `task_type`: NULL, and `tasks.extensions` records
-  `{"board_never_named": ["task_type"]}`; the report lists each such card.
-- `blocked_by` naming a card not on the board: `depends_on` set, `depends_on_task` NULL.
-- Values the board does not carry and the importer derives (for example a closed sprint's
-  `closed_at` from its modification time) are listed in the report as approximate.
-
-### 8.7 Budget counters
-
-Budget counters become `sprint_budget_events` rows; totals are aggregates against the installation
-thresholds. A charge with a journal `budget_recorded` row links to that request. A counted event
-with no surviving journal row gets a synthetic claim and an approximate `occurred_at` (sprint
-`updated_at`), marked in the report. Totals reconcile exactly.
-
-### 8.8 Audit journal and source fence
-
-With `--data-dir`, `board/events.ndjson` is part of the source. Every nonblank row must be a JSON
-object with unique nonempty `event_id` and `request_id`; it becomes one committed `requests` row
-with the row frozen in `intent` and `operation` = its `kind`. Only rows declaring
-`record_type=board.protocol_event` that pass `Event.from_record` are projected into
-`board_events`. Budget charges reuse the journal's request claim. Any conflicting reuse of a
-request id refuses the plan. Contract: [PROTOCOLS.md](PROTOCOLS.md#audit-journal-import-protocol).
-
-The importer takes two complete observations of both boards, registry, journal and transaction
-documents, recording SHA-256 identities and the journal's device, inode, size, mtime and digest.
-Movement during streaming, path replacement, truncation, append or any difference between the
-observations refuses before a database connection is opened. A retry reads a new pair. The fence
-is a consistency check, not a write barrier.
-
-`sprint:1037` exists twice on the Kanboard board (live and archived). The live row keeps the
-reference; the archived row is stored under a distinguishing reference with its original spelling
-in `sprints.source_audit`, and the report names it.
-
-Rehearsal runbook: [OPERATIONS.md](OPERATIONS.md#rehearsing-the-complete-board-import).
+Card, Issue and Product metadata keys outside `_KNOWN_METADATA` are stored under one fixed
+top-level key of the row's `extensions` column (`tasks`/`issues`/`products`), the key
+`board/sql_cards.py` and `board/sql_product_issues.py` read and write. It also holds the card's
+observed swimlane, which never overrides the lane derived from the product. A key on many rows
+indicates a missing column.
 
 ---
 
@@ -1202,7 +1048,7 @@ Rehearsal runbook: [OPERATIONS.md](OPERATIONS.md#rehearsing-the-complete-board-i
 
 | Identifier | In the schema |
 |---|---|
-| `sprint:N` and other `sprint:` references | `sprints.ref` primary key, stored verbatim; `sprints.sprint_number` nullable `UNIQUE`; new numbers from `sprint_number_seq`, set past the imported maximum |
+| `sprint:N` and other `sprint:` references | `sprints.ref` primary key, stored verbatim; `sprints.sprint_number` nullable `UNIQUE`; new numbers from `sprint_number_seq` |
 | `<project>-<n>` task refs | `tasks.task_ref` primary key; `UNIQUE (project_id, task_number)`; the next reference is allocated over all project cards, archived included (`next_reference`) |
 | `product:<id>` | `products.product_id` primary key, `products.ref` generated `UNIQUE` |
 | `issue:<hash>` | `issues.issue_id` primary key, `issues.ref` generated `UNIQUE` |
@@ -1222,5 +1068,5 @@ Rehearsal runbook: [OPERATIONS.md](OPERATIONS.md#rehearsing-the-complete-board-i
 | `event_id` | `board_events.event_id` primary key; `intent->>'event_id'` for generic records |
 | head run reference | `board_events.head_run_ref` (reference only) |
 
-Import keeps every reference's spelling, except the archived duplicate `sprint:1037` (§8.8).
-Nothing renumbers or re-derives an existing reference.
+Nothing renumbers or re-derives an existing reference. Entity identities recorded before this store
+carry another store word and still read back to their number (§2.2).

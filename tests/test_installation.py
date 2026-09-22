@@ -1867,7 +1867,7 @@ class InstallationTests(unittest.TestCase):
                 "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
                 "task_id": f"task_{RETIRED_STORE}_1",
                 "ref": "secretary-1",
-                "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
+                "backend": {"kind": RETIRED_STORE, "task_id": 1, "revision": "updated_at:x"},
                 "request_id": "routing-verdict",
                 "payload": {
                     "attempt": 1,

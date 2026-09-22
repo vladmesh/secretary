@@ -53,10 +53,9 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
-Bootstrap pins the board and session-manager transports, generates their local mode-0600 ignored
-configuration, creates the Pipeline board, and provisions the separate loopback-only `postgres:16`
-board-store container and persistent volume through the current Alembic head. It does not switch
-the card backend; see [Board store](docs/BOARD_STORE.md).
+Bootstrap pins the Docker and session-manager runtimes and provisions the loopback-only `postgres:16`
+board-store container and persistent volume, with its local mode-0600 ignored `board-store.env`,
+through the current Alembic head; see [Board store](docs/BOARD_STORE.md).
 
 ## Status
 

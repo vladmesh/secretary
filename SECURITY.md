@@ -19,11 +19,10 @@ with that user's filesystem and network access. They are not sandboxed and are n
 untrusted tenants. Anything an agent can reach, a compromised agent can reach.
 
 - Board and memory endpoints listen on loopback. Host access control is the perimeter.
-- Kanboard JSON-RPC transport, including its application-token Basic-Auth value, is deterministic
-  local configuration in `board-transport.env`, not a recovery secret or secret-store value.
-  This is a deliberate loopback, single-owner trust boundary: local agent code can read process
-  environment and owner-readable files, so filesystem modes do not isolate it. A custom token
-  imported during migration remains sensitive and must be handled as a credential by its owner.
+- The board store's role passwords are generated per host into `board-store.env` (mode `0600`,
+  gitignored, in no checkpoint or archive), not a recovery secret or secret-store value. This is a
+  deliberate loopback, single-owner trust boundary: local agent code can read process environment
+  and owner-readable files, so filesystem modes do not isolate it.
 - Installation secrets live in an encrypted store in the private instance repository. The raw
   installation key stays on the host, mode `0600`, outside Git; the recovery phrase is printed once
   and is never stored by the product.

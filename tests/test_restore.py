@@ -864,7 +864,7 @@ class RestoreTests(unittest.TestCase):
 class RestoredNonTaskSwimlaneTests(unittest.TestCase):
     """Product и Issue восстанавливаются в свой свимлейн, а отказ борда не маскируется.
 
-    `_create_restored_non_task` слал `swimlane_id=0`: живой Kanboard отвечает на это
+    `_create_restored_non_task` слал `swimlane_id=0`: живой борд отвечал на это
     `false`, а не идентификатором. Проверка `isinstance(task_id, int)` пропускала
     `false` (bool — подкласс int), поэтому восстановление падало на следующем шаге с
     сообщением про reference, хотя не создавалась сама запись. Тестовый борд ноль
@@ -1051,7 +1051,7 @@ class RestoredCardKindParityTests(unittest.TestCase):
 class RestoredOrderParityTests(unittest.TestCase):
     """Паритет расположения сверяет порядок, а не абсолютные номера позиций.
 
-    Kanboard держит позиции плотными среди активных задач, а закрытая задача
+    Живой борд держал позиции плотными среди активных задач, а закрытая задача
     сохраняет устаревшее значение и слот не занимает. Поэтому экспорт живой доски
     приходит с дырами и повторами: на восстановлении 745 карточек экспорт дал
     [.. 13, 15, 16 ..] и пары 126,126 / 141,141 против плотных 1..142 на
@@ -1102,7 +1102,7 @@ class RestoredOrderParityTests(unittest.TestCase):
 
     def test_closed_cards_are_not_compared(self) -> None:
         cards = [self._card("a", 1), self._card("gone", 2, closed=True), self._card("b", 3)]
-        # закрытая карточка получает от Kanboard произвольную позицию — это не расхождение
+        # закрытая карточка может нести произвольную позицию — это не расхождение
         actual = {"a": {"position": 1}, "gone": {"position": 99}, "b": {"position": 2}}
 
         self.assertFalse(_restored_order_mismatch(cards, actual))

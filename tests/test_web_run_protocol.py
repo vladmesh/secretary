@@ -1,6 +1,6 @@
 """The product runtime: one owner of a card, an idempotent start, five outcomes, and no Orca.
 
-Hermetic in the same strong sense the read layer's suite is: no live Orca, no network, no Kanboard
+Hermetic in the same strong sense the read layer's suite is: no live Orca, no network, no live board
 and no real agent. The board is a throwaway card store
 (`tests/sql_backend_fixtures.py`), the head registry is a table this file writes, and
 the head backend is a fake whose whole job is to leave behind exactly the artefacts a real
@@ -1558,7 +1558,7 @@ class RealBackendContractTests(RealHeadFixture):
     """`run_start` and `run_review` over the **real** head backend, not over a double.
 
     secretary-1564 left this open and said so: every failing-backend case in this file was
-    hermetic, the Kanboard and the head runtime under those cases were fakes, and the premise that
+    hermetic, the board and the head runtime under those cases were fakes, and the premise that
     the real backend honours this layer's contract was therefore assumed rather than checked. The
     three tests below are that premise, executed. Each of them raises a real process on a real
     terminal under `LocalPtyHeadRuntime`, through this product's own operations, and reads the

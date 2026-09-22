@@ -88,7 +88,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         self.data_dir = self.tmp / "data"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "dispatcher").mkdir(parents=True)
-        # The Kanboard-era card projection is still on disk: the cold render's health collection
+        # An older card projection is still on disk: the cold render's health collection
         # counts it, which is what shows the counter below sees the path it is asserting about.
         (self.data_dir / "board" / "cards.ndjson").write_text(
             json.dumps({"ref": "secretary-468"}) + "\n", encoding="utf-8"

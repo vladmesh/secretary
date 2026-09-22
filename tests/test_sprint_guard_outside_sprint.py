@@ -137,7 +137,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
             if method in {"getAllTasks", "searchTasks"} or (
                 method == "getTaskByReference" and params.get("reference") == self.ref
             ):
-                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+                raise TaskError("backend_unavailable", "board store is unavailable", 1)
             return original(method, **params)
 
         writes = {

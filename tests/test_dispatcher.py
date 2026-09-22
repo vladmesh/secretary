@@ -8959,7 +8959,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "outcome": "success",
                 "task_id": f"task_{RETIRED_STORE}_12",
                 "ref": "secretary-510",
-                "backend": {"kind": "kanboard", "task_id": 12, "revision": "1"},
+                "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "1"},
                 "request_id": request_id,
                 "payload": {"marker": "report:done", "body_sha256": "0" * 64},
             },

@@ -1694,7 +1694,7 @@ class CheckpointPusherTests(unittest.TestCase):
             before_secret = git(self.instance_dir, "rev-parse", "HEAD").strip()
             set_secret(
                 self.instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token-value",
                 scope="installation",
                 purpose="board api",

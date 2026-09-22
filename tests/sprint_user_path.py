@@ -11,11 +11,11 @@ Two properties are what make the record worth anything.
 
 **Nothing live is touched.** The installation this walks is built in a temporary directory: its own
 instance, its own data plane, its own installed head registry, and the repository's in-process board
-fake in place of a Kanboard. No socket leaves loopback, no live data directory is read or written,
+fake in place of a board store. No socket leaves loopback, no live data directory is read or written,
 and the live `secretary-web.service` is neither restarted nor consulted. What this therefore does
 *not* prove is stated in the same words wherever the record is quoted: the live board's behaviour on
 the new `sprint_worker` / `sprint_reviewer` keys, and the readability of a sprint row the moment it
-is written, are properties of a Kanboard and are here only as a fake's.
+is written, are properties of the board store and are here only as a fake's.
 
 **The client is a browser's client.** The request id travels in the markup of the form, exactly as
 it does in a browser, and every submission below re-sends what the previous page handed back. A
@@ -228,7 +228,7 @@ def _isolation(installation: Installation, app: WebApp, record: list[Step]) -> N
     if outside:
         entry.failures.append(f"layers pointing elsewhere: {outside}")
     entry.expect(
-        "the board was the repository's in-process fake, so no Kanboard was reached",
+        "the board was the repository's in-process fake, so no board store was reached",
         type(installation.board).__module__.startswith("tests."),
     )
     entry.notes.append(
@@ -403,7 +403,7 @@ def transcript(record: list[Step]) -> str:
         f"walked at {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
         f"by tests/sprint_user_path.py, on an isolated installation: temporary instance,",
         "temporary data plane, the repository's in-process board fake. No live installation, no "
-        "Kanboard, no restart.",
+        "board store, no restart.",
         "",
     ]
     lines += [step.render() for step in record]

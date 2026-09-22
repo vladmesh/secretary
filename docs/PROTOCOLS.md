@@ -857,7 +857,7 @@ Admission order for `create` and `reopen` (both on the staged-intent journal):
 
 A caller-supplied sprint reference is used as given; otherwise `sprint:N` is allocated from the
 sprint board's high-water mark over open and archived rows, with the same claim check as a card, and
-remembered so a repeat writes the same reference. It is never derived from the Kanboard row id.
+remembered so a repeat writes the same reference.
 
 The sprint reference is written last and publishes the sprint: a sprint-board row counts as a sprint
 only once it carries one, so an interrupted create is never observed as an open sprint.
@@ -2251,7 +2251,7 @@ observer's `decision:*`, and the latest of them, marked `terminal` when the card
 Each section of each document always carries a source record: `state` (`available` or `unavailable`),
 `reason`, `observed_at` and `data_age_seconds`. An answering source is stamped with the read time and age
 0; a refusing one carries why and dates the newest evidence still on disk. An empty list therefore always
-means an answer, and an unreachable Kanboard blanks the card list, not the page.
+means an answer, and an unreachable board store blanks the card list, not the page.
 
 ### The four states of an agent
 
@@ -2272,19 +2272,17 @@ the invariant in words.
 
 ### Continuing a read
 
-The cursor is a position in the committed board audit. Which store that is, is the card client's
-answer: the reader resolves the installation's card client and asks `secretary.tasks.task_audit_for`
-for its audit owner — on Kanboard `<data>/board/events.ndjson`, on `SECRETARY_CARD_BACKEND=postgres`
-the committed `requests` traversal ([Board store](BOARD_STORE.md), §7.3). The file projection is never
-consulted beside a PostgreSQL client.
+The cursor is a position in the committed board audit: the reader resolves the installation's card
+client and asks `secretary.tasks.task_audit_for` for its audit owner, the committed `requests`
+traversal ([Board store](BOARD_STORE.md), §7.3). The file projection under `<data>/board` is never
+consulted.
 
-The cursor is opaque: a base64 document carrying the card, a position and its kind — `offset` (a byte
-in the file journal) or `ordinal` (how many of this card's committed records precede the next). A
-cursor of the other kind is refused (`validation`), never reinterpreted. A cursor with no kind is read
-as a byte offset. After a refusal, a client reads a fresh task snapshot, whose `next_cursor` is valid for
+The cursor is opaque: a base64 document carrying the card, a position and its kind, `ordinal` (how
+many of this card's committed records precede the next). A cursor of any other kind, or with no kind,
+is refused (`validation`), never reinterpreted. After a refusal, a client reads a fresh task snapshot, whose `next_cursor` is valid for
 the installation's store.
 
-In both stores a committed record's position never changes, so:
+A committed record's position never changes, so:
 
 * reading with a page's `next_cursor` returns what was appended after that page, exactly once;
 * reading the same cursor twice returns the same page;
@@ -2862,12 +2860,11 @@ to no entity; a card cursor and a history cursor are not interchangeable. `next_
 older commands; `has_more` is true only when the limit cut the page. `DEFAULT_LIMIT` is 50 and
 `MAX_LIMIT` 500. Newest first is reversed append order, not a sort by `occurred_at`.
 
-Both reads go through `secretary.tasks.task_audit_for`: on `SECRETARY_CARD_BACKEND=postgres` the canon is
-the `requests` table, on Kanboard `board/events.ndjson` ([Board store](BOARD_STORE.md), §7.3). Documents
-are identical either way, and the file journal is never consulted beside a PostgreSQL client.
+Both reads go through `secretary.tasks.task_audit_for`, whose canon is the `requests` table
+([Board store](BOARD_STORE.md), §7.3); the file journal is never consulted.
 
 An unreadable audit is an unavailable source, never an empty history: `items` is `null` with a reason,
-including when the journal file is missing (on PostgreSQL: a store that will not answer). An empty
+including a store that will not answer. An empty
 `requests` table is an honestly empty history. A record's entity kind is `null` when not carried, never
 inferred.
 
@@ -3183,88 +3180,9 @@ The installation key belongs to the installation user. The store does not isolat
 grants, and the key opens every secret. Store layout and recovery (`locked`/`missing` report):
 [Recovery](RECOVERY.md#secrets). Runbooks: [Operations](OPERATIONS.md#runtime-secrets).
 
-## Audit journal import protocol
+## Card protocol address
 
-The committed `board/events.ndjson` journal owns the installation-wide request namespace during
-migration. Each accepted row becomes one committed `requests` claim under its original `request_id`,
-with the full row frozen in `intent`. A declared `board.protocol_event` crosses `Event.from_record` and
-becomes exactly one `board_events` row; a malformed declared protocol row is a refusal, never a generic
-fallback. `budget_recorded` keeps the same request owner in `sprint_budget_events`. A replay with the
-exact request and intent observes the committed claim; a different operation or payload under that id is
-refused. Import only records history and launches, resumes or notifies nothing. The report and its read
-fence: [Board store](BOARD_STORE.md).
-
-## `secretary cutover`
-
-Four machine-readable JSON commands:
-
-* `plan --instance PATH --expected-revision SHA` — reads only; returns `plan_id` and `confirmation`.
-* `status --instance PATH` — backend, canonical durable phases, immutable recovered history and, when a
-  canonical identity exists, the recovery confirmation token.
-* `apply --instance PATH --expected-revision SHA --actor ACTOR --reason REASON --confirm TOKEN` —
-  creates or resumes exactly one identity.
-* `recover` — the same mutation arguments and the `RECOVER-...` token printed by `status`.
-
-Mutations reject the default instance guess, unsafe configuration/state, concurrent control,
-revision/provenance disagreement, stale identity, backend disagreement and out-of-order continuation.
-Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the same
-command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not that work
-resumed.
-
-A successful pre-import `recover` (`no-cutover-effects`, `kanboard-before-fingerprint`) releases the
-canonical state slot. It publishes its `recovered-frozen` JSON under the installation's cutover history
-with `successor.canonical_slot: release-intent`, fsyncs the archive, verifies the canonical file is
-unchanged, unlinks it and fsyncs its directory. Then it links the immutable
-`successor-release-<plan-id>.json` receipt: `kind: postgres-preimport-release`, plan ID, `released_at`,
-history path and checksum, and recovery branch (no database OID or dump). The shared resolver projects
-`successor.canonical_slot: released-after-receipt` only from a matching archive/receipt pair, reports an
-archive without receipt as `successor_release.status: pending`, and refuses a mismatched or orphan
-receipt and an archive whose `successor` record says more than the intent.
-
-Archives carrying `canonical_slot: released-after-archive` with no receipt are read as terminal history
-unchanged; a receipt beside one is refused as an orphan. No new archive of that form is created: a
-canonical file left with that marker finishes as that archive only if the archive is already linked,
-otherwise it restarts on the receipt route.
-
-Repeating recovery after an interrupted publication verifies the same archive and completes the release
-without replaying service recovery. After an interruption between canonical unlink and receipt, the
-identical `recover` finds the pending archive by its `RECOVER-...` token and revision and publishes only
-the receipt. `status` renders that command, and `plan` refuses while any release receipt is pending. The
-next `plan` includes predecessor identities and archive digests in its input, so the recovered token
-cannot be reused. A completed final import keeps its canonical identity (its target is occupied).
-Completed cutovers, PostgreSQL-only recovery, a first SQL write and audit uncertainty are terminal.
-Public planning refuses whenever a canonical identity exists; `status.successor_eligibility` gives the
-phase-based reason. An entered but failed or running final import is terminal with uncertain occupancy;
-only absence of that phase admits the two pre-import successor branches.
-
-`secretary cutover prepare-successor` accepts only the exact terminal identity whose final import and
-full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is absent or
-completed with the SQL audit baseline `recover` compared against, `first_sql_write` is null, backend is
-Kanboard, and matching import evidence is readable. It requires an absolute explicit instance, the exact
-installed revision, non-empty actor and reason, and a confirmation derived from plan ID, configured
-database name and current database OID. `status` renders the token, phase evidence and exact next command
-without credentials. At `0006_sprint_transport_key` that command is the external owner/operator upgrade;
-preparation is a read-only refusal until the preserved database is verified at the head revision
-(`migrate.head_revision()`).
-
-Its phases: `eligibility`, `occupied_verification`, `dump_publication`, `connection_fence`,
-`database_rename`, `database_create`, `migration`, `role_verification`, `empty_verification`,
-`history_publication`, `canonical_release` and `release_receipt`. Migration applies only to the new
-empty canonical database. Every effect has a durable intent record and OID-based replay. History is
-fsynced before canonical unlink and directory fsync; only a matching immutable receipt proves terminal
-release. Old cutover, recovery and successor tokens do not authorize a new plan or apply. A completed
-`PREPARE-SUCCESSOR-...` token replays its history read-only only while the canonical slot is free; once
-any canonical identity holds the slot the replay refuses before any database probe, names both plan IDs
-and points at `cutover status`. Runbook: [Operations](OPERATIONS.md#postgresql-board-store-cutover);
-failure recovery: [Recovery](RECOVERY.md#cutover-controller-state).
-
-Each product subprocess must exit successfully and return a nonempty JSON object or array; empty,
-non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public writers
-read the durable state and admit only a child carrying `SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>`
-or the immediate controller child identified by parent pid. Terminal controller states are never
-re-armed by later pause state.
-
-On PostgreSQL a Card row's integer protocol address is its database-backed `board_key`, not the numeric
+A Card row's integer protocol address is its database-backed `board_key`, not the numeric
 suffix of its public reference. Public refs and `(project_id, task_number)` stay stable and
 project-local. Card keys occupy `[1,2000000000)`; Sprint, Product and Issue dispatch keep the disjoint
 ranges above it. Reference updates preserve the Card key.

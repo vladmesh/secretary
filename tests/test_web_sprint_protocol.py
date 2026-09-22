@@ -1,6 +1,6 @@
 """The sprint half of the transport-independent layer: one create, two reads, and no second rule.
 
-Hermetic in the same strong sense the other two suites are: no live Kanboard, no network, no
+Hermetic in the same strong sense the other two suites are: no live board, no network, no
 dispatcher tick and no real head. The board is the Product/Issue fake the sprint tests already use,
 the head registry is an installed pair, and the dispatcher's production state is a file. Everything
 the layer concludes it concludes from the evidence a real installation leaves. The installation
@@ -1969,7 +1969,7 @@ class CommentCommandTests(CommentFixture):
         """The outcome added after the fact, from the command a PO actually has.
 
         This case asserted the opposite until secretary-1578: `sprint comment` answered a closed
-        sprint with a conflict, which is what sent a PO past this protocol into Kanboard's own
+        sprint with a conflict, which is what sent a PO past this protocol into the board's own
         `createComment` (issue:9eee1d8ee505bc4ecdc2). The sprint's status is unchanged by it.
         """
         closed = self.add_sprint_row("sprint:9003", status="closed")

@@ -24,9 +24,8 @@ The `dev` extra is the pinned `ruff`; `required-version` in `pyproject.toml` mak
 refuse to run. Lint only changed and untracked Python paths with the command in
 [Testing](docs/TESTING.md#changed-python-lint), never the whole repository.
 
-The unit suite is hermetic: it needs no Kanboard, Orca, network or configured instance, even when the
-shell carries a live installation's `KANBOARD_*` variables, because a board client is built only from
-an explicit instance's `board-transport.env`. See [tests/README.md](tests/README.md). A live canary
+The unit suite is hermetic: it needs no Docker, board store, Orca, network or configured instance,
+because a board client is built only from an explicit instance's `board-store.env`. See [tests/README.md](tests/README.md). A live canary
 belongs in an operator runbook or an explicitly opted-in integration test against a disposable
 endpoint, never in a `test_*` module the default run discovers.
 

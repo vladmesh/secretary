@@ -27,9 +27,8 @@ manifest invalid before any suite starts. When changing the runner or manifest, 
 A missing required dependency is an infrastructure failure, never a green skip:
 
 - `integration-memory` needs `secretary[memory]`;
-- `integration-board` needs its disposable FakeKanboard fixture;
-- PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_board_import_integration`,
-  `tests.test_postgres_recovery`, `tests.test_cutover`) need Docker, Compose, `postgres:16`, psycopg,
+- PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_postgres_recovery`,
+  and the `integration-board` card-store fixtures) need Docker, Compose, `postgres:16`, psycopg,
   SQLAlchemy and Alembic. They use disposable Compose projects and volumes on dynamically selected
   loopback ports.
 
@@ -75,7 +74,7 @@ succeeds. Its summary lists each suite as `success`, `product_failure`, `infrast
     python3 scripts/ci_test_shards.py --fast
 
 The one fast profile for worker feedback. It validates a fixed module list (`FAST_MODULES`) and runs
-only hermetic Kanboard, Orca-discovery and pipeline-state proofs. It is not a CI suite and does not
+only hermetic board, Orca-discovery and pipeline-state proofs. It is not a CI suite and does not
 read `tests/ci-shards.txt` or use discovery.
 
 The child process group has a 120-second ceiling; on timeout the runner reports failure, terminates the
@@ -163,8 +162,6 @@ Where a change's tests live. Behaviour contracts are in [Recovery](RECOVERY.md),
 | Bulk comment restore | `tests.test_bulk_comment_restore` | integration-recovery |
 | Post-close order reconciliation, restore | `tests.test_restore` | integration-recovery |
 | Cold archive and PostgreSQL restore | `tests.test_backup`, `tests.test_postgres_recovery` | integration-recovery |
-| Cutover controller and successor preparation | `tests.test_cutover` | integration-recovery |
-| Board import mapping and PostgreSQL import | `tests.test_board_import_mapping`, `tests.test_board_import_integration` | integration-board |
 | PostgreSQL schema, roles, privileges | `tests.test_board_store_schema` | integration-board |
 | Published web path | `tests.test_web_front`, `tests.test_web_transport`, `tests.test_web_read_protocol`, `tests.test_web_run_protocol` | unit |
 
@@ -175,8 +172,8 @@ Notes:
 - Head-registry and checkout-reuse recovery tests use real local repositories, a real depth-1 checkout
   and an installation-user Git child.
 - <a id="normalized-board-bulk-recovery"></a>`tests.test_bulk_card_restore` and `tests.test_bulk_comment_restore` drive the real
-  `KanboardClient.call_batch` encoder/decoder against an in-process JSON-RPC peer, on a sanitized
-  production-shape fixture that holds only shape fields. Their timings are labelled
+  `SqlCardClient.call_batch` against a disposable card store, on a sanitized production-shape fixture
+  that holds only shape fields. Their timings are labelled
   `durability=excluded` and are structural, not an SLO. The full real-audit comment benchmark is opt-in:
 
   ```console
@@ -184,9 +181,6 @@ Notes:
     tests.test_bulk_comment_restore.DurableAuditBenchmark.test_full_production_shape_real_audit
   ```
 
-- `tests.test_postgres_recovery.PostgresRecoveryIntegrationTests.test_real_cutover_phases_share_one_disposable_postgres_16_boundary`
-  runs the real cutover phase methods against one disposable PostgreSQL 16; only systemd, installed-head
-  probes and dispatcher host launch are substituted.
 - `tests.test_web_run_protocol` has two suites that start real processes on real terminals under
   `LocalPtyHeadRuntime`: `RealHeadOwnershipTests` (a head stopped from a `HeadRun` rebuilt from the
   write-ahead record) and `RealBackendContractTests` (`run_start`/`run_review` against the real backend;

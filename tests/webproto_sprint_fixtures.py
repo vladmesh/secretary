@@ -131,10 +131,10 @@ class SprintProtocolFixture(unittest.TestCase):
 
     @contextlib.contextmanager
     def board_injected(self) -> Iterator[None]:
-        """Serve the fixture's board wherever a command asks the backend switch for one.
+        """Serve the fixture's board wherever a command asks `board_client` for one.
 
-        `board_client` is where the card backend is chosen for both implementations, so the
-        command's own client is replaced there rather than at a Kanboard-only constructor.
+        `board_client` is the one constructor of a board client, so the command's own client is
+        replaced there.
         """
         with contextlib.ExitStack() as stack:
             for target in self.BOARD_CLIENT_SEAMS:

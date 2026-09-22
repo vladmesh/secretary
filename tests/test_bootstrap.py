@@ -15,7 +15,7 @@ from secretary.bootstrap import (
     _install_platform,
     bootstrap,
 )
-from tests.retired_board import RETIRED_STORE, STALE_FILE
+from tests.retired_board import STALE_FILE
 
 
 class BootstrapTests(unittest.TestCase):
@@ -116,7 +116,7 @@ class BootstrapTests(unittest.TestCase):
                 "reused checkpoint checkout" if directory.exists() else self._clone(remote, directory)
             )
         )
-        refuse_kanboard = AssertionError("bootstrap reached Kanboard")
+        refuse_board_runtime = AssertionError("bootstrap ran a board runtime command")
         with (
             mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
             mock.patch("secretary.bootstrap._host_supported"),
@@ -127,7 +127,7 @@ class BootstrapTests(unittest.TestCase):
             mock.patch("secretary.bootstrap.provision_board_store", steps.provision),
             mock.patch("secretary.bootstrap.migrate_instance", steps.migrate),
             mock.patch("secretary.bootstrap.verify_board_store_roles", steps.verify),
-            mock.patch("secretary.bootstrap._run", side_effect=refuse_kanboard),
+            mock.patch("secretary.bootstrap._run", side_effect=refuse_board_runtime),
             mock.patch("builtins.print"),
         ):
             code = bootstrap(args)
@@ -140,7 +140,8 @@ class BootstrapTests(unittest.TestCase):
             code, steps = self._bootstrap(target)
 
             self.assertEqual(code, 0)
-            # The whole board-side sequence, in order: nothing starts, waits for or shapes Kanboard.
+            # The whole board-side sequence, in order: the store is provisioned, migrated and
+            # verified, and no other board is started, waited for or shaped.
             self.assertEqual(
                 steps.mock_calls,
                 [
@@ -161,13 +162,7 @@ class BootstrapTests(unittest.TestCase):
             exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
             self.assertIn(f"/{BOOTSTRAP_STAMP}", exclude)
             self.assertIn("/runtime.env", exclude)
-            for removed in (
-                "ensure_pipeline_board",
-                "migrate_assessment_column",
-                "_wait_for_" + RETIRED_STORE,
-                "_compose_file",
-                RETIRED_STORE.upper() + "_IMAGE",
-            ):
+            for removed in ("ensure_pipeline_board", "migrate_assessment_column", "_compose_file"):
                 self.assertFalse(hasattr(bootstrap_module, removed), removed)
 
     def test_a_fresh_bootstrap_writes_no_runtime_file(self) -> None:

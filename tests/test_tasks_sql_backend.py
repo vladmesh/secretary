@@ -171,10 +171,9 @@ class SqlTaskWriterTests(SqlBoardCase):
     ) -> None:
         """§7.1 for the transition, at the first of its three post-effect points.
 
-        `moveTaskPosition` returned and the round trip after it was lost, which on Kanboard is
-        exactly the state `test_a_transport_failure_after_the_move_keeps_the_typed_pending_record`
-        recovers from: a card in Validate beside a staged request.  Here the move is a statement of
-        the same transaction as the claim, so the rollback takes both and there is nothing to
+        `moveTaskPosition` returned and the round trip after it was lost: over a transport that
+        leaves a card in Validate beside a staged request.  Here the move is a statement of the
+        same transaction as the claim, so the rollback takes both and there is nothing to
         recover.
         """
         self._place("secretary-468", "in_progress")
@@ -198,9 +197,8 @@ class SqlTaskWriterTests(SqlBoardCase):
     ) -> None:
         """The second point: the claim's own board work landed and then the reply was lost.
 
-        On Kanboard that is `test_a_claim_whose_metadata_write_fails_keeps_its_pending_event` — a
-        card in In progress, its claim metadata half-written, and the event held open.  The
-        metadata write here is issued inside the transition's transaction, so it rolls back with
+        Over a transport that is a card in In progress, its claim metadata half-written, and the
+        event held open.  The metadata write here is issued inside the transition's transaction, so it rolls back with
         the column effect: the card is still Ready and still unclaimed.
         """
         self._set_metadata("secretary-468", claim="")
@@ -228,9 +226,7 @@ class SqlTaskWriterTests(SqlBoardCase):
     ) -> None:
         """The third point: the Ready reset landed and then the reply was lost.
 
-        On Kanboard this is `test_pending_ready_replay_finishes_cleanup_before_success_audit` and
-        `test_reconcile_completes_stale_ready_cleanup_before_closing_pending`: a card in Ready
-        whose reset is owed, held by a pending record.  Under one transaction the reset, the
+        Over a transport that is a card in Ready whose reset is owed, held by a pending record.  Under one transaction the reset, the
         column effect and the claim are undone together, so the card keeps the routing the reset
         would have cleared.
         """
@@ -551,8 +547,8 @@ class SqlTaskWriterTests(SqlBoardCase):
     def _create(self, *, request_id: str, title: str = "A created card") -> dict:
         """A create against an open sprint the *store* holds, not only the sprint reader.
 
-        `tasks.sprint_ref` is a foreign key here (§3.3), so the row a Kanboard fake can invent by
-        mocking `SprintReader.show` has to exist for the card to be storable at all.  Sprints on
+        `tasks.sprint_ref` is a foreign key here (§3.3), so the row a fake could invent by mocking
+        `SprintReader.show` has to exist for the card to be storable at all.  Sprints on
         this backend are a later card; this is the one row that card's absence makes necessary.
         """
         now = datetime.now(UTC)
@@ -598,8 +594,8 @@ class SqlTaskWriterTests(SqlBoardCase):
         """The boundary the same defect sat on: one transaction from the claim to the record.
 
         The claim used to commit on its own, before the card was written and long before the
-        record was, so a failure in between left a staged `requests` row and, on the Kanboard
-        journal, a pending file to reconcile.  §7.3 says that class of half-applied write does not
+        record was, so a failure in between left a staged `requests` row and, on the file journal
+        of the time, a pending file to reconcile.  §7.3 says that class of half-applied write does not
         exist on this backend; it only actually did not once the whole create became one
         transaction.
 

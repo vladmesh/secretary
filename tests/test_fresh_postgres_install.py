@@ -1,8 +1,8 @@
 """A fresh installation's board is the PostgreSQL store bootstrap leaves, against a real `postgres:16`.
 
-secretary-1666: bootstrap no longer starts Kanboard, waits for it, or shapes a Pipeline board in it,
-and install recovery no longer asks for that board before it restores a checkpoint. What replaces
-all of it is the store bootstrap provisions, migrates and verifies. These tests prove that store is
+secretary-1666: bootstrap starts, waits for and shapes no other board, and install recovery asks
+for none before it restores a checkpoint. The board is the store bootstrap provisions, migrates and
+verifies. These tests prove that store is
 enough on its own: a freshly migrated, empty store takes a card and lists it back, and a real install
 recovery on a real bootstrap checkout restores a checkpoint's cards into it at parity.
 

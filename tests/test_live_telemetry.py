@@ -437,7 +437,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.unhealthy_total, 0)
 
     def test_a_tick_that_dies_before_its_own_save_is_recorded_as_a_failure(self) -> None:
-        """The Kanboard outage case: the first board read raises and the tick never finishes.
+        """The board outage case: the first board read raises and the tick never finishes.
 
         Nothing inside the tick catches it, so without a record of its own the previous healthy
         tick would answer for the pipeline for the whole freshness window while no card moves.
@@ -1560,7 +1560,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.assertEqual(pending["pipeline_telemetry_generation"], "gen-a")
 
     def test_one_outage_is_one_incident_however_many_ticks_it_fails(self) -> None:
-        """The Kanboard-outage shape: every tick fails while it lasts, and it is one thing to look
+        """The board-outage shape: every tick fails while it lasts, and it is one thing to look
         at. Repeated scans before `advance` keep reporting the same incident, and further failing
         ticks of the same outage neither open a second one nor re-arm the first."""
         mark = self.baseline()
@@ -1895,7 +1895,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.assertIn("retained_window", rendered)
 
 
-_LONG_AGO = 1_600_000_000  # a Kanboard date_moved far beyond any stale threshold
+_LONG_AGO = 1_600_000_000  # a card date_moved far beyond any stale threshold
 
 
 class StewardStaleColumnsTests(unittest.TestCase):

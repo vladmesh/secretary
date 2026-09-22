@@ -855,7 +855,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
             initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
             set_secret(
                 instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"super-secret-token-value",
                 scope="installation",
                 purpose="board api",
@@ -952,7 +952,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
             initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
             set_secret(
                 instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token-value",
                 scope="installation",
                 purpose="board api",
@@ -983,7 +983,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
             initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
             set_secret(
                 instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token-value",
                 scope="installation",
                 purpose="board api",
@@ -1034,7 +1034,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
             initialize_store(instance_dir, phrase=" ".join(str(n) for n in range(16)), actor="tester")
             set_secret(
                 instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token-value",
                 scope="installation",
                 purpose="board api",

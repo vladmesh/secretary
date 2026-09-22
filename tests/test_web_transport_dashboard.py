@@ -543,7 +543,7 @@ class DashboardPageTests(FakeAppFixture):
             {
                 "id": "secretary",
                 "repo": "/srv/secretary",
-                "adapter": "kanboard",
+                "adapter": "secretary",
                 "default_branch": "main",
                 "enabled": True,
             }
