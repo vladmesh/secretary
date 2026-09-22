@@ -130,6 +130,11 @@ def _references(checkpoint: AnalyticsCheckpoint, name: str) -> set[str]:
 
 
 def _events(checkpoint: AnalyticsCheckpoint) -> dict[str, _RecordedEvent]:
+    """The typed records of the checkpoint's `events.ndjson`, the pre-2026-09-10 file journal.
+
+    That file is stored history: nothing appends to it any more, so it holds the outcomes recorded
+    before the PostgreSQL cutover and none after.
+    """
     path = checkpoint.board.path("events.ndjson")
     events: dict[str, _RecordedEvent] = {}
     requests: dict[str, _RecordedEvent] = {}

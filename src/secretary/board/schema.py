@@ -743,7 +743,7 @@ class Request(Base):
 class BoardEvent(Base):
     __tablename__ = "board_events"
 
-    # globally unique, as TaskAudit.event_id_owner requires
+    # globally unique, as SqlTaskAudit.event_id_owner requires
     event_id = sa.Column(sa.Text, primary_key=True)
     request_id = sa.Column(sa.Text, sa.ForeignKey("requests.request_id"), nullable=False)
     kind = sa.Column(sa.Text, nullable=False)

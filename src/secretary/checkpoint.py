@@ -70,9 +70,11 @@ from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskError, task_audit_for
 from triggered_agents.runtime.redact import redact
 
-# Canonical checkpoint entries per component. New board cuts always include an
-# empty events journal when no event has been written. Older checkpoints remain
-# readable without either events.ndjson or the analytics seal.
+# Canonical checkpoint entries per component. `events.ndjson` is stored history: the
+# pre-2026-09-10 file journal, which nothing writes any more. It is copied while the data dir
+# still holds it, because offline analytics projects pre-cutover outcomes from that copy, and
+# is published empty when it does not, because the analytics seal names it. Older checkpoints
+# remain readable without either events.ndjson or the analytics seal.
 ANALYTICS_MANIFEST = "analytics-manifest.json"
 ANALYTICS_SCHEMA = "secretary.board.analytics-checkpoint"
 ANALYTICS_VERSION = 2
@@ -104,8 +106,6 @@ BOARD_IGNORE = (
     "cards.json",
     "sprints.json",
     "audit.json",
-    "kanboard-raw-*/",
-    "pending-audit/",
     ".audit.lock",
 )
 RUNS_IGNORE = ("cards.json",)
@@ -1419,7 +1419,7 @@ def _validate_board(
 
 
 def _validate_board_events(path: Path) -> None:
-    """Validate new typed records while retaining released generic audit rows."""
+    """Validate the typed records of the stored file journal; its generic rows pass as they are."""
     for number, record in enumerate(_read_ndjson(path, "board events.ndjson"), start=1):
         if record.get("record_type") != Event.RECORD_TYPE:
             continue

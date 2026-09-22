@@ -82,7 +82,7 @@
         "actor": { "$ref": "#/$defs/actor" },
         "action": {
           "type": "string",
-          "description": "The released control-plane action spelling, which is what `TaskAudit.events(kind=...)` narrows on."
+          "description": "The released control-plane action spelling, which is what `SqlTaskAudit.events(kind=...)` narrows on."
         },
         "kind": { "type": "string" },
         "entity": { "$ref": "#/$defs/entity" },

@@ -1,4 +1,4 @@
-"""Typed board events stored through the released TaskAudit journal."""
+"""Typed board events stored through the audit owner of a card client."""
 
 from __future__ import annotations
 
@@ -8,15 +8,11 @@ import hashlib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from secretary.board.attempt_outcome import AttemptOutcomePayload
 from secretary.board.attempt_usage import AttemptUsagePayload
 from secretary.board.models import Event, EventKind
-
-if TYPE_CHECKING:
-    from secretary.tasks import TaskAudit
-
 
 T = TypeVar("T")
 
@@ -115,33 +111,27 @@ class AnalyticsOutcomeConflict(ValueError):
 
 
 class BoardEventCanon:
-    """The one typed-event facade over whichever store the caller's backend keeps the audit in.
+    """The one typed-event facade over the audit owner that keeps a card client's records.
 
-    Generic TaskAudit records have no ``record_type`` discriminator and are deliberately ignored by
-    :meth:`events`; TaskAudit itself remains the compatibility reader for released record versions.
+    Generic audit records have no ``record_type`` discriminator and are deliberately ignored by
+    :meth:`events`; the audit owner remains their reader.
 
-    ``audit`` is how a caller that has a card client says which store that is, and every caller that
-    has one passes it: :class:`~secretary.board.sql_host.SqlBoardHost` resolves it through
+    ``audit`` is required, because only the caller knows which store its records live in:
+    :class:`~secretary.board.sql_host.SqlBoardHost` resolves it through
     :func:`secretary.tasks.task_audit_for`, so a board client's canon is ``requests``/``board_events``
-    (``docs/BOARD_STORE.md`` §7.3). Constructed from a data directory alone this is the file journal,
-    which is the right answer for exactly one kind of caller -- one with no client at all, such as
-    the fake board host and the storage-level fixtures. With neither an audit
-    nor a data directory there is no backend-safe choice left to make, so construction refuses by
-    name rather than guessing one.
+    (``docs/BOARD_STORE.md`` §7.3), and the fake board host hands in its in-memory owner. There is no
+    default to fall back to: without an owner, construction refuses by name rather than guessing
+    one.
+
+    The owner contract the canon uses is small: ``claim``, ``append``, ``discard``, ``event``,
+    ``committed_event``, ``events``, ``event_id_owner`` and ``_occurrence_projection_records``.
     """
 
-    def __init__(self, data_dir: str | Path | None, *, audit: TaskAudit | None = None) -> None:
+    def __init__(self, audit: Any) -> None:
         if audit is None:
-            if data_dir is None:
-                raise BoardEventCanonUnowned(
-                    "a typed board event canon needs the audit owner of its card client, or a data "
-                    "directory whose file journal is the canon; it was given neither"
-                )
-            # Kept local so secretary.tasks can import board transition values
-            # without recursively loading its own TaskAudit definition.
-            from secretary.tasks import TaskAudit
-
-            audit = TaskAudit(data_dir)
+            raise BoardEventCanonUnowned(
+                "a typed board event canon needs the audit owner of its card client; it was given none"
+            )
         self.audit = audit
 
     def stage(self, request_id: str, event: Event) -> Event:
@@ -149,7 +139,7 @@ class BoardEventCanon:
 
         The one staging route of the typed canon, and it owns same-request idempotency itself: reading
         the committed record, reading the pending record, checking event-id identity and writing the new
-        pending record all happen inside a single TaskAudit lock hold. A second caller reusing the
+        pending record all happen inside a single hold of the audit owner's claim lock. A second caller reusing the
         request id either gets the event that already owns it or fails.
         """
         record = event.to_record(request_id)
@@ -364,8 +354,7 @@ class BoardEventCanon:
         return tuple(effects)
 
     def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:
-        # Kept local for the same reason as the TaskAudit import above: secretary.tasks
-        # imports this package for its transition registry.
+        # Kept local: secretary.tasks imports this package for its transition registry.
         from secretary.tasks import TaskError
 
         try:
@@ -374,13 +363,13 @@ class BoardEventCanon:
             if exc.code != "validation":
                 raise
             # The typed boundary speaks ValueError; a command-level TaskError would leak
-            # TaskAudit's exit-code protocol into board callers.
+            # the task command exit-code protocol into board callers.
             raise ValueError(exc.message) from None
 
     def _require_unclaimed_event_id(self, record: dict[str, Any]) -> None:
         """An event id names one occurrence, so refuse to publish a second one under it.
 
-        Runs inside TaskAudit's lock, which is what makes it a real precondition of the write rather
+        Runs inside the audit owner's claim lock, which is what makes it a real precondition of the write rather
         than an advisory check some other writer can race past.
         """
         event_id = record.get("event_id")
@@ -459,8 +448,7 @@ class MutationEventTransaction:
         except Exception:
             # The only discard in this class, and the only place one is correct:
             # `effect` raised, so by its contract no effect was applied and this
-            # staged event is not a recovery obligation.  TaskAudit's discard
-            # keeps its released semantics.
+            # staged event is not a recovery obligation.
             self.canon.audit.discard(self.request_id, self.event.to_record(self.request_id))
             raise
         # The effect completed.  From here the record survives every outcome.

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
+from secretary.board.fake import MemoryAudit
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatch import attempt_accounting
@@ -53,38 +53,36 @@ def outcome(*, disposition: str = "rework", effect: str = "evt-effect") -> Event
 
 class AttemptOutcomeTests(unittest.TestCase):
     def test_stage_recovery_and_exact_replay_have_one_natural_key(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            canon = BoardEventCanon(directory)
-            event = outcome()
-            canon.stage("outcome-1", event)
-            staged = canon.attempt_outcome_occurrences()
-            self.assertEqual(len(staged), 1)
-            self.assertTrue(staged[0].pending)
-            canon.commit("outcome-1", event)
-            canon.commit("outcome-1", event)
-            committed = canon.attempt_outcome_occurrences()
-            self.assertEqual(len(committed), 1)
-            self.assertFalse(committed[0].pending)
+        canon = BoardEventCanon(MemoryAudit())
+        event = outcome()
+        canon.stage("outcome-1", event)
+        staged = canon.attempt_outcome_occurrences()
+        self.assertEqual(len(staged), 1)
+        self.assertTrue(staged[0].pending)
+        canon.commit("outcome-1", event)
+        canon.commit("outcome-1", event)
+        committed = canon.attempt_outcome_occurrences()
+        self.assertEqual(len(committed), 1)
+        self.assertFalse(committed[0].pending)
 
     def test_conflicting_natural_key_is_a_named_diagnostic(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            canon = BoardEventCanon(directory)
-            first = outcome()
-            canon.commit("outcome-1", first)
-            second = outcome(effect="evt-other")
-            second = Event(
-                event_id="evt-outcome-other",
-                kind=second.kind,
-                entity_kind=second.entity_kind,
-                ref=second.ref,
-                actor=second.actor,
-                reason=second.reason,
-                occurred_at=second.occurred_at,
-                data=second.data,
-            )
-            canon.commit("outcome-2", second)
-            with self.assertRaises(AnalyticsOutcomeConflict):
-                canon.attempt_outcome_occurrences()
+        canon = BoardEventCanon(MemoryAudit())
+        first = outcome()
+        canon.commit("outcome-1", first)
+        second = outcome(effect="evt-other")
+        second = Event(
+            event_id="evt-outcome-other",
+            kind=second.kind,
+            entity_kind=second.entity_kind,
+            ref=second.ref,
+            actor=second.actor,
+            reason=second.reason,
+            occurred_at=second.occurred_at,
+            data=second.data,
+        )
+        canon.commit("outcome-2", second)
+        with self.assertRaises(AnalyticsOutcomeConflict):
+            canon.attempt_outcome_occurrences()
 
     def test_unknown_version_and_missingness_are_rejected_by_event_reader(self) -> None:
         event = outcome()

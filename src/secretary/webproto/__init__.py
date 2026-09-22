@@ -147,7 +147,7 @@ reads with the same properties and no others:
 Three properties are the point of that half, and each has a test:
 
 **They open no second store, index, scheduler or registry of operations.** The history is
-`TaskAudit.events`, the released cross-entity traversal; the request answer is `committed_event` and
+`SqlTaskAudit.events`, the released cross-entity traversal; the request answer is `committed_event` and
 `pending_event`, the pair the sprint writer itself consults; the paging is this layer's own cursor.
 Every one of them existed before the card.
 

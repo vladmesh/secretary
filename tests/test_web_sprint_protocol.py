@@ -28,13 +28,14 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from secretary import sprints as sprints_module
+from secretary.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from secretary.cli import main
 from secretary.config import validate
 from secretary.knowledge_write import list_knowledge_documents
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
-from secretary.tasks import _STATE_BY_COLUMN, TaskAudit, TaskError, TaskWriter, task_audit_for
+from secretary.tasks import _STATE_BY_COLUMN, TaskError, TaskWriter, task_audit_for
 from secretary.webproto import section as section_module
 from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
@@ -811,7 +812,7 @@ class CurrentCardStateTests(SprintWorkFixture):
             {
                 "event_id": f"board-event-{at}-{target}",
                 "schema_version": 1,
-                "record_type": TaskAudit._PROTOCOL_EVENT_RECORD_TYPE,
+                "record_type": PROTOCOL_EVENT_RECORD_TYPE,
                 "kind": "card.moved",
                 "ref": ref or self.card,
                 "occurred_at": at,

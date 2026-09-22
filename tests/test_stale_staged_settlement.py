@@ -248,7 +248,7 @@ class StaleStagedSettlementTests(SettlementCase):
         self.assertEqual(self.budget_rows(), budget)
 
     def test_a_row_whose_effect_cannot_be_proven_is_refused_rather_than_guessed(self) -> None:
-        BoardEventCanon(self.tmp, audit=self.audit).stage("req-transition", self.card_event("evt_transition"))
+        BoardEventCanon(self.audit).stage("req-transition", self.card_event("evt_transition"))
         self.age("req-transition", STALE_MINUTES)
 
         outcomes = self.audit.settle_stale_staged()

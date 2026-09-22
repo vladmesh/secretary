@@ -1,4 +1,4 @@
-"""`TaskAudit`'s contract, kept in `requests` and `board_events` instead of in files.
+"""The card audit contract, kept in `requests` and `board_events`.
 
 `docs/BOARD_STORE.md` §7.3 is the table this module implements, row by row.  The contract callers
 see is unchanged and deliberately so: the same `request_id`, the same answer to a retry with the
@@ -6,7 +6,7 @@ same id, and the same refusal — *"request id belongs to another operation or p
 id is reused for a different operation.  What changes is where the claim lives.
 
 * **The namespace** is `requests.request_id`, the whole installation's one primary key (§3.9),
-  in place of `TaskAudit`'s index over `events.ndjson` plus `pending-audit/v2-<sha256>.json`.
+  in place of the index the pre-2026-09-10 file journal kept over its lines and pending files.
 * **Staged and committed** are `requests.status`, in place of a pending file and a journal line.
   `requests.intent` holds the record itself, frozen at the claim, which is what makes the
   "same operation, same payload" comparison a column comparison rather than a file read.
@@ -42,6 +42,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board import budget_candidates
+from secretary.board.audit_contract import is_protocol_event, require_claim
 from secretary.board.models import EntityKind, Event, EventKind
 
 #: Every `kind` a `board_events` row may carry (§3.12).  A record whose kind is outside it is a
@@ -111,12 +112,10 @@ def _stamp(value: Any) -> str:
 class SqlTaskAudit:
     """The audit owner of the PostgreSQL card backend.
 
-    It takes the same `TaskError` vocabulary as `TaskAudit`, because every caller above it
+    It speaks the `TaskError` vocabulary, because every caller above it
     catches those and nothing else; a `psycopg` error escaping from here would be an unhandled
     failure in a command that today has a named one.
     """
-
-    _PROTOCOL_EVENT_RECORD_TYPE = Event.RECORD_TYPE
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -133,10 +132,6 @@ class SqlTaskAudit:
     def _commit(self) -> None:
         self.client._commit_unless_nested()
 
-    @classmethod
-    def _is_protocol_event(cls, event: dict[str, Any]) -> bool:
-        return event.get("record_type") == cls._PROTOCOL_EVENT_RECORD_TYPE
-
     @staticmethod
     def _document(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else json.loads(value or "{}")
@@ -148,7 +143,7 @@ class SqlTaskAudit:
         )
         return self._document(rows[0][0]) if rows else None
 
-    # --- the TaskAudit surface -------------------------------------------------------
+    # --- the audit owner surface -------------------------------------------------------
 
     def committed_event(self, request_id: str) -> dict[str, Any] | None:
         return self._record(request_id, "committed")
@@ -291,9 +286,7 @@ class SqlTaskAudit:
         reference: str | None,
         identity: dict[str, Any] | None,
     ) -> None:
-        from secretary.tasks import TaskAudit
-
-        TaskAudit.require_claim(existing, kind=kind, reference=reference, identity=identity)
+        require_claim(existing, kind=kind, reference=reference, identity=identity)
 
     @staticmethod
     def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
@@ -307,7 +300,7 @@ class SqlTaskAudit:
     def _pending_owner(
         self, request_id: str, event: dict[str, Any] | None, *, operation: str
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
-        """`TaskAudit._pending_owner`, over the two statuses of one `requests` row."""
+        """Which record owns `request_id`, over the two statuses of one `requests` row."""
         committed = self.committed_event(request_id)
         if committed is not None:
             if event is not None:
@@ -328,18 +321,18 @@ class SqlTaskAudit:
                     2,
                 )
             return None, None, False
-        if operation == "reconcile" and self._is_protocol_event(pending):
+        if operation == "reconcile" and is_protocol_event(pending):
             self._require_same_event(pending, {})
         if event is not None and pending == event:
             return None, pending, False
         if (
             operation == "stage"
             and event is not None
-            and not self._is_protocol_event(pending)
-            and not self._is_protocol_event(event)
+            and not is_protocol_event(pending)
+            and not is_protocol_event(event)
         ):
             return None, pending, True
-        if operation == "discard" and event is None and not self._is_protocol_event(pending):
+        if operation == "discard" and event is None and not is_protocol_event(pending):
             return None, pending, False
         self._require_same_event(pending, event or {})
         raise AssertionError("unreachable")
@@ -376,7 +369,7 @@ class SqlTaskAudit:
                 str(event.get("kind") or ""),
                 json.dumps(event, sort_keys=True),
                 status,
-                self._is_protocol_event(event),
+                is_protocol_event(event),
                 entity_kind,
                 ref or None,
                 _now(),
@@ -511,7 +504,7 @@ class SqlTaskAudit:
         """Whether a stale staged record's effect is present, and the sentence that says why."""
         kind = str(record.get("kind") or "")
         backend = record.get("backend") if isinstance(record.get("backend"), dict) else {}
-        if self._is_protocol_event(record):
+        if is_protocol_event(record):
             if kind in _RECORD_ONLY_TYPED:
                 return True, f"{kind} is a record-only occurrence: the staged record is its whole effect"
         elif kind in _RECORD_ONLY_GENERIC or backend.get("revision") == "not_written":
@@ -579,7 +572,7 @@ class SqlTaskAudit:
     def _write_board_event(self, request_id: str, event: dict[str, Any]) -> None:
         """Mirror a typed occurrence into `board_events`; a generic record has no row there."""
         kind = str(event.get("kind") or "")
-        if kind not in _TYPED_KINDS or not self._is_protocol_event(event):
+        if kind not in _TYPED_KINDS or not is_protocol_event(event):
             return
         try:
             typed = Event.from_record(event)
@@ -679,7 +672,7 @@ class SqlTaskAudit:
         for record in self.pending_events():
             candidate = str(record.get("request_id") or "")
             identity: tuple[str, str] | None = None
-            if self._is_protocol_event(record):
+            if is_protocol_event(record):
                 # A staged Card event that is not a marker (a usage record whose publication was
                 # refused, say) renders no marker and so reserves none; it must not refuse the
                 # marker write that is asking.

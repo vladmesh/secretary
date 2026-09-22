@@ -16,14 +16,9 @@ from secretary import secret_store
 from secretary._fsutil import publish_component_entries
 from secretary.board import (
     Actor,
-    BoardEventCanon,
-    Card,
-    CardState,
-    Create,
     EntityKind,
     Event,
     EventKind,
-    FakeBoardHost,
 )
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.checkpoint import (
@@ -456,22 +451,26 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(observed, ["no manifest"])
         verify_analytics_checkpoint(self.instance_dir / "state" / "board")
 
-    def test_live_typed_event_is_staged_as_a_board_checkpoint_artifact(self):
-        host = FakeBoardHost(data_dir=self.data_dir)
-        host.create(
-            Create(
-                Card("secretary-1419", "Typed event canon", CardState.READY),
-                Actor("po", "operator"),
-                "accepted into the sprint",
-                request_id="checkpoint-event-1",
-            )
+    def test_a_stored_typed_event_is_staged_as_a_board_checkpoint_artifact(self):
+        """The pre-2026-09-10 file journal is stored history: nothing writes it, the cut copies it."""
+        event = Event(
+            "evt-stored",
+            EventKind.ENTITY_CREATED,
+            EntityKind.CARD,
+            "secretary-1419",
+            Actor("po", "operator"),
+            "accepted into the sprint",
+            datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+        )
+        record = event.to_record("checkpoint-event-1")
+        (self.data_dir / "board" / "events.ndjson").write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
         )
 
         result = self.write()
 
         self.assertEqual(result.status, "committed")
         committed = self.committed_text("events.ndjson")
-        event = BoardEventCanon(self.data_dir).events()[0]
         self.assertEqual(json.loads(committed)["event_id"], event.event_id)
         self.assertEqual(json.loads(committed)["subject"], {"kind": "card", "ref": "secretary-1419"})
 

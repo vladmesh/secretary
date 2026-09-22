@@ -84,7 +84,7 @@ class CommandProtocolFixture(SprintProtocolFixture):
         return task_audit_for(self.board)
 
     def canon(self) -> BoardEventCanon:
-        return BoardEventCanon(self.data_dir, audit=self.audit())
+        return BoardEventCanon(self.audit())
 
     def journal(self) -> Path:
         return self.data_dir / "board" / "events.ndjson"

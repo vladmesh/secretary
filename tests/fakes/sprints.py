@@ -341,7 +341,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         return sum(row.get("reference") == reference for row in rows)
 
     def transaction_state(self) -> dict[str, int | bool]:
-        """Observe recovery ownership without knowing the Kanboard journal's filenames."""
+        """Observe recovery ownership without knowing where the store keeps it."""
         return self.writer.transactions.status()
 
     def arrange_metadata(self, reference: str, **values: object) -> None:

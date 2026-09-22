@@ -8,8 +8,8 @@ audit owner any more; read beside a PostgreSQL client, a card's history answered
 that backend never writes -- unavailable where the file was swept, and a successful empty or stale
 history where an old one was left behind, with the committed records invisible.
 
-The cursor counts the card's committed records and says so (:data:`POSITION_ORDINAL`). A released
-cursor that names a byte offset into the old file journal is refused rather than seeked with
+The cursor counts the card's committed records and says so (``pos``). A released cursor that names
+a byte offset into the pre-2026-09-10 file journal is refused rather than seeked with
 (:mod:`secretary.webproto.cursor`).
 
 Both record shapes the audit holds are returned -- the typed board protocol events (``record_type``
@@ -31,7 +31,7 @@ from typing import Any
 
 from secretary.board.models import Event
 from secretary.webproto import sources
-from secretary.webproto.cursor import POSITION_ORDINAL, Cursor
+from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import InvalidCursor
 from secretary.webproto.sources import Source
 
@@ -55,8 +55,7 @@ class EventPage:
 class CommittedAudit:
     """The read-only reader of a card's committed history in the store its audit owner holds.
 
-    Takes the audit owner itself -- `SqlTaskAudit` for a PostgreSQL client, and the file journal's
-    `TaskAudit` for anything that hands one in -- and pages
+    Takes the audit owner itself -- `SqlTaskAudit` for a PostgreSQL client -- and pages
     :meth:`~secretary.board.sql_audit.SqlTaskAudit.events`, the traversal every other reader of this
     installation's audit already uses. It opens no store of its own, holds no index and caches
     nothing: one page is one traversal, filtered to this card by the audit's own predicate.
@@ -136,7 +135,7 @@ class CommittedAudit:
         )
 
     def _at(self, ref: str, ordinal: int) -> Cursor:
-        return Cursor(ref=ref, offset=ordinal, position=POSITION_ORDINAL)
+        return Cursor(ref=ref, offset=ordinal)
 
     def _failures(self) -> tuple[type[BaseException], ...]:
         from secretary.tasks import TaskError

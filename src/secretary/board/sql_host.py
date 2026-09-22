@@ -74,10 +74,9 @@ class SqlBoardHost:
         self.instance = instance
         # The typed canon follows this host's own client and never the data directory: with no audit
         # handed in it is the card audit, `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3).
-        # Sprint and Product/Issue callers hand in the same audit. Letting the canon default to the
-        # file journal here published typed events into a file the PostgreSQL backend never reads.
+        # Sprint and Product/Issue callers hand in the same audit.
         self.canon = (
-            BoardEventCanon(data_dir, audit=audit or task_audit_for(client, data_dir))
+            BoardEventCanon(audit or task_audit_for(client, data_dir))
             if data_dir is not None
             else None
         )

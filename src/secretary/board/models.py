@@ -332,7 +332,7 @@ class Event:
     """An immutable, schema-versioned board protocol occurrence.
 
     The journal representation is deliberately a compact top-level document so
-    existing TaskAudit readers can still locate its request id and subject ref.
+    generic audit readers can still locate its request id and subject ref.
     ``subject`` remains explicit in the durable shape, rather than requiring a
     future reader to infer it from an event-kind prefix.
     """
@@ -391,7 +391,7 @@ class Event:
         object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
 
     def to_record(self, request_id: str) -> dict[str, Any]:
-        """Serialize a canonical, deterministic TaskAudit journal record."""
+        """Serialize a canonical, deterministic audit record."""
         _non_empty(request_id, "event request id")
         actor: dict[str, str] = {"role": self.actor.role, "id": self.actor.id}
         if self.actor.head_run_ref is not None:

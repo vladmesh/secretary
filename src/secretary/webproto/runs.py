@@ -347,8 +347,8 @@ class RunStore:
 
     Two directories and one lock. `runs/<run_id>.json` is the record; `runs/requests/<digest>.json`
     names the run a request id owns, digested rather than used verbatim so that a caller's request
-    id never becomes a path in this installation (the same rule `TaskAudit` keeps for its pending
-    records). The lock is one file for the whole store, held across read-decide-write, because the
+    id never becomes a path in this installation (the rule the pre-2026-09-10 file journal kept
+    for its pending records). The lock is one file for the whole store, held across read-decide-write, because the
     decision this store exists to make — "does this request id already own a run" — is only a
     decision if nobody can answer it twice at once.
     """
