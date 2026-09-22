@@ -449,7 +449,11 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
         self.assertEqual(task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]})
         self.assertEqual(task["routing"]["complexity"], "standard")
         self.assertEqual(task["routing"]["codex_launch_mode"], "tui")
-        self.assertEqual(task["extensions"]["extra"], {"steward_report": "1", "swimlane": "Secretary"})
+        # secretary-1678: the tasks table states the row's kind even where the bag never did.
+        self.assertEqual(
+            task["extensions"]["extra"],
+            {"record_type": "task", "steward_report": "1", "swimlane": "Secretary"},
+        )
         self.assertNotIn("comments", task)
 
     def test_list_names_the_card_identity_of_its_backend(self) -> None:

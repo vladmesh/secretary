@@ -795,6 +795,9 @@ class SqlCardClient:
             for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                 if name != "swimlane":
                     meta[name] = _text(value)
+            # The table is the record type (`sql_product_issues.py`): a `tasks` row is a task
+            # whether or not its bag ever repeated the key.
+            meta.setdefault("record_type", "task")
             result[key] = meta
         return result
 

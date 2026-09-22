@@ -816,6 +816,10 @@ def _normalized_cards(
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
         _fold_checkpoint_extensions(card)
+        # Exports taken before the tasks table stated its record type carry none on older task
+        # rows; absent means task, as in `reference_repair`. A present unknown value is refused.
+        if "record_type" not in card["metadata"]:
+            card["metadata"]["record_type"] = "task"
         if card["metadata"].get("record_type") not in _RECORD_TYPES:
             raise RestoreError(f"normalized board export card {card['reference']} has no record type")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
