@@ -70,7 +70,6 @@ files = [
     "src/secretary/board/sprint_close.py",
     "src/secretary/board/host.py",
     "src/secretary/board/backend.py",
-    "src/secretary/board/write_barrier.py",
     "src/secretary/dispatch/runtime_provenance.py",
     "src/secretary/dispatch/attempt_accounting.py",
     "src/secretary/dispatch/assessment_decision.py",

@@ -18,7 +18,6 @@ from secretary.checkpoint import (
     rpo_problem,
 )
 from secretary.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
-from secretary.cutover import add_cutover_subcommands
 from secretary.data import (
     export_all,
     export_artifacts,
@@ -185,7 +184,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_run_subcommands(subparsers)
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
-    add_cutover_subcommands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)

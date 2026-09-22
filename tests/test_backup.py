@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import create_backups, estimate_archive_bytes, verify_backup
+from secretary.backup import create_backups, verify_backup
 from secretary.backup_policy import POLICIES, should_skip_data_entry
 from secretary.data import DataExport
 from tests.restore_fixtures import (
@@ -190,18 +190,6 @@ class BackupTests(unittest.TestCase):
             mock.patch("secretary.backup.export_all", return_value=exports),
         ):
             return create_backup(instance)
-
-    def test_estimate_covers_the_archive_and_leaves_the_model_cache_out(self):
-        cache_bytes = 4 * 1024 * 1024
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            instance, data_dir = self._full_backup_with_model_cache(root, cache_bytes=cache_bytes)
-            with mock.patch("secretary.backup.ORCA_STATE_DIRS", (root / "orca",)):
-                estimate = estimate_archive_bytes(instance, data_dir, backup_kind="full")
-                result = self._create_full(instance, data_dir)
-
-            self.assertGreaterEqual(estimate, result.archive.stat().st_size)
-            self.assertLess(estimate, cache_bytes)
 
     def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
         from secretary.backup_policy import is_memory_model_cache_entry

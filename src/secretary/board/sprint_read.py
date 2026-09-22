@@ -44,9 +44,6 @@ RESUME_FIELDS = (
     "next_safe_step",
 )
 
-SPRINT_STATE_VALUES: frozenset[str] = frozenset(member.value for member in SprintState)
-
-
 def _default_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -146,15 +143,6 @@ class SprintBudget:
         }
 
 
-def sprint_budget_document(
-    value: Any = None,
-    thresholds: Mapping[str, int] | None = None,
-    uncharged: Any = None,
-) -> dict[str, Any]:
-    """Compatibility projection for code that still emits the released dict document."""
-    return SprintBudget.from_legacy(value, thresholds=thresholds, uncharged=uncharged).to_document()
-
-
 @dataclass(frozen=True, slots=True)
 class SprintSourceAudit:
     """The source audit carried by a restored Sprint, when one was recorded."""
@@ -188,12 +176,6 @@ class SprintSourceAudit:
             "updated_at": self.updated_at,
             "board": self.board,
         }
-
-
-def sprint_source_audit_document(value: Any) -> dict[str, str] | None:
-    """Compatibility projection of :class:`SprintSourceAudit`."""
-    source = SprintSourceAudit.from_legacy(value)
-    return source.to_document() if source is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,16 +240,6 @@ class SprintResume:
         }
 
 
-def sprint_resume_document(
-    value: Any,
-    *,
-    now: Callable[[], str] = _default_now,
-) -> dict[str, str] | None:
-    """Compatibility projection for non-validating legacy resume reads."""
-    resume = SprintResume.from_legacy(value, now=now)
-    return resume.to_document() if resume is not None else None
-
-
 @dataclass(frozen=True, slots=True)
 class SprintReadMetadata:
     """Typed compound fields read from one Sprint's legacy metadata bag."""
@@ -313,14 +285,10 @@ __all__ = [
     "DEFAULT_BUDGET_SIGNAL",
     "RESUME_FIELDS",
     "SOURCE_AUDIT_FIELDS",
-    "SPRINT_STATE_VALUES",
     "SprintBudget",
     "SprintReadMetadata",
     "SprintResume",
     "SprintSourceAudit",
     "budget_thresholds",
-    "sprint_budget_document",
-    "sprint_resume_document",
-    "sprint_source_audit_document",
     "sprint_string_list",
 ]

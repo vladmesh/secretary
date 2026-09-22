@@ -112,7 +112,6 @@ class TaskDecision(StrEnum):
 
 
 TASK_TYPE_VALUES: frozenset[str] = frozenset(member.value for member in TaskType)
-TASK_REVIEW_VALUES: frozenset[str] = frozenset(member.value for member in TaskReview)
 TASK_COMPLEXITY_VALUES: frozenset[str] = frozenset(member.value for member in TaskComplexity)
 FAMILY_PREFERENCE_VALUES: frozenset[str] = frozenset(member.value for member in FamilyPreference)
 ROUTING_PHASE_VALUES: frozenset[str] = frozenset(member.value for member in RoutingPhase)
@@ -298,7 +297,6 @@ __all__ = [
     "IMPACT_BOUNDS_SECTION",
     "ROUTING_PHASE_VALUES",
     "TASK_COMPLEXITY_VALUES",
-    "TASK_REVIEW_VALUES",
     "TASK_TYPE_VALUES",
     "UNDECIDED_EXITS",
     "BlockClassification",

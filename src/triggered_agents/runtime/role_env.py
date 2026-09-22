@@ -80,8 +80,8 @@ NONSECRET_ENV = (
     "SECRETARY_DATA_DIR",
     "TA_SECRETARY_REPO",
     # The process-wide board selector is ordinary routing configuration.  Every
-    # role must receive the same value as the dispatcher and web units or a
-    # cutover would create two simultaneous stores.
+    # role must receive the same value as the dispatcher and web units or the
+    # installation would serve cards from two stores at once.
     CARD_BACKEND_ENV,
 )
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env

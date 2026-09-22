@@ -65,7 +65,6 @@ def create_backups(
     caller_workspace: Path | None = None,
     pipeline_command: list[str] | None = None,
     backup_kinds: tuple[BackupKind, ...] = ("full",),
-    existing_freeze_actor: str | None = None,
 ) -> list[BackupResult]:
     kinds = tuple(dict.fromkeys(backup_kinds))
     invalid = [kind for kind in kinds if kind not in BACKUP_KINDS]
@@ -117,19 +116,17 @@ def create_backups(
         ]
         try:
             pre_pause = _pipeline_status(instance_file=instance_file, command=pipeline_command)
-            refusal = freeze_refusal(pre_pause, existing_freeze_actor)
-            if refusal:
-                raise RuntimeError(refusal)
-            if not pre_pause.get("paused"):
-                pause_status = _pipeline_action(
-                    "pause",
-                    instance_file=instance_file,
-                    command=pipeline_command,
-                    exclude_workspace=exclude_workspace,
-                )
-                paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
-                if not paused_by_us:
-                    raise RuntimeError("pipeline pause was not owned by backup create")
+            if pre_pause.get("paused"):
+                raise RuntimeError("pipeline is already paused; backup create must own the freeze")
+            pause_status = _pipeline_action(
+                "pause",
+                instance_file=instance_file,
+                command=pipeline_command,
+                exclude_workspace=exclude_workspace,
+            )
+            paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
+            if not paused_by_us:
+                raise RuntimeError("pipeline pause was not owned by backup create")
 
             init_layout(data_dir)
             exports = export_all(data_dir, instance_file.parent, copy_transcripts=copy_transcripts)
@@ -205,52 +202,6 @@ def create_backups(
     if missing:
         raise RuntimeError("archive was not created")
     return results
-
-
-# A member's header block, with room for the PAX record tarfile adds for a long name.
-TAR_MEMBER_BYTES = 3 * tarfile.BLOCKSIZE
-# What one file adds to the checksums in versions.json beyond its name: the digest and JSON framing.
-CHECKSUM_LINE_BYTES = 100
-# The rest of versions.json, and the few directory members the payload root adds.
-MANIFEST_BYTES = 64 * 1024
-
-
-def estimate_archive_bytes(instance_dir: Path, data_dir: Path, *, backup_kind: BackupKind) -> int:
-    """The size one archive of this kind would have if `create_backups` wrote it now.
-
-    The instance configuration and the data dir are walked with the traversal and the predicates
-    the snapshot copies them with, so whatever the archive leaves out -- the memory model cache,
-    the backups themselves -- the estimate leaves out by the same decision.  Each member is counted
-    as tar writes it: a header budget, and a file padded to the block and listed in the checksums.
-    The exports are rewritten when the archive is made, so their current size stands in for
-    theirs; a full archive's Orca inventory is built here exactly as it would be written.
-    """
-    policy = policy_for(backup_kind)
-    if policy is None:
-        raise RuntimeError(f"unsupported backup kind: {backup_kind}")
-
-    def skip_data(relative: Path) -> bool:
-        return should_skip_data_entry(relative, policy=policy)
-
-    total = TAR_MEMBER_BYTES + MANIFEST_BYTES
-    for source, root, skip in (
-        (instance_dir, "instance", _skip_instance_config_entry),
-        (data_dir, "secretary-data", skip_data),
-    ):
-        for path, relative in _filtered_entries(source, skip=skip):
-            total += TAR_MEMBER_BYTES
-            if not path.is_file():
-                continue
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            total += _tar_padded(size) + len(f"{root}/{relative.as_posix()}") + CHECKSUM_LINE_BYTES
-    if backup_kind == "full":
-        inventory = len(_json_text(_orca_debug_inventory()).encode("utf-8"))
-        total += TAR_MEMBER_BYTES + _tar_padded(inventory) + CHECKSUM_LINE_BYTES
-    # The two zero blocks that end the archive, and the padding to a whole tar record.
-    return _tar_padded(total + 2 * tarfile.BLOCKSIZE, tarfile.RECORDSIZE)
 
 
 def _reject_claimed_worker_context() -> None:
@@ -398,30 +349,6 @@ def _pipeline_status(
     return _pause_summary(document if isinstance(document, dict) else {})
 
 
-def pipeline_pause(instance_path: Path) -> dict[str, Any]:
-    """The pause facts `create_backups` decides on, read exactly the way it reads them."""
-    return _pipeline_status(instance_file=_instance_file(instance_path), command=None)
-
-
-def freeze_refusal(pause: dict[str, Any], existing_freeze_actor: str | None) -> str | None:
-    """Why `create_backups` refuses the pause it finds, or None when it may proceed.
-
-    Without `existing_freeze_actor` the backup takes the freeze itself, so any pause refuses it;
-    with one, the caller must already hold a freeze under exactly that actor.  The cutover
-    controller asks the same question before its window (secretary-1612), so the two cannot
-    disagree on which pause breaks a backup.
-    """
-    if pause.get("paused"):
-        if not existing_freeze_actor:
-            return "pipeline is already paused; backup create must own the freeze"
-        if pause.get("mode") != "freeze" or pause.get("actor") != existing_freeze_actor:
-            return "pipeline freeze is not owned by the declared backup caller"
-        return None
-    if existing_freeze_actor:
-        return "the declared caller-owned pipeline freeze is absent"
-    return None
-
-
 def _pause_summary(document: dict[str, Any]) -> dict[str, Any]:
     """The compact pause facts a backup decides on, out of the pause protocol document.
 
@@ -565,10 +492,6 @@ def _orca_debug_inventory() -> dict[str, Any]:
 
 def _json_text(payload: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
-
-
-def _tar_padded(size: int, block: int = tarfile.BLOCKSIZE) -> int:
-    return -(-size // block) * block
 
 
 def _write_tar(destination: Path, source: Path) -> None:

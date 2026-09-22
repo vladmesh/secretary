@@ -807,13 +807,12 @@ KANBOARD_ONLY = {
     "test_restoring_a_card_preserves_ordinary_long_text_byte_for_byte": (
         "it creates `secretary-restore-long`, a reference that does not end in -<number>.  "
         "`tasks.task_number` is NOT NULL and UNIQUE (project_id, task_number) has no value for "
-        "such a reference, which is the refusal `board/import_board.py` already records for the "
-        "same shape.  A finding about the schema, not a licence to change 0003"
+        "such a reference.  A finding about the schema, not a licence to change 0003"
     ),
     "test_auto_reference_serializes_concurrent_creates": (
         "it creates from two threads at once.  `SqlCardClient` holds one connection, and one "
         "libpq connection cannot carry two transactions, so the concurrency this asserts needs a "
-        "connection pool, which the store client does not have (§5.6).  A finding for the cutover card"
+        "connection pool, which the store client does not have (§5.6)"
     ),
     "test_pending_blocks_export_from_the_same_data_root": (
         "the export's gate reads `pending-audit/` on disk.  §6.3 says it becomes a query over "
@@ -944,8 +943,7 @@ KANBOARD_ONLY = {
     ),
     "test_auto_reference_uses_board_wide_project_high_water_mark": (
         "it seeds `secretary-nope` so the allocator has a malformed reference to skip.  "
-        "`tasks.task_number` cannot hold one, which is the refusal `board/import_board.py` "
-        "already records for the same shape"
+        "`tasks.task_number` cannot hold one"
     ),
     "test_backend_ignoring_atomic_reference_leaves_pending_create_unrepaired": (
         "it drops the reference from `createTask`.  `SqlCardClient` refuses that write outright "

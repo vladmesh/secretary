@@ -143,11 +143,7 @@ class SystemdUnitInstaller(UnitInstaller):
         self.sudo = sudo
 
     def argv(self, cmd: list[str]) -> list[str]:
-        """The privileged invocation contour: root work goes through non-interactive sudo.
-
-        Callers that keep their own execution and evidence contract - the cutover
-        controller does - ask for the argv here instead of growing a second wrapper.
-        """
+        """The privileged invocation contour: root work goes through non-interactive sudo."""
         return (["sudo", "-n"] if self.sudo else []) + cmd
 
     def _run(self, cmd: list[str], label: str) -> subprocess.CompletedProcess[str]:
