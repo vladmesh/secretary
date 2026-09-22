@@ -5,6 +5,11 @@ and the producer host is destroyed. Recovery then has exactly two inputs, the
 private repo that carries canon and the archive that carries everything derived
 from it. Component-level behaviour stays in test_restore.py and
 test_restore_archive.py.
+
+The board a restore imports into is an empty PostgreSQL store on a throwaway
+`postgres:16`, one per module. The engine half of a full archive -- `pg_dump`
+on the producer, `pg_restore` on the target -- is proven on a real store in
+test_postgres_recovery.py; here the archive carries a fixed stand-in dump.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from unittest import mock
 
 from secretary import restore_commands
 from secretary.backup_policy import ARCHIVE_ROOT
+from secretary.board.sql_cards import SqlCardClient
 from secretary.cli import main as cli_main
 from secretary.data import export_memory, init_layout
 from secretary.host import CollectResult, HostInventory, build_plan
@@ -34,17 +40,38 @@ from secretary.restore import (
 )
 from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
-    _EmptyWriteKanboard,
     _producer_exports,
     _restore_card,
     _seed_instance_facts,
+    _write_board_history,
     _write_checksums,
     _write_instance_to,
     create_backup,
-    on_kanboard_archive,
+    fake_engine_dump,
 )
+from tests.sql_backend_fixtures import PostgresBoard
 
 _UNSET = object()
+
+BOARD: PostgresBoard
+
+
+def setUpModule() -> None:
+    global BOARD
+    for module in ("psycopg", "sqlalchemy", "alembic"):
+        __import__(module)
+    BOARD = PostgresBoard()
+
+
+def tearDownModule() -> None:
+    BOARD.stop()
+
+
+def _empty_board(case: unittest.TestCase, instance: Path) -> SqlCardClient:
+    """An empty, migrated store of the case's own for the board restore to fill."""
+    client = SqlCardClient(BOARD.fresh_database().for_role("owner"), instance)
+    case.addCleanup(client.close)
+    return client
 
 
 def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
@@ -118,10 +145,7 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
-    raw = board / "kanboard-raw-e2e"
-    (raw / "data").mkdir(parents=True)
-    (raw / "manifest.json").write_text("{}", encoding="utf-8")
-    (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+    _write_board_history(board)
 
     _seed_instance_facts(instance_dir, CANON_FACTS)
     facts = export_memory(data_dir, instance_dir).count
@@ -161,6 +185,7 @@ class _Fixture(NamedTuple):
 
 def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
     """Produce an archive the way the nightly backup timer does."""
+    root.mkdir(exist_ok=True)
     source_data = root / "source-data"
     source_instance = _write_instance_to(root / "source-instance", "e2e", source_data)
     cards, facts = _seed_producer(source_data, source_instance)
@@ -169,10 +194,7 @@ def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
         mock.patch("secretary.backup._reject_claimed_worker_context"),
         mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
         mock.patch("secretary.backup._pipeline_action", return_value=None),
-        mock.patch(
-            "secretary.backup.raw_kanboard_dump",
-            return_value=type("Dump", (), {"dump_dir": source_data / "board" / "kanboard-raw-e2e"})(),
-        ),
+        fake_engine_dump(),
         mock.patch(
             "secretary.backup.export_all",
             return_value=_producer_exports(
@@ -252,11 +274,10 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
 
 
 class RestoreEndToEndTests(unittest.TestCase):
-    @on_kanboard_archive
     def test_fixture_backup_restores_to_green_doctor_without_the_source_data_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            fixture = _create_fixture_backup(root, kind="full")
+            fixture = _create_fixture_backup(root, kind="core")
             script = _reindex_script(root)
 
             # An empty target is a supported install on its own.
@@ -281,14 +302,9 @@ class RestoreEndToEndTests(unittest.TestCase):
                 0,
             )
 
-            # A full archive carries the raw dump and every card, done ones included.
-            self.assertTrue(list((data_dir / "board").glob("kanboard-raw-*")))
-            # It carries no model cache, and the reindex below rebuilds the index without one.
-            with tarfile.open(fixture.archive) as archive:
-                self.assertFalse([name for name in archive.getnames() if "/memory/fastembed-cache" in name])
-            self.assertFalse((data_dir / "memory" / "fastembed-cache").exists())
+            expected = [card for card in fixture.cards if card["column"] != "Done"]
             self.assertEqual(
-                import_normalized_board(data_dir, client=_EmptyWriteKanboard()), len(fixture.cards)
+                import_normalized_board(data_dir, client=_empty_board(self, instance)), len(expected)
             )
             self.assertEqual(main(["memory", "reindex", "--instance", str(instance)]), 0)
             self.assertEqual(_apply_reconcile(instance, data_dir, root), 0)
@@ -309,7 +325,29 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual((data_dir / "memory" / "export.ndjson").read_text(), fixture.export)
             self.assertFalse((data_dir / "memory" / "facts").exists())
 
-    @on_kanboard_archive
+    def test_full_archive_carries_every_card_and_the_engine_dump_but_no_model_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fixture = _create_fixture_backup(root, kind="full")
+
+            with tarfile.open(fixture.archive) as archive:
+                names = archive.getnames()
+                cards = json.loads(
+                    archive.extractfile(f"{ARCHIVE_ROOT}/secretary-data/board/cards.json").read()
+                )["cards"]
+            # Done cards included: the full archive is the whole board, not the working set.
+            self.assertEqual(
+                [card["reference"] for card in cards], [card["reference"] for card in fixture.cards]
+            )
+            self.assertIn(f"{ARCHIVE_ROOT}/engine/postgres.dump", names)
+            # It carries no model cache; the reindex downloads the model again.
+            self.assertFalse([name for name in names if "/memory/fastembed-cache" in name])
+
+            # Its engine is restored by `restore-postgres`, never by the plain data restore.
+            instance, data_dir = _target_instance(root, "target", _reindex_script(root))
+            self.assertEqual(main(["restore", str(fixture.archive), "--instance", str(instance)]), 2)
+            self.assertFalse(data_dir.exists())
+
     def test_core_archive_restores_normalized_board_without_a_raw_dump(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -328,7 +366,9 @@ class RestoreEndToEndTests(unittest.TestCase):
                 0,
             )
 
-            self.assertEqual(list((data_dir / "board").glob("kanboard-raw-*")), [])
+            self.assertEqual(
+                [path.name for path in (data_dir / "board").iterdir() if path.is_dir()], []
+            )
             restored = json.loads((data_dir / "board" / "cards.json").read_text())["cards"]
             # Core keeps every non-done card and says so in its export policy.
             expected = [card for card in fixture.cards if card["column"] != "Done"]
@@ -348,12 +388,13 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(exported, fixture.export)
             self.assertFalse((data_dir / "memory" / "facts").exists())
 
-            client = _EmptyWriteKanboard()
+            client = _empty_board(self, instance)
             self.assertEqual(import_normalized_board(data_dir, client=client), len(expected))
-            self.assertEqual(sorted(task["title"] for task in client.tasks), ["First", "Second"])
+            self.assertEqual(
+                sorted(title for (title,) in client._query("SELECT title FROM tasks")), ["First", "Second"]
+            )
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
-    @on_kanboard_archive
     def test_restore_rejects_a_truncated_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -374,7 +415,6 @@ class RestoreEndToEndTests(unittest.TestCase):
             )
             self.assertFalse(data_dir.exists())
 
-    @on_kanboard_archive
     def test_restore_rejects_a_corrupted_archive_without_creating_the_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -404,23 +444,24 @@ class RestoreEndToEndTests(unittest.TestCase):
 
 
 class RestoreEndToEndOfflineTests(unittest.TestCase):
-    """Chain-level negatives that only need local plain archives."""
+    """Chain-level negatives: plain archives, and an empty store where a board step is reached."""
 
-    @on_kanboard_archive
     def test_restore_rejects_an_unsupported_archive_version(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            archive = _repacked_archive(root, {"version": 99})
-            instance, data_dir = _target_instance(root, "target", _reindex_script(root))
+        for version in (1, 99):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                archive = _repacked_archive(root, {"version": version})
+                instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
-            with self.assertRaisesRegex(RestoreError, "unsupported backup version"):
-                restore_backup(
-                    archive,
-                    instance,
-                )
-            self.assertFalse(data_dir.exists())
+                with self.assertRaisesRegex(
+                    RestoreError, f"^unsupported backup version: {version}; this build reads version 2$"
+                ):
+                    restore_backup(
+                        archive,
+                        instance,
+                    )
+                self.assertFalse(data_dir.exists())
 
-    @on_kanboard_archive
     def test_restore_refuses_a_non_empty_target_and_leaves_it_untouched(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -437,7 +478,6 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 )
             self.assertEqual(marker.read_text(), '{"version": 1, "cards": []}')
 
-    @on_kanboard_archive
     def test_board_failure_keeps_the_chain_red_until_it_is_repaired(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -447,22 +487,16 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 archive,
                 instance,
             )
-            client = _EmptyWriteKanboard()
-            client.tasks.append(
-                {
-                    "id": 99,
-                    "reference": "secretary-stale",
-                    "title": "Stale",
-                    "description": "",
-                    "column_id": 2,
-                    "position": 1,
-                    "swimlane_id": 4,
-                    "date_creation": "1720000200",
-                    "date_modification": "1720000200",
-                }
+            client = _empty_board(self, instance)
+            client.call(
+                "createTask",
+                project_id=1,
+                title="Stale",
+                description="",
+                column_id=1,
+                swimlane_id=0,
+                reference="secretary-99",
             )
-            client.metadata[99] = {}
-            client.comments[99] = []
 
             with self.assertRaisesRegex(RestoreError, "board is not empty"):
                 import_normalized_board(data_dir, client=client)
@@ -470,7 +504,6 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 1)
 
-    @on_kanboard_archive
     def test_reconcile_failure_keeps_the_chain_red(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -481,7 +514,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 instance,
             )
             # A core archive carries the two non-done cards.
-            self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 2)
+            self.assertEqual(import_normalized_board(data_dir, client=_empty_board(self, instance)), 2)
             self.assertEqual(main(["memory", "reindex", "--instance", str(instance)]), 0)
 
             source = mock.Mock()
@@ -492,17 +525,14 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 1)
 
-    @on_kanboard_archive
     def test_derived_host_state_is_never_restored_as_canon(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = _plain_archive(root, kind="full")
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
-            plan = restore_backup(
-                archive,
-                instance,
-            )
+            # The data half of `restore-postgres`, which decides what of the archive is canon.
+            plan = restore_backup(archive, instance, _allow_postgres_engine=True)
 
             actions = {component["name"]: component["action"] for component in plan.components}
             self.assertEqual(actions["debug_orca_state"], "exclude")

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import functools
+import contextlib
 import json
-import os
 import shutil
 import subprocess
 import tarfile
-from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -14,32 +13,58 @@ from unittest import mock
 from secretary import state_repo
 from secretary._fsutil import sha256_file
 from secretary.backup import BackupResult, create_backups
-from secretary.backup_policy import ARCHIVE_ROOT
-from secretary.board.backend import CARD_BACKEND_ENV, KANBOARD, reset_card_backend
+from secretary.backup_policy import ARCHIVE_ROOT, POSTGRES_BACKUP_VERSION
+from secretary.board.provision import IMAGE, POSTGRES_MAJOR
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
-from tests.fakes.sprints import SprintKanboard
-from tests.fakes.tasks import WriteKanboard
+
+#: What `postgres_recovery.inspect_source` reports about a store, as `backup verify` requires it.
+ENGINE_DUMP_METADATA: dict[str, Any] = {
+    "engine": "postgresql",
+    "format": "custom",
+    "dump_version": 1,
+    "image": IMAGE,
+    "server_major": POSTGRES_MAJOR,
+    "source_schema": "0007_card_transport_key",
+    "alembic_head": "0007_card_transport_key",
+    "restore_purpose": "local recovery",
+    "source_endpoint_id": "a" * 64,
+    "table_counts": {"tasks": 1},
+}
+#: A custom-format dump starts with this signature; verify reads nothing past it.
+ENGINE_DUMP_BYTES = b"PGDMP-fixture"
 
 
-def on_kanboard_archive(test: Callable[..., Any]) -> Callable[..., Any]:
-    """Run one case on the Kanboard backend: it writes or restores the version-1 archive.
+def engine_dump_component() -> dict[str, Any]:
+    return {
+        "path": "engine/postgres.dump",
+        **ENGINE_DUMP_METADATA,
+        "tool_version": "(PostgreSQL) 16.10",
+        "bytes": len(ENGINE_DUMP_BYTES),
+    }
 
-    The suite runs on PostgreSQL (`tests/__init__.py`), whose archive carries a `pg_dump` of a real
-    store. A case built on the version-1 archive -- the raw Kanboard dump `raw_kanboard_dump`
-    stages -- means the Kanboard backup path, so it selects that backend for its own duration and
-    resets the process cache around the change. It goes away with the Kanboard backup path.
+
+@contextlib.contextmanager
+def fake_engine_dump() -> Iterator[mock.MagicMock]:
+    """`create_backups` against a store that is not there: the source is inspected and dumped.
+
+    The real `pg_dump` of a real store is proven in `tests/test_postgres_recovery.py`; a case here
+    is about the archive around the dump, so the dump is a fixed custom-format stand-in.
     """
 
-    @functools.wraps(test)
-    def pinned(*args: Any, **kwargs: Any) -> Any:
-        with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: KANBOARD}):
-            reset_card_backend()
-            try:
-                return test(*args, **kwargs)
-            finally:
-                reset_card_backend()
+    def dump(_config: object, destination: Path, details: dict[str, Any]) -> dict[str, Any]:
+        destination.write_bytes(ENGINE_DUMP_BYTES)
+        component = engine_dump_component()
+        component.pop("path")
+        return {**details, **component}
 
-    return pinned
+    with (
+        mock.patch(
+            "secretary.board.postgres_recovery.inspect_source",
+            side_effect=lambda _instance: (object(), dict(ENGINE_DUMP_METADATA)),
+        ),
+        mock.patch("secretary.board.postgres_recovery.create_dump", side_effect=dump) as create_dump,
+    ):
+        yield create_dump
 
 
 def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -> BackupResult:
@@ -49,77 +74,6 @@ def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -
     here rather than in `secretary.backup`, where nothing but a test would call it.
     """
     return create_backups(instance_path, backup_kinds=(backup_kind,), **kwargs)[0]
-
-
-class _EmptyWriteKanboard(WriteKanboard):
-    def __init__(self) -> None:
-        super().__init__()
-        self.tasks = []
-        self.metadata = {}
-        self.next_task_id = 12
-
-    def call(self, method: str, **params: object) -> object:
-        if method == "createTask":
-            self.calls.append((method, params))
-            task_id = self.next_task_id
-            self.next_task_id += 1
-            self.tasks.append(
-                {
-                    "id": task_id,
-                    "reference": params.get("reference", ""),
-                    "title": params["title"],
-                    "description": params.get("description", ""),
-                    "column_id": params["column_id"],
-                    "position": 1,
-                    "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1720000200",
-                    "date_modification": "1720000200",
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        return super().call(method, **params)
-
-
-class _EmptyBoardsKanboard(SprintKanboard):
-    """A disposable backend with both boards and no rows on either.
-
-    `SprintKanboard` already models the Pipeline and sprint boards side by side;
-    a restore target differs only in starting empty, and in stamping its own
-    creation dates so a parity check cannot pass by inheriting the source's.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.tasks = []
-        self.metadata = {}
-        self.comments = {}
-        self.next_task_id = 100
-
-    def call(self, method: str, **params: object) -> object:
-        if method == "createTask":
-            self.calls.append((method, params))
-            task_id = self.next_task_id
-            self.next_task_id += 1
-            self.tasks.append(
-                {
-                    "id": task_id,
-                    "project_id": int(params["project_id"]),
-                    "reference": params.get("reference", ""),
-                    "title": params["title"],
-                    "description": params.get("description", ""),
-                    "column_id": params["column_id"],
-                    "position": len(self.tasks) + 1,
-                    "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1780000000",
-                    "date_modification": "1780000000",
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        return super().call(method, **params)
 
 
 def _write_instance(root: Path, name: str) -> Path:
@@ -211,10 +165,7 @@ def _prepare_producer_data(data_dir: Path, instance_dir: Path) -> None:
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
-    raw = board / "kanboard-raw-test"
-    (raw / "data").mkdir(parents=True)
-    (raw / "manifest.json").write_text("{}", encoding="utf-8")
-    (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+    _write_board_history(board)
     runs = data_dir / "runs"
     for name in ("watermarks.json", "cards.json", "claims.json"):
         (runs / name).write_text("{}", encoding="utf-8")
@@ -268,14 +219,16 @@ def _core_archive(root: Path, name: str) -> Path:
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
+    _write_board_history(board)
     (payload / "secretary-data" / "memory" / "export.ndjson").write_text(
         '{"id":"fact"}\n{"id":"second-fact"}\n', encoding="utf-8"
     )
     for filename in ("watermarks.json", "cards.json", "claims.json"):
         (runs / filename).write_text("{}", encoding="utf-8")
     manifest = {
-        "version": 1,
+        "version": POSTGRES_BACKUP_VERSION,
         "backup_kind": "core",
+        "board_backend": "postgres",
         "instance": {"identity": {"name": name, "instance_remote": "git@example.invalid:test/instance.git"}},
         "components": {
             "board": {"path": "board/cards.json", "count": len(cards)},
@@ -285,6 +238,7 @@ def _core_archive(root: Path, name: str) -> Path:
                 "cards": "runs/cards.json",
                 "claims": "runs/claims.json",
             },
+            "board_history": {"path": "board/audit.json", "count": 0},
         },
     }
     _write_checksums(payload, manifest)
@@ -298,10 +252,9 @@ def _core_archive(root: Path, name: str) -> Path:
 def _full_archive(root: Path, name: str) -> Path:
     _core_archive(root, name)
     payload = root / ARCHIVE_ROOT
-    raw = payload / "secretary-data" / "board" / "kanboard-raw-test"
-    (raw / "data").mkdir(parents=True)
-    (raw / "manifest.json").write_text("{}", encoding="utf-8")
-    (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+    engine = payload / "engine"
+    engine.mkdir()
+    (engine / "postgres.dump").write_bytes(ENGINE_DUMP_BYTES)
     runs = payload / "secretary-data" / "runs"
     (runs / "runs.ndjson").write_text("{}\n", encoding="utf-8")
     for component in ("transcripts", "artifacts"):
@@ -314,7 +267,7 @@ def _full_archive(root: Path, name: str) -> Path:
     manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
     manifest["backup_kind"] = "full"
     manifest["components"] = {
-        "raw_board": {"path": "board/kanboard-raw-test"},
+        "postgres_dump": engine_dump_component(),
         "board": {"path": "board/cards.json"},
         "memory": {"path": "memory/export.ndjson"},
         "runs_state": {
@@ -326,6 +279,7 @@ def _full_archive(root: Path, name: str) -> Path:
         "transcripts": {"path": "transcripts/inventory.json"},
         "artifacts": {"path": "artifacts/inventory.json"},
         "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+        "board_history": {"path": "board/audit.json", "count": 0},
     }
     _write_checksums(payload, manifest)
     (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -333,6 +287,12 @@ def _full_archive(root: Path, name: str) -> Path:
     with tarfile.open(archive, "w") as bundle:
         bundle.add(payload, arcname=ARCHIVE_ROOT)
     return archive
+
+
+def _write_board_history(board: Path) -> None:
+    """The portable board history every archive carries next to the cards."""
+    (board / "audit.json").write_text('{"version": 1, "events": []}\n', encoding="utf-8")
+    (board / "audit.ndjson").write_text("", encoding="utf-8")
 
 
 def _write_checksums(payload: Path, manifest: dict[str, object]) -> None:

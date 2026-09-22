@@ -13,9 +13,17 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.backup import create_backups, estimate_archive_bytes, verify_backup
-from secretary.backup_policy import POLICIES, POSTGRES_FULL_POLICY, should_skip_data_entry
+from secretary.backup_policy import POLICIES, should_skip_data_entry
 from secretary.data import DataExport
-from tests.restore_fixtures import create_backup, on_kanboard_archive
+from tests.restore_fixtures import (
+    ENGINE_DUMP_BYTES,
+    create_backup,
+    engine_dump_component,
+    fake_engine_dump,
+)
+
+#: A raw file dump the retired board engine left under `board/`; no archive carries one.
+RETIRED_RAW_DUMP = "board/engine-raw-20260710T000000Z"
 
 
 class BackupTests(unittest.TestCase):
@@ -26,27 +34,24 @@ class BackupTests(unittest.TestCase):
         self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
+        self.engine_dump = self.enterContext(fake_engine_dump())
 
-    @on_kanboard_archive
     def test_create_writes_archive_with_expected_structure_and_verify_is_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
-            (instance / "runtime.env").write_text("KANBOARD_API_TOKEN=do-not-archive\n", encoding="utf-8")
+            (instance / "runtime.env").write_text("BOARD_API_TOKEN=do-not-archive\n", encoding="utf-8")
+            retired = data_dir / RETIRED_RAW_DUMP / "data"
+            retired.mkdir(parents=True)
+            (retired / "db.sqlite").write_bytes(b"sqlite")
 
             pipeline_calls: list[str] = []
 
             def fake_pipeline(action, **_kwargs):
                 pipeline_calls.append(action)
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             def fake_export_all(data_dir_arg, instance_dir_arg, *, copy_transcripts):
                 self.assertFalse(copy_transcripts)
@@ -72,7 +77,6 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch("secretary.backup.export_all", side_effect=fake_export_all),
             ):
                 result = create_backup(
@@ -86,15 +90,16 @@ class BackupTests(unittest.TestCase):
             )
 
             self.assertEqual(verified.code, 0, verified.findings)
-            self.assertEqual(verified.manifest["version"], 1)
+            self.assertEqual(verified.manifest["version"], 2)
+            self.assertEqual(verified.manifest["board_backend"], "postgres")
             with tarfile.open(result.archive, "r") as archive:
                 names = set(archive.getnames())
             self.assertIn("secretary-backup/versions.json", names)
             self.assertIn("secretary-backup/instance/instance.yaml", names)
             self.assertIn("secretary-backup/secretary-data/board/cards.json", names)
-            self.assertIn(
-                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite", names
-            )
+            self.assertIn("secretary-backup/engine/postgres.dump", names)
+            self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
+            self.assertEqual([name for name in names if RETIRED_RAW_DUMP in name], [])
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
             self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
             self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
@@ -104,7 +109,6 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/instance/runtime.env", names)
             self.assertNotIn("secretary-backup/instance/.env", names)
 
-    @on_kanboard_archive
     def test_create_excludes_memory_journal_hooks_and_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -124,10 +128,6 @@ class BackupTests(unittest.TestCase):
             cache.mkdir(parents=True)
             (cache / "model.onnx").write_bytes(b"onnx")
 
-            raw = data_dir / "board" / "kanboard-raw-test"
-            (raw / "data").mkdir(parents=True)
-            (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-            (raw / "manifest.json").write_text("{}", encoding="utf-8")
             exports = {
                 "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
                 "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
@@ -139,7 +139,6 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump", return_value=SimpleNamespace(dump_dir=raw)),
                 mock.patch("secretary.backup.export_all", return_value=exports),
             ):
                 result = create_backup(
@@ -172,10 +171,6 @@ class BackupTests(unittest.TestCase):
         cache = data_dir / "memory" / "fastembed-cache" / "models--bge-m3"
         cache.mkdir(parents=True)
         (cache / "model.onnx").write_bytes(b"\0" * cache_bytes)
-        raw = data_dir / "board" / "kanboard-raw-test"
-        (raw / "data").mkdir(parents=True)
-        (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-        (raw / "manifest.json").write_text("{}", encoding="utf-8")
         orca = root / "orca"
         orca.mkdir()
         (orca / "state.json").write_text("{}", encoding="utf-8")
@@ -192,30 +187,22 @@ class BackupTests(unittest.TestCase):
         with (
             mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
             mock.patch("secretary.backup._pipeline_action", return_value=None),
-            mock.patch(
-                "secretary.backup.raw_kanboard_dump",
-                return_value=SimpleNamespace(dump_dir=data_dir / "board" / "kanboard-raw-test"),
-            ),
             mock.patch("secretary.backup.export_all", return_value=exports),
         ):
             return create_backup(instance)
 
-    @on_kanboard_archive
     def test_estimate_covers_the_archive_and_leaves_the_model_cache_out(self):
         cache_bytes = 4 * 1024 * 1024
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance, data_dir = self._full_backup_with_model_cache(root, cache_bytes=cache_bytes)
             with mock.patch("secretary.backup.ORCA_STATE_DIRS", (root / "orca",)):
-                estimate = estimate_archive_bytes(
-                    instance, data_dir, backup_kind="full", backend="kanboard"
-                )
+                estimate = estimate_archive_bytes(instance, data_dir, backup_kind="full")
                 result = self._create_full(instance, data_dir)
 
             self.assertGreaterEqual(estimate, result.archive.stat().st_size)
             self.assertLess(estimate, cache_bytes)
 
-    @on_kanboard_archive
     def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
         from secretary.backup_policy import is_memory_model_cache_entry
         from secretary.restore import restore_backup
@@ -240,7 +227,8 @@ class BackupTests(unittest.TestCase):
             target = root / "target-instance"
             restored = root / "restored-data"
             _write_instance(target, restored)
-            restore_backup(result.archive, target)
+            # The data half of `restore-postgres`; the engine half is tests/test_postgres_recovery.py's.
+            restore_backup(result.archive, target, _allow_postgres_engine=True)
 
             self.assertEqual(
                 (restored / "memory" / "export.ndjson").read_text(encoding="utf-8"), "{}\n" * 20000
@@ -258,7 +246,6 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
 
-    @on_kanboard_archive
     def test_create_anchors_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -268,19 +255,16 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump") as raw_dump,
                 mock.patch(
                     "secretary.backup.export_all",
                     side_effect=lambda data_dir, *_args, **_kwargs: _fake_exports(data_dir),
                 ),
             ):
-                raw_dump.side_effect = lambda data_dir: SimpleNamespace(dump_dir=data_dir / "board" / "raw")
                 create_backup(instance)
 
             self.assertTrue((instance / "secretary-data" / "backups").exists())
             self.assertFalse((root / "secretary-data").exists())
 
-    @on_kanboard_archive
     def test_create_ignores_invalid_project_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -295,7 +279,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.raw_kanboard_dump",
+                    "secretary.backup.export_all",
                     side_effect=RuntimeError("snapshot reached"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "snapshot reached"),
@@ -319,7 +303,6 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
 
-    @on_kanboard_archive
     def test_create_resumes_pipeline_when_snapshot_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -334,10 +317,6 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch(
-                    "secretary.backup.raw_kanboard_dump",
-                    return_value=SimpleNamespace(dump_dir=data_dir / "board" / "raw"),
-                ),
                 mock.patch("secretary.backup.export_all", side_effect=RuntimeError("boom")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
@@ -493,7 +472,6 @@ class BackupTests(unittest.TestCase):
                     exclude_workspace=Path("/ws/backup"),
                 )
 
-    @on_kanboard_archive
     def test_create_claimed_worker_excludes_caller_workspace(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -510,10 +488,6 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
                 mock.patch("secretary.backup.export_all", side_effect=RuntimeError("stop")),
-                mock.patch(
-                    "secretary.backup.raw_kanboard_dump",
-                    return_value=SimpleNamespace(dump_dir=data_dir / "board" / "raw"),
-                ),
                 self.assertRaisesRegex(RuntimeError, "stop"),
             ):
                 create_backup(
@@ -538,7 +512,6 @@ class BackupTests(unittest.TestCase):
                     allow_claimed_worker=True,
                 )
 
-    @on_kanboard_archive
     def test_create_rejects_preexisting_freeze(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -565,7 +538,6 @@ class BackupTests(unittest.TestCase):
             ):
                 create_backup(instance)
 
-    @on_kanboard_archive
     def test_create_releases_lock_when_preexisting_freeze_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -597,7 +569,6 @@ class BackupTests(unittest.TestCase):
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
 
-    @on_kanboard_archive
     def test_create_rejects_preexisting_drain_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -617,7 +588,6 @@ class BackupTests(unittest.TestCase):
 
             pipeline_action.assert_not_called()
 
-    @on_kanboard_archive
     def test_create_rejects_concurrent_create(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -636,7 +606,6 @@ class BackupTests(unittest.TestCase):
                 os.close(fd)
             self.assertEqual(sorted(path.name for path in lock_path.parent.iterdir()), [".create.lock"])
 
-    @on_kanboard_archive
     def test_create_publishes_archive_without_clobbering_existing_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -648,18 +617,11 @@ class BackupTests(unittest.TestCase):
             existing = backups / "secretary-backup-full-20260710T000000Z.tar"
             existing.write_bytes(b"keep")
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch("secretary.backup.datetime") as fake_datetime,
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
@@ -679,7 +641,6 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar")
             self.assertTrue(result.archive.is_file())
 
-    @on_kanboard_archive
     def test_create_both_uses_one_pause_and_writes_core_and_full_archives(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -691,17 +652,10 @@ class BackupTests(unittest.TestCase):
             def fake_pipeline(action, **_kwargs):
                 pipeline_calls.append(action)
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
@@ -726,18 +680,13 @@ class BackupTests(unittest.TestCase):
                 core_names = set(archive.getnames())
             with tarfile.open(full, "r") as archive:
                 full_names = set(archive.getnames())
-            self.assertNotIn(
-                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite",
-                core_names,
-            )
-            self.assertIn(
-                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite",
-                full_names,
-            )
+            # One engine dump serves the pass, and only the full archive carries it.
+            self.engine_dump.assert_called_once()
+            self.assertNotIn("secretary-backup/engine/postgres.dump", core_names)
+            self.assertIn("secretary-backup/engine/postgres.dump", full_names)
             self.assertNotIn("secretary-backup/secretary-data/runs/runs.ndjson", core_names)
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", full_names)
 
-    @on_kanboard_archive
     def test_failed_create_does_not_leave_zero_length_final_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -754,7 +703,6 @@ class BackupTests(unittest.TestCase):
 
             self.assertEqual(list((data_dir / "backups").glob("*.tar")), [])
 
-    @on_kanboard_archive
     def test_core_filters_done_cards(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -762,17 +710,10 @@ class BackupTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(
@@ -801,7 +742,6 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
             self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", names)
 
-    @on_kanboard_archive
     def test_retention_keeps_one_core_and_removes_old_full(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -819,18 +759,11 @@ class BackupTests(unittest.TestCase):
             os.utime(old_core, (fresh_mtime, fresh_mtime))
             os.utime(old_full, (fresh_mtime, fresh_mtime))
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             with (
                 mock.patch("secretary.backup.datetime") as fake_datetime,
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch(
                     "secretary.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
@@ -928,10 +861,6 @@ class BackupTests(unittest.TestCase):
                 json.dumps(manifest, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-            raw_data = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data"
-            raw_data.mkdir(parents=True)
-            (raw_data / "db.sqlite").write_bytes(b"sqlite")
-            (raw_data.parent / "manifest.json").write_text("{}", encoding="utf-8")
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 
@@ -995,9 +924,9 @@ class BackupTests(unittest.TestCase):
             (payload / "versions.json").write_text(
                 json.dumps(
                     {
-                        "version": 1,
+                        "version": 2,
+                        "board_backend": "postgres",
                         "components": {
-                            "raw_board": {"path": "board/raw"},
                             "board": {"path": "board/cards.json"},
                             "memory": {"path": "memory/export.ndjson"},
                             "runs": {"path": "runs/runs.ndjson"},
@@ -1022,24 +951,42 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(any("runs/runs.ndjson" in item for item in result.findings))
         self.assertTrue(any("artifacts/inventory.json" in item for item in result.findings))
 
-    def test_verify_returns_1_when_raw_board_dump_has_no_data_files(self):
+    def test_verify_refuses_a_version_1_manifest_as_an_unsupported_version(self):
+        for version in (1, 3, None):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                archive = root / "old.tar"
+                payload = root / "payload" / "secretary-backup"
+                _write_complete_payload(payload)
+                manifest_path = payload / "versions.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["version"] = version
+                manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+                with tarfile.open(archive, "w") as tar:
+                    tar.add(payload, arcname="secretary-backup")
+
+                result = verify_backup(archive)
+
+            # No reading path for another format: the version is the whole answer.
+            self.assertEqual(result.code, 1)
+            self.assertEqual(
+                result.findings, [f"unsupported backup version: {version!r}; this build reads version 2"]
+            )
+
+    def test_verify_rejects_an_engine_dump_that_is_not_custom_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            archive = root / "incomplete.tar"
+            archive = root / "plain-sql.tar"
             payload = root / "payload" / "secretary-backup"
             _write_complete_payload(payload)
-            raw = payload / "secretary-data" / "board" / "kanboard-raw-empty"
-            (raw / "data").mkdir(parents=True)
-            (raw / "manifest.json").write_text("{}", encoding="utf-8")
+            (payload / "engine" / "postgres.dump").write_bytes(b"-- plain SQL dump\n")
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 
-            result = verify_backup(
-                archive,
-            )
+            result = verify_backup(archive)
 
         self.assertEqual(result.code, 1)
-        self.assertIn("raw board dump has no data files", result.findings)
+        self.assertIn("PostgreSQL dump is not in pg_restore custom format", result.findings)
 
     def test_verify_returns_1_when_transcript_payload_copies_are_present(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1050,9 +997,6 @@ class BackupTests(unittest.TestCase):
             copy_path = payload / "secretary-data" / "transcripts" / "copies" / "session.jsonl"
             copy_path.parent.mkdir(parents=True)
             copy_path.write_text("{}\n", encoding="utf-8")
-            raw = payload / "secretary-data" / "board" / "kanboard-raw-empty" / "data" / "db.sqlite"
-            raw.parent.mkdir(parents=True, exist_ok=True)
-            raw.write_bytes(b"sqlite")
             with tarfile.open(archive, "w") as tar:
                 tar.add(payload, arcname="secretary-backup")
 
@@ -1117,19 +1061,28 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
                     self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
 
     def test_full_archives_leave_out_only_the_memory_model_cache(self):
-        for policy in (POLICIES["full"], POSTGRES_FULL_POLICY):
-            for relative in (
-                "memory/fastembed-cache",
-                "memory/fastembed-cache/models--bge-m3/snapshots/model.onnx",
-            ):
-                with self.subTest(backend=policy.backend, relative=relative):
+        policy = POLICIES["full"]
+        for relative in (
+            "memory/fastembed-cache",
+            "memory/fastembed-cache/models--bge-m3/snapshots/model.onnx",
+        ):
+            with self.subTest(relative=relative):
+                self.assertTrue(should_skip_data_entry(Path(relative), policy=policy))
+        for relative in (
+            "memory/export.ndjson",
+            "memory/fastembed-cache-notes/readme.md",
+            "memory/facts/global/one.md",
+        ):
+            with self.subTest(relative=relative):
+                self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
+
+    def test_no_archive_carries_a_retired_raw_board_dump(self):
+        for policy in POLICIES.values():
+            for relative in (RETIRED_RAW_DUMP, f"{RETIRED_RAW_DUMP}/data/db.sqlite"):
+                with self.subTest(kind=policy.kind, relative=relative):
                     self.assertTrue(should_skip_data_entry(Path(relative), policy=policy))
-            for relative in (
-                "memory/export.ndjson",
-                "memory/fastembed-cache-notes/readme.md",
-                "memory/facts/global/one.md",
-            ):
-                with self.subTest(backend=policy.backend, relative=relative):
+            for relative in ("board/cards.json", "board/audit.json", "board/assessment-decisions/x.json"):
+                with self.subTest(kind=policy.kind, relative=relative):
                     self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
 
 
@@ -1194,11 +1147,15 @@ def _write_complete_payload(payload: Path) -> None:
     (payload / "secretary-data" / "transcripts").mkdir(parents=True)
     (payload / "secretary-data" / "artifacts").mkdir(parents=True)
     (payload / "debug" / "orca-state").mkdir(parents=True)
+    (payload / "engine").mkdir(parents=True)
+    (payload / "engine" / "postgres.dump").write_bytes(ENGINE_DUMP_BYTES)
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
     (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
     (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
+    (payload / "secretary-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
     (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
@@ -1216,15 +1173,17 @@ def _write_complete_payload(payload: Path) -> None:
     (payload / "versions.json").write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "board_backend": "postgres",
                 "components": {
-                    "raw_board": {"path": "board/kanboard-raw-empty"},
+                    "postgres_dump": engine_dump_component(),
                     "board": {"path": "board/cards.json"},
                     "memory": {"path": "memory/export.ndjson"},
                     "runs": {"path": "runs/runs.ndjson"},
                     "transcripts": {"path": "transcripts/inventory.json"},
                     "artifacts": {"path": "artifacts/inventory.json"},
                     "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+                    "board_history": {"path": "board/audit.json"},
                 },
             },
             sort_keys=True,
@@ -1247,6 +1206,8 @@ def _write_core_payload(payload: Path) -> None:
     )
     (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
     (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "secretary-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
+    (payload / "secretary-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
     (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
@@ -1254,9 +1215,11 @@ def _write_core_payload(payload: Path) -> None:
     (payload / "versions.json").write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "backup_kind": "core",
+                "board_backend": "postgres",
                 "components": {
+                    "board_history": {"path": "board/audit.json"},
                     "board": {"path": "board/cards.json"},
                     "memory": {"path": "memory/export.ndjson"},
                     "runs_state": {
@@ -1289,8 +1252,8 @@ class BackupMemoryCanonTests(unittest.TestCase):
         self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
+        self.engine_dump = self.enterContext(fake_engine_dump())
 
-    @on_kanboard_archive
     def test_create_exports_facts_from_the_private_repo(self):
         from secretary import state_repo
 
@@ -1312,12 +1275,6 @@ class BackupMemoryCanonTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A", "."], cwd=instance, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "facts"], cwd=instance, check=True)
 
-            def fake_raw(data_dir_arg):
-                raw = data_dir_arg / "board" / "kanboard-raw-20260710T000000Z"
-                (raw / "data").mkdir(parents=True)
-                (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
-                (raw / "manifest.json").write_text("{}", encoding="utf-8")
-                return SimpleNamespace(dump_dir=raw)
 
             def stub(name):
                 return lambda data_dir_arg, **_kwargs: DataExport(data_dir_arg / name, 1, name)
@@ -1325,7 +1282,6 @@ class BackupMemoryCanonTests(unittest.TestCase):
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump", side_effect=fake_raw),
                 mock.patch("secretary.data.export_board", side_effect=stub("board")),
                 mock.patch("secretary.data.export_runs", side_effect=stub("runs")),
                 mock.patch("secretary.data.export_transcripts", side_effect=stub("transcripts")),
@@ -1369,7 +1325,7 @@ class PostgresBackupPolicyTests(unittest.TestCase):
         self.addCleanup(reset_card_backend)
         self.addCleanup(self.env_patch.stop)
 
-    def test_postgres_full_never_calls_kanboard_and_excludes_store_credentials(self):
+    def test_full_archive_carries_the_engine_dump_and_excludes_store_credentials(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -1406,7 +1362,6 @@ class PostgresBackupPolicyTests(unittest.TestCase):
                 mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.raw_kanboard_dump") as raw,
                 mock.patch("secretary.backup.export_all", side_effect=exports),
                 mock.patch(
                     "secretary.board.postgres_recovery.inspect_source",
@@ -1416,13 +1371,11 @@ class PostgresBackupPolicyTests(unittest.TestCase):
             ):
                 result = create_backup(instance)
 
-            raw.assert_not_called()
             verified = verify_backup(result.archive)
             self.assertEqual(verified.code, 0, verified.findings)
             self.assertEqual(result.manifest["version"], 2)
             self.assertEqual(result.manifest["board_backend"], "postgres")
             self.assertIn("postgres_dump", result.manifest["components"])
-            self.assertNotIn("raw_board", result.manifest["components"])
             with tarfile.open(result.archive) as archive:
                 names = archive.getnames()
                 body = b"".join(
@@ -1434,6 +1387,26 @@ class PostgresBackupPolicyTests(unittest.TestCase):
             self.assertNotIn(secret.encode(), body)
             self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
             self.assertEqual([name for name in names if "memory/fastembed-cache" in name], [])
+
+    def test_create_refuses_a_board_not_served_by_postgres_before_pause_or_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            with (
+                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+                mock.patch("secretary.backup.card_backend", return_value="json-rpc"),
+                mock.patch("secretary.board.postgres_recovery.inspect_source") as inspect,
+                mock.patch("secretary.backup._pipeline_action") as pipeline,
+                self.assertRaisesRegex(
+                    RuntimeError, "backup create requires SECRETARY_CARD_BACKEND=postgres, not json-rpc"
+                ),
+            ):
+                create_backup(instance)
+            inspect.assert_not_called()
+            pipeline.assert_not_called()
+            self.assertFalse((data_dir / "backups").exists())
 
     def test_unusable_postgres_fails_before_pause_or_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:

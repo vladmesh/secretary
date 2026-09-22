@@ -16,7 +16,6 @@ from secretary._fsutil import file_lock, write_text_atomic
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
-    BACKUP_VERSION,
     CORE_POLICY,
     POSTGRES_BACKUP_VERSION,
     BackupPolicy,
@@ -1163,7 +1162,7 @@ def bootstrap_empty(instance_path: Path, *, dry_run: bool = False) -> RestorePla
     plan = RestorePlan(
         archive=Path(),
         backup_kind="empty",
-        backup_version=BACKUP_VERSION,
+        backup_version=POSTGRES_BACKUP_VERSION,
         data_dir=target,
         components=restore_plan_components(CORE_POLICY, empty=True),
         instance_identity=identity,
@@ -1199,19 +1198,17 @@ def restore_backup(
         if archive_identity != target_identity:
             raise RestoreError("archive instance identity does not match target instance")
         kind = manifest.get("backup_kind")
-        backend = manifest.get("board_backend", "kanboard")
-        expected_version = POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION
-        if kind not in BACKUP_KINDS or manifest.get("version") != expected_version:
+        if kind not in BACKUP_KINDS or manifest.get("version") != POSTGRES_BACKUP_VERSION:
             raise RestoreError("archive kind or version is not supported")
-        policy = policy_for(kind, backend)
+        policy = policy_for(kind)
         if policy is None:
             raise RestoreError("archive kind is not supported")
-        if backend == "postgres" and kind == "full" and not _allow_postgres_engine:
+        if kind == "full" and not _allow_postgres_engine:
             raise RestoreError("PostgreSQL full archives require secretary restore-postgres")
         plan = RestorePlan(
             archive=archive,
             backup_kind=kind,
-            backup_version=expected_version,
+            backup_version=POSTGRES_BACKUP_VERSION,
             data_dir=target,
             components=restore_plan_components(policy),
             instance_identity=target_identity,
@@ -1242,7 +1239,7 @@ def restore_postgres_backup(
     _, target, target_identity = _target(instance_path)
     if _archive_identity(manifest) != target_identity:
         raise RestoreError("archive instance identity does not match target instance")
-    policy = policy_for("full", "postgres")
+    policy = policy_for("full")
     if (
         manifest.get("board_backend") != "postgres"
         or manifest.get("backup_kind") != "full"
@@ -1337,7 +1334,7 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
     except (OSError, ValueError) as exc:
         raise RestoreError(f"portable PostgreSQL verification data is invalid: {exc}") from None
     finally:
-        if client is not None and getattr(client, "backend_kind", "kanboard") == "postgres":
+        if client is not None and getattr(client, "backend_kind", None) == "postgres":
             client.connection.close()
     by_ref = lambda rows: sorted(rows, key=lambda row: str(row.get("reference") or ""))
     if (

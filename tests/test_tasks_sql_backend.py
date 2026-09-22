@@ -43,8 +43,7 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_a
 # Imported as a module, not by name: a bare import would make unittest collect the Kanboard
 # cases a second time here, once more on the backend they already run on in test_tasks.py.
 from tests import test_tasks as kanboard_cases
-from tests.fakes.tasks import FakeKanboard, WriteKanboard
-from tests.restore_fixtures import _EmptyWriteKanboard
+from tests.fakes.tasks import FakeKanboard, WriteKanboard, _EmptyWriteKanboard
 from tests.sql_backend_fixtures import PostgresBoard, seed_client
 
 

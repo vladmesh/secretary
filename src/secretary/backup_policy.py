@@ -8,7 +8,6 @@ from typing import Any, Literal
 from secretary.data import DataExport
 
 ARCHIVE_ROOT = "secretary-backup"
-BACKUP_VERSION = 1
 POSTGRES_BACKUP_VERSION = 2
 
 BackupKind = Literal["core", "full"]
@@ -26,7 +25,6 @@ class ComponentPolicy:
     source_export: str | None = None
     required_entries: tuple[str, ...] = ()
     required_fields: tuple[str, ...] = ()
-    requires_raw_board_data: bool = False
     restore_action: RestoreAction = "restore"
 
 
@@ -37,7 +35,6 @@ class BackupPolicy:
     forbidden_entries: tuple[str, ...]
     retention_seconds: int | None
     restore_capability: str
-    backend: str = "kanboard"
 
     @property
     def required_components(self) -> tuple[str, ...]:
@@ -72,18 +69,21 @@ MEMORY = ComponentPolicy(
     source_export="memory",
 )
 
+BOARD = ComponentPolicy(
+    "board",
+    "board/cards.json",
+    source_export="board",
+    required_entries=("board/cards.ndjson", "board/export.json"),
+)
+BOARD_HISTORY = ComponentPolicy(
+    "board_history",
+    "board/audit.json",
+    required_entries=("board/audit.ndjson",),
+)
+
 CORE_POLICY = BackupPolicy(
     kind="core",
-    components=(
-        ComponentPolicy(
-            "board",
-            "board/cards.json",
-            source_export="board",
-            required_entries=("board/cards.ndjson", "board/export.json"),
-        ),
-        MEMORY,
-        RUNS_STATE,
-    ),
+    components=(BOARD, MEMORY, RUNS_STATE, BOARD_HISTORY),
     forbidden_entries=(
         f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
         f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
@@ -97,18 +97,8 @@ CORE_POLICY = BackupPolicy(
 FULL_POLICY = BackupPolicy(
     kind="full",
     components=(
-        ComponentPolicy(
-            "raw_board",
-            "board",
-            required_entries=("board",),
-            requires_raw_board_data=True,
-        ),
-        ComponentPolicy(
-            "board",
-            "board/cards.json",
-            source_export="board",
-            required_entries=("board/cards.ndjson", "board/export.json"),
-        ),
+        ComponentPolicy("postgres_dump", "engine/postgres.dump"),
+        BOARD,
         MEMORY,
         RUNS_STATE,
         ComponentPolicy("runs", "runs/runs.ndjson", source_export="runs"),
@@ -119,43 +109,11 @@ FULL_POLICY = BackupPolicy(
             "debug/orca-state/inventory.json",
             restore_action="exclude",
         ),
-    ),
-    forbidden_entries=(),
-    retention_seconds=48 * 60 * 60,
-    restore_capability="full-snapshot",
-)
-
-POSTGRES_CORE_POLICY = BackupPolicy(
-    kind="core",
-    components=(
-        *CORE_POLICY.components,
-        ComponentPolicy(
-            "board_history",
-            "board/audit.json",
-            required_entries=("board/audit.ndjson",),
-        ),
-    ),
-    forbidden_entries=CORE_POLICY.forbidden_entries,
-    retention_seconds=None,
-    restore_capability="normalized-core",
-    backend="postgres",
-)
-
-POSTGRES_FULL_POLICY = BackupPolicy(
-    kind="full",
-    components=(
-        ComponentPolicy("postgres_dump", "engine/postgres.dump"),
-        *tuple(component for component in FULL_POLICY.components if component.name != "raw_board"),
-        ComponentPolicy(
-            "board_history",
-            "board/audit.json",
-            required_entries=("board/audit.ndjson",),
-        ),
+        BOARD_HISTORY,
     ),
     forbidden_entries=(),
     retention_seconds=48 * 60 * 60,
     restore_capability="postgres-local-recovery",
-    backend="postgres",
 )
 
 POLICIES: dict[BackupKind, BackupPolicy] = {
@@ -165,12 +123,10 @@ POLICIES: dict[BackupKind, BackupPolicy] = {
 BACKUP_KINDS: tuple[BackupKind, ...] = tuple(POLICIES)
 
 
-def policy_for(kind: object, backend: str = "kanboard") -> BackupPolicy | None:
+def policy_for(kind: object) -> BackupPolicy | None:
     if not isinstance(kind, str):
         return None
-    if backend == "postgres":
-        return {"core": POSTGRES_CORE_POLICY, "full": POSTGRES_FULL_POLICY}.get(kind)
-    return POLICIES.get(kind) if kind in POLICIES else None
+    return POLICIES.get(kind)
 
 
 def component_archive_name(path: str) -> str:
@@ -203,17 +159,12 @@ def build_components_manifest(
     *,
     policy: BackupPolicy,
     data_dir: Path,
-    raw_dump: Path | None,
     exports: dict[str, DataExport],
     postgres_dump: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     components: dict[str, Any] = {}
     for component in policy.components:
-        if component.name == "raw_board":
-            if raw_dump is None:
-                raise RuntimeError("Kanboard full backup has no raw board dump")
-            components[component.name] = {"path": _relative_to_data(data_dir, raw_dump)}
-        elif component.name == "postgres_dump":
+        if component.name == "postgres_dump":
             if postgres_dump is None:
                 raise RuntimeError("PostgreSQL full backup has no engine dump")
             components[component.name] = {"path": component.path, **postgres_dump}
@@ -257,13 +208,21 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if any(part.startswith(".") for part in relative.parts) and relative.parts[:2] != ("memory", "facts"):
         return True
+    if is_retired_raw_board_dump(relative):
+        return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)
-    if is_memory_model_cache_entry(relative):
-        return True
-    if policy.backend == "postgres" and relative.parts[:1] == ("board",):
-        return len(relative.parts) > 1 and relative.parts[1].startswith("kanboard-raw-")
-    return False
+    return is_memory_model_cache_entry(relative)
+
+
+def is_retired_raw_board_dump(relative: Path) -> bool:
+    """A raw file dump of the retired board engine, `board/<engine>-raw-<stamp>/`.
+
+    Nothing writes one any more, but a data dir from before the PostgreSQL board may still hold
+    them; the engine dump in `engine/postgres.dump` is the board's recovery copy, so no archive
+    carries them.
+    """
+    return relative.parts[:1] == ("board",) and len(relative.parts) > 1 and "-raw-" in relative.parts[1]
 
 
 def is_memory_model_cache_entry(relative: Path) -> bool:
@@ -294,8 +253,6 @@ def _skip_core_data_entry(relative: Path) -> bool:
     root = relative.parts[0]
     if root in {"transcripts", "artifacts"}:
         return True
-    if root == "board" and len(relative.parts) > 1:
-        return relative.parts[1].startswith("kanboard-raw-")
     if root == "runs" and len(relative.parts) > 1:
         return relative.parts[1] not in {"watermarks.json", "cards.json", "claims.json"}
     return False

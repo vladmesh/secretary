@@ -22,8 +22,6 @@ from secretary.data import (
     init_layout,
     manifest_for,
     normalize_board_card,
-    raw_kanboard_dump,
-    resolve_kanboard_container,
 )
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import (
@@ -136,192 +134,6 @@ class DataLayoutTests(unittest.TestCase):
                 init_layout(data_dir)
 
 
-class RawKanboardDumpTests(unittest.TestCase):
-    """The dump resolves its container from the installed Compose project.
-
-    Before secretary-1607 every one of these tests ran against the literal `cp-kanboard`, which is
-    the name no installation has: the live one calls the container `secretary-kanboard-1`, and the
-    2026-09-09 cutover only got past this phase because the operator renamed it by hand. The
-    fake `docker` below therefore answers two commands, `ps` and `cp`, and the resolution is part
-    of what the dump is asserted to do.
-    """
-
-    COMPOSE_FILE = Path("/opt/secretary/kanboard-compose.yml")
-    RESOLVED_ID = "7e163af91030"
-    RESOLVED_NAME = "secretary-kanboard-1"
-
-    def _fake_docker(self, *, rows=None, copy=True, calls=None):
-        """A `subprocess.run` double for `docker ps` (resolution) and `docker cp` (the dump)."""
-
-        listed = ((self.RESOLVED_ID, self.RESOLVED_NAME, "running"),) if rows is None else rows
-
-        def run(command, **_kwargs):
-            if calls is not None:
-                calls.append(list(command))
-            if command[1] == "ps":
-                stdout = "".join("\t".join(row) + "\n" for row in listed)
-                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
-            self.assertEqual(command[0:2], ["docker", "cp"])
-            if copy:
-                destination = Path(command[-1])
-                destination.mkdir(parents=True)
-                (destination / "db.sqlite").write_bytes(b"sqlite")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-        return run
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_copies_into_unique_board_dir(self, run):
-        run.side_effect = self._fake_docker()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            first = raw_kanboard_dump(data_dir)
-            second = raw_kanboard_dump(data_dir)
-
-            self.assertNotEqual(first.dump_dir, second.dump_dir)
-            self.assertTrue((first.dump_dir / "data" / "db.sqlite").is_file())
-            self.assertTrue((first.dump_dir / "manifest.json").is_file())
-            self.assertEqual(run.call_count, 4)
-            self.assertEqual(run.call_args.args[0][0:2], ["docker", "cp"])
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_resolves_the_installed_compose_container(self, run):
-        calls: list[list[str]] = []
-        run.side_effect = self._fake_docker(calls=calls)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            dump = raw_kanboard_dump(data_dir)
-            manifest = json.loads((dump.dump_dir / "manifest.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(dump.source, f"{self.RESOLVED_NAME}:/var/www/app/data")
-        self.assertEqual(calls[0][0:2], ["docker", "ps"])
-        self.assertIn(
-            f"label=com.docker.compose.project.config_files={self.COMPOSE_FILE}", calls[0]
-        )
-        self.assertIn("label=com.docker.compose.service=kanboard", calls[0])
-        self.assertEqual(calls[1][2], f"{self.RESOLVED_NAME}:/var/www/app/data")
-        self.assertEqual(manifest["container"], self.RESOLVED_NAME)
-        self.assertEqual(manifest["container_origin"], "compose-service")
-        self.assertEqual(manifest["container_id"], self.RESOLVED_ID)
-        self.assertEqual(manifest["compose_file"], str(self.COMPOSE_FILE))
-        self.assertEqual(manifest["compose_service"], "kanboard")
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_explicit_container_wins_without_resolution(self, run):
-        calls: list[list[str]] = []
-        run.side_effect = self._fake_docker(calls=calls)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            dump = raw_kanboard_dump(data_dir, container="operator-chosen")
-            manifest = json.loads((dump.dump_dir / "manifest.json").read_text(encoding="utf-8"))
-
-        self.assertEqual([call[0:2] for call in calls], [["docker", "cp"]])
-        self.assertEqual(dump.source, "operator-chosen:/var/www/app/data")
-        self.assertEqual(manifest["container"], "operator-chosen")
-        self.assertEqual(manifest["container_origin"], "override")
-        self.assertIsNone(manifest["container_id"])
-        self.assertNotIn("compose_file", manifest)
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_resolve_kanboard_container_refuses_when_the_service_has_no_container(self, run):
-        run.side_effect = self._fake_docker(rows=())
-
-        with self.assertRaises(RuntimeError) as caught:
-            resolve_kanboard_container()
-
-        message = str(caught.exception)
-        self.assertIn(str(self.COMPOSE_FILE), message)
-        self.assertIn("'kanboard'", message)
-        self.assertIn("no container", message)
-        self.assertNotIn("cp-kanboard", message)
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_resolve_kanboard_container_refuses_a_stopped_container(self, run):
-        run.side_effect = self._fake_docker(rows=((self.RESOLVED_ID, self.RESOLVED_NAME, "exited"),))
-
-        with self.assertRaises(RuntimeError) as caught:
-            resolve_kanboard_container()
-
-        message = str(caught.exception)
-        self.assertIn(str(self.COMPOSE_FILE), message)
-        self.assertIn("'kanboard'", message)
-        self.assertIn("not running", message)
-        self.assertIn(self.RESOLVED_NAME, message)
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_resolve_kanboard_container_refuses_an_ambiguous_service(self, run):
-        run.side_effect = self._fake_docker(
-            rows=(("a" * 12, "secretary-kanboard-1", "running"), ("b" * 12, "secretary-kanboard-2", "running"))
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "2 running containers"):
-            resolve_kanboard_container()
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_resolve_kanboard_container_reports_a_failed_listing(self, run):
-        run.side_effect = subprocess.CalledProcessError(
-            1, ["docker", "ps"], output="", stderr="Cannot connect to the Docker daemon\n"
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "Cannot connect to the Docker daemon"):
-            resolve_kanboard_container()
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_cleans_staging_when_manifest_write_fails(self, run):
-        run.side_effect = self._fake_docker()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            with mock.patch("secretary.data.Path.write_text", side_effect=OSError("full")):
-                with self.assertRaises(RuntimeError):
-                    raw_kanboard_dump(data_dir)
-
-            board_entries = list((data_dir / "board").iterdir())
-
-        self.assertEqual(board_entries, [])
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_retries_publish_name_collision(self, run):
-        original_rename = os.rename
-        rename_calls = []
-
-        def fake_rename(source, destination):
-            rename_calls.append(Path(destination).name)
-            if len(rename_calls) == 1:
-                raise FileExistsError
-            original_rename(source, destination)
-
-        run.side_effect = self._fake_docker()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            with mock.patch("secretary.data.os.rename", side_effect=fake_rename):
-                dump = raw_kanboard_dump(data_dir)
-
-            self.assertTrue((dump.dump_dir / "manifest.json").is_file())
-            self.assertTrue((dump.dump_dir / "data" / "db.sqlite").is_file())
-
-        self.assertEqual(len(rename_calls), 2)
-        self.assertTrue(rename_calls[-1].endswith("-1"))
-
-    @mock.patch("secretary.data.subprocess.run")
-    def test_raw_kanboard_dump_wraps_staging_prepare_failure(self, run):
-        run.side_effect = self._fake_docker()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-
-            with (
-                mock.patch("secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")),
-                self.assertRaisesRegex(RuntimeError, "could not create raw dump"),
-            ):
-                raw_kanboard_dump(data_dir)
-
-            self.assertEqual(list((data_dir / "board").iterdir()), [])
-
-
 class ExportTests(unittest.TestCase):
     def test_normalize_board_card_keeps_required_surface(self):
         card = {
@@ -389,7 +201,7 @@ class ExportTests(unittest.TestCase):
     def test_export_board_uses_the_reader_not_a_subprocess_or_pipeline_path(self):
         reader = TaskExportReader()
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch("secretary.data.subprocess.run", side_effect=AssertionError("no subprocess")):
+            with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
                 result = export_board(
                     Path(tmpdir) / "secretary-data",
                     instance_dir=Path(tmpdir),
@@ -464,80 +276,6 @@ class ExportTests(unittest.TestCase):
         # Unreachable sprints must not produce a partial snapshot of cards alone.
         self.assertEqual(published, [])
 
-    def test_export_board_records_matching_active_raw_count_when_dump_exists(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
-            database.parent.mkdir(parents=True)
-            with sqlite3.connect(database) as conn:
-                conn.execute("create table projects (id integer primary key, name text)")
-                conn.execute(
-                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
-                )
-                conn.execute("insert into projects (id, name) values (1, 'Other'), (2, 'Pipeline')")
-                conn.execute(
-                    "insert into tasks (project_id, is_active) values (2, 1), (2, 0), (2, 1), (1, 1)"
-                )
-            export_board(
-                data_dir,
-                instance_dir=Path(tmpdir),
-                reader=TaskExportReader(
-                    [
-                        {"id": 1, "reference": "secretary-1", "title": "One"},
-                        {"id": 2, "reference": "secretary-2", "title": "Two"},
-                    ]
-                ),
-                sprint_client=SprintKanboard(),
-            )
-            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(summary["raw_active_task_count"], 2)
-
-    def test_export_board_skips_raw_count_when_board_project_missing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
-            database.parent.mkdir(parents=True)
-            with sqlite3.connect(database) as conn:
-                conn.execute("create table projects (id integer primary key, name text)")
-                conn.execute(
-                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
-                )
-                conn.execute("insert into projects (id, name) values (1, 'Other')")
-                conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1), (1, 1)")
-            export_board(
-                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(), sprint_client=SprintKanboard()
-            )
-            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
-
-        # A dump with no Pipeline board: another board's 3 active tasks must neither enter the
-        # count nor fail the export as a mismatch; the check is skipped explicitly.
-        self.assertIsNone(summary["raw_active_task_count"])
-        self.assertEqual(summary["card_count"], 1)
-
-    def test_export_board_records_stale_raw_count_without_failing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
-            database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
-            database.parent.mkdir(parents=True)
-            with sqlite3.connect(database) as conn:
-                conn.execute("create table projects (id integer primary key, name text)")
-                conn.execute(
-                    "create table tasks (id integer primary key, project_id integer, is_active integer)"
-                )
-                conn.execute("insert into projects (id, name) values (1, 'Pipeline')")
-                conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1)")
-            export_board(
-                data_dir,
-                instance_dir=Path(tmpdir),
-                reader=TaskExportReader([]),
-                sprint_client=SprintKanboard(),
-            )
-            summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(summary["card_count"], 0)
-        self.assertEqual(summary["raw_active_task_count"], 2)
-
     def test_export_board_preserves_previous_snapshot_on_publish_error(self):
         cards_by_run = [
             [{"id": 1, "reference": "secretary-1", "title": "One"}],
@@ -551,9 +289,6 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             board_dir = data_dir / "board"
-            raw_marker = board_dir / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
-            raw_marker.parent.mkdir(parents=True)
-            raw_marker.write_bytes(b"not sqlite")
 
             export_board(data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard())
             old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
@@ -580,12 +315,10 @@ class ExportTests(unittest.TestCase):
             current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
             current_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
             current_summary = (board_dir / "export.json").read_text(encoding="utf-8")
-            raw_dump_preserved = raw_marker.is_file()
 
         self.assertEqual(current_cards, old_cards)
         self.assertEqual(current_ndjson, old_ndjson)
         self.assertEqual(current_summary, old_summary)
-        self.assertTrue(raw_dump_preserved)
 
     def test_export_memory_writes_ndjson_from_the_instance_repo(self):
         with tempfile.TemporaryDirectory() as tmpdir:

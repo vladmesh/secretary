@@ -240,3 +240,34 @@ class WriteKanboard(FakeKanboard):
             task["date_modification"] = "1720000300"
             return True
         return super().call(method, **params)
+
+
+class _EmptyWriteKanboard(WriteKanboard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tasks = []
+        self.metadata = {}
+        self.next_task_id = 12
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = self.next_task_id
+            self.next_task_id += 1
+            self.tasks.append(
+                {
+                    "id": task_id,
+                    "reference": params.get("reference", ""),
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": 1,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
+                }
+            )
+            self.metadata[task_id] = {}
+            self.comments[task_id] = []
+            return task_id
+        return super().call(method, **params)

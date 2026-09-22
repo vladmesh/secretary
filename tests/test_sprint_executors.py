@@ -35,10 +35,10 @@ from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
     SprintBackendFixture,
     SprintFixture,
+    _EmptyBoardsKanboard,
     _write_project_registry,
 )
 from tests.observer_identity import as_observer
-from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.sprint_close_fixtures import close_decisions
 
 UNSET_BOTH = {"worker": executor_unset(), "reviewer": executor_unset()}

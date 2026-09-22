@@ -10,7 +10,6 @@ from secretary._fsutil import sha256_stream
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
-    BACKUP_VERSION,
     POSTGRES_BACKUP_VERSION,
     BackupPolicy,
     component_archive_name,
@@ -55,6 +54,20 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
     except (tarfile.TarError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         return VerifyResult(1, [f"invalid archive: {exc}"], [])
 
+    if isinstance(manifest, dict) and manifest.get("version") != POSTGRES_BACKUP_VERSION:
+        # Only the current format has a reading path; any other version is refused whole.
+        return VerifyResult(
+            1,
+            [
+                (
+                    f"unsupported backup version: {manifest.get('version')!r}; "
+                    f"this build reads version {POSTGRES_BACKUP_VERSION}"
+                )
+            ],
+            [],
+            manifest,
+        )
+
     policy = _policy_from_manifest(manifest)
     required_entries = _required_entries_for_manifest(manifest, policy)
     missing = sorted(required_entries - names)
@@ -64,12 +77,6 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         findings.append("versions manifest must be an object")
     else:
         raw_kind = manifest.get("backup_kind", manifest.get("kind", "full"))
-        backend = manifest.get("board_backend", "kanboard")
-        expected_version = POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION
-        if manifest.get("version") != expected_version:
-            findings.append("unsupported backup version")
-        if backend not in {"kanboard", "postgres"}:
-            findings.append("unsupported board backend")
         if raw_kind not in BACKUP_KINDS:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
@@ -77,7 +84,7 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
-    if policy.backend == "postgres" and policy.kind == "full":
+    if policy.kind == "full":
         findings.extend(_verify_postgres_archive_signature(path))
 
     forbidden_names = [name for name in sorted(names) if _is_forbidden_archive_entry(name)]
@@ -106,8 +113,7 @@ def _policy_from_manifest(manifest: Any) -> BackupPolicy:
     if not isinstance(manifest, dict):
         return policy_for("full")
     raw_kind = manifest.get("backup_kind", manifest.get("kind", "full"))
-    backend = manifest.get("board_backend", "kanboard")
-    return policy_for(raw_kind, backend) or policy_for("full")
+    return policy_for(raw_kind) or policy_for("full")
 
 
 def _required_entries_for_manifest(manifest: Any, policy: BackupPolicy) -> set[str]:
@@ -129,12 +135,7 @@ def _verify_manifest_components(
     missing_components = sorted(required_components - set(components))
     findings.extend(f"versions manifest missing component: {name}" for name in missing_components)
     component_policies = {component.name: component for component in policy.components}
-    if policy.backend == "postgres":
-        if "raw_board" in components:
-            findings.append("PostgreSQL archive must not contain a Kanboard raw_board component")
-        findings.extend(_verify_postgres_manifest(manifest, components))
-    elif "postgres_dump" in components:
-        findings.append("Kanboard archive must not contain a PostgreSQL dump component")
+    findings.extend(_verify_postgres_manifest(manifest, components))
     for name in sorted(required_components & set(components)):
         component = components.get(name)
         if not isinstance(component, dict) or not isinstance(component.get("path"), str):
@@ -147,8 +148,6 @@ def _verify_manifest_components(
         component_policy = component_policies[name]
         if name == "postgres_dump":
             findings.extend(_verify_postgres_dump_member(members, archive_name))
-        if component_policy.requires_raw_board_data:
-            findings.extend(_verify_raw_board_component(members, names, archive_name))
         for field in component_policy.required_fields:
             value = component.get(field)
             if not isinstance(value, str):
@@ -310,31 +309,8 @@ def _archive_has_path(names: set[str], archive_name: str) -> bool:
     return archive_name in names or any(member_name.startswith(f"{archive_name}/") for member_name in names)
 
 
-def _verify_raw_board_component(
-    members: list[tarfile.TarInfo],
-    names: set[str],
-    archive_name: str,
-) -> list[str]:
-    findings: list[str] = []
-    manifest_name = f"{archive_name}/manifest.json"
-    data_prefix = f"{archive_name}/data/"
-    if manifest_name not in names:
-        findings.append("raw board dump missing manifest.json")
-    if not any(member.isfile() and member.name.startswith(data_prefix) for member in members):
-        findings.append("raw board dump has no data files")
-    return findings
-
-
 def _verify_core_archive(names: set[str], path: Path, policy: BackupPolicy) -> list[str]:
     findings: list[str] = []
-    raw_entries = [
-        name
-        for name in names
-        if Path(name).parts[:3] == (ARCHIVE_ROOT, "secretary-data", "board")
-        and len(Path(name).parts) > 3
-        and Path(name).parts[3].startswith("kanboard-raw-")
-    ]
-    findings.extend(f"core archive contains raw board dump: {name}" for name in raw_entries)
     findings.extend(
         f"core archive contains full-only entry: {name}"
         for name in sorted(set(policy.forbidden_entries) & names)

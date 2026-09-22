@@ -51,9 +51,8 @@ from secretary.tasks import (
     standing_decision,
 )
 from tests.fakes.sprints import SprintKanboard
-from tests.fakes.tasks import FakeKanboard, WriteKanboard
+from tests.fakes.tasks import FakeKanboard, WriteKanboard, _EmptyWriteKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
-from tests.restore_fixtures import _EmptyWriteKanboard
 from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun
 from triggered_agents.runtime.head import HeadSpec, TaskRef
 

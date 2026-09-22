@@ -35,7 +35,6 @@ unit tests/test_broad_suite.py
 unit tests/test_candidate_history.py
 integration-recovery tests/test_checkpoint.py
 integration-recovery tests/test_cutover.py
-integration-recovery tests/test_kanboard_container_resolution.py
 integration-recovery tests/test_postgres_recovery.py
 integration-recovery tests/test_fresh_postgres_install.py
 unit tests/test_ci_shards.py
