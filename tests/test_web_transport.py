@@ -1,6 +1,6 @@
 """The web transport: a status table, a closed route list, cursors over HTTP, and one loopback bind.
 
-Hermetic in the same sense the two layer suites are: no live Orca, no Kanboard, no network beyond a
+Hermetic in the same sense the two layer suites are: no live Orca, no live board, no network beyond a
 loopback socket this test binds itself, and no real worker. The board is a throwaway card store
 (`tests/sql_backend_fixtures.py`), the head
 backend is a fake that leaves behind exactly the artefacts a supervised head leaves, and every

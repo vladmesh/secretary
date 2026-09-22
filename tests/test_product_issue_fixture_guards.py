@@ -23,9 +23,9 @@ STORE_METHODS = {
 
 class ProductIssueFixtureGuards(unittest.TestCase):
     def test_every_method_is_counted(self) -> None:
-        # 16 and 30 originally; secretary-1669 removed five Kanboard-only store cases that write a
-        # card. secretary-1670 removed the 11 Kanboard-only lane cases, the 11 Kanboard-only store
-        # cases and the file-journal upgrade gate case with the Kanboard implementation.
+        # 16 and 30 originally; secretary-1669 removed five store cases that wrote a card through
+        # the retired implementation. secretary-1670 removed the 11 lane cases, the 11 store cases
+        # and the file-journal upgrade gate case that only it had, together with it.
         self.assertEqual(len(SWIMLANE_METHODS), 5)
         self.assertEqual(len(STORE_METHODS), 13)
 
@@ -91,7 +91,7 @@ class ProductIssueFixtureBehaviorTests(ProductIssueFixture, unittest.TestCase):
             )
 
         # The store rolls the create back whole, so the refusal is a rolled-back transaction
-        # (`backend_rejected` was the Kanboard implementation's terminal `false` reply).
+        # (`backend_rejected` was the retired implementation's terminal `false` reply).
         self.assertEqual(refused.exception.code, "backend_error")
         self.assertEqual(self.record_count("product:secretary"), 0)
 

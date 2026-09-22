@@ -3951,7 +3951,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
 
         def explode(**_kwargs):
-            raise TaskError("backend_error", "kanboard is down", 1)
+            raise TaskError("backend_error", "board store is down", 1)
 
         with mock.patch.object(self.runtime.sprints, "list", explode):
             result = self.runtime.production_tick()

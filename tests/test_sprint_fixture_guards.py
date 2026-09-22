@@ -66,7 +66,7 @@ EXPECTED_CLASSES = {
 
 # The complete permitted locations of a storage reach-in: the listing-budget cases, whose subject is
 # what the store is asked. Sprints have one implementation, PostgreSQL (secretary-1670), and the 33
-# cases that were allowed one because their subject was the Kanboard transport or its half-applied
+# cases that were allowed one because their subject was the retired transport or its half-applied
 # filesystem transaction were deleted with it.
 ALLOWED_STORAGE_LOCATIONS: frozenset[str] = frozenset(
     f"tests.test_sprint_listing_budget.SprintListingBudgetTests.{name}"
@@ -90,7 +90,9 @@ def _methods(module: object) -> dict[str, object]:
     return found
 
 
-FORBIDDEN_NAMES = {"SprintKanboard", "ProductSprintKanboard", "ensure_sprint_board"}
+# The retired fake sprint classes are gone from the tree, so a case naming one fails on its own;
+# what is left to forbid by name is the board helper they were built on.
+FORBIDDEN_NAMES = {"ensure_sprint_board"}
 FORBIDDEN_RPC = {
     "getProjectByName",
     "getColumns",
@@ -207,10 +209,11 @@ class _HelperBypass:
 
 class SprintFixtureGuards(unittest.TestCase):
     def test_every_method_is_counted(self) -> None:
-        """204 originally; secretary-1669 removed the 24 Kanboard-only cases that write a card.
+        """204 originally; secretary-1669 removed the 24 cases that wrote a card through the retired
+        implementation.
 
-        secretary-1670 removed the 33 remaining Kanboard-only cases with the Sprint Kanboard
-        implementation, moved three SQL-only cases in from tests/test_sprints_sql_backend.py, and
+        secretary-1670 removed the 33 remaining cases that only the retired Sprint implementation
+        had, with it, moved three SQL-only cases in from tests/test_sprints_sql_backend.py, and
         rewrote the four listing-budget cases in store statements: 180 - 33 + 3 + 4 = 154.
         """
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
@@ -312,6 +315,6 @@ class SprintFixtureBehaviorTests(SprintFixture):
             self._create(goal="fixture failure", reference="sprint:fixture-failure")
 
         # The store rolls the whole create back, so the refusal owes no repair (`audit_pending` was
-        # the Kanboard implementation's half-applied create).
+        # the retired implementation's half-applied create).
         self.assertEqual(refused.exception.code, "backend_error")
         self.assertEqual(self.sprint_record_count("sprint:fixture-failure"), 0)

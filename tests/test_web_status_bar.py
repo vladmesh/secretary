@@ -56,7 +56,7 @@ def snapshot_with_a_project() -> dict[str, Any]:
         {
             "id": "secretary",
             "repo": "/srv/secretary",
-            "adapter": "kanboard",
+            "adapter": "secretary",
             "default_branch": "main",
             "enabled": True,
         }

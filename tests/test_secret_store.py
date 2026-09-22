@@ -165,7 +165,7 @@ class RecoveryPhraseCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -173,7 +173,7 @@ class RecoveryPhraseCase(SecretStoreCase):
         )
         (self.instance_dir / "secrets" / KEY_NAME).unlink()
         restore_installation_key(self.instance_dir, self.phrase)
-        self.assertEqual(read_secret(self.instance_dir, "kanboard.api-token"), b"token-value")
+        self.assertEqual(read_secret(self.instance_dir, "service.api-token"), b"token-value")
 
     def test_wrong_phrase_is_an_explicit_error_and_writes_nothing(self) -> None:
         self.initialize()
@@ -249,7 +249,7 @@ class RoundTripCase(SecretStoreCase):
     def test_catalog_holds_metadata_only_and_the_value_file_hides_the_value(self) -> None:
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"plaintext-needle",
             scope="installation",
             purpose="board api",
@@ -257,7 +257,7 @@ class RoundTripCase(SecretStoreCase):
         )
         catalog_text = (self.instance_dir / "secrets" / CATALOG_NAME).read_text("utf-8")
         self.assertNotIn("plaintext-needle", catalog_text)
-        envelope_text = (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").read_text(
+        envelope_text = (self.instance_dir / "secrets" / "values" / "service.api-token.enc.json").read_text(
             "utf-8"
         )
         self.assertNotIn("plaintext-needle", envelope_text)
@@ -269,14 +269,14 @@ class RoundTripCase(SecretStoreCase):
     def test_envelope_declares_its_format_kdf_and_aead_in_the_open(self) -> None:
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token",
             scope="installation",
             purpose="board api",
             actor="tester",
         )
         envelope = json.loads(
-            (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").read_text("utf-8")
+            (self.instance_dir / "secrets" / "values" / "service.api-token.enc.json").read_text("utf-8")
         )
         self.assertEqual(envelope["format"], secret_store.ENVELOPE_FORMAT)
         self.assertEqual(envelope["version"], secret_store.ENVELOPE_VERSION)
@@ -303,7 +303,7 @@ class RoundTripCase(SecretStoreCase):
     def test_updating_a_secret_keeps_created_at_and_one_catalog_entry(self) -> None:
         first = set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"one",
             scope="installation",
             purpose="board api",
@@ -312,7 +312,7 @@ class RoundTripCase(SecretStoreCase):
         created_at = list_secrets(self.instance_dir)[0]["created_at"]
         second = set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"two",
             scope="installation",
             purpose="board api, rotated",
@@ -324,12 +324,12 @@ class RoundTripCase(SecretStoreCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["created_at"], created_at)
         self.assertEqual(entries[0]["purpose"], "board api, rotated")
-        self.assertEqual(read_secret(self.instance_dir, "kanboard.api-token"), b"two")
+        self.assertEqual(read_secret(self.instance_dir, "service.api-token"), b"two")
 
     def test_catalog_and_value_land_in_the_same_commit(self) -> None:
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token",
             scope="installation",
             purpose="board api",
@@ -338,7 +338,7 @@ class RoundTripCase(SecretStoreCase):
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(
             sorted(touched),
-            ["secrets/catalog.yaml", "secrets/values/kanboard.api-token.enc.json"],
+            ["secrets/catalog.yaml", "secrets/values/service.api-token.enc.json"],
         )
 
     def test_set_refuses_once_the_key_stops_being_ignored(self) -> None:
@@ -346,7 +346,7 @@ class RoundTripCase(SecretStoreCase):
         with self.assertRaises(SecretStoreError) as caught:
             set_secret(
                 self.instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token",
                 scope="installation",
                 purpose="board api",
@@ -360,7 +360,7 @@ class RoundTripCase(SecretStoreCase):
         with self.assertRaises(SecretStoreValidationError) as caught:
             set_secret(
                 self.instance_dir,
-                secret_id="kanboard.api-token",
+                secret_id="service.api-token",
                 value=b"token",
                 scope="installation",
                 purpose="use AKIAIOSFODNN7EXAMPLE for the bucket",
@@ -380,7 +380,7 @@ class RoundTripCase(SecretStoreCase):
         ]
         for override in cases:
             request = {
-                "secret_id": "kanboard.api-token",
+                "secret_id": "service.api-token",
                 "value": b"token",
                 "scope": "installation",
                 "purpose": "board api",
@@ -652,7 +652,7 @@ class ImportCase(EnvStoreCase):
         head = state_repo.head(self.instance_dir)
         cases = [
             "export EXAMPLE_URL=https://board\n",
-            "KANBOARD URL\n",
+            "EXAMPLE URL\n",
             "1BAD=value\n",
             "EXAMPLE_URL=a\nEXAMPLE_URL=b\n",
             "EXAMPLE_URL=\n",
@@ -960,7 +960,7 @@ class MaterializeCase(EnvStoreCase):
         before = self.target.read_bytes()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.url.copy",
+            secret_id="service.url.copy",
             value=b"https://other.example.invalid/rpc",
             scope="installation",
             purpose="a second claim on the same variable",
@@ -1007,7 +1007,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -1027,7 +1027,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"super-secret-value",
             scope="installation",
             purpose="board api",
@@ -1050,7 +1050,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -1081,7 +1081,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -1096,15 +1096,15 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
             actor="tester",
         )
-        (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").unlink()
+        (self.instance_dir / "secrets" / "values" / "service.api-token.enc.json").unlink()
         findings = secret_store.store_findings(self.instance_dir)
-        self.assertIn("secret store: kanboard.api-token: catalogued with no value", findings)
+        self.assertIn("secret store: service.api-token: catalogued with no value", findings)
 
     def test_missing_key_params_with_a_non_empty_catalog_is_a_finding(self) -> None:
         """Reproduces a store where `init` ran and a secret was set, then only
@@ -1114,7 +1114,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -1136,7 +1136,7 @@ class ObservabilityCase(SecretStoreCase):
         self.initialize()
         set_secret(
             self.instance_dir,
-            secret_id="kanboard.api-token",
+            secret_id="service.api-token",
             value=b"token-value",
             scope="installation",
             purpose="board api",
@@ -1430,7 +1430,7 @@ class SecretCliCase(SecretStoreCase):
                 "--instance",
                 str(self.instance_dir),
                 "--id",
-                "kanboard.api-token",
+                "service.api-token",
                 "--scope",
                 "installation",
                 "--purpose",
@@ -1446,10 +1446,10 @@ class SecretCliCase(SecretStoreCase):
         code, out, _ = self.run_cli(["secret", "list", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 0)
         listed = json.loads(out)["secrets"]
-        self.assertEqual([entry["id"] for entry in listed], ["kanboard.api-token"])
+        self.assertEqual([entry["id"] for entry in listed], ["service.api-token"])
         self.assertNotIn("multi", out)
-        self.assertNotIn("value", out.replace("kanboard.api-token", ""))
-        self.assertEqual(read_secret(self.instance_dir, "kanboard.api-token"), b"multi\nline\nvalue\n")
+        self.assertNotIn("value", out.replace("service.api-token", ""))
+        self.assertEqual(read_secret(self.instance_dir, "service.api-token"), b"multi\nline\nvalue\n")
 
     def test_set_reads_a_binary_file_without_touching_argv(self) -> None:
         self.initialize()
@@ -1485,7 +1485,7 @@ class SecretCliCase(SecretStoreCase):
                 "--instance",
                 str(self.instance_dir),
                 "--id",
-                "kanboard.api-token",
+                "service.api-token",
                 "--scope",
                 "installation",
                 "--purpose",

@@ -1,18 +1,29 @@
-"""New writes carry the PostgreSQL identity; the retired Kanboard identity is only ever read.
+"""New writes carry the PostgreSQL identity; an earlier store's identity is only ever read.
 
 Cards (secretary-1669), Sprints and Products/Issues (secretary-1670) have one implementation, so
 every audit event a mutation commits names `task_postgres_<n>` / `sprint_postgres_<n>` and backend
-kind `postgres`. History written before the cutover keeps its ids under the retired store word,
+kind `postgres`. History written before this store keeps its ids under another store word,
 `task_<word>_<n>` and `sprint_<word>_<n>`, and those still resolve: by request id, in the ref's
 history, and to the number the live row carries.
+
+The historical word here is `RETIRED_STORE`, a neutral stand-in (`tests/retired_board.py`): the
+reader accepts any lowercase store word, so any word proves resolution across the boundary, and
+the observer checks the real historical form on the live store.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
-from secretary.board.backend import entity_id, entity_number, record_key, sprint_reference_number
+from secretary.board.backend import (
+    BOARD_STORE_KIND,
+    entity_id,
+    entity_number,
+    record_key,
+    sprint_reference_number,
+)
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.sprints import SprintFixture
@@ -36,9 +47,16 @@ class NewWritesNamePostgresTests(SprintFixture):
         return event  # type: ignore[return-value]
 
     def assert_no_retired_identity(self, event: dict[str, Any]) -> None:
-        for field in _identity_fields(event):
-            self.assertNotIn("kanboard", field, event)
-        self.assertNotIn('"kind": "kanboard"', json.dumps(event), event)
+        """The event names the store and no other: its backend kind, and any identity it mints.
+
+        A typed protocol event carries no backend at all, so an empty kind names no store.
+        """
+        task_id, kind, _ref = _identity_fields(event)
+        self.assertIn(kind, {"", BOARD_STORE_KIND}, event)
+        store_word = re.fullmatch(r"[a-z]+_([a-z]+)_[0-9]+", task_id)
+        if store_word is not None:
+            self.assertEqual(store_word.group(1), BOARD_STORE_KIND, event)
+        self.assertNotIn(RETIRED_STORE, json.dumps(event), event)
 
     def test_every_event_of_the_four_mutations_names_postgres(self) -> None:
         product = self.arrange_product("identity", projects=["secretary"])
@@ -110,8 +128,8 @@ class NewWritesNamePostgresTests(SprintFixture):
         self.assert_no_retired_identity(committed)
 
 
-class HistoricalKanboardIdentityTests(SprintFixture):
-    """A pre-cutover event under the retired store word still resolves."""
+class HistoricalStoreIdentityTests(SprintFixture):
+    """A pre-cutover event under another store word still resolves."""
 
     def _seed_history(self, request_id: str, *, ref: str, kind: str, number: int) -> dict[str, Any]:
         entity = "sprint" if ref.startswith("sprint:") else "task"
@@ -124,7 +142,7 @@ class HistoricalKanboardIdentityTests(SprintFixture):
             "outcome": "success",
             "task_id": f"{entity}_{RETIRED_STORE}_{number}",
             "ref": ref,
-            "backend": {"kind": "kanboard", "task_id": number, "revision": "history"},
+            "backend": {"kind": RETIRED_STORE, "task_id": number, "revision": "history"},
             "request_id": request_id,
             "payload": {},
         }
@@ -174,7 +192,7 @@ class LiteralPreCutoverIdentityTests(SprintFixture):
             "outcome": "success",
             "task_id": task_id,
             "ref": ref,
-            "backend": {"kind": "kanboard", "task_id": number, "revision": "history"},
+            "backend": {"kind": RETIRED_STORE, "task_id": number, "revision": "history"},
             "request_id": request_id,
             "payload": {},
         }

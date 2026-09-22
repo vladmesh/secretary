@@ -86,7 +86,7 @@ class RecoveryCase(unittest.TestCase):
             self.source,
             source=self.original,
             scope="installation",
-            purpose="kanboard credentials",
+            purpose="service credentials",
             actor="tester",
             materialize={"target": secret_store.MATERIALIZE_RUNTIME_ENV},
         )

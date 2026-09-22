@@ -92,24 +92,21 @@ class FakeSprintReader:
 
 
 class BoardFixture:
-    """The board as a fixture, in the vocabulary both backends answer.
+    """The board as a fixture, in the card client's own vocabulary.
 
     Every helper here speaks either the card client's own protocol — the one `TaskReader` and
-    `TaskWriter` speak to Kanboard and to the store alike — or the reader's normalized card.
-    None of them reaches into a fake's rows, its metadata map or its RPC log, which is what used
-    to pin ninety writer cases to one backend (a fixture-only list that
-    tests/test_tasks_sql_backend.py once kept).  A case built on these runs unchanged on both.
+    `TaskWriter` speak to the store — or the reader's normalized card. None of them reaches into
+    a fake's rows, its metadata map or its RPC log, which is what used to pin ninety writer cases
+    to one implementation (a fixture-only list that tests/test_tasks_sql_backend.py once kept).
 
     `self.rpc` is the transport log, and it is the test's own rather than a fake's: it records
-    what the product asked the *client interface* for.  That makes it truthful on either backend,
-    but it does not make it the right thing to assert: **where the fact is an effect, assert the
+    what the product asked the *client interface* for.  That makes it truthful, but it does not
+    make it the right thing to assert: **where the fact is an effect, assert the
     effect.**  A refused write is `assertBoardUnchanged`, a scrubbed comment is the comment the
-    reader returns, an archive is the card reading as closed — each is stronger than a call count
-    and backend-neutral by construction rather than by argument.  A count survives only where the
-    claim *is* the absence of a call and no state distinguishes it; there are five such cases and
-    each says so at the assertion.  Anything whose subject is Kanboard's wire behaviour — the
-    batch log below, the order two writes were issued in — was named in a Kanboard-only list
-    (tests/test_tasks_sql_backend.py).
+    reader returns, an archive is the card reading as closed — each is stronger than a call count.
+    A count survives only where the claim *is* the absence of a call and no state distinguishes
+    it; there are five such cases and each says so at the assertion.  A wire behaviour — the batch
+    log below, the order two writes were issued in — is not a subject here.
     """
 
     #: Neither client selects a card by the project id; both take it because the RPC carries one.
@@ -158,15 +155,12 @@ class BoardFixture:
         return len(self.board_calls(method))
 
     def board_batches(self) -> list[list[tuple[str, dict]]]:
-        """The batched reads the product posted — a Kanboard-only observation.
+        """The batched reads the product posted — a wire observation, not an effect.
 
-        Both clients serve `call_batch`, so an assertion over this log *passes* on either backend,
-        and that is exactly why it must not be read as parity.  A Kanboard batch is one JSON-RPC
-        round trip and the economy is the point; `SqlCardClient.call_batch` is
-        `[self.call(...) for ...]`, one batch because there is no round trip, so the same
-        assertion proves nothing there.  Every case that uses this was named in a Kanboard-only list
-        (tests/test_tasks_sql_backend.py).  What *is* portable is the other log, `self.rpc`:
-        which methods of the client interface the product invoked, and how many times.
+        `SqlCardClient.call_batch` is `[self.call(...) for ...]`, one batch because there is no
+        round trip, so an assertion over this log proves no economy.  What an assertion can rest
+        on is the other log, `self.rpc`: which methods of the client interface the product
+        invoked, and how many times.
         """
         return self.rpc_batches
 
@@ -789,8 +783,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         # writing has to fail here.  Every metadata key reaches the reader — the model's own keys
         # as named fields, everything else in `extensions.kanboard` — so the exhaustive claim
         # survives the move intact.  Three keys are dropped by name because they are the board's
-        # identity and placement rather than anything the create stamped, and §9 spells two of
-        # them differently on the two backends.
+        # identity and placement rather than anything the create stamped.
         report = self.card("secretary-701")
         for backend_owned in ("id", "audit", "position"):
             report.pop(backend_owned)
@@ -1000,7 +993,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             "outcome": "success",
             "task_id": self.writer.reader.show("secretary-468")["id"],
             "ref": "secretary-468",
-            "backend": {"kind": "kanboard", "task_id": 12, "revision": "r1"},
+            "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "r1"},
             "request_id": request_id,
             "payload": dict(payload),
         }
@@ -1304,9 +1297,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(result["action"], "archived")
         self.assertTrue(self.card("secretary-468")["closed"])
         # One reason comment, stored, and no second one.  The order in which the two board
-        # writes were issued is the subject of
-        # test_archive_retry_after_failed_comment_recreates_reason_before_close, which is
-        # Kanboard-only for exactly that reason.
+        # writes were issued is a wire observation, not asserted here.
         self.assertEqual(
             [body for body in self.card_comments("secretary-468") if body.startswith("[archive]")],
             ["[archive]\nbacklog cleanup"],
@@ -2112,7 +2103,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             "outcome": "success",
             "task_id": self.writer.reader.show("secretary-468")["id"],
             "ref": "secretary-468",
-            "backend": {"kind": "kanboard", "task_id": 12, "revision": "r1"},
+            "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "r1"},
             "request_id": request_id,
             "payload": dict(payload),
         }
@@ -4445,7 +4436,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             "outcome": "success",
             "task_id": f"task_{RETIRED_STORE}_12",
             "ref": "secretary-468",
-            "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
+            "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
             "payload": {"marker": "report:done", "body_sha256": hashlib.sha256(body.encode()).hexdigest()},
         }
@@ -4681,7 +4672,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             "outcome": "success",
             "task_id": f"task_{RETIRED_STORE}_12",
             "ref": "secretary-468",
-            "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
+            "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
             "payload": self._routing_payload(1),
         }

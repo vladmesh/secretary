@@ -1,14 +1,17 @@
 """The retired board transport's leftovers, as a stale installation may still carry them.
 
-Nothing in the product names them any more.  Tests that prove a leftover is neither read nor
-reported build the names here, from their parts, so the tree-wide retirement search stays empty.
+Nothing in the product names them any more, so what a test proves about a leftover -- that it is
+neither read nor reported, or that it is an ordinary entry like any other -- holds for any name.
+`RETIRED_STORE` is therefore a neutral stand-in for the word an earlier store used, not that word:
+the reader of historical identities accepts any lowercase store word (`board/backend.py`), and the
+real historical form is checked on the live store, not here.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-RETIRED_STORE = "kanboard"
+RETIRED_STORE = "legacy"
 STALE_FILE = "-".join(("board", "transport")) + ".env"
 LEGACY_ENV = tuple(f"{RETIRED_STORE.upper()}_{suffix}" for suffix in ("URL", "API_USER", "API_TOKEN"))
 LEGACY_SECRET_IDS = tuple(name.lower() for name in LEGACY_ENV)

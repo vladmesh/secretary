@@ -525,39 +525,50 @@ class FileAuditOwnershipTests(unittest.TestCase):
                 self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
-        """A new write names the PostgreSQL store; the retired store word's identities are only read.
+        """A new write names the PostgreSQL store; an earlier store's identities are only read.
 
-        The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
-        or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and
-        secretary-1669's first submission restored cards under the retired identity that way. Since
-        secretary-1671 `entity_id` mints only the store's identity and `entity_number` reads any
-        store word, so no module names the retired one at all.
+        The store word can hide in data rather than in a branch: an identity minted with another
+        store word, or a `"kind"` literal written into a fresh audit event's `backend`, is not a
+        `backend_kind` read, and secretary-1669's first submission restored cards under the retired
+        identity that way. So `entity_id` takes no store word at all, and every `backend` document a
+        module writes names its kind through a name (`BOARD_STORE_KIND`), never a store literal. The
+        only literal kind is the dispatcher's own, which names no store.
         """
+        from secretary.board.backend import entity_id
+
+        self.assertEqual(list(inspect.signature(entity_id).parameters), ["kind", "number"])
+        non_store_kinds = {"dispatcher"}
         for path in _source_modules():
             module = str(path.relative_to(ROOT / "src")).removeprefix("secretary/")
             tree = ast.parse(path.read_text(encoding="utf-8"))
-            found: list[int] = []
+            backends: list[ast.AST] = []
             for node in ast.walk(tree):
-                retired = (isinstance(node, ast.Name) and node.id == "KANBOARD") or (
-                    isinstance(node, ast.Attribute) and node.attr == "KANBOARD"
-                )
-                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "entity_id":
-                    retired = retired or any(
-                        isinstance(argument, ast.Constant) and argument.value == "kanboard"
-                        for argument in node.args
-                    )
                 if isinstance(node, ast.Dict):
-                    retired = retired or any(
-                        isinstance(key, ast.Constant)
-                        and key.value == "kind"
-                        and isinstance(value, ast.Constant)
-                        and value.value == "kanboard"
+                    backends.extend(
+                        value
                         for key, value in zip(node.keys, node.values, strict=True)
+                        if isinstance(key, ast.Constant) and key.value == "backend"
                     )
-                if retired:
-                    found.append(node.lineno)
+                if isinstance(node, ast.Assign):
+                    backends.extend(
+                        node.value
+                        for target in node.targets
+                        if isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "backend"
+                    )
+            found = [
+                value.lineno
+                for backend in backends
+                if isinstance(backend, ast.Dict)
+                for key, value in zip(backend.keys, backend.values, strict=True)
+                if isinstance(key, ast.Constant)
+                and key.value == "kind"
+                and isinstance(value, ast.Constant)
+                and value.value not in non_store_kinds
+            ]
             with self.subTest(module=module):
-                self.assertEqual(sorted(set(found)), [], f"{module} writes the retired Kanboard identity")
+                self.assertEqual(sorted(set(found)), [], f"{module} writes a store literal as a backend kind")
 
     def test_the_product_issue_store_keeps_no_file_journal_guard(self) -> None:
         """The pre-cutover file-claim guard protected nothing after the importer copied every id.
@@ -589,7 +600,7 @@ class IndirectFileAuditReaderTests(unittest.TestCase):
     `secretary-1622`'s first submission is why this class exists: the product-run events had moved
     to `requests` while `ReadLayer.task_snapshot` and `task_events` still built
     `EventJournal(data_dir)`, so a migrated installation answered a card's history from a projection
-    its writers never touch. The file reader is gone with the Kanboard card backend.
+    its writers never touch. The file reader is gone with the second card backend.
     """
 
     def test_the_file_event_reader_is_gone(self) -> None:
@@ -637,9 +648,33 @@ class OneBoardClientTests(unittest.TestCase):
         self.assertEqual(environment, [], "board/backend.py reads the process environment")
 
     def test_the_legacy_host_module_is_gone(self) -> None:
-        """The host `SqlCardClient` runs on has a neutral name, and the old module is not an alias."""
-        self.assertFalse((ROOT / "src" / "secretary" / "board" / "kanboard.py").exists())
-        self.assertTrue((ROOT / "src" / "secretary" / "board" / "sql_host.py").exists())
+        """The host `SqlCardClient` runs on has a neutral name, and no other module is its alias.
+
+        An alias is a board module that only imports from `sql_host`: the shape the old host module
+        would keep if it stayed behind as a compatibility name.
+        """
+        board = ROOT / "src" / "secretary" / "board"
+        self.assertTrue((board / "sql_host.py").exists())
+        aliases: list[str] = []
+        for path in sorted(board.glob("*.py")):
+            if path.name in {"sql_host.py", "__init__.py"}:
+                continue
+            body = ast.parse(path.read_text(encoding="utf-8")).body
+            imports_host = any(
+                isinstance(node, ast.ImportFrom) and node.module == "secretary.board.sql_host" for node in body
+            )
+            only_imports = all(
+                isinstance(node, (ast.Import, ast.ImportFrom))
+                or (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+                or (
+                    isinstance(node, ast.Assign)
+                    and [getattr(target, "id", "") for target in node.targets] == ["__all__"]
+                )
+                for node in body
+            )
+            if imports_host and only_imports:
+                aliases.append(path.name)
+        self.assertEqual(aliases, [])
 
 
 if __name__ == "__main__":

@@ -199,7 +199,7 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], ["sprint:once"])  # type: ignore[arg-type]
 
     def _refuse_once(self, refused_method: str, field: str = ""):
-        """Answer the first call of that method carrying `field` the way Kanboard refuses."""
+        """Answer the first call of that method carrying `field` with a refusal (`False`)."""
         original = self.client.call
         refused: list[str] = []
 

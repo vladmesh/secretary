@@ -15,7 +15,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 
 - `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
-  packages: `board`, `cutover`, `dispatch`, `infra`, `memory`, `po`, `projects`, `schemas`, `web`,
+  packages: `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `schemas`, `web`,
   `webfront`, `webproto`.
 - `src/triggered_agents` is a legacy namespace. It holds runtime primitives Secretary uses directly
   (head runtimes, session-manager and delivery helpers, the mechanical-role driver, the curator,
@@ -79,8 +79,7 @@ Dependency rules:
 - Feature code does not import CLI modules. Shared runtime does not import an application module to
   find configuration; configuration and paths are passed in.
 - A board client is built only through `secretary.board.backend.board_client`, and a card audit only
-  through `secretary.tasks.task_audit_for`. The few modules allowed to build `KanboardClient`,
-  `TaskAudit` or `EventJournal` directly are listed, with reasons, in `tests/test_architecture.py`.
+  through `secretary.tasks.task_audit_for`. `tests/test_architecture.py` holds both rules.
 
 ## Storage boundary
 
@@ -101,15 +100,13 @@ phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runti
 `0600` file, gitignored and outside every checkpoint and archive; a value registered in the store
 makes the file a materialised copy.
 
-The data directory holds task audit files, dispatcher state, derived exports and indexes, search
+The data directory holds dispatcher state, derived exports and indexes, search
 logs, raw dumps, transcripts and artifacts. The SQLite and vector index, worktrees, terminals and
 generated host resources are derived and are not checkpointed.
 
-The live board has two implementations of `TaskReader`/`TaskWriter`: Kanboard over JSON-RPC and the
-PostgreSQL board store. A process must pick one explicitly from `SECRETARY_CARD_BACKEND`
-(`kanboard` or `postgres`; missing, empty and unknown values refuse), once per process. The PostgreSQL schema, transactions and migrations are in
-[Board store](BOARD_STORE.md). Backup components follow the same backend: normalised board and
-process state is common, plus `raw_board` for Kanboard or `postgres_dump` for PostgreSQL. Backup code
+The live board is the PostgreSQL board store, the one implementation of `TaskReader`/`TaskWriter`.
+Its schema, transactions and migrations are in [Board store](BOARD_STORE.md). Backup components are
+normalised board and process state plus the `postgres_dump` of the store. Backup code
 does not read ORM rows. It asks the board client for normalised state and the `board-store.env`
 resolver for the owner connection; dump/restore runs in `board/postgres_recovery.py`.
 
@@ -467,32 +464,7 @@ secrets ([Protocols](PROTOCOLS.md#knowledge)).
   degraded until every binding is available and the recovery checkpoint is published.
 - Task audit and pending writes fail closed: an unfinished board mutation blocks export and the
   checkpoint.
-- Restoring a normalised board into Kanboard uses bounded JSON-RPC batches (at most 200 calls and
-  1 MiB per document, 50 calls for comment reads and writes). Each card or comment has a durable
-  `restored_bulk` obligation in `TaskAudit` before any write. Aggregate replies are never treated as
-  atomic: rows are proved from fresh inventory, and replay mutates nothing that is already proved.
-  Comment waves hold at most one occurrence per entity, and comment order relies on pinned Kanboard
-  v1.2.46 returning comments in `(date_creation, id) ASC` order. Test coverage:
+- Restoring a normalised board writes through the card client in one enclosing store transaction.
+  Each card or comment has a durable `restored_bulk` obligation in the audit before any write, and
+  replay mutates nothing that is already proved. Test coverage:
   [Testing](TESTING.md#normalized-board-bulk-recovery).
-
-## Cutover controller
-
-`secretary.cutover` orchestrates the Kanboard-to-PostgreSQL cutover out of existing product
-operations. It does not implement its own migration, import, parity, backup, checkpoint, pause or
-backend selection. Every completed phase is fsynced to the data plane before the next one starts, and
-a failure is durable and leaves the global freeze in place.
-
-- One installation-wide `CutoverLock` serialises mutation. State identity is a digest of installed
-  revision, provenance, paths, source fingerprint, counts, parity and phase vocabulary, and the
-  confirmation token derives from it. Retries accept only the original actor, reason, revision and
-  identity.
-- While a cutover is in flight, public writers are fenced; only controller children carrying the
-  state identity pass. Terminal states release the fence.
-- `prepare-successor` is a separate OID-driven state machine under the same lock. It writes durable
-  intent before every PostgreSQL effect and completed evidence after verification, and refuses any
-  database-name-to-OID mapping it did not record. Its terminal authority is immutable recovered history
-  plus a release receipt bound to the predecessor plan and archive.
-
-Commands, phases and tokens: [Protocols](PROTOCOLS.md#secretary-cutover). Runbook:
-[Operations](OPERATIONS.md#postgresql-board-store-cutover). Recovery boundary:
-[Recovery](RECOVERY.md#cutover-controller-state).

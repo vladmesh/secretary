@@ -11,8 +11,7 @@ comes from `secretary status` and `secretary doctor`, not from this file.
 - [recovery and the optional cold archive](#recovery);
 - [dispatcher operation and watchdogs](#auto-merging-green-cards);
 - [background roles, web service and units](#background-role-telemetry);
-- [upgrade and runtime health](#upgrade);
-- [PostgreSQL board-store cutover](#postgresql-board-store-cutover).
+- [upgrade and runtime health](#upgrade).
 
 ## Install and check the code
 
@@ -26,7 +25,7 @@ python3 -m tests.broad
 The first form installs the CLI, the second adds the memory runtime, the third the pinned linter.
 `ruff` is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed
 Python paths with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports
-Ubuntu 24.04 and installs the pinned board and session-manager runtimes; `secretary install` or
+Ubuntu 24.04, installs the pinned Docker and session-manager runtimes and provisions the board store; `secretary install` or
 `secretary recover` then applies the instance ([Recovery](RECOVERY.md)).
 
 `secretary status --instance <dir>` summarizes an installation; `--json` is a structured snapshot and
@@ -34,28 +33,6 @@ writes no state. `doctor` reports broken invariants (`--json` for structured fin
 host requires `reconcile plan` and a separate confirmed apply.
 
 ## Runtime secrets
-
-### Board transport
-
-`board-transport.env` beside `instance.yaml` is local, non-secret Kanboard JSON-RPC configuration
-(endpoint, application user, application token). Bootstrap and install create the same deterministic
-default, so it is not a recoverable credential. The file is gitignored and its contents may appear in
-board reports.
-
-It is one backend's transport. On `SECRETARY_CARD_BACKEND=postgres` the board is reached through
-`board-store.env`, so an absent or unusable tuple is not a finding, the `board-transport` upgrade
-step is a recorded no-op, and a role launch no longer refuses for the want of it. On
-`SECRETARY_CARD_BACKEND=kanboard` every one of those is unchanged. A tuple *tracked* in the instance
-repository stays a finding on both backends: that is a statement about the repository.
-
-Upgrade copies a complete legacy `KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN` tuple from
-`runtime.env` into this file once and removes it from `runtime.env`, keeping the running container
-working. It never guesses or rotates a token. A disagreement is reported as `board transport
-mismatch`: inspect the container and resolve it explicitly. Upgrade the installation with its
-existing container still running; do not recreate the container to clean up. Old encrypted
-`kanboard_url`, `kanboard_api_user` and `kanboard_api_token` entries are ignored by recovery and
-materialisation but stay in redaction until the owner removes them through the normal secret-store
-procedure. `secret import` rejects the retired `KANBOARD_*` entries.
 
 ### Installation secrets
 
@@ -79,15 +56,13 @@ python3 -P -m secretary secret materialize --instance INSTANCE --target runtime-
 
 `secret init` is interactive and shows the recovery phrase once. `runtime-env` is a named target
 resolving to the installation's canonical runtime-env path (including the supported override); do
-not pass `--materialize-path` with it — that flag is only for the `file` target. A plain
-`KANBOARD_URL` is configuration; a URL with userinfo is sensitive. `reconcile` never decrypts the
-store.
+not pass `--materialize-path` with it — that flag is only for the `file` target. `reconcile` never
+decrypts the store.
 
 ### PostgreSQL board store
 
 A fresh `secretary bootstrap` creates `/opt/secretary/postgres-compose.yml` (or checks the one root
-installed, see [privileged preconditions](#privileged-preconditions-installed-by-root-before-the-window)),
-the `secretary-board-store_board-db` volume and `<instance>/board-store.env`, runs Alembic to the
+installed), the `secretary-board-store_board-db` volume and `<instance>/board-store.env`, runs Alembic to the
 shipped head and verifies the owner/app/read logins and privilege boundary. PostgreSQL is the only
 container on this path and publishes only `127.0.0.1:5432`. Schema and roles are in
 [Board store](BOARD_STORE.md).
@@ -101,9 +76,7 @@ command. A rerun keeps the volume and credentials and applies only owed migratio
 
 No credential rotation command is shipped. Editing `POSTGRES_PASSWORD` does not rotate an owner in a
 non-empty volume. Rotation is one explicit manual operation: `ALTER ROLE`, an atomic whole-file rewrite
-of `board-store.env`, and a restart of the web and dispatcher consumers together. The backend selector `SECRETARY_CARD_BACKEND` is written by
-[`secretary cutover`](#postgresql-board-store-cutover); do not set it by hand because provisioning
-and migrations are green.
+of `board-store.env`, and a restart of the web and dispatcher consumers together.
 
 ### Checkpoint and project GitHub access
 
@@ -153,27 +126,12 @@ distinguishes absent from inactive.
 ```bash
 python3 -P -m secretary data init --instance INSTANCE
 python3 -P -m secretary data export --instance INSTANCE [--copy-transcripts]
-python3 -P -m secretary data raw-kanboard-dump --instance INSTANCE \
-  [--container CONTAINER] [--source-path /var/www/app/data]
 ```
 
 `data init` creates the local layout and manifest. The memory-fact canon is
 `INSTANCE/state/memory/facts`; the data directory keeps its export and index. `data export` writes
 normalised board, memory, run and transcript exports; without `--copy-transcripts` only a transcript
 inventory is kept.
-
-`raw-kanboard-dump` (Kanboard backend) copies the whole Kanboard data directory out of the container
-into a timestamped `DATA_DIR/board/kanboard-raw-*` directory. It writes nothing to the container and
-does not use the board API. Without `--container` it asks Docker for the container Compose created for
-the `kanboard` service of `/opt/secretary/kanboard-compose.yml`; if none exists or it is not running,
-it refuses, naming the file and service, and never falls back to a name or starts anything.
-`--container` is used verbatim. `manifest.json` records the container used, its id and its source.
-
-A dump's `data/db.sqlite` holds every project on the board, including ones the Pipeline export does
-not cover. Only the newest readable dump is ever read. Nothing prunes the others: keep the newest and
-any older dump that is the only copy of a board outside the Pipeline export, and delete the rest by
-hand. The checkpoint writer ignores `kanboard-raw-*`. A Kanboard-backend `backup create` of kind
-`full` or `both` takes a fresh dump first; a `core` archive leaves dumps out.
 
 ## Checkpoint writer
 
@@ -445,8 +403,7 @@ The `recovery` object is shared with doctor:
   `locked/unverifiable`. While any project uses an unmanaged HTTPS origin, doctor says to keep an
   ambient credential helper.
 - `paths`, `materializations`, `catalog_envelope_divergences` and `bypasses` are metadata-only; every
-  unsupported row carries `supported_next_action`. Legacy Kanboard entries never override
-  `board-transport.env`.
+  unsupported row carries `supported_next_action`.
 
 `doctor` raises secret-store findings when catalog and values diverge, when the key is missing or
 unusable with a non-empty catalog, or when the key is wider than `0600`.
@@ -1110,9 +1067,8 @@ secretary task verify-audit --instance INSTANCE     # .pending, .backend
 secretary task reconcile-audit --instance INSTANCE  # repaired/unresolved
 ```
 
-Both read the audit of the active card backend: `requests` on PostgreSQL, `board/pending-audit/` plus
-`board/events.ndjson` on Kanboard ([Board store](BOARD_STORE.md) §7.3). On PostgreSQL `reconcile-audit`
-answers `0/0`; a staged row there is resolved by repeating its own request id.
+Both read the card audit, the `requests` table ([Board store](BOARD_STORE.md) §7.3). `reconcile-audit`
+answers `0/0`; a staged row is resolved by repeating its own request id.
 
 The launch intent is written to production state before the host call:
 
@@ -1232,20 +1188,6 @@ pair or the Git index. Use the preview and exact-ID apply commands in
 show`, and do not edit normalized files or board storage. After apply, retry the checkpoint and verify
 its remote SHA before any recovery drill.
 
-## Board column schema
-
-Install creates the Pipeline columns and refuses to reshape a board that holds cards. A Kanboard board
-with the six-column layout gets the `Assessment` column with one explicit repair:
-
-```bash
-python3 -P -m secretary board migrate-assessment --instance /path/to/instance
-```
-
-It adds `Assessment` at position 5 without moving, reordering, trashing or renaming anything, reads the
-transport from the instance, and proves every card's column and position unchanged. It is retryable:
-`unchanged` on a finished board, `resumed` when a trailing `Assessment` was already added, and a refusal
-naming the accepted layouts for anything else.
-
 ## An export whose sprint rows carry no observer
 
 Restore validates the whole exported sprint set before its first write and refuses, by name, a row
@@ -1313,11 +1255,11 @@ python3 -P -m secretary backup verify ARCHIVE.tar [--strict]
 memory model cache are never included; staging files are `0600` and no password reaches argv or logs.
 `verify` returns `0` on success, `1` for findings or strict warnings, `2` for an unreadable archive.
 
-Legacy extraction is `secretary restore ARCHIVE.tar`. A PostgreSQL archive restores into a separately
+Legacy extraction is `secretary restore ARCHIVE.tar`. A `full` archive restores into a separately
 provisioned, migrated, empty target of the same instance with a different database endpoint:
 
 ```bash
-SECRETARY_CARD_BACKEND=postgres python3 -P -m secretary restore-postgres ARCHIVE.tar --instance TARGET
+python3 -P -m secretary restore-postgres ARCHIVE.tar --instance TARGET
 ```
 
 Neither command reconciles or starts processes.
@@ -1670,7 +1612,7 @@ fourth, and each one is decided by a rule rather than by a reading of the senten
 
 - **red** — the installation cannot be trusted to run work, or its health is unknown. Any of
   `unit.failed`, `unit.missing`, `checkpoint.blocked`, `checkpoint.last_failed`,
-  `secret_store.key_unusable`, `board_transport.finding`, `card_backend.finding`, or
+  `secret_store.key_unusable`, or
   `health.unreadable`.
 - **yellow** — it runs, but somebody should look. Any of `pipeline.paused`,
   `dispatcher.divergences_open`, `external_runtime.inactive`, `host.inventory_unreadable`,
@@ -2118,7 +2060,6 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `pull` | `git fetch` plus `merge --ff-only`; a dirty checkout is refused |
 | `registries` | read the skill manifest, instance overlay, head canon and memory pack; an unreadable or undeliverable registry stops the run before any write |
 | `memory-pack` | materialize the shipped memory pack into the memory canon |
-| `board-transport` | migrate a legacy runtime Kanboard tuple once, or create the deterministic `board-transport.env`; `skipped` on the PostgreSQL backend, which does not use it |
 | `dependencies` | reinstall into the virtualenv if the dependency manifest moved |
 | `dependency-provenance` | import `secretary`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
@@ -2417,186 +2358,3 @@ for an answer, 3 for degraded (no workspace path, or a host in `noop` mode). No 
 Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:
 no lifecycle call, no rebinding, no harder probing.
-
-## Rehearsing the complete board import
-
-On a Kanboard installation: use a uniquely named disposable Compose project running `postgres:16` on a
-dynamically assigned loopback port, migrate the empty database to the current Alembic head, and pass only
-that app-role DSN to `secretary board import --apply` with both `--instance` and `--data-dir` (without
-`--data-dir` there is no consistency fence). Import mechanics: [Board store](BOARD_STORE.md#88-audit-journal-and-source-fence).
-
-A movement refusal is expected on a live source and safe to retry against the same empty target; do not
-pause or mutate live services to make it pass. A successful report has `source_consistency.matched=true`,
-audit record/request parity, typed-event parity, exact budget reconciliation, no unnamed refusals and all
-parity axes green. Run the same apply again: it must refuse on the occupied target with counts unchanged.
-
-Record project name, port, image, Alembic head, fence values, counts and the rerun result, then remove the
-Compose project and volume. Do not edit `board-store.env`, set `SECRETARY_CARD_BACKEND`, reconcile the host
-or start any lifecycle process.
-
-## PostgreSQL board-store cutover
-
-`secretary cutover` is the only supported Kanboard to PostgreSQL activation. Command contract:
-[Protocols](PROTOCOLS.md#secretary-cutover); recovery boundary:
-[Recovery](RECOVERY.md#cutover-controller-state); activation: [Board store](BOARD_STORE.md#22-backend-selection-and-client-construction).
-
-Run it from the installed product environment, never from a task workspace, outside any observer turn, and
-only after the controller revision is installed and the installed head source pin reports it. The window
-stops every observer, worker and reviewer, both web services, the dispatcher timer and all standing
-automation timers.
-
-The operator needs ownership of the instance and data directories, the root-installed preconditions below,
-control of the named units and the Docker PostgreSQL service, and the installed virtual environment. The
-controller rejects symlinked or broadly writable configuration or state and prints no database credentials.
-The data root must stay traversable by the runtime service accounts.
-
-### Privileged preconditions installed by root before the window
-
-`apply` proves both before the controller lock, state document or first phase, so a refusal has no durable
-effect and the identical command succeeds once root has acted. `plan` reports both read-only.
-
-1. `/opt/secretary/postgres-compose.yml` is a regular file with exactly the shipped `COMPOSE_TEXT`, mode
-   `0600`, owned by the runtime user.
-2. `sudo -n systemctl` works for the runtime user. The controller issues every stop, start and restart as
-   `sudo -n systemctl ...`, records that argv, and never edits sudoers or units.
-
-The refusal prints these commands; run them as root, then rerun the identical `apply`:
-
-```
-install -d -m 0755 -o root -g root /opt/secretary
-install -m 0600 -o <runtime-user> -g <runtime-group> /dev/stdin \
-  /opt/secretary/postgres-compose.yml <<'COMPOSE'
-<the exact COMPOSE_TEXT the refusal prints>
-COMPOSE
-echo '<runtime-user> ALL=(root) NOPASSWD: /usr/bin/systemctl' \
-  | install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/secretary-systemctl
-visudo -cf /etc/sudoers.d/secretary-systemctl
-```
-
-The sudo probe is read-only (`sudo -n systemctl show --property=Version`).
-
-### The units of the window come from the installation
-
-Before the lock the controller reads `systemctl show <unit> --property=LoadState` for every declared unit
-(read-only, no `sudo`); `LoadState=not-found` means not installed. `host.components` is not consulted.
-
-| units | declared | absent unit |
-| --- | --- | --- |
-| `secretary-web.service`, `secretary-web-front.service` | required | `apply` refuses |
-| `secretary-dispatcher-production.timer`, `.service` | required | `apply` refuses |
-| `secretary-curator.timer`, `.service` | required | `apply` refuses |
-| `secretary-steward.timer`, `.service` | optional | excluded, recorded in evidence |
-| `secretary-steward-deep-sweep.timer`, `.service` | optional | excluded, recorded in evidence |
-| `secretary-retro.timer`, `.service` | optional | excluded, recorded in evidence |
-
-A missing required unit refuses with no durable effect. A missing optional unit is excluded from the freeze
-stop, the reconciliation start, all three `recover` restarts and the unit proof. `plan` prints the inventory
-under `privileged_preconditions.units`; each phase records `load_states`, its `stop`/`start` composition and
-`excluded` under `inventory`, and `recover` records the same. Do not edit unit lists or remove units before
-the window.
-
-### Pipeline pause and doctor before the window
-
-`apply` proves both on the same no-effect seam; `plan` prints them under
-`privileged_preconditions.pipeline_pause` and `privileged_preconditions.doctor` and never fails on them.
-
-1. **The pipeline pause**, judged like `backup create` for the next backup phase. Before
-   `current_kanboard_backup_checkpoint` any pause refuses, including the freeze `recover` leaves behind
-   (actor `secretary-postgres-cutover`; the controller never lifts it). The refusal names mode, actor, reason
-   and the lifting command:
-
-   ```
-   secretary resume --instance /absolute/instance
-   ```
-
-   After that checkpoint backup is `complete`, a retry runs under the controller's own freeze, and a running
-   pipeline passes while `global_freeze` is still ahead. A foreign freeze or a drain refuses. Once
-   `global_freeze` is complete, a missing or foreign freeze refuses with no resume command: inspect `status`
-   and use its `RECOVER-...` token.
-2. **`doctor --offline`**, run and judged exactly as `installed_protocol_acceptance` does. Findings are
-   listed with the reproducing command; the controller repairs none (retired catalog entries, runtime
-   credential materialisation, ambient Git credentials are operator steps). Acceptance reruns doctor after the
-   selector switch and may find what only the switched installation has.
-
-Past the last backup phase no phase reads the pause; past `installed_protocol_acceptance` none runs doctor.
-
-### Running the window
-
-The outage starts at `global_freeze` and ends only when an operator inspects `resume_ready` and runs
-`secretary resume`. Budget a full maintenance window.
-
-```
-secretary cutover plan --instance /absolute/instance --expected-revision <40-char-sha>
-```
-
-`plan` is read-only. It refuses with exit `1` (and `apply` refuses before its state document) when the volume
-holding `<data_dir>/backups` cannot take three full archives plus the staging copy of the last; the refusal
-names the volume, free and required bytes. Nothing is deleted; free space and plan again.
-
-Save the `confirmation`, inspect the source fence and parity, then:
-
-```
-secretary cutover apply --instance /absolute/instance --expected-revision <sha> \
-  --actor <operator> --reason <change-record> --confirm CUTOVER-<plan-id-prefix>
-secretary cutover status --instance /absolute/instance
-```
-
-`apply` detaches its controller (no `nohup`, `setsid` or `&` needed): the launcher starts it in a new session,
-prints its pid and log path `<data_dir>/cutover/artifacts/apply-<UTC stamp>-<launcher pid>.log`, waits, prints
-the log (last JSON document is the result) and exits with its code. Closing the terminal or killing the
-launcher does not stop the controller; follow `cutover status` (`state.status`, `state.phases`,
-`state.controller_pid`). Stopping a systemd unit or cgroup containing the caller does kill it, so never start
-`apply` from a unit the window stops.
-
-Quiescence refuses any other process whose command line matches the writer vocabulary and names the
-survivors. Only the controller, the launcher and the process that directly started `apply` are exempt; a
-wrapper such as `sudo` or `timeout` is itself that starter, and `sudo` with `use_pty` adds a second `sudo`
-above it. Keep writer words (` task `, ` sprint `, ` issue `, ...) out of `--actor` and `--reason` when
-wrapping.
-
-After a crash, rerun the identical `apply`. Never delete or edit the state document. A failed phase stays
-failed and frozen; completed phases are not repeated; a terminal identity cannot be applied again. Recovery
-uses the token `status` prints:
-
-```
-secretary cutover recover --instance /absolute/instance --expected-revision <sha> \
-  --actor <operator> --reason <incident-record> --confirm RECOVER-<plan-id-prefix>
-```
-
-- Failure before `global_freeze`: `recover` records `no-cutover-effects` without touching services.
-- Freeze entered, no import or activation: it confirms the Kanboard selector, records fresh source evidence
-  and restarts consumers.
-- Both early outcomes archive the identity under `<data_dir>/cutover/history/` and publish a
-  `successor-release-<plan-id>.json` receipt. If publication is interrupted, rerun the identical `recover`;
-  `plan` refuses until the receipt exists. A legacy archive marked `released-after-archive` has no receipt;
-  do not add one.
-- Then lift the recovery freeze, run `plan` again and apply only its new token; the old token stays refused.
-- A completed (or entered but unfinished) `final_fenced_import` keeps the identity terminal: recovery may
-  restore Kanboard before the first SQL write, but `plan` refuses a successor until the target is prepared
-  (below).
-
-Installed acceptance leaves a closed canary issue and an archived canary task on the selected live sprint;
-with no open sprint it opens and closes its own canary sprint (product `cutover-<plan prefix>`, observer
-`none`). Keep the command's revision, service, source, parity, archive, checkpoint and acceptance evidence
-before resuming.
-
-### Preparing a successor after a completed import
-
-A completed import occupies its PostgreSQL target and cannot be imported again or updated in place. After
-installing a revision that understands the imported schema, run `secretary cutover status --instance
-/absolute/instance`. For the supported `recovered-frozen / kanboard-before-first-write` shape it prints a
-`PREPARE-SUCCESSOR-...` token and the exact command. If the preserved target's schema is behind, status
-instead prints `secretary upgrade --no-pull --instance /absolute/instance`; run it and verify the migration
-before preparing. A refused `prepare-successor` changes nothing.
-
-`prepare-successor` is an outage-level database operation. It verifies the imported database, counts, audit
-boundary and zero foreign connections, publishes a verified native dump under `cutover/artifacts`, renames
-the imported database by OID with connections disabled, creates and migrates an empty database under the
-configured name, and verifies roles and emptiness. `board-store.env`, the volume and the selector do not
-change. Do not reconnect, drop, truncate, rename, overwrite or reimport the archived database; its dump is the
-access copy.
-
-Order: install; upgrade the preserved target if status asks; run `prepare-successor` with the token; inspect
-status and history; create a fresh `cutover plan`; schedule a separate window for `apply`. Rerunning a
-completed `prepare-successor` is a read-only replay only while the canonical slot is free; after a new plan
-occupies it, use `cutover status`.

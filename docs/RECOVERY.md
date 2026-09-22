@@ -14,12 +14,6 @@ host runtime          local runtime, rebuilt from the checkpoint; not canonical
 
 The private repository is the only Git canon for the data plane: one remote, one HEAD, one RPO.
 
-Kanboard transport is local non-secret configuration in `board-transport.env`, not secret-store
-content. Bootstrap recreates its deterministic default on a clean host without a recovery phrase.
-A pre-transport installation imports its legacy `runtime.env` tuple once; disagreement with an
-existing file is an operator action. Legacy encrypted `kanboard_*` entries stay inert until the
-operator removes them.
-
 ## Source of truth
 
 The selected board backend (PostgreSQL in production) is the operational store. The remote Git HEAD
@@ -142,13 +136,13 @@ Six writers touch the repository, each with its own pathspec:
   commit);
 - head-registry writer: `heads/heads.yaml`, `heads/source.yaml`, on `secretary upgrade`; it commits and
   immediately pushes the pair;
-- local-configuration writer: `.gitignore`, when local configuration such as `board-transport.env`
+- local-configuration writer: `.gitignore`, when local configuration such as `board-store.env`
   needs a durable exclusion.
 
 Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
 alone. Every writer holds the shared repository lock while staging and committing. All writers except
 the tick writer commit synchronously; the next push carries their commits out. Explicit checkpoint
-users (install, recover, cutover) are also synchronous and bypass the periodic cadence.
+users (install, recover) are also synchronous and bypass the periodic cadence.
 
 ## Checkpoint readers and freshness
 
@@ -199,9 +193,8 @@ Before each tick commit the snapshot passes a fail-closed check. If any item fai
 checkpoint, records the reason in status and retries next tick:
 
 - task audit is settled with no pending board mutation. The audit is the one the card client names
-  (`tasks.task_audit_for`): staged `requests` rows on PostgreSQL; `board/pending-audit/` plus the
-  staged Product/Issue transaction journal on Kanboard. If the card client cannot be established the
-  checkpoint is blocked by name, never checked against the file journal instead;
+  (`tasks.task_audit_for`): staged `requests` rows. If the card client cannot be established the
+  checkpoint is blocked by name, never checked against a file journal instead;
 - `cards.ndjson` and `sprints.ndjson` are regenerated from the live backend, both counters in
   `export.json` match the line counts, the generated `cards.json`/`cards.ndjson` pair is identical and
   card references are unique, all before local export or canonical files are replaced;
@@ -243,8 +236,8 @@ On remote divergence (remote commits not present locally) the push stops and `st
 ## Secrets
 
 The host `runtime.env` is mode `0600`, gitignored, outside the checkpoint, and may hold materialised
-installation secrets. `board-transport.env` is ordinary local configuration, not restored from the
-store. Forge access and interactive head logins stay in the operator's password manager; the product
+installation secrets. `board-store.env` is local connection material that bootstrap generates,
+not restored from the secret store. Forge access and interactive head logins stay in the operator's password manager; the product
 never copies them to the host.
 
 The secret store (`secretary/secret_store.py`, `secrets/`) is a recoverable canon in the same
@@ -329,16 +322,15 @@ The Git checkpoint is the only recovery contract. `backup create`/`backup verify
 archive for raw material, with no timer, offsite transfer or `doctor` gate. Commands are in
 [Operations](OPERATIONS.md#optional-cold-archive).
 
-Archive creation resolves `SECRETARY_CARD_BACKEND` once before touching an engine. Both backends carry
-the normalized Product, Issue, Task and Sprint views, comments, request/audit history and inert
-run/claim state. A `core` archive holds only that engine-independent set. A Kanboard `full` archive
-adds the `raw_board` directory. A PostgreSQL `full` archive is version 2 and adds
+Every archive carries the normalized Product, Issue, Task and Sprint views, comments, request/audit
+history and inert run/claim state. A `core` archive holds only that engine-independent set. A `full`
+archive is version 2 and adds
 `engine/postgres.dump`, a custom-format data-only dump made and listed by the pinned `postgres:16`
 client; its manifest records source Alembic head, server/client version, table counts and purpose. No
 archive carries a database password, role secret, `board-store.env` or the memory model cache
 `memory/fastembed-cache` (the index rebuild downloads the model again).
 
-`SECRETARY_CARD_BACKEND=postgres secretary restore-postgres ARCHIVE --instance TARGET` restores only
+`secretary restore-postgres ARCHIVE --instance TARGET` restores only
 into a distinct disposable target whose `board-store.env`, container, database and owner/app/read roles
 are managed by the board-store lifecycle. It verifies archive identity and checksums, refuses the
 source endpoint, migrates the target to the recorded head, verifies roles, requires every application
@@ -350,9 +342,9 @@ database untouched; repair or recreate only the target before retrying.
 ## Fresh install and recovery
 
 Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs the pinned
-board and session-manager runtimes, writes `board-transport.env` and creates the Pipeline board, with
-no recovery phrase or manual board credentials. `secretary install` installs neither runtime and
-checks both before changing live state.
+Docker and session-manager runtimes and provisions, migrates and role-verifies the PostgreSQL board
+store, with no recovery phrase or manual board credentials. `secretary install` installs neither
+runtime and checks both before changing live state.
 
 ```bash
 python3 -m pip install '.[memory]'
@@ -395,7 +387,7 @@ preserve it, then remove it outside Secretary or choose a fresh `--instance-dir`
 different origin, invalid repository or unsupported non-fast-forward is also left untouched and
 refused. A clean tree alone never proves product ownership.
 
-`runtime.env` and `board-transport.env` stay gitignored and are never committed.
+`runtime.env` and `board-store.env` stay gitignored and are never committed.
 
 ### Sequence
 
@@ -409,7 +401,7 @@ refused. A clean tree alone never proves product ownership.
    are handed to `--installation-user` before that user's Git or remote child can consume a restored
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
 3. Checks the remote and checkout, materialised credentials, board reachability and the installed
-   session manager. Board transport is created or read independently of the secret step.
+   session manager.
 4. Materialises `state/board` and `state/runs` into a new local data plane, builds derived JSON from
    the NDJSON and verifies counters before any live write.
 5. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`
@@ -457,22 +449,14 @@ Restore-only bulk boundaries, all idempotent on rerun:
 
 - **Cards.** Task, Product and Issue creation validates the full plan and stages a deterministic
   per-card audit obligation before the first backend mutation. Every create, metadata/state and closure
-  payload is checked against the 1 MiB call limit first; an oversized payload is refused by reference
-  and phase with nothing staged. Batches are not transactions: a mixed error, bad or lost reply, or
-  interruption is reconciled against a fresh board inventory, and only individually proved rows
-  commit. A retry writes only absent or incomplete obligations. Duplicate references, conflicting
-  title/description, or a committed card that no longer matches fail closed. A valid JSON-RPC error
-  member is a definite rejection; lost replies and malformed aggregates stay ambiguous and pending.
+  batch is reconciled against a fresh board inventory, and only individually proved rows commit. A
+  retry writes only absent or incomplete obligations. Duplicate references, conflicting
+  title/description, or a committed card that no longer matches fail closed.
 - **Comments.** Card and sprint history is read in bounded batches and written in ordered waves with at
   most one next occurrence per entity per batch. Each occurrence is staged under a stable restore
   request id; a fresh history read proves applied occurrences before audit append, and only unproved
   ones are retried. Identical bodies keep multiplicity and order (body digest plus occurrence ordinal).
-  Pending evidence carries the body only while the outcome is ambiguous. Batch policy: 200 calls and
-  1 MiB per document; comment reads and writes each cap at 50 calls. A very long single history can hit
-  the 30-second transport timeout and fails closed with its pending obligations intact. This relies on
-  pinned `kanboard/kanboard:v1.2.46` returning comments in `(date_creation, id)` ascending order and
-  `createComment` returning the new comment id or `false`. Before changing the pin, re-check both in
-  the upstream source and on a disposable backend.
+  Pending evidence carries the body only while the outcome is ambiguous.
 - **Order.** Archived rows are closed in bounded batches only after their comments are proven. Then,
   from an authoritative snapshot, the relative order of active rows in each `(column, swimlane)` group
   is reconciled to normalized `(position, reference)` order. Only mismatched groups move; each owns one
@@ -574,15 +558,6 @@ interruption, either command keeps that card and reallocates under the allocatio
 superseded allocation; a row already changed is never reallocated. Rollback is a reviewed follow-up
 after audit reconciliation, never a hand edit of checkpoint files, pending audit or board storage.
 Never edit `cards.ndjson` as the source of truth.
-
-<a id="cutover-recovery-boundary"></a>
-
-## Cutover controller state
-
-The PostgreSQL cutover controller keeps its state in `<data_dir>/cutover/` (`postgres-v1.json`, the
-controller lock, `artifacts/`, `history/`). Preserve these files and both backend backups; never edit
-or delete them. Its recovery rules are in [Protocols](PROTOCOLS.md#secretary-cutover) and the runbook
-in [Operations](OPERATIONS.md#postgresql-board-store-cutover).
 
 ## Not covered
 

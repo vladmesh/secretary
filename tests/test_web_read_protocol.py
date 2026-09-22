@@ -1,7 +1,7 @@
 """The transport-independent read layer: cursors, the five agent states, and degraded sources.
 
 Every test here is hermetic in the strong sense the card asks for: no live Orca, no network, no
-Kanboard, no real worker. The board is a throwaway card store (`tests/sql_backend_fixtures.py`),
+live board, no real worker. The board is a throwaway card store (`tests/sql_backend_fixtures.py`),
 installation health is a value the test
 supplies, and the agents are heartbeat records written into a temporary directory -- which is
 exactly the point, because a dashboard that could only be tested against production would be
@@ -380,14 +380,14 @@ class DegradedSourceTests(ReadLayerFixture):
             def call(self, method, **params):
                 from secretary.tasks import TaskError
 
-                raise TaskError("backend_unavailable", "Kanboard is not answering", 1)
+                raise TaskError("backend_unavailable", "board store is not answering", 1)
 
             def call_batch(self, calls):
                 return []
 
         snapshot = self.layer(board_client=RefusingBoard()).system_snapshot()
         self.assertEqual(snapshot["tasks"]["source"]["state"], "unavailable")
-        self.assertIn("Kanboard is not answering", snapshot["tasks"]["source"]["reason"])
+        self.assertIn("board store is not answering", snapshot["tasks"]["source"]["reason"])
         self.assertEqual(snapshot["tasks"]["items"], [])
         self.assertEqual(snapshot["agents"]["source"]["state"], "available")
 
