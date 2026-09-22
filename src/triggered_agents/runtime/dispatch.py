@@ -154,7 +154,7 @@ from secretary.runtime.head import (
     with_pid_heartbeat,
 )
 from secretary.runtime.head.identity import head_process_status
-from .head_runtime_backends import build_head_runtime, head_runtime_name
+from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
 from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from secretary.runtime.pane_host import Pane, SessionHost, safe_command_label, session_host
 from .production_telemetry import data_dir as _installation_data_dir

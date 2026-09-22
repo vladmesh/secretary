@@ -1308,7 +1308,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
 
     def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
         package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
+        backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):

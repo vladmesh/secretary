@@ -266,7 +266,7 @@ from secretary.runtime.head import (
 from secretary.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
-from triggered_agents.runtime.head_runtime_backends import (
+from secretary.runtime.head_runtime_backends import (
     UnknownHeadRuntimeError,
     build_head_runtime,
     head_runtime_name,

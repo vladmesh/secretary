@@ -113,7 +113,7 @@ from secretary.webproto.runs import (
 )
 from secretary.webproto.store_io import write_document
 from secretary.webproto.workspaces import provision, workspace_path
-from triggered_agents.runtime.head_runtime_backends import build_head_runtime
+from secretary.runtime.head_runtime_backends import build_head_runtime
 
 #: Re-exported so that the names an operator and a test already know keep resolving here, while the
 #: transitions that use them live in one place. See :mod:`secretary.webproto.lifecycle`.
