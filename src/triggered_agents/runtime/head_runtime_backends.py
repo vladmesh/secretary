@@ -6,7 +6,7 @@ caller is acting on. They are separate files because the vocabulary is imported 
 `head.command.validate_launch_shape`, which is the check every reader of a registry goes through,
 and that check must stay free of the backends it is validating names against.
 
-Two callers read it, and it is the same mapping for both. `secretary.dispatcher.DispatcherHost`
+Two callers read it, and it is the same mapping for both. `secretary.dispatch.host.CommandHostRuntime`
 raises, observes and stops the pipeline's heads through it; `runtime.dispatch` — the mechanical-role
 driver for curator, steward and retro — chooses through it which of the two ways it holds a head of
 its own. A second copy of either half is a way for one of them to raise a head the other cannot

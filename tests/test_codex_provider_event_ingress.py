@@ -20,6 +20,7 @@ from secretary.codex_provider_events import (
 from secretary.dispatch import launch as dispatcher_launch
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -38,12 +39,12 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.tui import provider_progress_for_run
 from secretary.dispatch.types import HostError
 from secretary.dispatch.worker_launch import bring_up_worker_head
 from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
 from secretary.head_health import HeadReadiness
 from secretary.projects.contract import (
     ContractVerdict,

@@ -26,16 +26,18 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary import dispatcher as secretary_dispatcher
 from secretary._fsutil import file_lock
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import launch as dispatcher_launch
+from secretary.dispatch import runtime as secretary_dispatcher
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog, LaunchedHead
 from secretary.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatch.production import _budget_event_type
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import (
     DispatcherRecord,
     GatePrAuthorship,
@@ -66,12 +68,6 @@ from secretary.dispatch.watchdog import (
 from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
-)
-from secretary.dispatcher import (
-    CommandHostRuntime,
-    DispatcherRuntime,
-    InstanceCatalog,
-    LaunchedHead,
 )
 from secretary.projects.contract import (
     ContractVerdict,

@@ -22,6 +22,7 @@ from secretary.board.sql_cards import BOARD_ID
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import observer_fence as dispatcher_observer_fence
 from secretary.dispatch.heartbeat import heartbeat_identity
+from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.dispatch.launch import infrastructure_action
 from secretary.dispatch.observer import (
     EVENT_DEFERRED,
@@ -54,6 +55,7 @@ from secretary.dispatch.production import (
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.tui import (
     DeliveryEvidence,
     TuiDeliveryError,
@@ -64,11 +66,6 @@ from secretary.dispatch.tui import (
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.dispatcher import (
-    CommandHostRuntime,
-    DispatcherRuntime,
-    InstanceCatalog,
-)
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import (

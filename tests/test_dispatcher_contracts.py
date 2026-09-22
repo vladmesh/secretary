@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
 from secretary import role_env as head_role_env
 from secretary import upgrade
 from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
@@ -44,13 +43,16 @@ from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatch import production as dispatcher_production
 from secretary.dispatch import release_lifecycle as dispatcher_release_lifecycle
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import runtime as dispatcher_module
 from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
 from secretary.dispatch.gate import GateResult
+from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
+from secretary.dispatch.types import DispatcherError, HostError
 from secretary.head_registry import (
     canonical_heads,
     installed_heads,
@@ -111,7 +113,7 @@ _RUNTIME_HOLDERS = ("self", "runtime")
 
 
 def _runtime_trees() -> list[ast.AST]:
-    """Sources that drive a runtime's collaborators. dispatcher.py is narrowed to the
+    """Sources that drive a runtime's collaborators. dispatch/runtime.py is narrowed to the
     `DispatcherRuntime` class: `CommandHostRuntime` also holds a `self.catalog`, but that is the
     host's own use of the real catalog, not the surface the doubles have to cover."""
     trees: list[ast.AST] = []
@@ -385,7 +387,7 @@ class HostBehaviourContractTests(unittest.TestCase):
         real = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
 
         def boom(args):
-            raise dispatcher_module.HostError("orca is down")
+            raise HostError("orca is down")
 
         real._run_json = boom  # type: ignore[assignment]
         record = self._record(str(self.root / "fake" / "w1"))
@@ -507,7 +509,7 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
                 instance = self.instance(Path(tmpdir), snapshot)
 
-                with self.assertRaises(dispatcher_module.DispatcherError) as caught:
+                with self.assertRaises(DispatcherError) as caught:
                     InstanceCatalog(instance)
 
                 self.assertEqual(caught.exception.code, "invalid_heads")
@@ -1411,7 +1413,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         host = CommandHostRuntime(FakeCatalog(), Path(tmp.name), mode="noop")
 
-        with self.assertRaisesRegex(dispatcher_module.HostError, "unknown head runtime"):
+        with self.assertRaisesRegex(HostError, "unknown head runtime"):
             host.head_runtime_for(HeadSpec(profile_id="head", adapter="claude", runtime="podman"))
 
     # -- criterion 5: it survives publication ---------------------------------------------------
@@ -1588,7 +1590,7 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
         self.supervised.refuses = True
         record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
 
-        with self.assertRaisesRegex(dispatcher_module.HostError, "was not stopped"):
+        with self.assertRaisesRegex(HostError, "was not stopped"):
             self.host.stop_workspace(record)
 
     def test_a_teardown_does_not_remove_the_worktree_under_a_head_it_could_not_stop(self) -> None:

@@ -15,22 +15,25 @@ from typing import Any, ClassVar
 from secretary.checkpoint import PUSH_INTERVAL_SECONDS, CheckpointResult, is_push_due
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
-from secretary.dispatch.launcher import claude_launch_model, role_launch_env
-from secretary.dispatch.observer import OBSERVER_HEAD_FALLBACK
-from secretary.dispatch.types import HeadLaunchAborted, ReviewLaunch
-from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status
-from secretary.dispatch.watchdog import pid_file_path
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.dispatcher import (
-    STOPPED_BY_DISPATCHER,
-    STOPPED_BY_REVIEW_FREEZE,
+from secretary.dispatch.host import (
     CommandHostRuntime,
-    HostError,
     LaunchedHead,
     _continuation_note,
     _report_nudge_prompt,
 )
+from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
+from secretary.dispatch.launcher import claude_launch_model, role_launch_env
+from secretary.dispatch.observer import OBSERVER_HEAD_FALLBACK
+from secretary.dispatch.types import (
+    STOPPED_BY_DISPATCHER,
+    STOPPED_BY_REVIEW_FREEZE,
+    HeadLaunchAborted,
+    HostError,
+    ReviewLaunch,
+)
+from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status
+from secretary.dispatch.watchdog import pid_file_path
+from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
     ContractVerdict,

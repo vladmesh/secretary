@@ -3,7 +3,7 @@
 Codex TUI paints in an alternate screen, so Orca's terminal lastOutputAt can stay stale
 while the head is reasoning and writing rollout JSONL. These helpers map session files
 back to a workspace and give the dispatcher's terminal-status check a supplemental activity
-signal (secretary/dispatcher.py, through latest_activity_for).
+signal (secretary/dispatch/runtime.py, through latest_activity_for).
 
 Two hard rules, both from review 373:
 

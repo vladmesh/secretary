@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import InstanceCatalog
+from secretary.dispatch.host import InstanceCatalog
 from tests import _SUITE_CODEX_HOME
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import codex_preflight

@@ -16,7 +16,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from secretary.dispatcher import CommandHostRuntime, HostError
+from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.types import HostError
 from triggered_agents.agents.pipeline.heads import HEADS_TOML, Registry, load_registry
 from triggered_agents.runtime.head import (
     HeadSpec,

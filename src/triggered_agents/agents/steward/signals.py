@@ -424,7 +424,7 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
 def _active_card_id_prefixes(project: str, reader: StewardSignalReader | None = None) -> set[str]:
     """id-prefixes (`<id>-`, `review-<id>-`) for every active card of `project`, in ANY column —
     including Blocked. The pipeline deliberately leaves a card's worker/reviewer workspace on disk
-    with NO cards.json record at all once it reaches Blocked (dispatcher.py's report:blocked path,
+    with NO cards.json record at all once it reaches Blocked (secretary/dispatch/worker_report.py's report:blocked path,
     validate.py's Blocked-from-Validate/contrib paths — "left alive for a human to inspect"), so
     matching against cards.json would flag every one of those as a false-positive orphan
     (2026-07-04 review, triggered-agents-244 blocker B1). The board itself, not the dispatcher's

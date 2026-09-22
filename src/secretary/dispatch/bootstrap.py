@@ -1,6 +1,6 @@
 """Construction boundary for the production dispatcher runtime.
 
-The dispatcher state machine remains in :mod:`secretary.dispatcher` while the installed
+The dispatcher state machine lives in :mod:`secretary.dispatch.runtime`; the installed
 CLI/web entry points build it here. Keeping backend selection, instance data-dir resolution and
 host construction in this small module prevents new callers from treating the legacy dispatcher
 monolith as a general-purpose API.
@@ -14,7 +14,7 @@ from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
-from secretary.dispatcher import DispatcherRuntime
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.types import DispatcherError
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 

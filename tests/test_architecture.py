@@ -18,7 +18,7 @@ LEGACY_FLAT_MODULES = frozenset(
     __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
     backup_policy.py backup_retention.py backup_verify.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
-    codex_provider_events.py config.py data.py dispatcher.py
+    codex_provider_events.py config.py data.py
     gate.py
     head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
@@ -44,10 +44,9 @@ LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
 )
 
 
-# The monolith remains the state-machine implementation for now. Only the narrow construction
-# boundary may import it from production code; every other caller must depend on feature modules.
-# This set should become empty when DispatcherRuntime itself moves.
-DISPATCHER_FACADE_IMPORTS = frozenset({("dispatch/bootstrap.py", "secretary.dispatcher")})
+# The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
+# must not come back, and nothing may import it under its old name.
+RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
 
 
 def _is_runtime_package(module: str) -> bool:
@@ -70,31 +69,28 @@ class SourceLayoutTests(unittest.TestCase):
         current = {path.name for path in (ROOT / "src" / "secretary").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
 
-    def test_dispatcher_facade_adds_no_new_product_consumers(self) -> None:
-        package = ROOT / "src" / "secretary"
-        imports: set[tuple[str, str]] = set()
-        for path in package.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                module = ""
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name == "secretary.dispatcher":
-                            imports.add((path.relative_to(package).as_posix(), alias.name))
-                    continue
-                if isinstance(node, ast.ImportFrom):
-                    if node.module == "secretary.dispatcher":
-                        module = node.module
-                    elif node.module == "secretary" and any(
-                        alias.name == "dispatcher" for alias in node.names
-                    ):
-                        module = "secretary.dispatcher"
-                if module:
-                    imports.add((path.relative_to(package).as_posix(), module))
-        self.assertEqual(imports, DISPATCHER_FACADE_IMPORTS)
+    def test_retired_dispatcher_root_module_stays_retired(self) -> None:
+        """The retired flat dispatcher root module is gone and nothing imports it by its old name."""
+        self.assertFalse((ROOT / "src" / "secretary" / "dispatcher.py").exists())
+        retired = ".".join(RETIRED_DISPATCHER_MODULE)
+        offenders: list[str] = []
+        for tree_root in ("src", "tests", "scripts"):
+            for path in (ROOT / tree_root).rglob("*.py"):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    modules: list[str] = []
+                    if isinstance(node, ast.Import):
+                        modules = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                        modules = [node.module]
+                        modules += [f"{node.module}.{alias.name}" for alias in node.names]
+                    for module in modules:
+                        if module == retired or module.startswith(f"{retired}."):
+                            offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
+        self.assertEqual(offenders, [])
 
     def test_dispatcher_claim_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(
             encoding="utf-8"
         )
         production_source = (
@@ -111,7 +107,7 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._claim(", production_source)
 
     def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(
             encoding="utf-8"
         )
         claim_source = (
@@ -135,7 +131,7 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("def resolve_headless_worker(", worker_launch_source)
 
     def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         report_source = (ROOT / "src" / "secretary" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
         for helper in (
             "_record_infra_completion", "_accept_stale_infrastructure_done",
@@ -164,10 +160,10 @@ class SourceLayoutTests(unittest.TestCase):
         )
         for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
             self.assertIn(f"def {entry}(", report_source)
-        self.assertNotIn("from secretary.dispatcher import", report_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", report_source)
 
     def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         gate_source = (
             ROOT / "src" / "secretary" / "dispatch" / "gate_lifecycle.py"
         ).read_text(encoding="utf-8")
@@ -204,10 +200,10 @@ class SourceLayoutTests(unittest.TestCase):
         ):
             self.assertIn(f"def {entry}(", gate_source)
         self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
-        self.assertNotIn("from secretary.dispatcher import", gate_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", gate_source)
 
     def test_dispatcher_review_verdict_parking_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         verdict_source = (
             ROOT / "src" / "secretary" / "dispatch" / "review_verdict.py"
         ).read_text(encoding="utf-8")
@@ -235,10 +231,10 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
         self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
         self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from secretary.dispatcher import", verdict_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", verdict_source)
 
     def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         decision_source = (
             ROOT / "src" / "secretary" / "dispatch" / "assessment_decision.py"
         ).read_text(encoding="utf-8")
@@ -260,10 +256,10 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("release_lifecycle.release_parked(", decision_source)
         self.assertNotIn("runtime._release_parked(", decision_source)
         self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from secretary.dispatcher import", decision_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", decision_source)
 
     def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         release_source = (
             ROOT / "src" / "secretary" / "dispatch" / "release_lifecycle.py"
         ).read_text(encoding="utf-8")
@@ -308,10 +304,10 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._block_merge_path(", verdict_source)
         self.assertNotIn("runtime._release_effect(", verdict_source)
         self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("from secretary.dispatcher import", release_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", release_source)
 
     def test_dispatcher_attempt_accounting_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         accounting_source = (
             ROOT / "src" / "secretary" / "dispatch" / "attempt_accounting.py"
         ).read_text(encoding="utf-8")
@@ -354,10 +350,10 @@ class SourceLayoutTests(unittest.TestCase):
                 "runtime.publish_pending_attempt_usage(",
             ):
                 self.assertNotIn(legacy_call, source, path.name)
-        self.assertNotIn("from secretary.dispatcher import", accounting_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", accounting_source)
 
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         wait_source = (
             ROOT / "src" / "secretary" / "dispatch" / "wait_vitality.py"
         ).read_text(encoding="utf-8")
@@ -382,7 +378,7 @@ class SourceLayoutTests(unittest.TestCase):
             "reduce_and_store_vitality_episode",
         ):
             self.assertIn(f"def {entry}(", wait_source)
-        self.assertNotIn("from secretary.dispatcher import", wait_source)
+        self.assertNotIn("from secretary.dispatch.runtime import", wait_source)
 
     def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
         package = ROOT / "src" / "triggered_agents"
