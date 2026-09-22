@@ -2319,25 +2319,39 @@ class DoneRetentionTests(CardStoreCase):
         equal = close_old_done(self.reader, self.writer, now=100 + 14 * 86400, retention_days=14)
         self.assertEqual(equal["closed"], [])
 
+    def _records(self) -> tuple[str, str]:
+        """A Product and an Issue in their own tables, as the Product/Issue writer makes them."""
+        issue = "issue:" + "b" * 20
+        self.client.add_record(
+            "product:alpha",
+            "Alpha",
+            {"record_type": "product", "product_id": "alpha", "product_projects": '["secretary"]'},
+        )
+        self.client.add_record(
+            issue,
+            "Beta",
+            {"record_type": "issue", "issue_product": "alpha", "issue_kind": "feature", "issue_priority": "P1"},
+        )
+        return "product:alpha", issue
+
     def test_reader_includes_only_active_done_execution_candidates(self) -> None:
-        for key, reference, state, record_type, closed in (
-            (14, "product-1", "done", "product", False),
-            (15, "ready-1", "ready", "task", False),
-            (16, "closed-1", "done", "task", True),
+        self._records()
+        for key, reference, state, closed in (
+            (15, "ready-1", "ready", False),
+            (16, "closed-1", "done", True),
         ):
             self.client.add_card(
                 key, reference, state=state, project=None, closed=closed,
-                metadata={"record_type": record_type},
+                metadata={"record_type": "task"},
             )
             self.client.set_moved(key, 1)
         self.assertEqual(self.reader.done_retention_candidates(), [{"reference": "secretary-468", "date_moved": 100}])
 
     def test_product_or_issue_is_refused_without_close(self) -> None:
-        for record_type in ("issue", "product"):
-            self.client.save_metadata(12, record_type=record_type)
+        for reference in self._records():
             with self.assertRaisesRegex(TaskError, "cannot be retired") as raised:
                 self.writer.retire_done(
-                    reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+                    reference=reference, expected_date_moved=100, cutoff=101, retention_days=14
                 )
             self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))

@@ -674,6 +674,41 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         restore_postgres_backup(result.archive, self.target_instance)
         self.assertTrue((self.root / "target-data" / "postgres-restore.json").is_file())
 
+    def test_tasks_rows_whose_bag_names_another_kind_export_as_tasks_and_restore(self) -> None:
+        """secretary-1678 D2: the table is the record type, whatever a stale bag value says."""
+        self._seed()
+        source = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
+        with source.transaction():
+            for reference, stale in (("secretary-1", "product"), ("codegen-product-kit-1", "not-a-kind")):
+                source._execute(
+                    "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
+                    "'{extra,record_type}', to_jsonb(%s::text), true) WHERE task_ref = %s",
+                    (stale, reference),
+                )
+        source.connection.close()
+
+        with (
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("secretary.backup._pipeline_action", return_value=None),
+            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+        ):
+            (result,) = create_backups(self.source_instance)
+
+        with tarfile.open(result.archive) as archive:
+            cards = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+            )["cards"]
+        kinds = {card["reference"]: card["metadata"]["record_type"] for card in cards}
+        self.assertEqual(kinds["secretary-1"], "task")
+        self.assertEqual(kinds["codegen-product-kit-1"], "task")
+        self.assertEqual(kinds["product:secretary"], "product")
+        self.assertEqual(kinds["issue:recovery"], "issue")
+
+        # Counts, then normalized parity against the restored store; either refusal raises.
+        restore_postgres_backup(result.archive, self.target_instance)
+        self.assertTrue((self.root / "target-data" / "postgres-restore.json").is_file())
+
     @staticmethod
     def _down(instance: Path, project: str) -> None:
         subprocess.run(

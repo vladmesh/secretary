@@ -796,8 +796,8 @@ class SqlCardClient:
                 if name != "swimlane":
                     meta[name] = _text(value)
             # The table is the record type (`sql_product_issues.py`): a `tasks` row is a task
-            # whether or not its bag ever repeated the key.
-            meta.setdefault("record_type", "task")
+            # whatever its bag says; a stale bag value never renames it.
+            meta["record_type"] = "task"
             result[key] = meta
         return result
 
@@ -812,6 +812,11 @@ class SqlCardClient:
             self._commit_unless_nested()
             return result
         ref = self._ref_of(task_id)
+        # The read states a `tasks` row's kind from the table; a bag value naming another kind
+        # would be a Product or Issue written into the wrong table, so it is refused here.
+        declared = _text(values.get("record_type"))
+        if declared not in {"", "task"}:
+            raise SqlCardError(f"card {ref} is a task; it cannot carry record_type {declared!r}")
         assignments: list[str] = []
         params: list[Any] = []
         bag_updates: dict[str, Any] = {}

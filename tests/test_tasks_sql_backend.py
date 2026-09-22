@@ -48,6 +48,31 @@ class SqlTaskReaderTests(SqlBoardCase):
         self.assertEqual(rows["secretary-468"]["project"], "secretary")
         self.assertEqual(rows["secretary-468"]["task_type"], "code")
 
+    def test_a_tasks_row_states_task_whatever_its_bag_says(self) -> None:
+        """secretary-1678: the table is the record type; a stale bag value does not rename the row."""
+        key = self.client.key_of("secretary-468")
+        for stale in ("product", "issue", "epic"):
+            with self.subTest(stale=stale), self.client.transaction():
+                self.client._execute(
+                    "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
+                    "'{extra,record_type}', to_jsonb(%s::text), true) WHERE board_key = %s",
+                    (stale, key),
+                )
+            self.assertEqual(self.client.metadata(key)["record_type"], "task")
+            rows = {row["reference"]: row for row in self.reader.export()}
+            self.assertEqual(rows["secretary-468"]["metadata"]["record_type"], "task")
+
+    def test_a_tasks_row_refuses_another_record_type_on_write(self) -> None:
+        """secretary-1678: a write cannot store a Product's or Issue's kind in a `tasks` row's bag."""
+        key = self.client.key_of("secretary-468")
+        for declared in ("product", "issue", "epic"):
+            with self.subTest(declared=declared), self.assertRaisesRegex(TaskError, "is a task"):
+                self.client.save_metadata(key, record_type=declared)
+        self.client.save_metadata(key, record_type="task")
+        stored = self.client._query("SELECT extensions FROM tasks WHERE board_key = %s", (key,))[0][0]
+        bag = stored if isinstance(stored, dict) else json.loads(stored or "{}")
+        self.assertIn((bag.get("extra") or {}).get("record_type"), {None, "task"})
+
     def test_restore_snapshot_returns_every_card_by_reference(self) -> None:
         snapshot = self.reader.restore_snapshot()
 
