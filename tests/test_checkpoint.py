@@ -26,7 +26,6 @@ from secretary.board import (
     FakeBoardHost,
 )
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import (
     ANALYTICS_MANIFEST,
     PUSH_INTERVAL_SECONDS,
@@ -51,6 +50,7 @@ from secretary.secret_words import RECOVERY_WORDS
 from secretary.tasks import TaskReader, task_audit_for
 from tests.fakes.installation import split_board
 from tests.fakes.tasks import writer_seed
+from tests.retired_board import LEGACY_VALUES, legacy_runtime_lines, write_stale_leftovers
 from tests.sql_backend_fixtures import card_store
 
 
@@ -726,9 +726,10 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("secret detected in state/board/cards.ndjson", result.reason)
         self.assertIsNone(self.committed_board())
 
-    def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
-        transport = ensure_board_transport(self.instance_dir, allow_default=True).transport
-        contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
+    def test_stale_transport_text_in_a_card_does_not_block_the_checkpoint(self):
+        """The retired transport file is not a redaction source: its plain configuration publishes."""
+        stale = write_stale_leftovers(self.instance_dir)
+        contents = stale.read_text(encoding="utf-8")
         self.seed_board(
             [
                 {
@@ -754,44 +755,27 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(result.status, "committed")
         published = self.published_text("cards.ndjson")
-        self.assertIn(transport.url, published)
-        self.assertIn("KANBOARD_API_USER=jsonrpc", published)
-        self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
+        self.assertIn(LEGACY_VALUES[0], published)
         exported = self.published_text("export.json")
         self.assertIn(contents, json.loads(exported)["report"])
 
-    def test_migrated_board_transport_token_is_redacted_from_the_checkpoint(self):
-        transport = ensure_board_transport(
-            self.instance_dir,
-            legacy_values={
-                "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "migrated-live-token",
-            },
-        ).transport
-        self.seed_board([{**CARD, "description": f"token {transport.token}"}])
+    def test_a_stale_transport_file_with_a_broad_mode_does_not_block_the_checkpoint(self):
+        """Nothing reads the leftover, so its mode is no redaction failure either."""
+        write_stale_leftovers(self.instance_dir).chmod(0o644)
+        self.seed_board([CARD])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+
+    def test_a_legacy_runtime_token_is_still_redacted_by_the_ordinary_rule(self):
+        (self.instance_dir / "runtime.env").write_text(legacy_runtime_lines(), encoding="utf-8")
+        self.seed_board([{**CARD, "description": f"token {LEGACY_VALUES[2]}"}])
 
         result = self.write()
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("secret detected", result.reason)
-
-    def test_insecure_transport_blocks_checkpoint_before_a_token_can_publish(self):
-        transport = ensure_board_transport(
-            self.instance_dir,
-            legacy_values={
-                "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "migrated-live-token",
-            },
-        ).transport
-        (self.instance_dir / "board-transport.env").chmod(0o644)
-        self.seed_board([{**CARD, "description": f"token {transport.token}"}])
-
-        result = self.write()
-
-        self.assertEqual(result.status, "blocked")
-        self.assertIn("redaction values", result.reason)
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"
@@ -849,7 +833,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_imported_runtime_config_paths_do_not_block_checkpoint(self):
         runtime = self.instance_dir / "runtime.env"
-        url = "https://board.example.invalid/jsonrpc.php"
+        url = "https://board.example.invalid/rpc"
         data_dir = "/srv/secretary-data"
         product_root = "/srv/secretary"
         runtime.write_text(

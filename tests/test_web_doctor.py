@@ -57,7 +57,6 @@ EVERY_PROBLEM: dict[str, Any] = {
         "unpublished_minutes": 45,
         "rpo_reason": "checkpoint gate blocked since 2026-09-20T11:15:00Z: no remote",
     },
-    "board_transport": {"findings": ["x"]},
     "secret_store": {"installation_key": {"present": True, "usable": False}},
     "memory": {"index_present": False},
 }
@@ -122,7 +121,6 @@ class TheColourRuleTests(unittest.TestCase):
                 "checkpoint.blocked",
                 "checkpoint.last_failed",
                 "checkpoint.rpo_exceeded",
-                "board_transport.finding",
                 "secret_store.key_unusable",
                 "memory.index_missing",
             ],
@@ -140,7 +138,6 @@ class TheColourRuleTests(unittest.TestCase):
             "checkpoint.last_failed",
             "checkpoint.rpo_exceeded",
             "secret_store.key_unusable",
-            "board_transport.finding",
             "health.unreadable",
         }
         yellow = {
@@ -159,7 +156,10 @@ class TheColourRuleTests(unittest.TestCase):
 
     def test_one_red_problem_makes_the_colour_red_however_many_yellow_ones_there_are(self) -> None:
         self.assertEqual(health_summary(EVERY_PROBLEM)["colour"], "red")
-        just_red = {"memory": {"index_present": False}, "board_transport": {"findings": ["x"]}}
+        just_red = {
+            "memory": {"index_present": False},
+            "secret_store": {"installation_key": {"present": True, "usable": False}},
+        }
         self.assertEqual(health_summary(just_red)["colour"], "red")
 
     def test_the_colour_keys_on_the_code_and_not_on_the_wording(self) -> None:
@@ -293,7 +293,7 @@ class TheDoctorPageTests(TransportFixture):
         self.assertLess(red, yellow, "what makes the lamp red is read first")
         for code, message in (
             ("unit.failed", "a.service is failed"),
-            ("board_transport.finding", "board_transport has 1 finding(s)"),
+            ("secret_store.key_unusable", "the secret store&#x27;s installation key is not usable"),
             ("pipeline.paused", "the pipeline is paused (drain)"),
             ("memory.index_missing", "the memory index is missing"),
         ):

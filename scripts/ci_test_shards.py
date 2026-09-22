@@ -32,7 +32,7 @@ SUITES = (
 )
 
 FAST_MODULES = (
-    "tests.test_hermetic_kanboard",
+    "tests.test_hermetic_board",
     "tests.test_hermetic_orca",
     "tests.test_hermetic_pipeline_state",
 )

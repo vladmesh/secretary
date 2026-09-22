@@ -45,6 +45,7 @@ from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
+from tests.retired_board import legacy_runtime_lines
 from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
@@ -944,14 +945,9 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.data_dir = self.root / "srv" / "secretary-data"
         self.instance = _instance(self.root / "instance", self.data_dir)
-        # The live runtime.env carries board credentials and no instance path — the case the
+        # The live runtime.env carries leftover board lines and no instance path — the case the
         # reviewer found: role_env has nothing to forward unless the unit itself exports it.
-        (self.instance / "runtime.env").write_text(
-            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
-            "KANBOARD_API_USER=steward\n"
-            "KANBOARD_API_TOKEN=secret\n",
-            encoding="utf-8",
-        )
+        (self.instance / "runtime.env").write_text(legacy_runtime_lines(), encoding="utf-8")
         self.layout = host.SystemdLayout(
             product_root=self.root / "product",
             instance_path=self.instance,
@@ -998,10 +994,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         """
         env_data = self.root / "env-data"
         (self.instance / "runtime.env").write_text(
-            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
-            "KANBOARD_API_USER=steward\n"
-            "KANBOARD_API_TOKEN=secret\n"
-            f"SECRETARY_DATA_DIR={env_data}\n",
+            legacy_runtime_lines() + f"SECRETARY_DATA_DIR={env_data}\n",
             encoding="utf-8",
         )
         # What the dispatcher unit's own EnvironmentFile gives its process, resolved by the real

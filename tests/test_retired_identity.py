@@ -2,9 +2,9 @@
 
 Cards (secretary-1669), Sprints and Products/Issues (secretary-1670) have one implementation, so
 every audit event a mutation commits names `task_postgres_<n>` / `sprint_postgres_<n>` and backend
-kind `postgres`. History written before the cutover keeps its `task_kanboard_<n>` and
-`sprint_kanboard_<n>` ids, and those still resolve: by request id, in the ref's history, and to the
-number the live row carries.
+kind `postgres`. History written before the cutover keeps its ids under the retired store word,
+`task_<word>_<n>` and `sprint_<word>_<n>`, and those still resolve: by request id, in the ref's
+history, and to the number the live row carries.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.sprints import SprintFixture
 from tests.observer_identity import as_observer
+from tests.retired_board import RETIRED_STORE
 from tests.sql_backend_fixtures import ensure_sprint_row
 
 
@@ -110,7 +111,7 @@ class NewWritesNamePostgresTests(SprintFixture):
 
 
 class HistoricalKanboardIdentityTests(SprintFixture):
-    """A pre-cutover `task_kanboard_<n>` / `sprint_kanboard_<n>` event still resolves."""
+    """A pre-cutover event under the retired store word still resolves."""
 
     def _seed_history(self, request_id: str, *, ref: str, kind: str, number: int) -> dict[str, Any]:
         entity = "sprint" if ref.startswith("sprint:") else "task"
@@ -121,7 +122,7 @@ class HistoricalKanboardIdentityTests(SprintFixture):
             "actor": {"role": "po", "id": "operator"},
             "kind": kind,
             "outcome": "success",
-            "task_id": f"{entity}_kanboard_{number}",
+            "task_id": f"{entity}_{RETIRED_STORE}_{number}",
             "ref": ref,
             "backend": {"kind": "kanboard", "task_id": number, "revision": "history"},
             "request_id": request_id,
@@ -130,7 +131,7 @@ class HistoricalKanboardIdentityTests(SprintFixture):
         SqlTaskAudit(self.client).append(request_id, event)
         return event
 
-    def test_a_card_s_kanboard_history_resolves_by_request_ref_and_number(self) -> None:
+    def test_a_card_s_pre_cutover_history_resolves_by_request_ref_and_number(self) -> None:
         card = TaskReader(self.client).show("secretary-12")  # type: ignore[arg-type]
         number = entity_number("task", card["id"])
         seeded = self._seed_history("history-card", ref="secretary-12", kind="commented", number=number or 0)
@@ -141,7 +142,7 @@ class HistoricalKanboardIdentityTests(SprintFixture):
         self.assertEqual(entity_number("task", seeded["task_id"]), number)
         self.assertTrue(card["id"].startswith("task_postgres_"), card)
 
-    def test_a_sprint_s_kanboard_history_resolves_by_request_ref_and_number(self) -> None:
+    def test_a_sprint_s_pre_cutover_history_resolves_by_request_ref_and_number(self) -> None:
         sprint = self._create(goal="history", request_id="history-create")["sprint"]
         number = entity_number("sprint", sprint["id"])
         seeded = self._seed_history("history-sprint", ref=sprint["ref"], kind="commented", number=number or 0)
@@ -156,7 +157,7 @@ class HistoricalKanboardIdentityTests(SprintFixture):
 
 
 class LiteralPreCutoverIdentityTests(SprintFixture):
-    """`task_kanboard_12` and `sprint_kanboard_7`, exactly as stored before the cutover, still resolve.
+    """Task 12 and sprint 7 under the retired store word, exactly as stored before the cutover, resolve.
 
     `entity_number` no longer knows any store word by name (secretary-1671): it reads the number out
     of any `<kind>_<word>_<n>`. These cases hold that against the real store, through the lookups a
@@ -180,10 +181,10 @@ class LiteralPreCutoverIdentityTests(SprintFixture):
         SqlTaskAudit(self.client).append(request_id, event)
         return event
 
-    def test_task_kanboard_12_resolves_to_the_card_the_store_holds_under_12(self) -> None:
-        seeded = self._seed("literal-card", ref="secretary-12", task_id="task_kanboard_12", number=12)
+    def test_retired_task_12_resolves_to_the_card_the_store_holds_under_12(self) -> None:
+        seeded = self._seed("literal-card", ref="secretary-12", task_id=f"task_{RETIRED_STORE}_12", number=12)
 
-        number = entity_number("task", "task_kanboard_12")
+        number = entity_number("task", f"task_{RETIRED_STORE}_12")
         self.assertEqual(number, 12)
         reader = TaskReader(self.client)  # type: ignore[arg-type]
         card = reader.show_id(number)
@@ -195,11 +196,11 @@ class LiteralPreCutoverIdentityTests(SprintFixture):
         self.assertEqual(audit.committed_event("literal-card"), seeded)
         self.assertIn(seeded, audit.events(reference=card["ref"]))
 
-    def test_sprint_kanboard_7_resolves_to_the_numbered_sprint_it_names(self) -> None:
+    def test_retired_sprint_7_resolves_to_the_numbered_sprint_it_names(self) -> None:
         ensure_sprint_row(self.client, "sprint:7")  # type: ignore[arg-type]
-        seeded = self._seed("literal-sprint", ref="sprint:7", task_id="sprint_kanboard_7", number=7)
+        seeded = self._seed("literal-sprint", ref="sprint:7", task_id=f"sprint_{RETIRED_STORE}_7", number=7)
 
-        number = entity_number("sprint", "sprint_kanboard_7")
+        number = entity_number("sprint", f"sprint_{RETIRED_STORE}_7")
         self.assertEqual(number, 7)
         sprint = self.sprint(f"sprint:{number}")
         self.assertEqual(sprint["ref"], "sprint:7")

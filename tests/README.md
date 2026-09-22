@@ -125,12 +125,12 @@ There is no default board fake to install, because there is nothing to shadow. A
 client comes from `secretary.board.backend.board_client(<instance dir>)`, which resolves that
 instance's local `board-store.env` and raises `backend_unavailable` when it is absent. Nothing
 selects a backend; there is one.
-A worker, reviewer or operator shell that inherits a live installation's `KANBOARD_*`
-variables therefore cannot turn the unit suite into a client of that board — the variables
-are simply not a source of transport configuration.
+A worker, reviewer or operator shell that inherits live-looking database variables therefore
+cannot turn the unit suite into a client of a live board — the variables are simply not a
+source of board configuration.
 
-`tests/test_hermetic_kanboard.py` is the proof, and it asserts both halves: with live-looking
-`KANBOARD_*` in the environment and a temporary instance that has no transport file, the
+`tests/test_hermetic_board.py` is the proof, and it asserts both halves: with live-looking
+`DATABASE_URL`/`PG*` in the environment and a temporary instance that has no `board-store.env`, the
 status read fails closed with `backend_unavailable` while a patched `urlopen` turns any
 accidental dial-out into a loud failure.
 
@@ -140,7 +140,7 @@ A CLI test that needs a board injects it where the client is built — the
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
 `collect_status(report, offline=True, sprint_client=sprint_store(self, status_seed()))` is the seam, and
-`tests/test_hermetic_kanboard.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
+`tests/test_hermetic_board.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
 is the worked example. Do not build a client against a real endpoint in a `test_*` module the
 default `python -m unittest` run discovers; a live canary belongs in an operator runbook or an
 explicit, separately opted-in integration test against a disposable endpoint instead.

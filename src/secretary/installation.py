@@ -44,7 +44,6 @@ from secretary._fsutil import (
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.board.backend import CARD, board_client
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
-from secretary.board_transport import transport_path
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import (
@@ -1718,14 +1717,9 @@ def install(args: argparse.Namespace) -> InstallResult:
                 raise _blocked_by_secrets(
                     InstallError(f"runtime.env lacks {', '.join(unavailable)}"), secrets, runtime_env
                 ) from None
-        # The PostgreSQL store is reached through board-store.env; the JSON-RPC tuple is not
-        # this installation's transport, so nothing materializes it.  A stale backend selector
-        # line an older build wrote into runtime.env is an ordinary unread variable.
-        result.add("board-transport", "skipped", "the PostgreSQL board store needs no JSON-RPC transport")
         if not args.dry_run:
             if canonical_runtime_env:
                 _set_installation_owner(runtime_env, args.installation_user)
-            _set_installation_owner(transport_path(target), args.installation_user)
             _set_installation_owner(target / ".gitignore", args.installation_user)
             _set_installation_owner(target / ".git", args.installation_user)
         result.add(

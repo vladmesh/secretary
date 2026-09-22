@@ -35,7 +35,6 @@ from unittest import mock
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env as head_role_env
 from secretary import upgrade
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
 from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
@@ -65,6 +64,7 @@ from secretary.role_env import observer_binding
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
+from tests.retired_board import legacy_runtime_lines
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
 from triggered_agents.runtime.head import (
@@ -678,12 +678,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             RoleRoutingGenerationTests.CANON, encoding="utf-8"
         )
         (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-        (self.instance / "runtime.env").write_text(
-            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
-            "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n",
-            encoding="utf-8",
-        )
-        ensure_board_transport(self.instance, allow_default=True)
+        (self.instance / "runtime.env").write_text(legacy_runtime_lines(), encoding="utf-8")
         materialize_snapshot(self.instance, upgrade.running_product_root())
         record_source(self.instance, upgrade.running_product_root())
         self.layout = SystemdLayout(
@@ -922,9 +917,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         loses its heads, so the fixture keeps one in the file the roles read.
         """
         (self.instance / "runtime.env").write_text(
-            "KANBOARD_URL=https://board.invalid/jsonrpc.php\n"
-            "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n"
-            "SECRETARY_INSTANCE=/home/dev/secretary-instance\n"
+            legacy_runtime_lines() + "SECRETARY_INSTANCE=/home/dev/secretary-instance\n"
             "SECRETARY_OBSERVER_SPRINT=sprint:somebody-else\n"
             "SECRETARY_OBSERVER_GENERATION=forged\n",
             encoding="utf-8",

@@ -10,7 +10,6 @@ from pathlib import Path
 
 from secretary import state_repo
 from secretary.backup import create_backups, verify_backup
-from secretary.board_transport import findings as _board_transport_findings
 from secretary.check_commands import add_check_subcommands
 from secretary.checkpoint import (
     checkpoint_snapshot,
@@ -110,7 +109,6 @@ class DoctorInspection:
     dispatcher: list[str]
     checkpoint: list[str]
     secret_store: list[str]
-    board_transport: list[str]
     resource_probes: list[HeadReadiness]
     recovery: dict[str, object]
     expected: object | None = None
@@ -519,10 +517,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_recovery_inventory(inspection.recovery)
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
-    if inspection.board_transport:
-        print("board transport findings:")
-        for finding in inspection.board_transport:
-            print(f"  {finding}")
 
     print("host changes: none")
     if inspection.unavailable:
@@ -691,7 +685,6 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     checkpoint_plain = checkpoint_findings(report)
     checkpoint = [f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo] + checkpoint_plain
     secret_store = secret_store_findings(report)
-    board_transport = _board_transport_findings(report.instance_path.parent)
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
     checkpoint_snapshot_value = checkpoint_snapshot(
         report.instance_path.parent,
@@ -719,7 +712,6 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(checkpoint_rpo)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_plain)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
-    findings.extend({"code": "board_transport", "message": finding} for finding in board_transport)
     findings.extend(
         {"code": "resource_probe", "resource": readiness.resource, "message": _probe_finding(readiness)}
         for readiness in resource_probes
@@ -735,7 +727,6 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         dispatcher,
         checkpoint,
         secret_store,
-        board_transport,
         resource_probes,
         recovery,
         expected,

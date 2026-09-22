@@ -4,7 +4,7 @@ read before anything judges.
 Five signal kinds: new Blocked card, an unhealthy production dispatcher tick since the steward's
 watermark, a card sitting in an active column past STALE_HOURS, a resource health flip, a
 worker/reviewer workspace on disk with no in-flight card record. Any one is enough for precheck
-to spawn the head; finding none costs a few Kanboard reads and a couple of file stats, no LLM.
+to spawn the head; finding none costs a few board reads and a couple of file stats, no LLM.
 
 Every signal dedupes against a persisted watermark (state/steward/watermark.json) keyed by
 anomaly kind, so a condition that has not changed since the last run does not re-spawn the head

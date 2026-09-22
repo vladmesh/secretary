@@ -54,6 +54,7 @@ from secretary.host import (
 from secretary.host_apply import ApplyInputs, apply_host
 from secretary.projects.availability import ProjectAvailability
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
 from triggered_agents.agents.pipeline import heads, health
 
 UNIT_PREFIX = "secretary-"
@@ -669,32 +670,73 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "unchanged")
         self.assertIn("1 unavailable project registrations deferred", result.detail)
 
-    def test_board_transport_step_is_a_recorded_no_op(self):
-        """The JSON-RPC tuple is no transport of the board store, so nothing is materialized or retired."""
+    def test_no_upgrade_step_is_about_a_transport(self):
+        names = [step.__name__ for step in upgrade.STEPS]
+        self.assertFalse([name for name in names if "transport" in name], names)
+        self.assertIn("step_runtime_owner", names)
+
+    def test_runtime_owner_step_neither_reads_nor_reports_stale_transport_leftovers(self):
+        """A stale transport file and legacy runtime.env lines are left exactly as found."""
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
             runtime = instance / "runtime.env"
-            body = (
-                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=legacy-token\n"
-            )
+            body = "OTHER=value\n" + legacy_runtime_lines()
             runtime.write_text(body, encoding="utf-8")
             runtime.chmod(0o600)
-            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-            self.assertEqual(result.status, "skipped")
-            self.assertIn("PostgreSQL board store", result.detail)
-            self.assertFalse((instance / "board-transport.env").exists())
-            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
+            stale = write_stale_leftovers(instance)
+            stale.chmod(0o644)  # even a mode the old step refused is no business of this one
+            stale_body = stale.read_bytes()
+            real_open = Path.open
 
-    def test_board_transport_step_still_fails_on_an_unsafe_runtime_env(self):
+            def guarded_open(path, *args, **kwargs):
+                if Path(path).name == STALE_FILE:
+                    raise AssertionError("upgrade read the stale transport file")
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", guarded_open):
+                result = upgrade.step_runtime_owner(self.context(FakeUnitInstaller(), instance_path=instance))
+            self.assertEqual(result.status, "unchanged")
+            self.assertNotIn("transport", result.detail)
+            self.assertNotIn(STALE_FILE, result.detail)
+            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
+            self.assertEqual(stale.read_bytes(), stale_body)
+            self.assertEqual(stale.stat().st_mode & 0o777, 0o644)
+
+    def test_runtime_owner_step_hands_runtime_files_to_the_runtime_user_and_skips_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            (instance / ".gitignore").write_text("runtime.env\n", encoding="utf-8")
+            runtime = instance / "runtime.env"
+            runtime.write_text("OTHER=value\n", encoding="utf-8")
+            runtime.chmod(0o600)
+            stale = write_stale_leftovers(instance)
+            context = self.context(FakeUnitInstaller(), instance_path=instance, runtime_user="operator")
+            account = SimpleNamespace(pw_uid=123, pw_gid=456)
+
+            with (
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown") as chown,
+            ):
+                result = upgrade.step_runtime_owner(context)
+
+            owned = {Path(call.args[0]) for call in chown.call_args_list}
+            self.assertEqual(result.status, "unchanged")
+            self.assertIn(runtime, owned)
+            self.assertIn(instance / ".gitignore", owned)
+            self.assertIn(instance / ".git", owned)
+            self.assertNotIn(stale, owned)
+
+    def test_runtime_owner_step_still_fails_on_an_unsafe_runtime_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
             runtime = instance / "runtime.env"
             runtime.write_text("OTHER=value\n", encoding="utf-8")
             runtime.chmod(0o644)
-            insecure = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+            insecure = upgrade.step_runtime_owner(self.context(FakeUnitInstaller(), instance_path=instance))
         self.assertEqual(insecure.status, "failed")
         self.assertIn("permissions are too broad", insecure.detail)
 
@@ -1044,8 +1086,8 @@ class UpgradeStepTests(unittest.TestCase):
         )
 
     def test_a_snapshot_install_is_reinstalled_even_with_no_manifest_move(self):
-        """The 2026-08-05 outage: `step_board_transport` retired the legacy KANBOARD_* tuple while
-        this venv still held a copy of the previous day's reader, and every tick failed for 26h."""
+        """The 2026-08-05 outage: an upgrade step retired legacy runtime.env lines while this venv
+        still held a copy of the previous day's reader, and every tick failed for 26h."""
         with tempfile.TemporaryDirectory() as tmp:
             root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {}})
             context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)

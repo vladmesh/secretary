@@ -1,12 +1,11 @@
 """Non-secret, local PostgreSQL connection configuration for the board store.
 
-The same category as ``board_transport.py``, and deliberately the same mechanism (§5.4 of
-``docs/BOARD_STORE.md``): a ``KEY=VALUE`` file at ``<instance>/board-store.env``, mode 0600,
-git-ignored, refused rather than repaired when it is partial.  It is not a secret-store value:
-a database password is regenerable by recreating the role, is meaningless without the volume it
-guards, and is needed by ``docker compose up`` before the instance repository is necessarily in
-a state where the store can be opened — exactly the argument that kept the old board API token out
-of the store.
+Installation configuration, not a secret (§5.4 of ``docs/BOARD_STORE.md``): a ``KEY=VALUE``
+file at ``<instance>/board-store.env``, mode 0600, git-ignored, refused rather than repaired
+when it is partial.  It is not a secret-store value: a database password is regenerable by
+recreating the role, is meaningless without the volume it guards, and is needed by
+``docker compose up`` before the instance repository is necessarily in a state where the store
+can be opened — exactly the argument that kept the old board API token out of the store.
 
 It carries one credential **per role**, not one credential, because §5.5's three-role boundary is
 unreachable otherwise: a single user would make every consumer connect as the owner.  The caller
@@ -347,7 +346,7 @@ def enforce_exclusion(instance_dir: Path | str, *, dry_run: bool = False) -> Sto
 
 
 def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
-    """The durable exclusion `board_transport.ensure` gives the transport, for this file.
+    """The durable git exclusion of this file.
 
     It adds the `/board-store.env` entry to the instance repository's exclusions. A file already
     in the index is not something an exclusion can fix, so it refuses rather than pretending; a
@@ -375,7 +374,7 @@ def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreO
 
 
 def findings(instance_dir: Path | str) -> list[str]:
-    """Public, non-secret store health evidence, in `board_transport.findings`'s shape.
+    """Public, non-secret store health evidence for status and doctor.
 
     Read-only by construction: it reports a tracked or unreadable file, it never creates the
     ignore entry or the file itself.  A checkout with no lifecycle marker yet — no file and no

@@ -23,7 +23,6 @@ from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.cli import main as task_main
 from secretary.dispatch import assessment_decision as dispatcher_assessment_decision
@@ -172,6 +171,7 @@ from tests.fakes.dispatcher import (
     dispatcher_seed,
 )
 from tests.integration_setup import require_disposable_board_fixture
+from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, legacy_runtime_lines
 from tests.sql_backend_fixtures import PostgresBoard, card_store
 from triggered_agents.runtime.head import (
     HEAD_DRAINING,
@@ -8957,7 +8957,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "actor": {"role": "worker", "id": "worker"},
                 "kind": "reported",
                 "outcome": "success",
-                "task_id": "task_kanboard_12",
+                "task_id": f"task_{RETIRED_STORE}_12",
                 "ref": "secretary-510",
                 "backend": {"kind": "kanboard", "task_id": 12, "revision": "1"},
                 "request_id": request_id,
@@ -11423,14 +11423,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             runtime = root / "runtime.env"
-            runtime.write_text(
-                "KANBOARD_URL=http://board.invalid\n"
-                "KANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=board-token\n"
-                "ANTHROPIC_MODEL=opus\n",
-                encoding="utf-8",
-            )
-            ensure_board_transport(root, allow_default=True)
+            runtime.write_text(legacy_runtime_lines() + "ANTHROPIC_MODEL=opus\n", encoding="utf-8")
             env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(home),
@@ -11439,9 +11432,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "TA_SECRETARY_REPO": str(repo),
                 "ANTHROPIC_MODEL": "opus",
                 "CLAUDE_MANAGED_SETTINGS": str(root / "no-managed.json"),
-                "KANBOARD_URL": "http://board.invalid",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "board-token",
+                **dict(zip(LEGACY_ENV, LEGACY_VALUES)),
             }
             catalog = object.__new__(InstanceCatalog)
             catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
@@ -12662,11 +12653,11 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("/bin/sh -lc", wrapped)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
 
-    def test_role_env_uses_local_board_transport_and_strips_unallowed_secrets(self) -> None:
+    def test_role_env_strips_unallowed_secrets_and_legacy_board_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / ".env"
             env_file.write_text(
-                "KANBOARD_URL=https://kanboard.example\nKANBOARD_API_USER=bot\nKANBOARD_API_TOKEN=board-token\nPANELMEM_KB_PAT=memory-token\nTA_CODEX_MODE=exec",
+                legacy_runtime_lines() + "PANELMEM_KB_PAT=memory-token\nTA_CODEX_MODE=exec",
                 encoding="utf-8",
             )
 
@@ -12681,7 +12672,8 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
 
         self.assertEqual(env["BOARD_ROLE"], "worker")
-        self.assertNotIn("KANBOARD_API_TOKEN", env)
+        for name in LEGACY_ENV:
+            self.assertNotIn(name, env)
         self.assertNotIn("TA_CODEX_MODE", env)
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)

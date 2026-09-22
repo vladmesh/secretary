@@ -102,6 +102,7 @@ from tests.fakes.observer import (
 )
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import as_observer, bind_observer
+from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
 from triggered_agents.runtime import codex_preflight, tui_delivery
@@ -5551,15 +5552,14 @@ class ObserverConfigurationTests(unittest.TestCase):
 
         env_file = Path(tempfile.mkdtemp()) / "runtime.env"
         env_file.write_text(
-            "KANBOARD_URL=http://board\nKANBOARD_API_USER=u\nKANBOARD_API_TOKEN=t\n"
-            "UNRELATED_SECRET_TOKEN=leak\n",
+            legacy_runtime_lines() + "UNRELATED_SECRET_TOKEN=leak\n",
             encoding="utf-8",
         )
 
         env = runtime_env("observer", base_env={"PATH": "/usr/bin"}, env_file=env_file)
 
         self.assertEqual(env["BOARD_ROLE"], "observer")
-        self.assertNotIn("KANBOARD_URL", env)
+        self.assertNotIn(LEGACY_ENV[0], env)
         self.assertNotIn("UNRELATED_SECRET_TOKEN", env)
 
     def test_runtime_env_cannot_rename_the_sprint_a_head_observes(self) -> None:
@@ -5571,8 +5571,7 @@ class ObserverConfigurationTests(unittest.TestCase):
         """
         env_file = Path(tempfile.mkdtemp()) / "runtime.env"
         env_file.write_text(
-            "KANBOARD_URL=http://board\nKANBOARD_API_USER=u\nKANBOARD_API_TOKEN=t\n"
-            f"{OBSERVER_SPRINT_ENV}=sprint:somebody-else\n"
+            legacy_runtime_lines() + f"{OBSERVER_SPRINT_ENV}=sprint:somebody-else\n"
             f"{OBSERVER_GENERATION_ENV}=forged\n",
             encoding="utf-8",
         )

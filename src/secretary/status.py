@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 from secretary import _proc, head_registry
 from secretary.board.backend import SPRINT, board_client
-from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.dispatch.observer import observer_snapshot
@@ -122,7 +121,6 @@ def collect_status(
         },
         "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
-        "board_transport": {"findings": board_transport_findings(instance_dir)},
         "secret_store": store_health(report.instance_path.parent),
         "recovery": recovery,
     }

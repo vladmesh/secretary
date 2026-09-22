@@ -6,7 +6,6 @@ import stat
 from pathlib import Path
 
 from secretary import state_repo
-from triggered_agents.runtime.board_transport import TRANSPORT_ENV
 
 
 class RuntimeEnvError(RuntimeError):
@@ -27,13 +26,7 @@ def read_runtime_env(
     *,
     require_ignored: bool = True,
 ) -> dict[str, str]:
-    """Read the supported ``KEY=VALUE`` dialect, after private-file checks.
-
-    Transport entries deliberately cannot use whitespace-padded spelling: migration
-    removes only exact legacy keys, so accepting another spelling would leave a
-    live duplicate behind. Other runtime settings retain the established tolerant
-    whitespace behavior.
-    """
+    """Read the supported ``KEY=VALUE`` dialect, after private-file checks."""
     path = instance_runtime_env_path(instance_dir, override)
     try:
         mode = path.lstat().st_mode
@@ -73,14 +66,5 @@ def read_runtime_env(
         key, value = line.split("=", 1)
         if not key or not key.replace("_", "a").isalnum() or key[0].isdigit():
             raise RuntimeEnvError(f"runtime.env line {number} has an invalid variable name")
-        if key in TRANSPORT_ENV and raw != line:
-            raise RuntimeEnvError(
-                f"runtime.env line {number} has whitespace-padded legacy Kanboard configuration"
-            )
-        if key in TRANSPORT_ENV and key in values:
-            raise RuntimeEnvError(
-                f"legacy Kanboard runtime configuration is ambiguous: {key} appears more than once "
-                f"(line {number})"
-            )
         values[key] = value
     return values

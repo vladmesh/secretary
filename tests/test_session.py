@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 from secretary import session
-from secretary.board_transport import ensure as ensure_board_transport
 from triggered_agents.agents.pipeline import heads as head_registry
 
 
@@ -20,22 +19,21 @@ class OperatorEnvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(
                 Path(tmp),
-                "KANBOARD_ADMIN_PASSWORD=hunter2\nGITHUB_TOKEN=gh-test-token\n",
+                "EXAMPLE_ADMIN_PASSWORD=hunter2\nGITHUB_TOKEN=gh-test-token\n",
             )
-            ensure_board_transport(Path(tmp), allow_default=True)
             env = session.operator_env(env_file, base_env={"PATH": "/bin", "SECRETARY_INSTANCE": tmp})
-        self.assertNotIn("KANBOARD_API_TOKEN", env)
-        self.assertEqual(env["KANBOARD_ADMIN_PASSWORD"], "hunter2")
+        self.assertEqual(env["EXAMPLE_ADMIN_PASSWORD"], "hunter2")
         self.assertEqual(env["GITHUB_TOKEN"], "gh-test-token")
         self.assertEqual(env["PATH"], "/bin")
         self.assertEqual(env["SECRETARY_ROLE"], "operator")
 
-    def test_fails_closed_without_board(self):
+    def test_launches_with_no_transport_file(self):
+        """The operator session needs no transport file: the board is reached through its store."""
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(Path(tmp), "SOMETHING=else\n")
-            with self.assertRaises(session.SessionError) as ctx:
-                session.operator_env(env_file, base_env={"SECRETARY_INSTANCE": tmp})
-        self.assertIn("board transport", str(ctx.exception))
+            env = session.operator_env(env_file, base_env={"SECRETARY_INSTANCE": tmp})
+        self.assertEqual(env["SOMETHING"], "else")
+        self.assertEqual(env["SECRETARY_ROLE"], "operator")
 
 
 # The product ships a small neutral registry; an OpenRouter-backed hermes head is one

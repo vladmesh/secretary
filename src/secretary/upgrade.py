@@ -38,7 +38,6 @@ from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board.store import BoardStoreError, ensure_ignored, store_path
-from secretary.board_transport import transport_path
 from secretary.checkpoint import CheckpointPusher
 from secretary.config import DataDirError, validate_instance
 from secretary.head_registry import (
@@ -1485,33 +1484,27 @@ def step_verify(context: UpgradeContext) -> StepResult:
     return StepResult("verify", "unchanged", detail)
 
 
-def step_board_transport(context: UpgradeContext) -> StepResult:
-    """Reconcile the runtime user's ownership of the files the old board transport step owned.
+def step_runtime_owner(context: UpgradeContext) -> StepResult:
+    """Give the runtime user back `runtime.env`, `.gitignore` and `.git` after a root-run upgrade.
 
-    The board is the PostgreSQL store, reached through `board-store.env`, so the JSON-RPC tuple is
-    no transport of it and nothing materializes a `board-transport.env` any more; the step records
-    that.  The ownership reconciliation is not part of that decision -- `runtime.env`,
-    `.gitignore` and `.git` belong to the runtime user -- so it still runs, and is a no-op for
-    absent paths.  `runtime.env` is still read so a malformed file fails here as it did before.
+    A no-op for absent paths and for a non-root run.  `runtime.env` is read first so a malformed
+    file fails here, before any later step relies on it.
     """
     try:
         read_runtime_env(context.instance_path, require_ignored=False)
     except RuntimeEnvMissing:
         pass
     except RuntimeEnvError as exc:
-        return StepResult("board-transport", "failed", str(exc))
+        return StepResult("runtime-owner", "failed", str(exc))
     if not context.dry_run:
         try:
             _set_runtime_owner(context.instance_path / "runtime.env", context.runtime_user)
-            _set_runtime_owner(transport_path(context.instance_path), context.runtime_user)
             _set_runtime_owner(context.instance_path / ".gitignore", context.runtime_user)
             _set_runtime_owner(context.instance_path / ".git", context.runtime_user)
         except GitError as exc:
-            return StepResult("board-transport", "failed", str(exc))
+            return StepResult("runtime-owner", "failed", str(exc))
     return StepResult(
-        "board-transport",
-        "skipped",
-        "the PostgreSQL board store needs no JSON-RPC board transport",
+        "runtime-owner", "unchanged", "runtime.env, .gitignore and .git belong to the runtime user"
     )
 
 
@@ -1601,7 +1594,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_registries,
     step_memory_pack,
-    step_board_transport,
+    step_runtime_owner,
     step_dependencies,
     step_dependency_provenance,
     step_board_store_provision,

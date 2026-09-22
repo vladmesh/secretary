@@ -20,8 +20,8 @@ from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.kanboard import KanboardUnreachable
 from triggered_agents.runtime.paths import default_instance_path
+from triggered_agents.runtime.state import BoardUnavailable
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})
 
@@ -45,14 +45,14 @@ def _canonical_reader() -> TaskReader:
         if exc.code == "backend_unavailable":
             # Precheck already distinguishes this historical "board is not
             # available yet" result from a broken deterministic helper.
-            raise KanboardUnreachable(exc.message) from None
+            raise BoardUnavailable(exc.message) from None
         raise
 
 
 def _map_signal_error(error: TaskError) -> None:
     """Keep the steward precheck's historical deferred-board classification."""
     if error.code == "backend_unavailable":
-        raise KanboardUnreachable(error.message) from None
+        raise BoardUnavailable(error.message) from None
 
 
 def _signal_board() -> StewardSignalBoard:

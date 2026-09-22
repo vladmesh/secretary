@@ -58,12 +58,12 @@ PATTERNS = [
 # `runtime.env` is an environment *configuration* file, not a list of secret
 # values.  In particular a local board URL is deliberately long enough to have
 # tripped the old length-only rule.  Treating every long value as a secret made
-# mentioning KANBOARD_URL on a card stop the checkpoint and, worse, made a
+# mentioning a board URL on a card stop the checkpoint and, worse, made a
 # normal config value look like leaked credential material.
 #
 # Names remain the primary signal for exact-value redaction.  A URL with user
 # info is the exception: it can carry a password even when its variable is
-# named DATABASE_URL or KANBOARD_URL, so its value is protected too.  Pattern
+# named DATABASE_URL, so its value is protected too.  Pattern
 # redaction below remains the backstop for credentials that arrive outside the
 # selected runtime file.
 _URL_WITH_USERINFO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")

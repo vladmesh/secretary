@@ -13,7 +13,7 @@ Board reads need no patch here. A client is built only by
 instance's own ``board-store.env``, and nothing in the environment selects
 or reaches a board, so a worker/reviewer/operator shell that inherits a live
 installation's environment cannot turn the unit suite into a client of that
-board (secretary-1026). ``tests/test_hermetic_kanboard.py`` proves the
+board (secretary-1026). ``tests/test_hermetic_board.py`` proves the
 status read fails closed. A test that needs a board injects it where the
 client is built -- ``board_client``/``card_client`` or the reader/writer
 constructor the command uses.

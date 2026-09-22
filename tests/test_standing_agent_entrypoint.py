@@ -18,8 +18,7 @@ from secretary.tasks import TaskError
 from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
-from triggered_agents.runtime.kanboard import KanboardUnreachable
-from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, AgentState
+from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, AgentState, BoardUnavailable
 
 
 class StewardCliReaderTests(unittest.TestCase):
@@ -184,7 +183,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
             mock.patch.object(standing_agent, "card_client", return_value=object()),
             mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
             mock.patch.object(standing_agent, "TaskWriter", return_value=Writer()),
-            self.assertRaises(KanboardUnreachable),
+            self.assertRaises(BoardUnavailable),
         ):
             port = standing_agent._done_retention_board()
             port.close_old_done()

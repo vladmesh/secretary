@@ -657,7 +657,6 @@ PROBLEM_SEVERITY: dict[str, str] = {
     # No checkpoint has reached the remote for longer than the 30-minute RPO (`rpo_problem`).
     "checkpoint.rpo_exceeded": "red",
     "secret_store.key_unusable": "red",
-    "board_transport.finding": "red",
     # Minted by the reader of this summary rather than here: health that could not be read at all
     # is not an absence of problems, so it carries a code of its own and the gravest severity.
     "health.unreadable": "red",
@@ -764,9 +763,6 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
         )
     if checkpoint.get("rpo_exceeded"):
         found(CHECKPOINT_RPO_EXCEEDED, rpo_problem(checkpoint))
-    reported = _object(status.get("board_transport")).get("findings") or []
-    if reported:
-        found("board_transport.finding", f"board_transport has {len(reported)} finding(s)")
     key = _object(_object(status.get("secret_store")).get("installation_key"))
     if key and not key.get("usable"):
         found("secret_store.key_unusable", "the secret store's installation key is not usable")

@@ -16,10 +16,6 @@ import os
 import sys
 from pathlib import Path
 
-from secretary.board_transport import (
-    BoardTransportError,
-    resolve_for_environ,
-)
 from secretary.memory import access as memory_access
 from secretary.role_env import load_env_file
 from triggered_agents.agents.pipeline import heads as head_registry
@@ -55,17 +51,12 @@ def operator_env(
 ) -> dict[str, str]:
     """Full runtime env for the operator: base process env overlaid with the entire runtime.env.
 
-    No allowlist and no sensitive-name scrubbing — that is the point. Board transport is checked
-    from local configuration, not injected as credentials.
+    No allowlist and no sensitive-name scrubbing — that is the point.
     """
     base = dict(os.environ if base_env is None else base_env)
     source = load_env_file(env_file)
     env = {**base, **source}
     env["SECRETARY_ROLE"] = "operator"
-    try:
-        resolve_for_environ(env)
-    except BoardTransportError as exc:
-        raise SessionError(f"board transport configuration is unavailable: {exc}") from None
     return env
 
 

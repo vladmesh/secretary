@@ -79,7 +79,6 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.board.transitions import BoardProtocolError
-from secretary.board_transport import transport_path
 from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -1515,8 +1514,7 @@ class TaskWriter:
     def _redaction_values(self) -> tuple[str, ...]:
         """Open the catalog at most once while its on-disk inputs are unchanged."""
         root = self.instance_dir / "secrets"
-        transport = transport_path(self.instance_dir)
-        paths = [root / "catalog.yaml", root / "installation.key", transport]
+        paths = [root / "catalog.yaml", root / "installation.key"]
         values_dir = root / "values"
         if values_dir.is_dir():
             paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))

@@ -44,6 +44,7 @@ from secretary.runtime_env import RuntimeEnvError
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.upgrade import UpgradeResult, step_host
 from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
+from tests.retired_board import RETIRED_STORE, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
 
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
@@ -1699,7 +1700,7 @@ class InstallationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             (target / ".git").mkdir(parents=True)
-            (target / "runtime.env").write_text("KANBOARD_API_TOKEN=existing\n", encoding="utf-8")
+            (target / "runtime.env").write_text("EXAMPLE_API_TOKEN=existing\n", encoding="utf-8")
 
             with (
                 mock.patch("secretary.installation.state_repo.git", return_value="remote\n"),
@@ -1864,7 +1865,7 @@ class InstallationTests(unittest.TestCase):
                 "occurred_at": "2026-07-24T00:00:00Z",
                 "outcome": "success",
                 "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
-                "task_id": "task_kanboard_1",
+                "task_id": f"task_{RETIRED_STORE}_1",
                 "ref": "secretary-1",
                 "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
                 "request_id": "routing-verdict",
@@ -2083,11 +2084,7 @@ class InstallationTests(unittest.TestCase):
                 text=True,
             )
             runtime = target / "runtime.env"
-            runtime.write_text(
-                "KANBOARD_URL=http://127.0.0.1/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=test\n",
-                encoding="utf-8",
-            )
+            runtime.write_text(legacy_runtime_lines(), encoding="utf-8")
             runtime.chmod(0o600)
 
             with (
@@ -2268,12 +2265,12 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         ):
             return installation.install(args), steps
 
-    def test_recovery_restores_into_the_store_with_no_kanboard_step(self) -> None:
+    def test_recovery_restores_into_the_store_with_no_transport_step(self) -> None:
         result, steps = self._install()
 
         self.assertEqual(result.status, "ok", result.steps)
         # The board-side sequence is the store's prerequisite read, then the restore into it:
-        # no Kanboard transport is materialized and no Pipeline board is made first.
+        # no transport is materialized and no Pipeline board is made first.
         self.assertEqual(
             steps.mock_calls,
             [
@@ -2282,9 +2279,27 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
             ],
         )
         board = {step.name: (step.status, step.detail) for step in result.steps}
-        self.assertEqual(board["board-transport"][0], "skipped")
+        self.assertFalse([name for name in board if "transport" in name], board)
         self.assertEqual(board["board"], ("changed", "1 card(s) at parity"))
-        self.assertFalse((self.target / "board-transport.env").exists())
+        self.assertFalse((self.target / STALE_FILE).exists())
+
+    def test_recovery_leaves_stale_transport_leftovers_unread_and_unreported(self) -> None:
+        runtime = self.target / "runtime.env"
+        runtime.write_text("EXAMPLE_TOKEN=from-the-store\n" + legacy_runtime_lines(), encoding="utf-8")
+        runtime.chmod(0o600)
+        stale = write_stale_leftovers(self.target)
+        # An older build ignored the file it wrote, so it is no local change of the checkout.
+        with (self.target / ".git" / "info" / "exclude").open("a", encoding="utf-8") as exclude:
+            exclude.write(f"/{STALE_FILE}\n")
+        body = stale.read_bytes()
+
+        result, _steps = self._install()
+
+        self.assertEqual(result.status, "ok", result.steps)
+        rendered = " ".join(f"{step.name} {step.detail}" for step in result.steps)
+        self.assertNotIn(STALE_FILE, rendered)
+        self.assertNotIn("board transport", rendered.lower())
+        self.assertEqual(stale.read_bytes(), body)
 
     def test_a_store_written_runtime_env_is_left_as_the_store_wrote_it(self) -> None:
         # Nothing selects the board, so recovery adds no line to the file a store materialized.
@@ -2296,7 +2311,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok", result.steps)
         self.assertEqual(runtime.read_text(encoding="utf-8"), "EXAMPLE_TOKEN=from-the-store\n")
-        self.assertFalse((self.target / "board-transport.env").exists())
+        self.assertFalse((self.target / STALE_FILE).exists())
 
     def test_locked_runtime_secrets_still_block_although_a_runtime_file_exists(self) -> None:
         # A runtime.env carrying none of the store's variables does not say they arrived.

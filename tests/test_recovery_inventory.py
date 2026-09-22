@@ -19,6 +19,7 @@ from secretary.secret_store import initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.status import collect_status
 from tests.head_registry import write_installed_pair
+from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
 
 REGISTRY = """resources:
   never-used:
@@ -367,18 +368,26 @@ class RecoveryInventoryTests(unittest.TestCase):
         self.assertEqual(snapshot["credential_consumers"][0]["state"], "locked/unverifiable")
         self.assertNotIn("equal", snapshot["credential_consumers"][0]["reason"])
 
-    def test_legacy_board_catalog_entries_are_retired_bypasses_only(self) -> None:
+    def test_legacy_board_catalog_entries_are_ordinary_entries_with_no_transport_row(self) -> None:
+        """Nothing names the retired transport's ids: they add no bypass and no transport capability."""
         with tempfile.TemporaryDirectory() as tmp:
-            _, report = self.fixture(Path(tmp))
-            with mock.patch(
-                "secretary.infra.recovery_inventory.list_secrets",
-                return_value=({"id": "kanboard_api_token"}, {"id": "current.provider"}),
-            ):
-                snapshot = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+            instance, report = self.fixture(Path(tmp))
+            initialize_store(instance, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester")
+            for secret_id, environment, value in zip(LEGACY_SECRET_IDS, LEGACY_ENV, LEGACY_VALUES):
+                set_secret(
+                    instance,
+                    secret_id=secret_id,
+                    value=value.encode(),
+                    scope="installation",
+                    purpose="historic board configuration",
+                    actor="tester",
+                    environment=environment,
+                )
+            snapshot = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
 
-        legacy = [row for row in snapshot["bypasses"] if row["kind"] == "retired-secret-catalog-entry"]
-        self.assertEqual([row["entry"] for row in legacy], ["kanboard_api_token"])
-        self.assertIn("cannot overwrite board transport", legacy[0]["reason"])
+        text = json.dumps(snapshot)
+        self.assertNotIn("transport", text)
+        self.assertFalse([row for row in snapshot["bypasses"] if row.get("entry") in LEGACY_SECRET_IDS])
 
     def test_repeated_inventory_does_not_change_repository_or_dispatcher_cache(self) -> None:
         now = time.time()

@@ -29,6 +29,14 @@ PRECHECK_SKIP = 100
 # Board unavailability is retryable and distinct from a clean skip.
 PRECHECK_BOARD_UNREACHABLE = 101
 
+
+class BoardUnavailable(RuntimeError):
+    """The board store is not reachable yet: nothing was read or written.
+
+    A precheck reports it as PRECHECK_BOARD_UNREACHABLE, a deferred tick, rather than as its own
+    failure; any other exception means the precheck itself is broken.
+    """
+
 # Durable settlement is in progress; exit cleanly without racing live-head cleanup.
 PRECHECK_DEFERRED = 102
 

@@ -220,7 +220,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertEqual(
             FAST_MODULES,
             (
-                "tests.test_hermetic_kanboard",
+                "tests.test_hermetic_board",
                 "tests.test_hermetic_orca",
                 "tests.test_hermetic_pipeline_state",
             ),
@@ -271,7 +271,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture_root = Path(tmp)
             environment = fast_environment(root, fixture_root)
-            for name in ("KANBOARD_API_TOKEN", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID"):
+            for name in ("EXAMPLE_API_TOKEN", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID"):
                 self.assertNotIn(name, environment)
             for name in (
                 "HOME",

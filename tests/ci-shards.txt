@@ -19,7 +19,6 @@ integration-board tests/test_board.py
 unit tests/test_board_roles.py
 unit tests/test_marker_payload.py
 integration-board tests/test_board_boot_race.py
-integration-board tests/test_board_transport.py
 unit tests/test_board_store.py
 integration-board tests/test_board_store_schema.py
 integration-board tests/test_po_runner.py
@@ -70,7 +69,7 @@ unit tests/test_head_vitality_regression.py
 integration-board tests/test_head_vitality_wait_decisions.py
 unit tests/test_health_suite_command.py
 component tests/test_hermetic_codex.py
-integration-board tests/test_hermetic_kanboard.py
+integration-board tests/test_hermetic_board.py
 component tests/test_hermetic_orca.py
 component tests/test_hermetic_pipeline_state.py
 unit tests/test_hermetic_source_tree.py
@@ -160,7 +159,7 @@ integration-board tests/test_reslice_seed.py
 unit tests/test_web_front.py
 unit tests/test_web_front_cookie_order.py
 integration-board tests/test_web_transport.py
-integration-board tests/test_web_dashboard_transport.py
+integration-board tests/test_web_transport_dashboard.py
 unit tests/test_web_po_transport.py
 unit tests/test_web_status_bar.py
 integration-board tests/test_web_doctor.py

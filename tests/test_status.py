@@ -859,7 +859,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
                 value=b"super-secret-token-value",
                 scope="installation",
                 purpose="board api",
-                environment="KANBOARD_API_TOKEN",
+                environment="EXAMPLE_API_TOKEN",
                 materialize={"target": "runtime-env"},
                 actor="tester",
             )

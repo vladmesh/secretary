@@ -1,7 +1,7 @@
 """Status reads fail closed and accept an explicit in-memory board seam.
 
-secretary-1026: ambient `KANBOARD_*` credentials must never make a unit test
-read or write a live board.  Tests that need sprint data pass their own store
+secretary-1026: ambient database credentials must never make a unit test read
+or write a live board.  Tests that need sprint data pass their own store
 through `collect_status(..., sprint_client=...)`.
 """
 
@@ -28,11 +28,11 @@ def _report(root: Path):
     return validate_instance(instance)
 
 
-class HermeticKanboardTests(unittest.TestCase):
+class HermeticBoardTests(unittest.TestCase):
     def test_default_never_dials_out_even_with_live_looking_credentials(self):
-        # No injected board here.  Even with live-looking credentials, the
-        # temporary instance has no transport and must fail before any network
-        # request; urlopen makes an accidental dial-out loud.
+        # No injected board here.  Even with live-looking libpq credentials, the
+        # temporary instance has no board-store.env and must fail before any
+        # network request; urlopen makes an accidental dial-out loud.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
@@ -40,14 +40,15 @@ class HermeticKanboardTests(unittest.TestCase):
                 mock.patch.dict(
                     "os.environ",
                     {
-                        "KANBOARD_URL": "https://board.invalid/jsonrpc.php",
-                        "KANBOARD_API_USER": "svc",
-                        "KANBOARD_API_TOKEN": "secret",
+                        "DATABASE_URL": "postgresql://svc:secret@board.invalid/board",
+                        "PGHOST": "board.invalid",
+                        "PGUSER": "svc",
+                        "PGPASSWORD": "secret",
                     },
                 ),
                 mock.patch(
                     "urllib.request.urlopen",
-                    side_effect=AssertionError("unit test reached a real Kanboard network call"),
+                    side_effect=AssertionError("unit test reached a real board network call"),
                 ),
             ):
                 snapshot = collect_status(report, offline=True)

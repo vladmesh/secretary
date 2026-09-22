@@ -1,6 +1,6 @@
 """The hermetic family's missing member: the suite must test the checkout it lives in.
 
-The other guards in this family (`test_hermetic_orca.py`, `test_hermetic_kanboard.py`,
+The other guards in this family (`test_hermetic_orca.py`, `test_hermetic_board.py`,
 `test_hermetic_codex.py`, `test_hermetic_pipeline_state.py`) all answer one question: does this
 run's result depend on the host rather than on this checkout? They cover the host's Orca binary,
 the host's board, the host's Codex home and the host's pipeline state. Nothing covered the most
