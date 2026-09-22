@@ -6,6 +6,7 @@ import stat
 from pathlib import Path
 
 from secretary import state_repo
+from secretary._fsutil import write_text_atomic
 from triggered_agents.runtime.board_transport import TRANSPORT_ENV
 
 
@@ -84,3 +85,41 @@ def read_runtime_env(
             )
         values[key] = value
     return values
+
+
+def select_card_backend(path: Path, backend: str) -> bool:
+    """Name the card backend in ``runtime.env``, keeping every other line exactly as it is.
+
+    ``SECRETARY_CARD_BACKEND`` is read from this file by the instance units and by an operator
+    command bound to the instance (``board/backend.py``), so this is where a fresh installation
+    records its choice. An absent file is created private. Returns whether the file changed.
+    """
+    from secretary.board.backend import CARD_BACKEND_ENV, parse_card_backend
+
+    name = parse_card_backend(backend)
+    try:
+        body = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        body = ""
+    except (OSError, UnicodeError):
+        raise RuntimeEnvError("runtime.env is unreadable") from None
+    lines = body.splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.strip().split("=", 1)[0] == CARD_BACKEND_ENV]
+    if len(matches) > 1:
+        raise RuntimeEnvError(f"runtime.env contains duplicate {CARD_BACKEND_ENV} entries")
+    entry = f"{CARD_BACKEND_ENV}={name}\n"
+    if matches:
+        lines[matches[0]] = entry
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(entry)
+    updated = "".join(lines)
+    if updated == body:
+        return False
+    try:
+        write_text_atomic(path, updated)
+        path.chmod(0o600)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeEnvError(f"could not record {CARD_BACKEND_ENV} in runtime.env: {exc}") from None
+    return True

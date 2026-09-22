@@ -7,386 +7,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from secretary import bootstrap as bootstrap_module
 from secretary.bootstrap import (
     BOOTSTRAP_STAMP,
-    LEGACY_PIPELINE_COLUMNS,
-    PIPELINE_COLUMNS,
     BootstrapError,
     _host_supported,
     _install_platform,
     bootstrap,
-    ensure_pipeline_board,
-    migrate_assessment_column,
 )
-from secretary.tasks import TaskError
+from secretary.runtime_env import read_runtime_env
 
 
-class Board:
-    def __init__(self) -> None:
-        self.project: dict[str, object] | None = None
-        self.columns: list[dict[str, object]] = []
-        self.lanes: list[dict[str, object]] = []
-        self.tasks: list[dict[str, object]] = []
-        self.calls: list[str] = []
-
-    def call(self, method: str, **params: object) -> object:
-        self.calls.append(method)
-        if method == "getProjectByName":
-            return self.project
-        if method == "getVersion":
-            return "1.2.46"
-        if method == "createProject":
-            self.project = {"id": 7, "name": params["name"]}
-            # Kanboard 1.2.46 creates these four columns for a new project.
-            self.columns = [
-                {"id": n, "title": title}
-                for n, title in enumerate(("Backlog", "Ready", "Work in progress", "Done"), 1)
-            ]
-            return 7
-        if method == "getColumns":
-            return self.columns
-        if method == "getAllTasks":
-            status = params.get("status_id")
-            if status not in {0, 1}:
-                return []
-            return [task for task in self.tasks if (int(task.get("is_active", 1) or 0) != 0) == (status == 1)]
-        if method == "updateColumn":
-            for column in self.columns:
-                if column["id"] == params["column_id"]:
-                    column["title"] = params["title"]
-            return True
-        if method == "addColumn":
-            self.columns.append({"id": len(self.columns) + 1, "title": params["title"]})
-            return len(self.columns)
-        if method == "changeColumnPosition":
-            column = next((item for item in self.columns if item["id"] == params["column_id"]), None)
-            if column is None:
-                return False
-            self.columns.remove(column)
-            self.columns.insert(int(params["position"]) - 1, column)  # type: ignore[arg-type]
-            return True
-        if method == "removeColumn":
-            self.columns = [column for column in self.columns if column["id"] != params["column_id"]]
-            return True
-        if method == "getActiveSwimlanes":
-            return self.lanes
-        if method == "addSwimlane":
-            self.lanes.append({"id": len(self.lanes) + 1, "name": params["name"]})
-            return len(self.lanes)
-        raise AssertionError(method)
-
-
-def _legacy_board() -> Board:
-    """A live board on the pre-Assessment layout, with cards spread over its columns."""
-    board = Board()
-    board.project = {"id": 7, "name": "Pipeline"}
-    board.columns = [{"id": index, "title": title} for index, title in enumerate(LEGACY_PIPELINE_COLUMNS, 1)]
-    board.tasks = [
-        {"id": 11, "column_id": 2, "position": 1, "is_active": 1},
-        {"id": 12, "column_id": 4, "position": 1, "is_active": 1},
-        {"id": 13, "column_id": 5, "position": 2, "is_active": 1},
-        {"id": 14, "column_id": 6, "position": 1, "is_active": 0},
-    ]
-    return board
-
-
-class AssessmentMigrationTests(unittest.TestCase):
-    """secretary-1025: adding the Assessment column to a board that already holds cards."""
-
-    def test_adds_the_column_at_index_five_without_touching_any_card(self) -> None:
-        board = _legacy_board()
-        before = [dict(task) for task in board.tasks]
-
-        result = migrate_assessment_column(client=board)
-
-        self.assertEqual(result["status"], "migrated")
-        self.assertEqual(result["cards"], 4)
-        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-        self.assertEqual(board.columns[4]["title"], "Assessment")
-        self.assertEqual(board.tasks, before)
-        self.assertNotIn("updateColumn", board.calls)
-        self.assertNotIn("removeColumn", board.calls)
-        self.assertNotIn("moveTaskPosition", board.calls)
-
-    def test_running_it_twice_is_a_no_op_with_a_success_result(self) -> None:
-        board = _legacy_board()
-        migrate_assessment_column(client=board)
-        columns = [dict(column) for column in board.columns]
-        board.calls.clear()
-
-        result = migrate_assessment_column(client=board)
-
-        self.assertEqual(result["status"], "unchanged")
-        self.assertIs(result["ok"], True)
-        self.assertEqual([dict(column) for column in board.columns], columns)
-        self.assertNotIn("addColumn", board.calls)
-        self.assertNotIn("changeColumnPosition", board.calls)
-
-    def test_ensure_pipeline_board_accepts_the_migrated_board_unchanged(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            board = _legacy_board()
-            migrate_assessment_column(client=board)
-            columns = [dict(column) for column in board.columns]
-            board.calls.clear()
-
-            self.assertEqual(ensure_pipeline_board(Path(temporary), client=board), 7)
-
-            self.assertEqual([dict(column) for column in board.columns], columns)
-            self.assertNotIn("addColumn", board.calls)
-            self.assertNotIn("updateColumn", board.calls)
-            self.assertNotIn("removeColumn", board.calls)
-
-    def test_refuses_a_board_whose_layout_is_neither_known_one(self) -> None:
-        board = _legacy_board()
-        board.columns[0]["title"] = "Backlog"
-
-        with self.assertRaises(BootstrapError) as raised:
-            migrate_assessment_column(client=board)
-
-        message = str(raised.exception)
-        self.assertIn("Backlog", message)
-        self.assertIn(", ".join(LEGACY_PIPELINE_COLUMNS), message)
-        self.assertIn(", ".join(PIPELINE_COLUMNS), message)
-        self.assertNotIn("addColumn", board.calls)
-
-    def test_refuses_a_declined_reposition_instead_of_reporting_success(self) -> None:
-        board = _legacy_board()
-
-        def declined(method: str, **params: object) -> object:
-            if method == "changeColumnPosition":
-                board.calls.append(method)
-                return False
-            return Board.call(board, method, **params)
-
-        board.call = declined  # type: ignore[method-assign]
-        with self.assertRaisesRegex(BootstrapError, "did not move Assessment"):
-            migrate_assessment_column(client=board)
-
-    def test_a_retry_finishes_a_column_whose_add_response_was_lost(self) -> None:
-        """The ambiguous write: Kanboard committed addColumn and the answer never came back."""
-        board = _legacy_board()
-        before = [dict(task) for task in board.tasks]
-
-        def lost_reply(method: str, **params: object) -> object:
-            result = Board.call(board, method, **params)
-            if method == "addColumn":
-                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
-            return result
-
-        board.call = lost_reply  # type: ignore[method-assign]
-        with self.assertRaisesRegex(BootstrapError, "unavailable"):
-            migrate_assessment_column(client=board)
-        self.assertEqual(
-            [column["title"] for column in board.columns],
-            [*LEGACY_PIPELINE_COLUMNS, "Assessment"],
-        )
-
-        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
-        board.calls.clear()
-        result = migrate_assessment_column(client=board)
-
-        self.assertEqual(result["status"], "resumed")
-        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-        self.assertEqual(board.tasks, before)
-        # The existing column is finished, never a second one.
-        self.assertNotIn("addColumn", board.calls)
-        self.assertEqual([column["title"] for column in board.columns].count("Assessment"), 1)
-
-    def test_a_retry_finishes_a_reposition_that_failed(self) -> None:
-        board = _legacy_board()
-        before = [dict(task) for task in board.tasks]
-
-        def declined(method: str, **params: object) -> object:
-            if method == "changeColumnPosition":
-                board.calls.append(method)
-                return False
-            return Board.call(board, method, **params)
-
-        board.call = declined  # type: ignore[method-assign]
-        with self.assertRaises(BootstrapError):
-            migrate_assessment_column(client=board)
-
-        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
-        result = migrate_assessment_column(client=board)
-
-        self.assertEqual(result["status"], "resumed")
-        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-        self.assertEqual(board.tasks, before)
-
-    def test_a_reposition_whose_response_was_lost_retries_as_unchanged(self) -> None:
-        """The board is already correct; the second run must recognise that, not repair it."""
-        board = _legacy_board()
-
-        def lost_reply(method: str, **params: object) -> object:
-            result = Board.call(board, method, **params)
-            if method == "changeColumnPosition":
-                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
-            return result
-
-        board.call = lost_reply  # type: ignore[method-assign]
-        with self.assertRaisesRegex(BootstrapError, "unavailable"):
-            migrate_assessment_column(client=board)
-
-        board.call = lambda method, **params: Board.call(board, method, **params)  # type: ignore[method-assign,assignment]
-        board.calls.clear()
-        result = migrate_assessment_column(client=board)
-
-        self.assertEqual(result["status"], "unchanged")
-        self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-        self.assertNotIn("addColumn", board.calls)
-        self.assertNotIn("changeColumnPosition", board.calls)
-
-    def test_a_resume_still_refuses_when_a_card_moved_underneath_it(self) -> None:
-        board = _legacy_board()
-        board.columns.append({"id": 7, "title": "Assessment"})
-
-        def moves_a_card(method: str, **params: object) -> object:
-            result = Board.call(board, method, **params)
-            if method == "changeColumnPosition":
-                board.tasks[0]["column_id"] = 3
-            return result
-
-        board.call = moves_a_card  # type: ignore[method-assign]
-        with self.assertRaisesRegex(BootstrapError, "moved or lost"):
-            migrate_assessment_column(client=board)
-
-    def test_refuses_a_missing_board(self) -> None:
-        board = Board()
-        with self.assertRaisesRegex(BootstrapError, "does not exist"):
-            migrate_assessment_column(client=board)
-
-
-class BootstrapBoardTests(unittest.TestCase):
+class BootstrapTests(unittest.TestCase):
     # secretary-756: the four scenarios formerly here (idempotent ownership, refusing an
     # unowned matching unit, starting a foreign/legacy-CLI Orca ahead of ownership removal,
     # and a missing-executable error preceding any unit write) all called `_start_orca_service`,
     # which bootstrap no longer defines. Orca is host-owned and external (secretary-739/755):
     # bootstrap never installs, starts, or owns a `secretary-orca.service` unit, so none of
     # these scenarios has a current-contract equivalent. Deleted rather than rewritten.
-
-    def test_creates_pipeline_schema_and_registry_lanes_idempotently(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            projects = instance / "projects"
-            projects.mkdir()
-            (projects / "api.yaml").write_text("id: api\n", encoding="utf-8")
-            (projects / "web.yaml").write_text("id: web\norca_binding: web_runtime\n", encoding="utf-8")
-            board_state = instance / "state" / "board"
-            board_state.mkdir(parents=True)
-            (board_state / "cards.ndjson").write_text(
-                '{"reference":"retired-1","swimlane":"retired_project"}\n',
-                encoding="utf-8",
-            )
-            board = Board()
-
-            self.assertEqual(ensure_pipeline_board(instance, client=board), 7)
-            self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-            self.assertEqual(
-                [lane["name"] for lane in board.lanes],
-                ["api", "retired_project", "web_runtime"],
-            )
-            calls = len(board.calls)
-
-            self.assertEqual(ensure_pipeline_board(instance, client=board), 7)
-            self.assertEqual(len(board.calls), calls + 3)
-            self.assertEqual(
-                [lane["name"] for lane in board.lanes],
-                ["api", "retired_project", "web_runtime"],
-            )
-
-    def test_refuses_a_populated_board_with_another_layout_by_name(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            board = Board()
-            board.project = {"id": 7, "name": "Pipeline"}
-            board.columns = [
-                {"id": index, "title": title}
-                for index, title in enumerate(("Backlog", *PIPELINE_COLUMNS[1:]), 1)
-            ]
-
-            def populated(method: str, **params: object) -> object:
-                if method == "getAllTasks":
-                    board.calls.append(method)
-                    return [{"id": 3, "column_id": 1}]
-                return Board.call(board, method, **params)
-
-            board.call = populated  # type: ignore[method-assign]
-            with self.assertRaises(BootstrapError) as raised:
-                ensure_pipeline_board(instance, client=board)
-
-            message = str(raised.exception)
-            self.assertIn("Backlog", message)
-            self.assertIn(PIPELINE_COLUMNS[0], message)
-            self.assertEqual(board.columns[0]["title"], "Backlog")
-            self.assertNotIn("updateColumn", board.calls)
-            self.assertNotIn("removeColumn", board.calls)
-            self.assertNotIn("addColumn", board.calls)
-
-    def test_refuses_a_declined_column_rename_on_an_empty_board(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            board = Board()
-            board.project = {"id": 7, "name": "Pipeline"}
-            board.columns = [
-                {"id": index, "title": f"old-{index}"} for index in range(1, len(PIPELINE_COLUMNS) + 1)
-            ]
-
-            def declined(method: str, **params: object) -> object:
-                if method == "updateColumn":
-                    board.calls.append(method)
-                    return False
-                return Board.call(board, method, **params)
-
-            board.call = declined  # type: ignore[method-assign]
-            with self.assertRaisesRegex(BootstrapError, "did not rename"):
-                ensure_pipeline_board(instance, client=board)
-
-            self.assertEqual(board.columns[0]["title"], "old-1")
-            self.assertNotIn("addSwimlane", board.calls)
-
-    def test_removes_surplus_columns_with_supported_method(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            board = Board()
-            board.project = {"id": 7, "name": "Pipeline"}
-            board.columns = [{"id": index, "title": f"old-{index}"} for index in range(1, 9)]
-
-            ensure_pipeline_board(instance, client=board)
-
-            self.assertEqual([column["title"] for column in board.columns], list(PIPELINE_COLUMNS))
-            self.assertIn("removeColumn", board.calls)
-
-    def test_refuses_to_remove_surplus_columns_when_only_closed_cards_exist(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            board = Board()
-            board.project = {"id": 7, "name": "Pipeline"}
-            board.columns = [{"id": index, "title": f"old-{index}"} for index in range(1, 9)]
-
-            def closed_cards(method: str, **params: object) -> object:
-                if method == "getAllTasks":
-                    self.assertIn(params.get("status_id"), {0, 1})
-                    return [{"id": 3, "is_active": 0}] if params.get("status_id") == 0 else []
-                return Board.call(board, method, **params)
-
-            board.call = closed_cards  # type: ignore[method-assign]
-            with self.assertRaisesRegex(BootstrapError, "cards but an incompatible"):
-                ensure_pipeline_board(instance, client=board)
-
-    def test_refuses_a_populated_legacy_board_and_names_the_migration(self) -> None:
-        """The pre-Assessment layout is refused like any other, but with a way out."""
-        with tempfile.TemporaryDirectory() as temporary:
-            instance = Path(temporary)
-            board = _legacy_board()
-
-            with self.assertRaises(BootstrapError) as raised:
-                ensure_pipeline_board(instance, client=board)
-
-            message = str(raised.exception)
-            self.assertIn(", ".join(LEGACY_PIPELINE_COLUMNS), message)
-            self.assertIn(", ".join(PIPELINE_COLUMNS), message)
-            self.assertIn("board migrate-assessment", message)
-            self.assertNotIn("addColumn", board.calls)
 
     def test_platform_uses_distribution_compose_and_ubuntu_fuse_packages(self) -> None:
         with (
@@ -448,67 +86,200 @@ class BootstrapBoardTests(unittest.TestCase):
             with self.assertRaisesRegex(BootstrapError, "Ubuntu 24.04 only"):
                 _host_supported(release)
 
-    def test_bootstrap_generates_usable_runtime_and_ignored_files(self) -> None:
+    def _clone(self, _remote: str, directory: Path, **_kwargs: object) -> str:
+        directory.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(directory)], check=True)
+        subprocess.run(["git", "-C", str(directory), "config", "user.name", "Test"], check=True)
+        subprocess.run(
+            ["git", "-C", str(directory), "config", "user.email", "test@example.invalid"], check=True
+        )
+        (directory / "instance.yaml").write_text(
+            "version: 1\nname: bootstrap\ndata_dir: "
+            + str(directory.parent / "data")
+            + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
+            + "host:\n  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        return "cloned private instance remote"
+
+    def _bootstrap(self, target: Path, *, dry_run: bool = False) -> tuple[int, mock.Mock]:
+        """Run bootstrap with the host edges stubbed, recording the board-store steps in order."""
+        args = SimpleNamespace(
+            instance_dir=str(target),
+            instance_remote="remote",
+            installation_user="dev",
+            dry_run=dry_run,
+        )
+        steps = mock.Mock()
+        clone = mock.Mock(
+            side_effect=lambda remote, directory, **kwargs: (
+                "reused checkpoint checkout" if directory.exists() else self._clone(remote, directory)
+            )
+        )
+        refuse_kanboard = AssertionError("bootstrap reached Kanboard")
+        with (
+            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+            mock.patch("secretary.bootstrap._host_supported"),
+            mock.patch("secretary.bootstrap._ensure_installation_user"),
+            mock.patch("secretary.bootstrap._clone_or_reuse", clone),
+            mock.patch("secretary.bootstrap._install_platform", steps.install_platform),
+            mock.patch("secretary.bootstrap._set_installation_owner", steps.set_owner),
+            mock.patch("secretary.bootstrap.provision_board_store", steps.provision),
+            mock.patch("secretary.bootstrap.migrate_instance", steps.migrate),
+            mock.patch("secretary.bootstrap.verify_board_store_roles", steps.verify),
+            mock.patch("secretary.bootstrap._run", side_effect=refuse_kanboard),
+            mock.patch("secretary.tasks.KanboardClient.for_instance", side_effect=refuse_kanboard),
+            mock.patch("secretary.tasks.KanboardClient.call", side_effect=refuse_kanboard),
+            mock.patch("builtins.print"),
+        ):
+            code = bootstrap(args)
+        return code, steps
+
+    def test_bootstrap_provisions_migrates_and_verifies_the_store_with_no_kanboard_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
-            board = Board()
 
-            def clone(_remote: str, directory: Path, **_kwargs: object) -> str:
-                directory.mkdir()
-                subprocess.run(["git", "init", "--quiet", str(directory)], check=True)
-                subprocess.run(["git", "-C", str(directory), "config", "user.name", "Test"], check=True)
-                subprocess.run(
-                    ["git", "-C", str(directory), "config", "user.email", "test@example.invalid"], check=True
-                )
-                (directory / "instance.yaml").write_text(
-                    "version: 1\nname: bootstrap\ndata_dir: "
-                    + str(directory.parent / "data")
-                    + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
-                    + "host:\n  unit_prefix: secretary-\n",
-                    encoding="utf-8",
-                )
-                return "cloned private instance remote"
+            code, steps = self._bootstrap(target)
 
-            args = SimpleNamespace(
-                instance_dir=str(target),
-                instance_remote="remote",
-                installation_user="dev",
-                dry_run=False,
+            self.assertEqual(code, 0)
+            # The whole board-side sequence, in order: nothing starts, waits for or shapes Kanboard.
+            self.assertEqual(
+                steps.mock_calls,
+                [
+                    mock.call.install_platform(dry_run=False, runtime_user="dev"),
+                    mock.call.provision(target, allow_create=True),
+                    mock.call.migrate(target),
+                    mock.call.verify(target),
+                    # The handoff comes after provisioning, so it covers `board-store.env`.
+                    mock.call.set_owner(target, "dev"),
+                ],
             )
-            with (
-                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-                mock.patch("secretary.bootstrap._ensure_installation_user"),
-                mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=clone),
-                mock.patch("secretary.bootstrap._install_platform"),
-                mock.patch("secretary.bootstrap._set_installation_owner"),
-                mock.patch("secretary.bootstrap._compose_file"),
-                mock.patch("secretary.bootstrap._run"),
-                mock.patch("secretary.bootstrap.KanboardClient.for_instance", return_value=board),
-                mock.patch("secretary.bootstrap.provision_board_store") as provision_store,
-                mock.patch("secretary.bootstrap.migrate_instance") as migrate_store,
-                mock.patch("secretary.bootstrap.verify_board_store_roles") as verify_roles,
-            ):
-                self.assertEqual(bootstrap(args), 0)
-
-            provision_store.assert_called_once_with(target, allow_create=True)
-            migrate_store.assert_called_once_with(target)
-            verify_roles.assert_called_once_with(target)
-
-            self.assertFalse((target / "runtime.env").exists())
+            self.assertFalse((target / "board-transport.env").exists())
+            gitignore = target / ".gitignore"
+            self.assertNotIn(
+                "board-transport.env", gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+            )
             self.assertTrue((target / BOOTSTRAP_STAMP).is_file())
             exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
             self.assertIn(f"/{BOOTSTRAP_STAMP}", exclude)
             self.assertIn("/runtime.env", exclude)
-            self.assertIn("/board-transport.env", (target / ".gitignore").read_text(encoding="utf-8"))
-            transport = (target / "board-transport.env").read_text(encoding="utf-8")
-            self.assertIn("KANBOARD_API_USER=jsonrpc\n", transport)
-            compose = target.parent / "compose.yml"
-            from secretary.bootstrap import _compose_file
+            for removed in (
+                "ensure_pipeline_board",
+                "migrate_assessment_column",
+                "_wait_for_kanboard",
+                "_compose_file",
+                "KANBOARD_IMAGE",
+            ):
+                self.assertFalse(hasattr(bootstrap_module, removed), removed)
 
-            _compose_file(compose)
-            contents = compose.read_text(encoding="utf-8")
-            self.assertIn("API_AUTHENTICATION_TOKEN: ${KANBOARD_API_TOKEN}", contents)
-            self.assertIn("image: kanboard/kanboard:v1.2.46", contents)
+    def test_a_fresh_bootstrap_leaves_the_installation_selecting_postgres(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+
+            code, _steps = self._bootstrap(target)
+
+            self.assertEqual(code, 0)
+            runtime = target / "runtime.env"
+            self.assertEqual(runtime.read_text(encoding="utf-8"), "SECRETARY_CARD_BACKEND=postgres\n")
+            self.assertEqual(runtime.stat().st_mode & 0o777, 0o600)
+            # The same validated reader the instance-bound CLI and the units' environment go through.
+            self.assertEqual(read_runtime_env(target)["SECRETARY_CARD_BACKEND"], "postgres")
+
+    def test_a_rerun_keeps_runtime_lines_and_names_the_backend_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            self.assertEqual(self._bootstrap(target)[0], 0)
+            runtime = target / "runtime.env"
+            runtime.write_text(
+                "# operator note\nEXAMPLE_TOKEN=kept\nSECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8"
+            )
+
+            self.assertEqual(self._bootstrap(target)[0], 0)
+
+            self.assertEqual(
+                runtime.read_text(encoding="utf-8"),
+                "# operator note\nEXAMPLE_TOKEN=kept\nSECRETARY_CARD_BACKEND=postgres\n",
+            )
+
+    def test_a_preview_writes_no_runtime_file_and_touches_no_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+
+            code, steps = self._bootstrap(target, dry_run=True)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(steps.mock_calls, [])
+            self.assertFalse((target / "runtime.env").exists())
+
+    def test_the_real_provision_leaves_board_store_env_to_the_installation_user_at_0600(self) -> None:
+        """Real `provision` materializes `board-store.env` as root; bootstrap then hands it over.
+
+        Only the Docker edges of `provision` are stood in for. The test cannot switch users, so
+        it runs `_set_installation_owner` for real with root's view of the host and records the
+        uid and gid each `chown` receives, and when, relative to the store steps.
+        """
+        from secretary.board import provision as provision_module
+        from secretary.board import store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            compose = Path(temporary) / "opt" / "postgres-compose.yml"
+            events: list[tuple[object, ...]] = []
+            account = SimpleNamespace(pw_uid=4242, pw_gid=4343)
+
+            def chown(path: object, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+                events.append(("chown", Path(str(path)), uid, gid))
+
+            def step(name: str):
+                def record(instance: Path, *args: object, **kwargs: object) -> None:
+                    events.append((name, Path(instance)))
+                    # The store file has to exist, private, before anything reads it.
+                    store_file = store.store_path(instance)
+                    self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
+
+                return record
+
+            args = SimpleNamespace(
+                instance_dir=str(target), instance_remote="remote", installation_user="dev", dry_run=False
+            )
+            kwdefaults = dict(provision_module.provision.__kwdefaults__ or {})
+            kwdefaults["compose_path"] = compose
+            with (
+                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
+                mock.patch("secretary.bootstrap._host_supported"),
+                mock.patch("secretary.bootstrap._ensure_installation_user"),
+                mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=self._clone),
+                mock.patch("secretary.bootstrap._install_platform"),
+                # `provision` itself runs; only Docker is answered for it.
+                mock.patch.object(provision_module.provision, "__kwdefaults__", kwdefaults),
+                mock.patch("secretary.board.provision._exists", return_value=False),
+                mock.patch("secretary.board.provision._run", return_value="container-id"),
+                mock.patch("secretary.board.provision._inspect_container"),
+                mock.patch("secretary.board.provision._wait_ready"),
+                mock.patch("secretary.bootstrap.migrate_instance", side_effect=step("migrate")),
+                mock.patch("secretary.bootstrap.verify_board_store_roles", side_effect=step("verify")),
+                # `_set_installation_owner` runs for real, as root would, against a stand-in account.
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown", side_effect=chown),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(bootstrap(args), 0)
+
+            store_file = store.store_path(target)
+            self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
+            self.assertIn("SECRETARY_DB_APP_PASSWORD=", store_file.read_text(encoding="utf-8"))
+            names = [event[0] for event in events]
+            handed = [event for event in events if event[0] == "chown" and event[1] == store_file]
+            self.assertEqual(handed, [("chown", store_file, 4242, 4343)])
+            # In order: the store steps first, then the handoff of the file they needed.
+            self.assertLess(names.index("verify"), events.index(handed[0]))
+            for other in ("runtime.env", ".gitignore", BOOTSTRAP_STAMP):
+                self.assertIn(("chown", target / other, 4242, 4343), events, other)
+            # The Compose definition is root's, outside the instance, and is never handed over.
+            self.assertTrue(compose.is_file())
+            self.assertEqual(compose.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(any(event[0] == "chown" and event[1] == compose for event in events))
 
     def test_rejects_unsupported_host_before_creating_user_or_checkout(self) -> None:
         args = SimpleNamespace(

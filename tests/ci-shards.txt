@@ -37,6 +37,7 @@ integration-recovery tests/test_checkpoint.py
 integration-recovery tests/test_cutover.py
 integration-recovery tests/test_kanboard_container_resolution.py
 integration-recovery tests/test_postgres_recovery.py
+integration-recovery tests/test_fresh_postgres_install.py
 unit tests/test_ci_shards.py
 component tests/test_cli.py
 component tests/test_codex_capability_matrix.py

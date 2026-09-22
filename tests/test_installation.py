@@ -41,7 +41,7 @@ from secretary.installation import (
 )
 from secretary.projects.availability import ProjectAvailability
 from secretary.routing_journal import attempts
-from secretary.runtime_env import RuntimeEnvError
+from secretary.runtime_env import RuntimeEnvError, select_card_backend
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.upgrade import UpgradeResult, step_host
 from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
@@ -1450,7 +1450,6 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
-                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
                 mock.patch("secretary.installation.import_normalized_board", return_value=1),
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
                 mock.patch("secretary.installation.provision_codex_home", return_value=0),
@@ -1550,7 +1549,6 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
-                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
                 mock.patch("secretary.installation.import_normalized_board", return_value=0),
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=0),
                 mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
@@ -1635,7 +1633,6 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
-                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
                 mock.patch(
                     "secretary.installation.import_normalized_board",
                     side_effect=installation.RestoreError("parity failed"),
@@ -2048,7 +2045,6 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.materialize_host", return_value=host),
                 mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
-                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
             with (
                 patches[0],
@@ -2057,7 +2053,6 @@ class InstallationTests(unittest.TestCase):
                 patches[3],
                 patches[4],
                 patches[5],
-                patches[6],
                 mock.patch("secretary.installation._set_installation_owner") as set_owner,
             ):
                 with mock.patch("secretary.installation._ensure_installation_user"):
@@ -2213,6 +2208,135 @@ class InstallationTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             code = main(argv)
         return code, output.getvalue()
+
+
+class BootstrapCheckoutRecoveryTests(unittest.TestCase):
+    """secretary-1666: recovery on the checkout bootstrap left, whose board is the PostgreSQL store."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        source = root / "source"
+        self.remote = root / "instance.git"
+        self.target = root / "instance"
+        self.data = root / "data"
+        source.mkdir()
+        _checkpoint(source, self.data)
+        _git(source, "init")
+        _git(source, "config", "user.name", "Test")
+        _git(source, "config", "user.email", "test@example.invalid")
+        _git(source, "add", ".")
+        _git(source, "commit", "-m", "checkpoint")
+        subprocess.run(
+            ["git", "clone", "--bare", str(source), str(self.remote)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        text = (source / "instance.yaml").read_text(encoding="utf-8")
+        (source / "instance.yaml").write_text(text.replace("placeholder", str(self.remote)), encoding="utf-8")
+        _git(source, "add", "instance.yaml")
+        _git(source, "commit", "-m", "remote identity")
+        _git(source, "push", str(self.remote), "HEAD:master")
+        # What bootstrap leaves before any install: the clone, its stamp and the backend selector.
+        from secretary.bootstrap import _mark_bootstrap_checkout
+
+        self.assertEqual(
+            _clone_or_reuse(str(self.remote), self.target, recovery=True, dry_run=False),
+            "cloned private instance remote",
+        )
+        _mark_bootstrap_checkout(self.target)
+        select_card_backend(self.target / "runtime.env", "postgres")
+
+    def _install(
+        self, secrets: installation.SecretRecovery | None = None
+    ) -> tuple[installation.InstallResult, mock.Mock]:
+        steps = mock.Mock()
+        steps.import_normalized_board.return_value = 1
+        args = SimpleNamespace(
+            instance_dir=str(self.target),
+            instance_remote=str(self.remote),
+            installation_user=getpass.getuser(),
+            recover=True,
+            adopt=False,
+            dry_run=False,
+            runtime_env=None,
+            product_root=str(PRODUCT_ROOT),
+            bootstrap_credential_file=None,
+            bootstrap_credential_stdin=False,
+            recovery_phrase_file=None,
+            recovery_phrase_stdin=False,
+            host_fixture=None,
+        )
+        store = secrets or installation.SecretRecovery(store_present=False, unlocked=False)
+        with (
+            mock.patch("secretary.installation._ensure_installation_user"),
+            mock.patch("secretary.installation._set_installation_owner"),
+            mock.patch("secretary.installation._open_secret_store", return_value=store),
+            mock.patch("secretary.installation.ensure_from_runtime_values", steps.ensure_from_runtime_values),
+            mock.patch("secretary.installation.check_prerequisites", steps.check_prerequisites),
+            mock.patch("secretary.installation.import_normalized_board", steps.import_normalized_board),
+            mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
+            mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
+            mock.patch("secretary.installation.provision_codex_home", return_value=0),
+            mock.patch(
+                "secretary.installation.materialize_host",
+                return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
+            ),
+            mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
+            mock.patch("secretary.installation.restore_findings", return_value=[]),
+        ):
+            return installation.install(args), steps
+
+    def test_recovery_restores_into_the_store_with_no_kanboard_step(self) -> None:
+        result, steps = self._install()
+
+        self.assertEqual(result.status, "ok", result.steps)
+        # The board-side sequence is the store's prerequisite read, then the restore into it:
+        # no Kanboard transport is materialized and no Pipeline board is made first.
+        self.assertEqual(
+            steps.mock_calls,
+            [
+                mock.call.check_prerequisites(None, self.target, getpass.getuser()),
+                mock.call.import_normalized_board(self.data, instance=self.target),
+            ],
+        )
+        board = {step.name: (step.status, step.detail) for step in result.steps}
+        self.assertEqual(board["board-transport"][0], "skipped")
+        self.assertEqual(board["board"], ("changed", "1 card(s) at parity"))
+        self.assertFalse((self.target / "board-transport.env").exists())
+
+    def test_a_store_written_runtime_env_gets_the_postgres_selector_back(self) -> None:
+        # A store that materializes runtime.env rewrites the whole file, dropping bootstrap's line.
+        runtime = self.target / "runtime.env"
+        runtime.write_text("EXAMPLE_TOKEN=from-the-store\n", encoding="utf-8")
+        runtime.chmod(0o600)
+
+        result, steps = self._install()
+
+        self.assertEqual(result.status, "ok", result.steps)
+        self.assertEqual(
+            runtime.read_text(encoding="utf-8"),
+            "EXAMPLE_TOKEN=from-the-store\nSECRETARY_CARD_BACKEND=postgres\n",
+        )
+        steps.ensure_from_runtime_values.assert_not_called()
+
+    def test_locked_runtime_secrets_still_block_although_bootstrap_wrote_the_file(self) -> None:
+        locked = installation.SecretRecovery(
+            store_present=True,
+            unlocked=False,
+            locked=({"id": "example_token", "environment": "EXAMPLE_TOKEN", "target": "runtime-env"},),
+        )
+
+        result, steps = self._install(locked)
+
+        self.assertEqual(result.status, "failed")
+        failure = next(step.detail for step in result.steps if step.status == "failed")
+        self.assertIn("recovery is incomplete", failure)
+        self.assertIn("runtime.env lacks EXAMPLE_TOKEN", failure)
+        steps.check_prerequisites.assert_not_called()
+        steps.import_normalized_board.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -126,7 +126,6 @@ class RecoveryCase(unittest.TestCase):
             ),
             mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
             mock.patch("secretary.installation.restore_findings", return_value=[]),
-            mock.patch("secretary.bootstrap.ensure_pipeline_board"),
         )
         with contextlib.ExitStack() as stack:
             for patch in patches:

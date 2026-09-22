@@ -81,7 +81,7 @@ class KanboardContainer:
 # containers of a project, and asking the daemon for them is the same lookup `docker compose ps`
 # performs -- with one difference that decides the matter here: `docker compose -f <file> ps`
 # parses the Compose file in the calling process, and the installed file is mode 0600 root:root
-# (`bootstrap._compose_file`), while the cutover controller and `backup create` run as the
+# (as bootstrap wrote it while it still installed Kanboard), while the cutover controller and `backup create` run as the
 # unprivileged installation user.  The daemon holds the same fact and answers it over the socket.
 COMPOSE_CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"

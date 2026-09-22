@@ -9,7 +9,7 @@ does not exist yet: it is what the store writes once the recovery phrase rebuild
 installation key. Without the phrase the recovery still brings back everything that needs no
 credentials and reports which secrets stayed locked or went missing.
 
-It deliberately does not install Kanboard or Orca: their package transport and supported versions
+It deliberately does not install the board store or Orca (`bootstrap` does): their supported versions
 are product decision gates, so a missing runtime is reported before any live state is written.
 """
 
@@ -42,7 +42,7 @@ from secretary._fsutil import (
     write_text_atomic,
 )
 from secretary.automations import OrcaAutomationClient, workspaces_root
-from secretary.board.backend import CARD, POSTGRES, board_client, card_backend_status
+from secretary.board.backend import CARD, CARD_BACKEND_ENV, POSTGRES, board_client, card_backend_status
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.board_transport import (
     BoardTransport,
@@ -77,6 +77,7 @@ from secretary.runtime_env import (
     RuntimeEnvMissing,
     instance_runtime_env_path,
     read_runtime_env,
+    select_card_backend,
 )
 from secretary.secret_recover import SecretRecovery, recover_secrets
 from secretary.secret_store import (
@@ -843,7 +844,7 @@ def _board_label() -> str:
 
 
 def check_prerequisites(
-    transport: BoardTransport,
+    transport: BoardTransport | None,
     instance_dir: Path,
     installation_user: str | None = None,
 ) -> None:
@@ -1717,33 +1718,65 @@ def install(args: argparse.Namespace) -> InstallResult:
         except RuntimeEnvError as exc:
             raise InstallError(str(exc)) from None
         try:
-            transport_outcome = ensure_from_runtime_values(
-                target,
-                legacy_values=values,
-                runtime_env=runtime_env,
-                dry_run=args.dry_run,
-                allow_default=detail.startswith(("cloned", "would clone")),
+            canonical_runtime_env = runtime_env.resolve() == target.resolve() / "runtime.env"
+        except OSError:
+            canonical_runtime_env = False
+        if bootstrap_checkout and runtime_loaded:
+            # Bootstrap writes runtime.env with nothing but the backend selector, so on its
+            # checkout the file being there no longer says the store's variables arrived.
+            unavailable = sorted(
+                {
+                    str(entry["environment"])
+                    for entry in (*secrets.locked, *secrets.missing)
+                    if entry.get("target") == "runtime-env" and entry.get("environment")
+                }
+                - set(values)
             )
-        except BoardTransportError as exc:
-            raise InstallError(str(exc)) from None
-        if not args.dry_run:
+            if unavailable:
+                _restore_without_credentials(args, target, result, bootstrap)
+                raise _blocked_by_secrets(
+                    InstallError(f"runtime.env lacks {', '.join(unavailable)}"), secrets, runtime_env
+                ) from None
+        if bootstrap_checkout and canonical_runtime_env:
+            # A fresh installation serves cards from the PostgreSQL store bootstrap provisioned.
+            # A store that materializes runtime.env rewrites the whole file, so the selector
+            # bootstrap recorded is put back here rather than trusted to have survived.
+            if not args.dry_run:
+                try:
+                    select_card_backend(runtime_env, POSTGRES)
+                except RuntimeEnvError as exc:
+                    raise InstallError(str(exc)) from None
+            values = {**values, CARD_BACKEND_ENV: POSTGRES}
+        transport: BoardTransport | None = None
+        if values.get(CARD_BACKEND_ENV, "").strip() == POSTGRES:
+            # The PostgreSQL store is reached through board-store.env; the Kanboard JSON-RPC
+            # tuple is not this installation's transport, so nothing materializes it.
+            result.add("board-transport", "skipped", "the PostgreSQL board store needs no Kanboard transport")
+        else:
             try:
-                canonical_runtime_env = runtime_env.resolve() == target.resolve() / "runtime.env"
-            except OSError:
-                canonical_runtime_env = False
+                transport_outcome = ensure_from_runtime_values(
+                    target,
+                    legacy_values=values,
+                    runtime_env=runtime_env,
+                    dry_run=args.dry_run,
+                    allow_default=detail.startswith(("cloned", "would clone")),
+                )
+            except BoardTransportError as exc:
+                raise InstallError(str(exc)) from None
+            transport = transport_outcome.transport
+            result.add(
+                "board-transport",
+                "would-change"
+                if args.dry_run and transport_outcome.changed
+                else ("changed" if transport_outcome.changed else "unchanged"),
+                transport_outcome.render(dry_run=args.dry_run),
+            )
+        if not args.dry_run:
             if canonical_runtime_env:
                 _set_installation_owner(runtime_env, args.installation_user)
             _set_installation_owner(transport_path(target), args.installation_user)
             _set_installation_owner(target / ".gitignore", args.installation_user)
             _set_installation_owner(target / ".git", args.installation_user)
-        transport = transport_outcome.transport
-        result.add(
-            "board-transport",
-            "would-change"
-            if args.dry_run and transport_outcome.changed
-            else ("changed" if transport_outcome.changed else "unchanged"),
-            transport_outcome.render(dry_run=args.dry_run),
-        )
         result.add(
             "runtime-env",
             "unchanged" if runtime_loaded else "skipped",
@@ -1785,11 +1818,6 @@ def install(args: argparse.Namespace) -> InstallResult:
                 else f"{cards} board card(s), {runs} run record(s)",
             )
             _write_recovery_progress(progress_path, identity, checkpoint="complete")
-            # The checkpoint only contains cards. The board itself is derived host
-            # state and must exist before restore can prove card parity.
-            from secretary.bootstrap import ensure_pipeline_board
-
-            ensure_pipeline_board(target)
             recovered_board_completion = (
                 progress.get("board") == "started"
                 and restore_state(data_dir).get("board_parity") == "complete"

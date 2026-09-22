@@ -172,6 +172,14 @@ def _epoch(value: datetime | None) -> str:
     return str(int(value.timestamp()))
 
 
+def _ensure_project_row(client: SqlCardClient, project_id: str) -> None:
+    """Insert a missing `projects` row with the id only, inside the caller's transaction (§3.1)."""
+    client._execute(
+        "INSERT INTO projects (project_id) VALUES (%s) ON CONFLICT (project_id) DO NOTHING",
+        (project_id,),
+    )
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -813,6 +821,11 @@ class SqlCardClient:
         bag_removals: list[str] = []
         for key, raw in values.items():
             text = _text(raw)
+            if key == "project" and text:
+                # §3.1: `projects` only backs the foreign key; the registry files are canonical.
+                # A fresh store has no rows at all, so the write that names an id inserts it,
+                # with the id only, as a Product's project-set write does.
+                _ensure_project_row(self, text)
             if key in _METADATA_COLUMNS:
                 column = _METADATA_COLUMNS[key]
                 assignments.append(f"{column} = %s")
