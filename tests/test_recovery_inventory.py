@@ -18,7 +18,6 @@ from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.secret_store import initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.status import collect_status
-from tests.fakes.sprints import SprintBoard
 from tests.head_registry import write_installed_pair
 
 REGISTRY = """resources:
@@ -122,7 +121,7 @@ class RecoveryInventoryTests(unittest.TestCase):
                 mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
                 mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
             ):
-                snapshot = collect_status(report, sprint_client=SprintBoard())
+                snapshot = collect_status(report)
 
         probe.assert_not_called()
         self.assertTrue(snapshot["recovery"]["resources"])

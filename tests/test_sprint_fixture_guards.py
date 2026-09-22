@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-import types
 import unittest
 from pathlib import Path
 
@@ -15,7 +14,6 @@ from tests import (
     test_sprints,
 )
 from tests.fakes.sprints import SprintBackendFixture, SprintFixture
-from tests.sprint_contract import CARD_STORE_ONLY, KANBOARD_ONLY
 
 SUITES = (
     test_sprints,
@@ -24,9 +22,9 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 131,
-    "tests.test_sprint_executors": 24,
-    "tests.test_sprint_restore": 21,
+    "tests.test_sprints": 107,
+    "tests.test_sprint_executors": 21,
+    "tests.test_sprint_restore": 22,
     "tests.test_sprint_listing_budget": 4,
 }
 BEFORE_REACH_INS = {
@@ -38,37 +36,47 @@ BEFORE_REACH_INS = {
     "client.comments": 6,
 }
 AFTER_REACH_INS = {
-    "client.calls": 12,
-    "client.tasks": 6,
-    "_sprint_rows": 12,
-    "client.metadata": 8,
-    "_transactions": 9,
-    "client.comments": 2,
+    "client.calls": 0,
+    "client.tasks": 0,
+    "_sprint_rows": 0,
+    "client.metadata": 0,
+    "_transactions": 0,
+    "client.comments": 0,
 }
 EXPECTED_CLASSES = {
-    "tests.test_sprints.SprintOwnershipTests": 33,
+    "tests.test_sprints.SprintOwnershipTests": 19,
     "tests.test_sprints.TwoOpenSprintAdmissionTests": 18,
     "tests.test_sprints.TwoOpenSprintIsolationTests": 9,
-    "tests.test_sprints.SprintTests": 30,
+    "tests.test_sprints.SprintTests": 21,
     "tests.test_sprints.SprintStatusHeadlessCommandTests": 3,
-    "tests.test_sprints.SprintAuditTraversalTests": 8,
+    "tests.test_sprints.SprintAuditTraversalTests": 7,
     "tests.test_sprints.SprintSingleWriterGuardTests": 11,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
     "tests.test_sprints.SprintCloseDecisionTests": 10,
     "tests.test_sprints.CloseDecisionFileTests": 3,
     "tests.test_sprint_executors.ExecutorValueTests": 2,
-    "tests.test_sprint_executors.SprintExecutorPinTests": 7,
+    "tests.test_sprint_executors.SprintExecutorPinTests": 5,
     "tests.test_sprint_executors.ObserverPromptExecutorTests": 3,
-    "tests.test_sprint_executors.SprintCardExecutorTests": 5,
+    "tests.test_sprint_executors.SprintCardExecutorTests": 4,
     "tests.test_sprint_executors.SprintExecutorRecoveryTests": 4,
     "tests.test_sprint_executors.CardEditExecutorTests": 3,
-    "tests.test_sprint_restore.SprintRestoreTests": 21,
+    "tests.test_sprint_restore.SprintRestoreTests": 22,
     "tests.test_sprint_listing_budget.SprintListingBudgetTests": 4,
 }
 
-# These are the complete permitted locations.  Adding a storage reach-in anywhere else fails the
-# guard even if a broad aggregate count happens to stay unchanged.
-ALLOWED_KANBOARD_ONLY_LOCATIONS = frozenset(KANBOARD_ONLY)
+# The complete permitted locations of a storage reach-in: the listing-budget cases, whose subject is
+# what the store is asked. Sprints have one implementation, PostgreSQL (secretary-1670), and the 33
+# cases that were allowed one because their subject was the Kanboard transport or its half-applied
+# filesystem transaction were deleted with it.
+ALLOWED_STORAGE_LOCATIONS: frozenset[str] = frozenset(
+    f"tests.test_sprint_listing_budget.SprintListingBudgetTests.{name}"
+    for name in (
+        "test_the_listing_costs_the_same_whether_it_lists_two_sprints_or_forty",
+        "test_the_listing_reads_no_sprint_comments",
+        "test_one_listing_traverses_the_committed_audit_at_most_once",
+        "test_watching_one_sprint_costs_what_listing_them_all_does",
+    )
+)
 
 
 def _methods(module: object) -> dict[str, object]:
@@ -80,32 +88,6 @@ def _methods(module: object) -> dict[str, object]:
             if name.startswith("test_") and callable(value):
                 found[f"{module.__name__}.{owner.__name__}.{name}"] = value
     return found
-
-
-def _portable_sql_shadows(module: object) -> list[str]:
-    violations: list[str] = []
-    for owner in vars(module).values():
-        if not inspect.isclass(owner) or owner.__module__ != module.__name__:
-            continue
-        inherited = owner.__mro__[1:]
-        for name, replacement in owner.__dict__.items():
-            if not name.startswith("test_"):
-                continue
-            original = next(
-                (
-                    base.__dict__[name]
-                    for base in inherited
-                    if name in base.__dict__ and callable(base.__dict__[name])
-                ),
-                None,
-            )
-            if original is None:
-                continue
-            qualified = f"{original.__module__}.{original.__qualname__}"
-            if qualified not in KANBOARD_ONLY:
-                action = "overrides" if callable(replacement) else "shadows"
-                violations.append(f"{owner.__name__}.{name} {action} portable {qualified}")
-    return violations
 
 
 FORBIDDEN_NAMES = {"SprintKanboard", "ProductSprintKanboard", "ensure_sprint_board"}
@@ -224,25 +206,22 @@ class _HelperBypass:
 
 
 class SprintFixtureGuards(unittest.TestCase):
-    def test_every_original_method_is_classified_once(self) -> None:
-        """204 originally; secretary-1669 removed the 24 Kanboard-only cases that write a card."""
+    def test_every_method_is_counted(self) -> None:
+        """204 originally; secretary-1669 removed the 24 Kanboard-only cases that write a card.
+
+        secretary-1670 removed the 33 remaining Kanboard-only cases with the Sprint Kanboard
+        implementation, moved three SQL-only cases in from tests/test_sprints_sql_backend.py, and
+        rewrote the four listing-budget cases in store statements: 180 - 33 + 3 + 4 = 154.
+        """
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 180)
+        self.assertEqual(len(methods), 154)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]
             by_class[owner] = by_class.get(owner, 0) + 1
         self.assertEqual(by_class, EXPECTED_CLASSES)
-        self.assertEqual(set(KANBOARD_ONLY) - set(methods), set())
-        portable = set(methods) - set(KANBOARD_ONLY)
-        self.assertFalse(portable & set(KANBOARD_ONLY))
-        self.assertEqual(len(portable) + len(KANBOARD_ONLY), 180)
-        self.assertEqual((len(portable), len(KANBOARD_ONLY)), (147, 33))
-        # A case that writes a card runs on the store only, so it must be portable to run at all.
-        self.assertEqual(set(CARD_STORE_ONLY) - portable, set())
-        self.assertTrue(all(reason.strip() for reason in KANBOARD_ONLY.values()))
 
     def test_saved_before_inventory_is_reproducible(self) -> None:
         roots = Path(__file__).parent
@@ -274,7 +253,7 @@ class SprintFixtureGuards(unittest.TestCase):
 
     def test_portable_bodies_do_not_reach_into_fake_or_storage_layout(self) -> None:
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
-        self.assertEqual(_portable_storage_violations(methods, ALLOWED_KANBOARD_ONLY_LOCATIONS), [])
+        self.assertEqual(_portable_storage_violations(methods, ALLOWED_STORAGE_LOCATIONS), [])
 
     def test_portable_helper_indirection_cannot_bypass_the_storage_guard(self) -> None:
         qualified = f"{_HelperBypass.__module__}.{_HelperBypass.__qualname__}.test_portable"
@@ -285,28 +264,8 @@ class SprintFixtureGuards(unittest.TestCase):
         self.assertIn("test_portable -> _writes", violations[0])
         self.assertIn("self.client.calls", violations[0])
 
-    def test_kanboard_only_locations_are_exactly_the_named_inventory(self) -> None:
-        self.assertEqual(ALLOWED_KANBOARD_ONLY_LOCATIONS, frozenset(KANBOARD_ONLY))
-
-    def test_sql_subclasses_do_not_override_portable_test_bodies(self) -> None:
-        from tests import test_sprints_sql_backend as sql
-
-        self.assertEqual(_portable_sql_shadows(sql), [])
-
-    def test_a_non_callable_attribute_cannot_hide_a_portable_sql_test(self) -> None:
-        base = type("PortableBase", (), {"test_portable": lambda self: None})
-        base.__module__ = "tests.synthetic_shared"
-        shadow = type("SqlShadow", (base,), {"test_portable": None})
-        shadow.__module__ = "tests.synthetic_sql"
-        module = types.SimpleNamespace(__name__="tests.synthetic_sql", SqlShadow=shadow)
-
-        violations = _portable_sql_shadows(module)
-
-        self.assertEqual(len(violations), 1)
-        self.assertIn("shadows portable", violations[0])
-
     def test_portable_fixture_helpers_do_not_reach_into_fake_storage(self) -> None:
-        allowed = {"make_sprint_client", "_sprint_rows", "_transactions"}
+        allowed = {"make_sprint_client"}
         violations: list[str] = []
         for name, method in SprintFixture.__dict__.items():
             if name in allowed or not callable(method):
@@ -352,5 +311,7 @@ class SprintFixtureBehaviorTests(SprintFixture):
         with self.named_failure("record_create"), self.assertRaises(TaskError) as refused:
             self._create(goal="fixture failure", reference="sprint:fixture-failure")
 
-        self.assertEqual(refused.exception.code, "audit_pending")
+        # The store rolls the whole create back, so the refusal owes no repair (`audit_pending` was
+        # the Kanboard implementation's half-applied create).
+        self.assertEqual(refused.exception.code, "backend_error")
         self.assertEqual(self.sprint_record_count("sprint:fixture-failure"), 0)

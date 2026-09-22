@@ -159,7 +159,6 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertIn(f"def {entry}(", report_source)
         self.assertNotIn("from secretary.dispatcher import", report_source)
 
-
     def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         gate_source = (
@@ -255,7 +254,6 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._release_parked(", decision_source)
         self.assertNotIn("\n    def _release_parked(", dispatcher_source)
         self.assertNotIn("from secretary.dispatcher import", decision_source)
-
 
     def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
@@ -424,41 +422,32 @@ FILE_AUDIT_CONSTRUCTIONS = {
         "or Kanboard-only; every caller that has one passes the audit its client named, and with "
         "neither an audit nor a data directory the construction refuses"
     ),
-    "product_issues.py": (
-        "`entity_audit_for`, the audit owner of the Sprint and Product/Issue Kanboard "
-        "implementations until they retire; and the pre-v2 pending-layout gate and the "
-        "unmigrated-file-claim check, which are statements about the file layout itself and are "
-        "run *because* the client is PostgreSQL"
-    ),
 }
 
-#: Where a live audit reader asks for its owner. Cards have one owner (`task_audit_for`); the Sprint
-#: and Product/Issue code still has two implementations, so it asks `entity_audit_for`.
+#: Where a live audit reader asks for its owner. Cards, Sprints and Products/Issues have one
+#: implementation, PostgreSQL, and so one audit owner (`task_audit_for`).
 LIVE_AUDIT_SELECTORS = {
     "checkpoint.py": "task_audit_for(",
     "task_commands.py": "task_audit_for(",
     "webproto/command_reads.py": "task_audit_for(",
     "webproto/ops.py": "task_audit_for(",
     "webproto/reads.py": "task_audit_for(",
-    "webproto/sprint_reads.py": "entity_audit_for(",
+    "webproto/sprint_reads.py": "task_audit_for(",
     "board/kanboard.py": "task_audit_for(",
-    "sprints.py": "entity_audit_for(",
+    "sprints.py": "task_audit_for(",
     "data.py": "task_audit_for(",
     "dispatch/bootstrap.py": "task_audit_for(",
-    "product_issues.py": "entity_audit_for(",
+    "product_issues.py": "task_audit_for(",
 }
 
-#: The card path: every module whose `backend_kind` branch was collapsed to PostgreSQL.
-CARD_PATH_MODULES = (
-    "tasks.py",
-    "task_restore.py",
-    "task_commands.py",
-    "checkpoint.py",
-    "data.py",
-    "restore.py",
-    "webproto/reads.py",
-    "webproto/command_reads.py",
-)
+#: The modules allowed to name the retired Kanboard backend: the backend vocabulary itself, which
+#: defines the name and reads historical `task_kanboard_<n>` / `sprint_kanboard_<n>` identities.
+RETIRED_IDENTITY_OWNERS = frozenset({"board/backend.py"})
+
+
+def _source_modules() -> list[Path]:
+    """Every Python module under `src/`, both packages."""
+    return sorted((ROOT / "src").rglob("*.py"))
 
 
 class FileAuditOwnershipTests(unittest.TestCase):
@@ -514,10 +503,15 @@ class FileAuditOwnershipTests(unittest.TestCase):
         source = inspect.getsource(task_audit_for)
         self.assertNotIn("TaskAudit(", source.replace("SqlTaskAudit(", ""))
 
-    def test_the_card_path_has_no_backend_branch(self) -> None:
-        """Cards have one implementation, so nothing on their path asks which one it is holding."""
-        for module in CARD_PATH_MODULES:
-            tree = ast.parse((ROOT / "src" / "secretary" / module).read_text(encoding="utf-8"))
+    def test_no_source_module_has_a_backend_branch(self) -> None:
+        """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds.
+
+        `KanboardClient.backend_kind` and `SqlCardClient.backend_kind` are class attributes the
+        clients declare; a declaration is a name binding, not a read, so it is not reported.
+        """
+        for path in _source_modules():
+            module = str(path.relative_to(ROOT / "src"))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             reads = [
                 node.lineno
                 for node in ast.walk(tree)
@@ -535,45 +529,57 @@ class FileAuditOwnershipTests(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
-    def test_the_card_path_writes_no_retired_backend_identity(self) -> None:
-        """A new card write names the PostgreSQL backend; `task_kanboard_<n>` is only ever read.
+    def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
+        """A new write names the PostgreSQL backend; `task_kanboard_<n>`/`sprint_kanboard_<n>` are only read.
 
         The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
         or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and
-        secretary-1669's first submission restored cards under the retired identity that way. The
-        one allowed use is `task_restore._restored_backend`, which answers the identity Sprint and
-        Product/Issue records still carry.
+        secretary-1669's first submission restored cards under the retired identity that way. Cards,
+        Sprints and Products/Issues all write the PostgreSQL identity (secretary-1670); only the
+        backend vocabulary names the retired one.
         """
-        allowed = {("task_restore.py", "_restored_backend")}
-        for module in CARD_PATH_MODULES:
-            tree = ast.parse((ROOT / "src" / "secretary" / module).read_text(encoding="utf-8"))
+        for path in _source_modules():
+            module = str(path.relative_to(ROOT / "src")).removeprefix("secretary/")
+            if module in RETIRED_IDENTITY_OWNERS:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             found: list[int] = []
-            for holder in ast.walk(tree):
-                if not isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
-                    continue
-                if (module, holder.name) in allowed:
-                    continue
-                for node in ast.walk(holder):
-                    retired = (isinstance(node, ast.Name) and node.id == "KANBOARD") or (
-                        isinstance(node, ast.Attribute) and node.attr == "KANBOARD"
+            for node in ast.walk(tree):
+                retired = (isinstance(node, ast.Name) and node.id == "KANBOARD") or (
+                    isinstance(node, ast.Attribute) and node.attr == "KANBOARD"
+                )
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "entity_id":
+                    retired = retired or any(
+                        isinstance(argument, ast.Constant) and argument.value == "kanboard"
+                        for argument in node.args
                     )
-                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "entity_id":
-                        retired = retired or any(
-                            isinstance(argument, ast.Constant) and argument.value == "kanboard"
-                            for argument in node.args
-                        )
-                    if isinstance(node, ast.Dict):
-                        retired = retired or any(
-                            isinstance(key, ast.Constant)
-                            and key.value == "kind"
-                            and isinstance(value, ast.Constant)
-                            and value.value == "kanboard"
-                            for key, value in zip(node.keys, node.values, strict=True)
-                        )
-                    if retired:
-                        found.append(node.lineno)
+                if isinstance(node, ast.Dict):
+                    retired = retired or any(
+                        isinstance(key, ast.Constant)
+                        and key.value == "kind"
+                        and isinstance(value, ast.Constant)
+                        and value.value == "kanboard"
+                        for key, value in zip(node.keys, node.values, strict=True)
+                    )
+                if retired:
+                    found.append(node.lineno)
             with self.subTest(module=module):
                 self.assertEqual(sorted(set(found)), [], f"{module} writes the retired Kanboard identity")
+
+    def test_the_product_issue_store_keeps_no_file_journal_guard(self) -> None:
+        """The pre-cutover file-claim guard protected nothing after the importer copied every id.
+
+        On 2026-09-22 the live `board/events.ndjson` (last written 2026-09-10) held 27,966 request
+        ids, all but three already in SQL `requests`, and those three were dispatcher records, not
+        Product/Issue ones; `board/pending-audit` was empty (secretary-1670).
+        """
+        from secretary.board.sql_audit import SqlTaskAudit
+        from secretary.product_issues import ProductIssueStore
+
+        self.assertFalse(hasattr(ProductIssueStore, "_require_sql_legacy_namespace_free"))
+        self.assertNotIn("legacy_audit", inspect.getsource(ProductIssueStore))
+        self.assertNotIn("legacy_audit", inspect.getsource(SqlTaskAudit))
+        self.assertFalse(hasattr(SqlTaskAudit, "require_pending_layout"))
 
     def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
         """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""

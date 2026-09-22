@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import state_repo
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.cli import main
 from secretary.config import validate, validate_instance
 from secretary.head_registry import (
@@ -26,9 +27,9 @@ from secretary.host import (
 )
 from secretary.host_apply import resolve_packaged
 from secretary.secret_store import initialize_store, set_secret
+from secretary.sprints import SprintWriter
 from secretary.status import collect_status
-from secretary.tasks import TaskAudit
-from tests.fakes.sprints import SprintBoard
+from tests.fakes.sprints import sprint_store, status_seed
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -46,7 +47,6 @@ def _init_instance_repo(instance_dir: Path, instance_yaml: str) -> None:
         _git(instance_dir, "config", "--local", key, value)
     _git(instance_dir, "add", "instance.yaml")
     _git(instance_dir, "commit", "--quiet", "-m", "config")
-
 
 
 class StatusCliTests(unittest.TestCase):
@@ -329,11 +329,10 @@ class StatusCliTests(unittest.TestCase):
                 "sprint_budget:\n  signal: 20\n  hard: 40\n",
                 encoding="utf-8",
             )
-            board = SprintBoard()
+            board = sprint_store(self, status_seed())
             board.add_sprint(
                 "sprint:1",
                 status="stopped",
-                sprint_budget=json.dumps({"by_type": {"blocked": 2}}),
                 sprint_resume=json.dumps(
                     {
                         "selected_step": "fix",
@@ -346,8 +345,15 @@ class StatusCliTests(unittest.TestCase):
                     }
                 ),
             )
-            board.metadata[12]["sprint_ref"] = "sprint:1"
-            TaskAudit(data_dir).append(
+            # The store keeps a budget as the charges that make it up, so it is arranged through
+            # the verbatim restore a checkpoint recovery uses.
+            SprintWriter(board, data_dir=data_dir).restore(
+                reference="sprint:1",
+                values={"sprint_budget": json.dumps({"by_type": {"blocked": 2}})},
+                request_id="fixture-budget",
+            )
+            board.save_metadata(12, sprint_ref="sprint:1")
+            SqlTaskAudit(board).append(
                 "later-card-event",
                 {
                     "event_id": "evt_later_card_event",
@@ -410,7 +416,7 @@ class StatusCliTests(unittest.TestCase):
                     "host:\n  unit_prefix: secretary-\n",
                     encoding="utf-8",
                 )
-                board = SprintBoard()
+                board = sprint_store(self, status_seed())
                 for index in range(sprint_count):
                     board.add_sprint(
                         f"sprint:{index}",
@@ -427,8 +433,8 @@ class StatusCliTests(unittest.TestCase):
                             }
                         ),
                     )
-                board.metadata[12]["sprint_ref"] = "sprint:0"
-                TaskAudit(data_dir).append(
+                board.save_metadata(12, sprint_ref="sprint:0")
+                SqlTaskAudit(board).append(
                     "later-card-event",
                     {
                         "event_id": "evt_later_card_event",
@@ -442,7 +448,7 @@ class StatusCliTests(unittest.TestCase):
                 )
                 report = validate_instance(instance)
                 traversals = 0
-                original = TaskAudit.events
+                original = SqlTaskAudit.events
 
                 def counting(audit, *args, **kwargs):
                     nonlocal traversals
@@ -460,7 +466,7 @@ class StatusCliTests(unittest.TestCase):
                             "checkpoint_duration_ms": 0.0,
                         },
                     ),
-                    mock.patch.object(TaskAudit, "events", counting),
+                    mock.patch.object(SqlTaskAudit, "events", counting),
                 ):
                     collected = collect_status(report, offline=True, sprint_client=board)
                 return collected, traversals

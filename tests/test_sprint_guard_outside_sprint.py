@@ -20,7 +20,7 @@ from unittest import mock
 
 from secretary.sprints import SprintReader, SprintWriter, refresh_active_sprint_projects
 from secretary.tasks import TaskError, TaskWriter, task_audit_for
-from tests.fakes.sprints import ProductSprintKanboard, SprintBackendFixture
+from tests.fakes.sprints import ProductSprintSeed, SprintBackendFixture
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
 
@@ -29,7 +29,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
     BACKEND = "postgres"
 
     def make_sprint_client(self):
-        return card_store(self, ProductSprintKanboard(), instance_dir=self.tmp.name)
+        return card_store(self, ProductSprintSeed(), instance_dir=self.tmp.name)
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

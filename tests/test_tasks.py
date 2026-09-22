@@ -50,7 +50,6 @@ from secretary.tasks import (
     specification_revision,
     standing_decision,
 )
-from tests.fakes.sprints import SprintKanboard
 from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
@@ -1658,8 +1657,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         }
         data_dir = Path(self.tmpdir.name) / "round-trip"
         init_layout(data_dir)
+        # The subject is the cards: the sprint set comes from a store that holds none.
         export_board(
-            data_dir, instance_dir=Path(self.tmpdir.name), reader=self.writer.reader, sprint_client=SprintKanboard()
+            data_dir,
+            instance_dir=Path(self.tmpdir.name),
+            reader=self.writer.reader,
+            sprint_client=self.card_store(empty_seed()),
         )
         exported = {
             card["reference"]: card

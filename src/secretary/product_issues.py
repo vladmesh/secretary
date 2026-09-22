@@ -15,10 +15,10 @@ from typing import Any
 
 import yaml
 
-from secretary.board.backend import KANBOARD, entity_id
+from secretary.board.backend import entity_id
 from secretary.tasks import (
+    CARD_BACKEND,
     KanboardClient,
-    TaskAudit,
     TaskError,
     _digest,
     _now,
@@ -144,26 +144,14 @@ def registered_projects(instance: str | Path) -> set[str]:
     return result
 
 
-def entity_audit_for(client: Any, data_dir: str | os.PathLike[str] | None) -> Any:
-    """The audit owner of a Sprint or Product/Issue client, decided by the client's own backend.
-
-    Cards have one audit owner (`secretary.tasks.task_audit_for`), but the Sprint and Product/Issue
-    Kanboard implementations still exist until sprint:1452 retires them, and theirs is the file
-    journal under `<data>/board` (docs/BOARD_STORE.md §7.3).
-    """
-    if getattr(client, "backend_kind", "kanboard") == "postgres":
-        return task_audit_for(client)
-    return TaskAudit(data_dir or "")
-
-
 class ProductIssueTransaction:
     """The private staged journal for Product/Issue writes.
 
-    Deliberately separate from TaskAudit's generic pending records: generic task reconciliation must
+    Deliberately separate from the audit's generic pending records: generic task reconciliation must
     not turn a partially applied Product/Issue intent into an audit event.
     """
 
-    def __init__(self, data_dir: str | Path, audit: TaskAudit) -> None:
+    def __init__(self, data_dir: str | Path, audit: Any) -> None:
         board = Path(data_dir) / "board"
         self.directory = board / "product-issue-transactions"
         # Product/Issue claims and generic audit claims share one request-id namespace.
@@ -482,15 +470,7 @@ class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
         self.data_dir = Path(data_dir)
-        self.audit = entity_audit_for(client, data_dir)
-        # Not a second audit owner: `legacy_audit` is the *file layout* itself, kept because two
-        # guards are statements about that layout rather than reads of the canon — the released
-        # pre-v2 pending-upgrade gate, and `_require_sql_legacy_namespace_free`, which refuses a SQL
-        # mutation whose request id an unmigrated file claim already owns. Both are run because the
-        # client is PostgreSQL, never instead of asking it (`docs/BOARD_STORE.md` §7.3).
-        self.legacy_audit = TaskAudit(data_dir)
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            self.audit.legacy_audit = self.legacy_audit
+        self.audit = task_audit_for(client)
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         self.instance = Path(instance)
 
@@ -603,9 +583,9 @@ class ProductIssueStore:
             "actor": {"role": role, "id": actor},
             "kind": kind,
             "outcome": "success",
-            "task_id": entity_id("task", KANBOARD, task_id) if task_id is not None else "",
+            "task_id": entity_id("task", CARD_BACKEND, task_id) if task_id is not None else "",
             "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"},
+            "backend": {"kind": CARD_BACKEND, "task_id": task_id, "revision": "product-issue"},
             "request_id": request_id,
             "payload": payload,
         }
@@ -735,8 +715,8 @@ class ProductIssueStore:
     @staticmethod
     def _remember_task_id(document: dict[str, Any], task_id: int) -> int:
         event = document["event"]
-        event["task_id"] = entity_id("task", KANBOARD, task_id)
-        event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
+        event["task_id"] = entity_id("task", CARD_BACKEND, task_id)
+        event["backend"] = {"kind": CARD_BACKEND, "task_id": task_id, "revision": "product-issue"}
         document.setdefault("progress", {})["task_id"] = task_id
         return task_id
 
@@ -1054,7 +1034,6 @@ class ProductIssueStore:
         kind = str(staged.get("kind") or "")
         finish = self._finish_for(kind)
         intent = staged["intent"]
-        self.audit.require_pending_layout()
         event = staged.get("event") if isinstance(staged.get("event"), dict) else {}
         with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -1133,8 +1112,6 @@ class ProductIssueStore:
 
     def _host_mutation(self, callback: Callable[[], Any]) -> Any:
         """Run one Product/Issue host mutation at the SQL client's shared boundary."""
-        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
-            return callback()
         try:
             with self.client.transaction():
                 return callback()
@@ -1149,14 +1126,6 @@ class ProductIssueStore:
             raise TaskError(
                 "backend_error", f"PostgreSQL Product/Issue transaction rolled back: {detail}", 1
             ) from None
-
-    def _require_sql_legacy_namespace_free(self, request_id: str) -> None:
-        """Refuse unmigrated file claims before a SQL mutation touches the database."""
-        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
-            return
-        self.legacy_audit.require_pending_layout()
-        if self.legacy_audit.event(request_id) is not None:
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
 
     def create_product(
         self,
@@ -1179,7 +1148,6 @@ class ProductIssueStore:
             )
         reference = f"product:{product_id}"
         request_id = request_id or str(uuid.uuid4())
-        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1242,7 +1210,6 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
-        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1278,7 +1245,6 @@ class ProductIssueStore:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
-        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1339,7 +1305,6 @@ class ProductIssueStore:
             raise TaskError("validation", "description append requires a non-empty block and reason", 2)
         request_id = request_id or str(uuid.uuid4())
         body_sha256 = _digest(body)
-        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1412,7 +1377,6 @@ class ProductIssueStore:
                 "validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2
             )
         request_id = request_id or str(uuid.uuid4())
-        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:

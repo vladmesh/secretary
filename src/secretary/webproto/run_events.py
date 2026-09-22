@@ -48,7 +48,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.tasks import TaskError
+from secretary.tasks import CARD_BACKEND, TaskError
 from secretary.webproto.errors import RuntimeUnavailable
 from secretary.webproto.runs import ProductRun
 
@@ -148,7 +148,7 @@ def _publish(
         "outcome": outcome,
         "task_id": "",
         "ref": run.ref,
-        "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+        "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
         "request_id": request_id,
         "payload": payload,
     }

@@ -31,11 +31,10 @@ from secretary import sprints as sprints_module
 from secretary.cli import main
 from secretary.config import validate
 from secretary.knowledge_write import list_knowledge_documents
-from secretary.product_issues import entity_audit_for
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
-from secretary.tasks import _STATE_BY_COLUMN, TaskAudit, TaskError, TaskWriter
+from secretary.tasks import _STATE_BY_COLUMN, TaskAudit, TaskError, TaskWriter, task_audit_for
 from secretary.webproto import section as section_module
 from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
@@ -101,7 +100,6 @@ _WRITE_METHODS = {
 }
 
 
-
 def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The kinds `SprintWriter` gives `_write`, read from the writer instead of restated here.
 
@@ -133,7 +131,6 @@ def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(sorted(kinds)), tuple(sorted(underivable))
 
 
-
 def _board_id(board: Any, name: str) -> int:
     """Which board of this client carries `name`, as the client itself answers."""
     return int(board.call("getProjectByName", name=name)["id"])
@@ -154,6 +151,7 @@ def _board_missing(board: Any, name: str) -> Iterator[None]:
         yield
     finally:
         board.call = original  # type: ignore[method-assign]
+
 
 class CreateTests(SprintProtocolFixture):
     def test_a_sprint_opens_with_what_it_was_opened_with(self) -> None:
@@ -177,7 +175,7 @@ class CreateTests(SprintProtocolFixture):
         from secretary.sprints import SPRINT_CREATED, active_sprint_projects
 
         reference = self.reference_of(self.create())
-        kinds = [str(event.get("kind") or "") for event in entity_audit_for(self.board, self.data_dir).events()]
+        kinds = [str(event.get("kind") or "") for event in task_audit_for(self.board).events()]
         self.assertIn(SPRINT_CREATED, kinds)
         self.assertEqual(active_sprint_projects(self.data_dir), {"secretary": [reference]})
 
@@ -383,27 +381,6 @@ class IdempotencyTests(SprintProtocolFixture):
         self.assert_pending_after_create(pending.exception, cause="a defect in the document builder")
         self.assertIsInstance(pending.exception.__cause__, TypeError)
 
-    def test_a_writer_that_stalls_mid_create_is_reported_as_repeatable_not_as_a_refusal(self) -> None:
-        """A create that stopped between its row and its reference is not "it did not happen"."""
-        real = self.board.call
-
-        def refuse_the_reference(method: str, **params: object) -> object:
-            if method == "updateTask" and "reference" in params:
-                return False
-            return real(method, **params)
-
-        with (
-            mock.patch.object(self.board, "call", refuse_the_reference),
-            self.assertRaises(OperationPending) as pending,
-        ):
-            self.create()
-        self.assertEqual(pending.exception.data["action"]["request_id"], "req-1")
-
-        # The repeat resumes the same request and this installation ends with one sprint.
-        repeat = self.create()
-        self.assertEqual(len(self.sprint_rows()), 1)
-        self.assertEqual(self.reference_of(repeat), str(self.sprint_rows()[0]["reference"]))
-
     def test_the_request_index_names_the_sprint_and_never_a_second_one(self) -> None:
         reference = self.reference_of(self.create())
         record = SprintRequestStore(self.data_dir).by_request("req-1")
@@ -601,7 +578,7 @@ class SprintStateTests(SprintProtocolFixture):
         """A read writes nothing, and the board this installation has never had is one of them."""
         with self.assertRaises(TaskNotFound):
             self.reads().sprint_state("sprint:1")
-        self.assertNotIn(SPRINT_BOARD_NAME, self.board.projects)
+        self.assertEqual(self.sprint_rows(), [])
         self.assertFalse(any(method == "createProject" for method, _ in self.board.calls))
 
 
@@ -750,16 +727,12 @@ class LayerPropertyTests(SprintProtocolFixture):
         self.assertEqual(written, [])
 
 
-
-
 class SprintWorkFixture(SprintProtocolFixture):
     """The pieces both work-document suites drive: one sprint, one card, and where the card is.
 
     A base rather than an inheritance between the two suites, so that neither re-runs the other's
-    cases to get at a helper. It writes cards, so its board is a real card store (`CARD_STORE`).
+    cases to get at a helper. It writes cards, so its board is a real card store.
     """
-
-    CARD_STORE = True
 
     def _entry(self, document: dict, reference: str) -> dict:
         return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
@@ -797,6 +770,7 @@ class SprintWorkFixture(SprintProtocolFixture):
             role="observer", actor="observer", reference=sprint, task_reference=card
         )
 
+
 class CurrentCardStateTests(SprintWorkFixture):
     """Where a sprint's current card stands, and since when, in both documents.
 
@@ -829,7 +803,7 @@ class CurrentCardStateTests(SprintWorkFixture):
     def _append(self, event: dict[str, Any]) -> None:
         """Commit one record to the card audit, under its own event id as its request id."""
         record = {"request_id": event["event_id"], **event}
-        entity_audit_for(self.board, self.data_dir).append(record["request_id"], record)
+        task_audit_for(self.board).append(record["request_id"], record)
 
     def _typed_move(self, at: str, source: str, target: str, *, ref: str | None = None) -> None:
         """A typed protocol event, which carries `transition.source` and `transition.target`."""
@@ -987,7 +961,7 @@ class CurrentCardStateTests(SprintWorkFixture):
     def test_a_journal_nobody_can_read_takes_away_this_and_nothing_else(self) -> None:
         """Criterion 2: the new part is unavailable, and the card's own fields still stand."""
         self._typed_move(self.LAST, "ready", "in_progress")
-        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit denied")):
+        with mock.patch.object(type(task_audit_for(self.board)), "events", side_effect=PermissionError("audit denied")):
             watched = self.reads().sprint_state(self.reference)
             listed = self._entry(self.reads().sprint_list(), self.reference)
 
@@ -1474,8 +1448,6 @@ class SprintReadCommandTests(SprintProtocolFixture):
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
 
-
-
 class CommentFixture(SprintProtocolFixture):
     """One open sprint and the pieces both comment suites drive.
 
@@ -1507,11 +1479,11 @@ class CommentFixture(SprintProtocolFixture):
     def board_comments(self) -> list[str]:
         """Every comment on this sprint's row, as the board actually holds them."""
         row = next(task for task in self.sprint_rows() if task["reference"] == self.reference)
-        return [str(entry.get("comment") or "") for entry in self.board.comments.get(int(row["id"]), [])]
+        return [str(entry.get("comment") or "") for entry in self.board.comments(int(row["id"]))]
 
     def audit_events(self) -> list[dict[str, Any]]:
 
-        return entity_audit_for(self.board, self.data_dir).events()
+        return task_audit_for(self.board).events()
 
     def significant_events(self) -> list[str]:
         """The events that are a semantic wake for this sprint's observer, by the product's own rule.
@@ -1541,7 +1513,7 @@ class CommentFixture(SprintProtocolFixture):
 
         runtime = SimpleNamespace(
             sprints=SprintReader(self.board, data_dir=self.data_dir, thresholds=None),
-            audit=entity_audit_for(self.board, self.data_dir),
+            audit=task_audit_for(self.board),
         )
         record = ObserverRecord.from_json(
             (self.production_payload().get("observers") or {}).get(self.reference)
@@ -1872,10 +1844,10 @@ class CommentDeliveryFaultTests(CommentFixture):
 
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
-        from secretary.tasks import TaskAudit
+        from secretary.board.sql_audit import SqlTaskAudit
 
         with mock.patch.object(
-            TaskAudit, "events", side_effect=PermissionError("audit journal denied")
+            SqlTaskAudit, "events", side_effect=PermissionError("audit journal denied")
         ):
             yield
 
@@ -2248,8 +2220,6 @@ def _source_at(document: dict, path: str) -> dict:
     return node["source"]
 
 
-
-
 class SourceIsolationMatrixTests(SprintWorkFixture):
     """Every source refusing alone and in combination, per section, over both operations.
 
@@ -2311,7 +2281,7 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
 
-        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit journal denied")):
+        with mock.patch.object(type(task_audit_for(self.board)), "events", side_effect=PermissionError("audit journal denied")):
             yield
 
     @contextlib.contextmanager
@@ -2579,7 +2549,6 @@ class CloseFixture(SprintProtocolFixture):
 
     REASON = "the goal is reached far enough to cut the next sprint, and the rest is deferred"
     #: It writes cards, so its board is a real card store.
-    CARD_STORE = True
 
     def setUp(self) -> None:
         super().setUp()
@@ -2825,7 +2794,7 @@ class CloseOperationTests(CloseFixture):
 
     def audit_events(self) -> list[dict[str, Any]]:
 
-        return entity_audit_for(self.board, self.data_dir).events()
+        return task_audit_for(self.board).events()
 
 
 class CloseoutTests(CloseFixture):
@@ -2854,7 +2823,7 @@ class CloseoutTests(CloseFixture):
         answered = self.close()
 
         step = _close_step_request_id("close-1", "closeout", self.reference)
-        committed = entity_audit_for(self.board, self.data_dir).committed_event(step)
+        committed = task_audit_for(self.board).committed_event(step)
         self.assertIsNotNone(committed)
         self.assertEqual(committed["kind"], SPRINT_CLOSEOUT)
         self.assertEqual(committed["ref"], self.reference)
@@ -2928,7 +2897,7 @@ class PostCloseCommentTests(CloseFixture):
 
         self.assertTrue(answered["saved"])
         self.assertEqual(validate(answered, "web-sprint", answered["kind"]), [])
-        committed = entity_audit_for(self.board, self.data_dir).committed_event("po-after-close")
+        committed = task_audit_for(self.board).committed_event("po-after-close")
         self.assertEqual(committed["event_id"], answered["comment_id"])
         self.assertEqual(committed["kind"], "commented")
 
@@ -2967,13 +2936,13 @@ class PostCloseCommentTests(CloseFixture):
 
     def test_a_repeat_is_idempotent_on_the_request_id(self) -> None:
         first = self.comment()
-        events = [event["event_id"] for event in entity_audit_for(self.board, self.data_dir).events()]
+        events = [event["event_id"] for event in task_audit_for(self.board).events()]
 
         repeated = self.comment()
 
         self.assertFalse(repeated["saved"])
         self.assertEqual(repeated["comment_id"], first["comment_id"])
-        self.assertEqual([event["event_id"] for event in entity_audit_for(self.board, self.data_dir).events()], events)
+        self.assertEqual([event["event_id"] for event in task_audit_for(self.board).events()], events)
 
     def test_a_repeat_over_different_content_is_refused(self) -> None:
         self.comment()
@@ -3104,7 +3073,7 @@ class CloseResultFaultTests(CloseFixture):
 
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
-        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit journal denied")):
+        with mock.patch.object(type(task_audit_for(self.board)), "events", side_effect=PermissionError("audit journal denied")):
             yield
 
     @contextlib.contextmanager

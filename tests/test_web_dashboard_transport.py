@@ -712,7 +712,6 @@ class DashboardPageTests(FakeAppFixture):
 
 class CardOperationTests(SprintProtocolFixture):
     #: The card writes land in a real card store.
-    CARD_STORE = True
 
     def layer(self) -> CardOperationLayer:
         return CardOperationLayer(

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.dispatch.observer import (
     ObserverRecord,
     load_observers,
@@ -41,7 +42,7 @@ from secretary.sprint_observer import (
     observer_choice,
     parse_observer,
 )
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_audit_for
+from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -67,10 +68,10 @@ def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
     path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
 
-
 #: A persisted declaration that names no observer. `sprints.observer` is `jsonb`, so text that is not
 #: JSON at all cannot be stored; the corruption a store can hold is JSON of no observer shape.
 CORRUPT_DECLARATION = '{"kind": "not-an-observer"}'
+
 
 class ObserverValueTests(unittest.TestCase):
     """Four tagged forms, and nothing that resembles one."""
@@ -132,8 +133,7 @@ class SprintDeclarationTests(SprintFixture):
     """Opening and reopening a sprint state its observer, or do not happen."""
 
     def _metadata(self, reference: str) -> dict:
-        row = next(item for item in self.client.tasks if item["reference"] == reference)
-        return self.client.metadata[int(row["id"])]
+        return self.client.sprint_metadata(reference)
 
     def test_create_without_an_observer_is_refused_before_any_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "requires an explicit observer"):
@@ -146,7 +146,7 @@ class SprintDeclarationTests(SprintFixture):
                 projects=["secretary"],
             )
 
-        self.assertEqual(TaskAudit(self.tmp.name).events(), [])
+        self.assertEqual(SqlTaskAudit(self.client).events(), [])
 
     def test_create_records_none_as_a_value_of_its_own(self) -> None:
         result = self._create(goal="unobserved", observer=none_choice())
@@ -178,7 +178,7 @@ class SprintDeclarationTests(SprintFixture):
         with self.assertRaisesRegex(TaskError, "not a profile of this installation"):
             self._create(goal="ghost head", observer=head_choice("retired-observer"))
 
-        self.assertEqual(TaskAudit(self.tmp.name).events(), [])
+        self.assertEqual(SqlTaskAudit(self.client).events(), [])
 
     def test_reopen_refuses_a_head_the_registry_does_not_have(self) -> None:
         reference = self._create(goal="reopen onto a ghost")["sprint"]["ref"]
@@ -213,17 +213,6 @@ class SprintDeclarationTests(SprintFixture):
         result = self._create(goal="unobserved", observer=none_choice())
 
         self.assertEqual(result["sprint"]["observer"], none_choice())
-
-    def test_the_observer_lands_before_the_reference_publishes_the_row(self) -> None:
-        self._create(goal="ordered", reference="sprint:ordered")
-
-        order = [
-            method
-            for method, params in self.client.calls
-            if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
-            or (method == "updateTask" and params.get("reference") == "sprint:ordered")
-        ]
-        self.assertEqual(order[:2], ["saveTaskMetadata", "updateTask"])
 
     def test_reopen_requires_a_fresh_choice_and_never_inherits_the_closed_one(self) -> None:
         reference = self._create(goal="reopened", observer=head_choice("codex-observer"))["sprint"]["ref"]

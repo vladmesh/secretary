@@ -1,300 +1,30 @@
-"""Portable Sprint contract and SQL atomicity probes on PostgreSQL 16."""
+"""SQL atomicity probes for Sprint mutations and the Sprint transport namespace, on PostgreSQL 16.
+
+The shared Sprint contract (tests/test_sprints.py and its siblings) runs on the store itself since
+secretary-1670, so this module holds only the probes that name tables or inject a failure between
+two statements of one transaction.
+"""
 
 from __future__ import annotations
 
-import contextlib
-import hashlib
 import json
-import tempfile
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_cards import SqlCardClient
 from secretary.board.sql_sprints import sprint_key
 from secretary.sprint_observer import head_choice
-from secretary.sprints import SprintReader, SprintWriter
-from secretary.tasks import TaskError, TaskReader, TaskWriter
-from tests import test_sprint_executors as executors
-from tests import test_sprint_listing_budget as listing_budget
-from tests import test_sprint_restore as restore
-from tests import test_sprints as shared
-from tests.fakes.sprints import ProductSprintKanboard, SprintBackendFixture, _write_project_registry
+from secretary.sprints import SprintWriter
+from secretary.tasks import TaskError
+from tests.fakes.sprints import SprintFixture
 from tests.sprint_close_fixtures import close_decisions
-from tests.sql_backend_fixtures import PostgresBoard, seed_client
-
-BOARD: PostgresBoard
 
 
-class ContractSqlCardClient(SqlCardClient):
-    """Expose the fake fixture's final row probe without changing the production client."""
-
-    @property
-    def tasks(self) -> list[dict]:
-        return [
-            row
-            for board_id in (1, 2)
-            for status_id in (1, 0)
-            for row in self.call("getAllTasks", project_id=board_id, status_id=status_id)
-        ]
-
-
-def setUpModule() -> None:
-    global BOARD
-    for module in ("psycopg", "sqlalchemy", "alembic"):
-        __import__(module)
-    BOARD = PostgresBoard()
-
-
-def tearDownModule() -> None:
-    BOARD.stop()
-
-
-class SqlSprintFixture(SprintBackendFixture):
-    BACKEND = "postgres"
-
-    def make_sprint_client(self) -> SqlCardClient:
-        root = Path(getattr(getattr(self, "tmp", None), "name", tempfile.gettempdir()))
-        client = seed_client(BOARD.fresh_database(), ProductSprintKanboard(), root)
-        client.__class__ = ContractSqlCardClient
-        self.addCleanup(self._dispose_client, client)
-        return client
-
-    def make_ownership_client(self) -> SqlCardClient:
-        root = Path(getattr(getattr(self, "tmp", None), "name", tempfile.gettempdir()))
-        fake = ProductSprintKanboard()
-        fake.tasks = [row for row in fake.tasks if str(row.get("reference", "")).startswith(("product:", "issue:"))]
-        client = seed_client(BOARD.fresh_database(), fake, root)
-        client.__class__ = ContractSqlCardClient
-        self.addCleanup(self._dispose_client, client)
-        return client
-
-    @staticmethod
-    def _dispose_client(client: SqlCardClient) -> None:
-        name = client.credentials.dbname
-        client.close()
-        BOARD.drop_database(name)
-
-    def setUp(self) -> None:
-        self.skip_kanboard_only()
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.instance = _write_project_registry(
-            Path(self.tmp.name), "secretary", "secretary-instance", "other"
-        )
-        self.client = self.make_sprint_client()
-        self._bind_audit()
-        self.writer = SprintWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
-
-    def _bind_audit(self) -> None:
-        client = self.client
-
-        class BoundSqlTaskAudit(SqlTaskAudit):
-            def __init__(self, _data_dir=None) -> None:
-                super().__init__(client)
-
-        for module in (shared, executors):
-            patcher = mock.patch.object(module, "TaskAudit", BoundSqlTaskAudit)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def arrange_metadata(self, reference: str, **values: object) -> None:
-        budget = values.pop("sprint_budget", None)
-        if budget is not None:
-            document = json.loads(str(budget))
-            for event_type, count in (document.get("by_type") or {}).items():
-                for occurrence in range(int(count)):
-                    self.writer.record_budget(
-                        role="steward", actor="fixture", reference=reference,
-                        event_type=str(event_type),
-                        request_id=f"fixture-budget-{reference}-{event_type}-{occurrence}",
-                    )
-        if values:
-            identity = hashlib.sha256(
-                json.dumps(values, sort_keys=True, default=str).encode()
-            ).hexdigest()[:16]
-            self.writer.restore(
-                reference=reference,
-                values={str(key): str(value) for key, value in values.items()},
-                request_id=f"fixture-restore-{reference}-{identity}",
-            )
-
-    def _events(self) -> list[dict]:
-        return SqlTaskAudit(self.client).events()
-
-
-class SqlSprintOwnershipTests(SqlSprintFixture, shared.SprintOwnershipTests):
-    pass
-
-
-class SqlTwoOpenSprintAdmissionTests(SqlSprintFixture, shared.TwoOpenSprintAdmissionTests):
-    def setUp(self) -> None:
-        SqlSprintFixture.setUp(self)
-        (self.instance / "projects" / "third.yaml").write_text("id: third\n", encoding="utf-8")
-        self.arrange_product("third", projects=["third"])
-        self.third_issue = self.arrange_issue("third", product="third")["ref"]
-        self.roots = Path(self.tmp.name) / "repos"
-
-
-class SqlTwoOpenSprintIsolationTests(SqlSprintFixture, shared.TwoOpenSprintIsolationTests):
-    def setUp(self) -> None:
-        SqlTwoOpenSprintAdmissionTests.setUp(self)
-        self._limit(2)
-
-
-class SqlSprintTests(SqlSprintFixture, shared.SprintTests):
-    pass
-
-
-class SqlSprintStatusHeadlessCommandTests(SqlSprintFixture, shared.SprintStatusHeadlessCommandTests):
-    pass
-
-
-class SqlSprintAuditTraversalTests(SqlSprintFixture, shared.SprintAuditTraversalTests):
-    @contextlib.contextmanager
-    def _traversals(self):
-        counter = {"count": 0}
-        original = SqlTaskAudit.events
-
-        def counting(audit, *args, **kwargs):
-            counter["count"] += 1
-            return original(audit, *args, **kwargs)
-
-        with mock.patch.object(SqlTaskAudit, "events", counting):
-            yield counter
-
-
-class SqlSprintSingleWriterGuardTests(SqlSprintFixture, shared.SprintSingleWriterGuardTests):
-    def setUp(self) -> None:
-        shared.SprintSingleWriterGuardTests.setUp(self)
-        self._bind_audit()
-
-    def test_sql_unique_live_reservation_rolls_back_an_unrepresentable_overlap(self) -> None:
-        """SQL rejects the impossible duplicate reservation without a partial restore."""
-        other_ref = self.sprints.restore_create(
-            reference="sprint:overlap",
-            goal="overlap",
-            repositories=["secretary"],
-            request_id="seed-overlap-sprint",
-        )["sprint"]["ref"]
-        with self.assertRaises(TaskError) as raised:
-            self.sprints.restore(
-                reference=other_ref,
-                values={"sprint_reservations": json.dumps(["secretary"])},
-                request_id="seed-overlap-reservation",
-            )
-        self.assertEqual(raised.exception.code, "backend_error")
-        self.assertIsNone(self.sprints.audit.event("seed-overlap-reservation"))
-        self.assertEqual(
-            self.client._query(
-                "SELECT sprint_ref FROM sprint_projects WHERE project_id=%s AND reserved",
-                ("secretary",),
-            ),
-            [(self.ref,)],
-        )
-
-
-class SqlSprintReservedProjectGuardTests(SqlSprintFixture, shared.SprintReservedProjectGuardTests):
-    def setUp(self) -> None:
-        shared.SprintReservedProjectGuardTests.setUp(self)
-        self._bind_audit()
-
-
-class SqlSprintCloseDecisionTests(SqlSprintFixture, shared.SprintCloseDecisionTests):
-    def setUp(self) -> None:
-        SqlSprintFixture.setUp(self)
-        self.second_issue = self.arrange_issue("second", product="secretary")["ref"]
-        from secretary.tasks import TaskWriter
-
-        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
-
-    def test_sql_rolled_back_claim_allows_a_changed_intent_as_a_new_request(self) -> None:
-        """A SQL failure erases the claim, so the retry may state a new complete intent."""
-        ref = self._open(issues=["issue:open"])
-        card = self._card(ref, "disposed once", "restated-card")
-        decisions = {
-            "issues": list(shared.KEEP_THE_ISSUE_OPEN["issues"]),
-            "cards": [{"ref": card, "verdict": "drop", "reason": "not finished"}],
-        }
-        with (
-            mock.patch.object(TaskWriter, "archive", side_effect=OSError("disk full")),
-            self.assertRaises(TaskError) as raised,
-        ):
-            self.writer.close(
-                role="po", actor="operator", reference=ref,
-                request_id="restated-close", decisions=decisions,
-            )
-        self.assertEqual(raised.exception.code, "backend_error")
-        self.assertIsNone(self.writer.audit.event("restated-close"))
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")
-        self.assertEqual([row["ref"] for row in TaskReader(self.client).list(sprint=ref)], [card])
-
-        changed = {
-            "issues": list(shared.KEEP_THE_ISSUE_OPEN["issues"]),
-            "cards": [{"ref": card, "verdict": "done", "reason": "landed after all"}],
-        }
-        result = self.writer.close(
-            role="po", actor="operator", reference=ref,
-            request_id="restated-close", decisions=changed,
-        )
-        self.assertEqual(result["archived_tasks"] + result["disposed_tasks"], [card])
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")
-        self.assertEqual(len(self.writer.audit.events(reference=ref, kind="closed")), 1)
-
-
-class SqlSprintExecutorPinTests(SqlSprintFixture, executors.SprintExecutorPinTests):
-    pass
-
-
-class SqlSprintCardExecutorTests(SqlSprintFixture, executors.SprintCardExecutorTests):
-    pass
-
-
-class SqlCardEditExecutorTests(SqlSprintFixture, executors.CardEditExecutorTests):
-    pass
-
-
-class SqlSprintExecutorRecoveryTests(SqlSprintFixture, executors.SprintExecutorRecoveryTests):
-    def make_empty_sprint_client(self) -> SqlCardClient:
-        return self.make_ownership_client()
-
-    def persisted_record_count(self, client: SqlCardClient) -> int:
-        return int(client._query("SELECT count(*) FROM tasks")[0][0]) + int(
-            client._query("SELECT count(*) FROM sprints")[0][0]
-        )
-
-
-class SqlSprintRestoreTests(SqlSprintFixture, restore.SprintRestoreTests):
-    def setUp(self) -> None:
-        restore.SprintRestoreTests.setUp(self)
-
-    def make_target_client(self) -> SqlCardClient:
-        return self.make_ownership_client()
-
-    def persisted_record_count(self, client: SqlCardClient) -> int:
-        return int(client._query("SELECT count(*) FROM tasks")[0][0]) + int(
-            client._query("SELECT count(*) FROM sprints")[0][0]
-        )
-
-    def test_sql_restore_refuses_an_unlinked_current_task_before_writes(self) -> None:
-        path = self.target_data / "board" / "sprints.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["sprints"][0]["current_task"] = "secretary:not-in-export"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        client = self.make_target_client()
-
-        with self.assertRaisesRegex(restore.RestoreError, "not an included Card already linked"):
-            restore.import_normalized_board(self.target_data, client=client, instance=self.instance)
-        self.assertEqual(self.persisted_record_count(client), 0)
-
-
-class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
+class SqlSprintAtomicityTests(SprintFixture):
     """Real-connection rollback probes for every multi-row Sprint mutation family."""
 
     def setUp(self) -> None:
-        SqlSprintFixture.setUp(self)
+        SprintFixture.setUp(self)
         self.client = self.make_ownership_client()
-        self._bind_audit()
         self.writer = SprintWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
 
     def _create(self, request_id: str = "atomic-create") -> dict:
@@ -702,7 +432,7 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
                 self.assertEqual(client._query("SELECT status FROM sprints WHERE ref=%s", (ref,)), [("open",)])
 
 
-class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
+class SqlTransportNamespaceTests(SprintFixture):
     def test_canonical_and_unicode_digit_refs_are_distinct_and_lossless(self) -> None:
         writer = SprintWriter(self.client, data_dir=self.tmp.name)
         ascii_ref = writer.restore_create(
@@ -814,19 +544,3 @@ class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
             self.client._query("SELECT count(*) FROM requests WHERE request_id='cursor-restore'"),
             [(0,)],
         )
-
-
-class SqlSprintListingBudgetTests(SqlSprintFixture, listing_budget.SprintListingBudgetTests):
-    """The four request-count methods execute as their named Kanboard-only exclusions."""
-
-
-class SqlCloseDecisionFileTests(shared.CloseDecisionFileTests):
-    pass
-
-
-class SqlExecutorValueTests(executors.ExecutorValueTests):
-    pass
-
-
-class SqlObserverPromptExecutorTests(executors.ObserverPromptExecutorTests):
-    pass

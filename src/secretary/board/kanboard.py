@@ -72,9 +72,8 @@ class KanboardBoardHost:
         self.instance = instance
         # The typed canon follows this host's own client and never the data directory: with no audit
         # handed in it is the card audit, `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3).
-        # Sprint and Product/Issue callers hand theirs in (`entity_audit_for`). Letting the canon
-        # default to the file journal here published typed events into a file the PostgreSQL
-        # backend never reads.
+        # Sprint and Product/Issue callers hand in the same audit. Letting the canon default to the
+        # file journal here published typed events into a file the PostgreSQL backend never reads.
         self.canon = (
             BoardEventCanon(data_dir, audit=audit or task_audit_for(client, data_dir))
             if data_dir is not None
@@ -140,21 +139,15 @@ class KanboardBoardHost:
             # This is preparatory evidence, not part of the uncertain write
             # window.  A failure here proves that createTask was never issued,
             # so MutationEventTransaction must discard the staged occurrence.
-            try:
-                reply = self.client.call(
-                    "createTask",
-                    project_id=board_id,
-                    title=entity.title,
-                    description=self._create_marker(request_id),
-                    column_id=column_id,
-                    swimlane_id=swimlane_id,
-                    reference=entity.ref,
-                )
-            except Exception:
-                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                    raise
-                # Post-RPC failure is uncertain: confirm or retain pending, never recreate.
-                return
+            reply = self.client.call(
+                "createTask",
+                project_id=board_id,
+                title=entity.title,
+                description=self._create_marker(request_id),
+                column_id=column_id,
+                swimlane_id=swimlane_id,
+                reference=entity.ref,
+            )
             task_id = _positive_int(reply)
             if task_id is None:
                 # Discard only after both reads prove absence; otherwise retain pending.
@@ -244,13 +237,7 @@ class KanboardBoardHost:
             if not any(
                 isinstance(comment, dict) and comment.get("comment") == content for comment in comments
             ):
-                try:
-                    saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
-                except Exception:
-                    if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                        raise
-                    # A reply cannot disprove the write; confirmation decides recovery.
-                    return
+                saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 if not _comment_saved(saved):
                     raise BoardProtocolError("Kanboard rejected issue priority comment")
 
@@ -297,13 +284,7 @@ class KanboardBoardHost:
             if _digest(str(row.get("description") or "")) != append.description_sha256_was:
                 # Nothing is written over a description that changed since the block was computed.
                 raise BoardProtocolError("Issue description changed before the block was appended")
-            try:
-                saved = self.client.call("updateTask", id=self._row_id(row), description=entity.description)
-            except Exception:
-                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                    raise
-                # A reply cannot disprove the write; confirmation decides recovery.
-                return
+            saved = self.client.call("updateTask", id=self._row_id(row), description=entity.description)
             if not saved:
                 raise BoardProtocolError("Kanboard rejected the issue description")
 
@@ -745,12 +726,7 @@ class KanboardBoardHost:
             if not any(
                 isinstance(comment, dict) and comment.get("comment") == content for comment in comments
             ):
-                try:
-                    saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
-                except Exception:
-                    if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                        raise
-                    return
+                saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 if not _comment_saved(saved):
                     raise BoardProtocolError("Kanboard rejected issue close comment")
 
