@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from triggered_agents.runtime.agent_prompt_transport import prepare_agent_prompt
-from triggered_agents.runtime.prompt_document import (
+from secretary.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
     PromptDocumentError,
     nudge_for,
     write_prompt_document,
 )
+from triggered_agents.runtime.agent_prompt_transport import prepare_agent_prompt
 
 # What a card description can carry into a prompt and what the composer failures were made of: an
 # escape, a bracketed-paste terminator, and the CRLF the board's own web form submits.

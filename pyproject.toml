@@ -85,6 +85,14 @@ files = [
     "src/secretary/dispatch/state.py",
     "src/secretary/dispatch/pause.py",
     "src/secretary/po/models.py",
+    "src/secretary/runtime/__init__.py",
+    "src/secretary/runtime/paths.py",
+    "src/secretary/runtime/references.py",
+    "src/secretary/runtime/prompt_document.py",
+    "src/secretary/runtime/launch_prefix.py",
+    "src/secretary/runtime/shared_state.py",
+    "src/secretary/runtime/claude_sessions.py",
+    "src/secretary/runtime/claude_env.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true

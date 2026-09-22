@@ -19,8 +19,8 @@ import sqlite3
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
+from secretary.runtime.paths import default_instance_path, instance_dir
 from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
-from triggered_agents.runtime.paths import default_instance_path, instance_dir
 
 # Claude project-dir naming: every non-alphanumeric cwd character becomes "-".
 # Overridable via TA_CLAUDE_PROJECTS_DIR so a run (e.g. an e2e on fixtures) can point the

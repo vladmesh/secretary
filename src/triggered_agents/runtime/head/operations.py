@@ -26,8 +26,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from secretary.runtime.prompt_document import nudge_for
+
 from ..pane_host import Pane, PaneSplitSourceMissing, SessionHost
-from ..prompt_document import nudge_for
 from ..tui_delivery import (
     READINESS_BLOCKED,
     READINESS_BUSY,

@@ -11,7 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...runtime.paths import configured_product_root, default_instance_path
+from secretary.runtime.paths import configured_product_root, default_instance_path
+
 from ...runtime.state import AgentState
 
 DEFAULT_SECRETARY_INSTANCE = default_instance_path()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from triggered_agents.runtime.references import (
+from secretary.runtime.references import (
     BoardRowsUnavailable,
     board_rows,
     next_reference,

@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.backend import BOARD_STORE_KIND, entity_id
+from secretary.runtime.references import next_reference, reference_allocation_lock
 from secretary.tasks import (
     _STATE_BY_COLUMN,
     ACTIVE_STATES,
@@ -22,7 +23,6 @@ from secretary.tasks import (
     _text,
     all_project_cards,
 )
-from triggered_agents.runtime.references import next_reference, reference_allocation_lock
 
 REPAIR_KIND = "reference_repaired"
 PRODUCER_FIX = "d9e872ba4a3166486b9282611ba54699f9dd7a66"

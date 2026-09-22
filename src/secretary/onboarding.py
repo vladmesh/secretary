@@ -16,7 +16,7 @@ from secretary._fsutil import (
     publish_pair_atomic,
 )
 from secretary.config import ConfigError, load_config, validate
-from triggered_agents.runtime.paths import default_instance_path
+from secretary.runtime.paths import default_instance_path
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
 # runtime, so the CLI and a launched role cannot disagree about which installation they mean.

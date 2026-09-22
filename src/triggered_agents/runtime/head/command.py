@@ -27,12 +27,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.runtime.launch_prefix import pythonpath_prefix
+
 from .. import role_env
 from ..codex_preflight import codex_home, codex_trust_paths
 
 # Valid backend names; this renderer validates the profile's choice.
 from ..head_runtimes import DEFAULT_HEAD_RUNTIME, HEAD_RUNTIMES
-from ..launch_prefix import pythonpath_prefix
 
 # Efforts each adapter accepts and their command-line spelling.
 CODEX_EFFORTS = {

@@ -501,7 +501,7 @@ class RunLifecycle:
                 ) from None
             return
         if spec.adapter == "claude":
-            from triggered_agents.runtime import claude_env
+            from secretary.runtime import claude_env
 
             try:
                 claude_env.ensure_trust(CLAUDE_JSON, run.workspace)

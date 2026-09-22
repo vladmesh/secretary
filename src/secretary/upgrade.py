@@ -75,10 +75,10 @@ from secretary.memory.pack import MemoryPackError, load_product_pack, materializ
 from secretary.po import token as po_token
 from secretary.po import workspace as po_workspace
 from secretary.projects.availability import ProjectAvailability
+from secretary.runtime.paths import configured_product_root
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from secretary.web.health import WebProbeError, probe_web, target_from_unit
 from secretary.web.server import LoopbackOnly
-from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
 WEB_COMPONENT = "web"

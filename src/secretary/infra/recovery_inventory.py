@@ -19,12 +19,12 @@ from secretary.infra.github_credential import (
     checkpoint_credential_readiness_for_child,
     project_remote_execution,
 )
+from secretary.runtime.paths import configured_product_root
 from secretary.secret_store import (
     SecretStoreError,
     store_divergence,
     store_health,
 )
-from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.runtime.role_env import RUNTIME_ENV_FILE_ENVS
 
 

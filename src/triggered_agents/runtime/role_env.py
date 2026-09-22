@@ -14,7 +14,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .paths import PRODUCT_ENV, default_instance_path
+from secretary.runtime.paths import PRODUCT_ENV, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"

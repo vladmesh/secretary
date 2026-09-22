@@ -272,7 +272,7 @@ from triggered_agents.runtime.head_runtime_backends import (
     head_runtime_name,
 )
 from triggered_agents.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
-from triggered_agents.runtime.launch_prefix import pythonpath_prefix
+from secretary.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
@@ -282,14 +282,14 @@ from triggered_agents.runtime.pane_host import (
 from triggered_agents.runtime.pane_host import (
     safe_command_label as _safe_command_label,
 )
-from triggered_agents.runtime.paths import configured_product_root
-from triggered_agents.runtime.prompt_document import (
+from secretary.runtime.paths import configured_product_root
+from secretary.runtime.prompt_document import (
     PromptDocumentError,
 )
-from triggered_agents.runtime.prompt_document import (
+from secretary.runtime.prompt_document import (
     nudge_for as _nudge_for,
 )
-from triggered_agents.runtime.prompt_document import (
+from secretary.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES

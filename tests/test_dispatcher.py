@@ -148,6 +148,11 @@ from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import (
     attempts as routing_attempts,
 )
+from secretary.runtime.prompt_document import (
+    NUDGE_FILE_MODE,
+    NUDGE_MAX_BYTES,
+    PromptDocumentError,
+)
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, instance_open_sprint_limit
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
@@ -185,11 +190,6 @@ from triggered_agents.runtime.head import (
     wrap_role_command,
 )
 from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.prompt_document import (
-    NUDGE_FILE_MODE,
-    NUDGE_MAX_BYTES,
-    PromptDocumentError,
-)
 
 
 def setUpModule() -> None:
