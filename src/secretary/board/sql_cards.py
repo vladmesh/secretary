@@ -15,11 +15,11 @@ Three mappings do the whole job:
   states and `_STATE_BY_COLUMN`'s seven column titles are the same seven, so the virtual board
   below numbers them once and both directions read that one table.
 * **metadata bag ↔ columns.**  §8.1: the keys the model names are columns, and the keys it does
-  not are `tasks.extensions.kanboard` (§8.2).  `saveTaskMetadata` writes columns for the former
+  not are `tasks.extensions.extra` (§8.2).  `saveTaskMetadata` writes columns for the former
   and the bag for the latter, so a key nobody modelled is still readable rather than dropped.
 * **swimlane ↔ nothing.**  The store has no lane: a lane is a legacy board presentation of the
   product a card belongs to.  It is kept exactly where the importer keeps it —
-  `extensions.kanboard.swimlane` — and the lane *table* is virtual, derived from the lanes the
+  `extensions.extra.swimlane` — and the lane *table* is virtual, derived from the lanes the
   rows themselves name plus the products the store holds.
 
 The integer board-client identity is `tasks.board_key`. It is immutable and globally unique while
@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import card_transport_key, record_key_kind
+from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.sql_product_issues import ProductIssueRecords
 from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.board.store import BoardStoreCredentials
@@ -76,7 +77,7 @@ SPRINT_BOARD_NAME = "Secretary sprints"
 SPRINT_BOARD_ID = 2
 
 #: §8.1's metadata keys that are `tasks` columns, and the column each one is.  Everything else a
-#: caller writes lands in `extensions.kanboard` (§8.2).
+#: caller writes lands in `extensions[EXTENSION_BAG]` (§8.2).
 _METADATA_COLUMNS = {
     "project": "project_id",
     "task_type": "task_type",
@@ -437,8 +438,8 @@ class SqlCardClient:
             named = {
                 row[0]
                 for row in self._query(
-                    "SELECT DISTINCT extensions->'kanboard'->>'swimlane' FROM tasks "
-                    "WHERE extensions->'kanboard'->>'swimlane' IS NOT NULL"
+                    f"SELECT DISTINCT extensions->'{EXTENSION_BAG}'->>'swimlane' FROM tasks "
+                    f"WHERE extensions->'{EXTENSION_BAG}'->>'swimlane' IS NOT NULL"
                 )
             }
             named |= {row[0] for row in self._query("SELECT product_id FROM products")}
@@ -502,7 +503,7 @@ class SqlCardClient:
             moved,
         ) = values
         bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
-        lane = (bag.get("kanboard") or {}).get("swimlane")
+        lane = (bag.get(EXTENSION_BAG) or {}).get("swimlane")
         transport_key = card_transport_key(board_key)
         if transport_key is None:
             raise SqlCardError(f"card {ref} carries malformed transport key {board_key!r}")
@@ -617,7 +618,7 @@ class SqlCardClient:
             )
         number = _task_number_of(reference)
         lane = self._lane_name(swimlane_id)
-        extensions: dict[str, Any] = {"kanboard": {"swimlane": lane}} if lane else {}
+        extensions: dict[str, Any] = {EXTENSION_BAG: {"swimlane": lane}} if lane else {}
         now = _now()
         rows = self._query(
             "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
@@ -685,7 +686,7 @@ class SqlCardClient:
         self._execute(
             "UPDATE tasks SET state = %s, position = %s, updated_at = %s, date_moved = %s, "
             "extensions = CASE WHEN %s::text IS NULL THEN extensions "
-            "ELSE jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard,swimlane}', "
+            f"ELSE jsonb_set(coalesce(extensions, '{{}}'::jsonb), '{{{EXTENSION_BAG},swimlane}}', "
             "to_jsonb(%s::text), true) END "
             "WHERE task_ref = %s",
             (state, max(1, int(position)), _now(), _now(), lane, lane, ref),
@@ -791,7 +792,7 @@ class SqlCardClient:
             if issues.get(ref):
                 meta["issues"] = ",".join(f"issue:{issue_id}" for issue_id in issues[ref])
             bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
-            for name, value in (bag.get("kanboard") or {}).items():
+            for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                 if name != "swimlane":
                     meta[name] = _text(value)
             result[key] = meta
@@ -853,8 +854,8 @@ class SqlCardClient:
                 bag_removals.append(key)
         if bag_updates:
             assignments.append(
-                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
+                f"extensions = jsonb_set(coalesce(extensions, '{{}}'::jsonb), '{{{EXTENSION_BAG}}}', "
+                f"coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag_updates))
         if assignments:
@@ -865,7 +866,7 @@ class SqlCardClient:
         for key in bag_removals:
             self._execute(
                 "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
-                "'{kanboard}', coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true) "
+                f"'{{{EXTENSION_BAG}}}', coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) - %s, true) "
                 "WHERE task_ref = %s",
                 (key, ref),
             )

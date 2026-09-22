@@ -298,7 +298,7 @@ def seed_client(
     keeps its row id as its `board_key`, so `task_postgres_<id>` and every `task_id=<id>` call a test
     makes name the card it seeded, and the key sequence continues after the highest one (or at
     `seed.next_key`). Metadata keys the model names become columns, the rest become
-    `tasks.extensions.kanboard`, and the swimlane stays in that same bag.  Everything but the card
+    `tasks.extensions.extra`, and the swimlane stays in that same bag.  Everything but the card
     row itself is the product's own write path — `createTask`, `saveTaskMetadata` — rather than
     direct SQL, so a seeding that disagrees with the client is a failure of the client rather than
     a divergence nobody sees.
@@ -421,7 +421,7 @@ def insert_card_row(
             created,
             updated,
             moved,
-            json.dumps({"kanboard": {"swimlane": lane}} if lane else {}),
+            json.dumps({"extra": {"swimlane": lane}} if lane else {}),
         ),
     )
     client._execute(

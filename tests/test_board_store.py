@@ -454,6 +454,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0014_neutral_extension_bag",
                 "0013_budget_candidates",
                 "0012_request_read_indexes",
                 "0011_card_kinds",

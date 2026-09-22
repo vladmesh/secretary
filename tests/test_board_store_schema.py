@@ -88,6 +88,7 @@ REVISIONS = (
     "0011_card_kinds",
     "0012_request_read_indexes",
     "0013_budget_candidates",
+    "0014_neutral_extension_bag",
 )
 
 
@@ -460,6 +461,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0011_card_kinds",
                 "0012_request_read_indexes",
                 "0013_budget_candidates",
+                "0014_neutral_extension_bag",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -528,7 +530,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         connection.exec_driver_sql(
             "UPDATE issues SET extensions = %s::jsonb WHERE issue_id = '2fdac531'",
-            ('{"kanboard": {"slug": "an-issue", "swimlane": "Codegen"}}',),
+            ('{"extra": {"slug": "an-issue", "swimlane": "Codegen"}}',),
         )
 
         stored, default = connection.exec_driver_sql(
@@ -536,7 +538,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "(SELECT column_default FROM information_schema.columns "
             " WHERE table_name = 'issues' AND column_name = 'extensions')"
         ).fetchone()
-        self.assertEqual(stored["kanboard"]["swimlane"], "Codegen")
+        self.assertEqual(stored["extra"]["swimlane"], "Codegen")
         self.assertIn("'{}'::jsonb", default)
 
     def test_a_sprint_reference_that_carries_no_number_is_a_row_and_keeps_its_cards(self) -> None:
@@ -567,11 +569,11 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.prepared()
         connection.exec_driver_sql(
             "UPDATE products SET extensions = %s::jsonb WHERE product_id = 'secretary'",
-            ('{"kanboard": {"future_product_field": "kept"}}',),
+            ('{"extra": {"future_product_field": "kept"}}',),
         )
         self.assertEqual(
             connection.exec_driver_sql(
-                "SELECT extensions->'kanboard'->>'future_product_field' FROM products "
+                "SELECT extensions->'extra'->>'future_product_field' FROM products "
                 "WHERE product_id = 'secretary'"
             ).fetchone()[0],
             "kept",
@@ -705,7 +707,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0011_card_kinds", "0012_request_read_indexes", "0013_budget_candidates"),
+            (
+                "0011_card_kinds",
+                "0012_request_read_indexes",
+                "0013_budget_candidates",
+                "0014_neutral_extension_bag",
+            ),
         )
 
         self.assertEqual(
@@ -1023,6 +1030,169 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 self.assertTrue(docker("volume", "inspect", f"{project}_board-db"))
             finally:
                 cleanup()
+
+    # --- 0014: the extension bag under its neutral key ------------------------------------------
+    #
+    # The revision never spells the key it moves: it moves whichever single top-level key besides
+    # `extra` and the markers the rows carry.  So the seeded pre-migration shape names its bag
+    # `retired_board`, which stands for the retired board's own name exactly as the revision sees it.
+
+    def at_0013(self):
+        """A store at `0013_budget_candidates` with a Product, an Issue and a project."""
+        from alembic import command
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords),
+            "0013_budget_candidates",
+        )
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql(
+            "INSERT INTO products (product_id, board_key, title, extensions, created_at, updated_at) "
+            "VALUES ('secretary', %s, 'Secretary', %s::jsonb, now(), now())",
+            (record_key("product", "secretary"), '{"retired_board": {"future_product_field": "kept"}}'),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO issues (issue_id, board_key, product_id, title, issue_kind, priority, "
+            "extensions, created_at, updated_at) VALUES ('2fdac531', %s, 'secretary', 'An issue', "
+            "'bug', 'P1', %s::jsonb, now(), now())",
+            (record_key("issue", "2fdac531"), '{"retired_board": {"slug": "an-issue", "swimlane": "Codegen"}}'),
+        )
+        connection.commit()
+        return connection
+
+    def request(self, connection, request_id: str, status: str) -> None:
+        settled = "now()" if status != "staged" else "NULL"
+        connection.exec_driver_sql(
+            "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
+            f"ref, created_at, settled_at) VALUES (%s, 'card.retire', '{{}}'::jsonb, %s, true, "
+            f"'card', 'secretary-1', now(), {settled})",
+            (request_id, status),
+        )
+
+    def extensions_of(self, connection) -> dict[str, object]:
+        rows = connection.exec_driver_sql(
+            "SELECT 'task:' || task_ref, extensions FROM tasks "
+            "UNION ALL SELECT 'product:' || product_id, extensions FROM products "
+            "UNION ALL SELECT 'issue:' || issue_id, extensions FROM issues"
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def test_0014_is_what_a_dry_run_of_a_0013_store_owes(self) -> None:
+        connection = self.at_0013()
+
+        self.assertEqual(self.run_migrations(connection, dry_run=True), ("0014_neutral_extension_bag",))
+        self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
+
+    def test_0014_moves_every_current_bag_onto_the_neutral_key_and_loses_nothing(self) -> None:
+        connection = self.at_0013()
+        self.card(
+            connection,
+            "secretary-1",
+            extensions='{"retired_board": {"swimlane": "secretary", "steward_report": "1"}}',
+        )
+        # `secretary-583`'s live shape: the bag and the importer's marker beside it.
+        self.card(
+            connection,
+            "secretary-583",
+            task_type=None,
+            extensions='{"retired_board": {"swimlane": "secretary"}, "board_never_named": ["task_type"]}',
+        )
+        self.card(connection, "secretary-2")
+        # Both keys present: the two bags merge, and a field both name with one value is kept once.
+        self.card(
+            connection,
+            "secretary-3",
+            extensions='{"retired_board": {"note": "old", "same": "1"}, "extra": {"fresh": "new", "same": "1"}}',
+        )
+        # A committed done-retention record is history; it does not stop the revision.
+        self.request(connection, "done-retention-committed", "committed")
+        connection.commit()
+
+        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+
+        self.assertEqual(
+            self.extensions_of(connection),
+            {
+                "task:secretary-1": {"extra": {"swimlane": "secretary", "steward_report": "1"}},
+                "task:secretary-583": {
+                    "extra": {"swimlane": "secretary"},
+                    "board_never_named": ["task_type"],
+                },
+                "task:secretary-2": {},
+                "task:secretary-3": {"extra": {"note": "old", "fresh": "new", "same": "1"}},
+                "product:secretary": {"extra": {"future_product_field": "kept"}},
+                "issue:2fdac531": {"extra": {"slug": "an-issue", "swimlane": "Codegen"}},
+            },
+        )
+        # History is not rewritten.
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT status FROM requests").fetchall(), [("committed",)]
+        )
+
+    def assertRefused(self, connection, *fragments: str) -> None:
+        before = self.extensions_of(connection)
+        with self.assertRaises(Exception) as caught:
+            self.run_migrations(connection)
+        connection.rollback()
+        for fragment in fragments:
+            self.assertIn(fragment, str(caught.exception))
+        self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
+        self.assertEqual(self.extensions_of(connection), before)
+
+    def test_0014_refuses_a_store_with_two_keys_besides_the_neutral_one(self) -> None:
+        connection = self.at_0013()
+        self.card(connection, "secretary-1", extensions='{"unexpected": {"a": "1"}}')
+        connection.commit()
+
+        self.assertRefused(connection, "'retired_board'", "'unexpected'")
+
+    def test_0014_refuses_a_field_both_bags_name_with_different_values(self) -> None:
+        connection = self.at_0013()
+        self.card(
+            connection,
+            "secretary-1",
+            extensions='{"retired_board": {"note": "old"}, "extra": {"note": "new"}}',
+        )
+        connection.commit()
+
+        self.assertRefused(connection, "tasks:secretary-1:note")
+
+    def test_0014_refuses_a_bag_that_is_not_an_object(self) -> None:
+        connection = self.at_0013()
+        self.card(connection, "secretary-1", extensions='{"retired_board": "flat"}')
+        connection.commit()
+
+        self.assertRefused(connection, "tasks:secretary-1")
+
+    def test_0014_refuses_a_non_committed_done_retention_request_and_names_it(self) -> None:
+        connection = self.at_0013()
+        self.request(connection, "done-retention-staged", "staged")
+        connection.commit()
+
+        self.assertRefused(connection, "done-retention-staged:staged")
+
+    def test_0014_admits_a_store_with_no_done_retention_request_at_all(self) -> None:
+        connection = self.at_0013()
+        self.request(connection, "card-move-staged", "staged")
+        connection.commit()
+
+        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+
+    def test_0014_has_no_downgrade(self) -> None:
+        from alembic import command
+
+        connection = self.at_0013()
+        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+
+        with self.assertRaisesRegex(NotImplementedError, "forward-only"):
+            command.downgrade(
+                migrate.alembic_config(connection=connection, passwords=self.passwords),
+                "0013_budget_candidates",
+            )
+        connection.rollback()
+        self.assertEqual(migrate.current_revision(connection), "0014_neutral_extension_bag")
 
 
 if __name__ == "__main__":

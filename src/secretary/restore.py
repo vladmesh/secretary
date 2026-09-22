@@ -27,6 +27,7 @@ from secretary.backup_policy import (
 )
 from secretary.backup_verify import _verify_plain_tar
 from secretary.board.backend import CARD, SPRINT, board_client, entity_number
+from secretary.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
@@ -814,6 +815,7 @@ def _normalized_cards(
             raise RestoreError("normalized board export has an invalid column")
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
+        _fold_checkpoint_extensions(card)
         if card["metadata"].get("record_type") not in _RECORD_TYPES:
             raise RestoreError(f"normalized board export card {card['reference']} has no record type")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
@@ -1098,6 +1100,28 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
 
 
 
+def _fold_checkpoint_extensions(card: dict[str, Any]) -> None:
+    """Read a record's `extensions` through the one fold rule, into what restore writes.
+
+    A checkpoint or archive written before revision `0014_neutral_extension_bag` may carry its bag
+    under an older top-level key.  Every such key folds into the current bag, and the bag's fields
+    reach `metadata` (which is what restore writes, and what lands back in the bag) unless
+    `metadata` already names them; its lane fills an empty `swimlane`.
+    """
+    if "extensions" not in card:
+        return
+    card["extensions"] = fold_extension_bags(card["extensions"])
+    bag = card["extensions"].get(EXTENSION_BAG, {})
+    for name, value in bag.items():
+        if value is None:
+            continue
+        if name == "swimlane":
+            if not card.get("swimlane"):
+                card["swimlane"] = str(value)
+        else:
+            card["metadata"].setdefault(str(name), str(value))
+
+
 def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
     fields = _restore_fields(card)
     metadata = card["metadata"]
@@ -1142,7 +1166,7 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
-    extensions = card.get("extensions", {}).get("kanboard", {})
+    extensions = card.get("extensions", {}).get(EXTENSION_BAG, {})
     return {
         "ref": card.get("ref"),
         "title": card.get("title"),

@@ -20,6 +20,7 @@ unit tests/test_board_roles.py
 unit tests/test_marker_payload.py
 integration-board tests/test_board_boot_race.py
 unit tests/test_board_store.py
+unit tests/test_extension_bag.py
 integration-board tests/test_board_store_schema.py
 integration-board tests/test_po_runner.py
 integration-board tests/test_web_po_operations.py

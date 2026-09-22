@@ -67,7 +67,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                 (
                     product, record_key("product", product), product.title(),
                     "archived" if product == "zeta" else "active",
-                    json.dumps({"kanboard": {"legacy": "kept", "product_id": "shadowed"}}),
+                    json.dumps({"extra": {"legacy": "kept", "product_id": "shadowed"}}),
                     _at(0), _at(1),
                 ),
             )
@@ -89,7 +89,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                     f"Issue {index}", f"body {index}", ("bug", "feature", "question")[index % 3],
                     f"P{index % 4}", "closed" if closed else "open",
                     "resolved" if closed else None,
-                    json.dumps({"kanboard": {"swimlane": "x", "note": str(index), "issue_kind": "no"}}),
+                    json.dumps({"extra": {"swimlane": "x", "note": str(index), "issue_kind": "no"}}),
                     _at(index), _at(index + 1),
                 ),
             )
@@ -180,7 +180,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                     states[index % 4], index % 5 == 4, index, "required" if index % 2 else None,
                     index % 3 == 0, "worker" if index % 2 else None, f"slug-{index}", index % 3,
                     _at(index) if index % 2 else None, "sprint:1" if index % 2 else None,
-                    json.dumps({"kanboard": {"swimlane": "secretary", "extra": str(index)}}),
+                    json.dumps({"extra": {"swimlane": "secretary", "extra": str(index)}}),
                     _at(index), _at(index + 1), _at(index + 2),
                 ),
             )
@@ -268,7 +268,7 @@ class _PerRecordOracle:
         if issues:
             meta["issues"] = ",".join(f"issue:{issue_id}" for (issue_id,) in issues)
         bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
-        for name, value in (bag.get("kanboard") or {}).items():
+        for name, value in (bag.get("extra") or {}).items():
             if name != "swimlane":
                 meta[name] = _text(value)
         return meta
@@ -302,7 +302,7 @@ class _PerRecordOracle:
                 "product_projects": json.dumps(projects, separators=(",", ":")),
             }
             bag = rows[0][0] if isinstance(rows[0][0], dict) else json.loads(rows[0][0] or "{}")
-            for name, value in (bag.get("kanboard") or {}).items():
+            for name, value in (bag.get("extra") or {}).items():
                 if name not in PRODUCT_KEYS:
                     meta[name] = _text(value)
             return meta
@@ -321,7 +321,7 @@ class _PerRecordOracle:
         if close_reason:
             meta["issue_closed_reason"] = _text(close_reason)
         bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
-        for name, value in (bag.get("kanboard") or {}).items():
+        for name, value in (bag.get("extra") or {}).items():
             if name not in ISSUE_KEYS:
                 meta[name] = _text(value)
         return meta

@@ -697,7 +697,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) |
 | `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) |
 | `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads (`docs/REQUESTS_GROWTH.md`) |
-| `0013_budget_candidates` | one partial index on `requests` only, `requests_budget_candidates`: committed rows meeting the budget pass's candidate predicate (`board/budget_candidates.py`), in claim order (head) |
+| `0013_budget_candidates` | one partial index on `requests` only, `requests_budget_candidates`: committed rows meeting the budget pass's candidate predicate (`board/budget_candidates.py`), in claim order |
+| `0014_neutral_extension_bag` | data only: the extension bag of current `tasks`, `products` and `issues` rows moves onto the key `extra` (§8.2); refuses a store whose premise does not hold or that holds a non-committed `done-retention-` request; history is not rewritten; no downgrade (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1011,7 +1012,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0013_budget_candidates`). PostgreSQL restore compares against `head_revision()`.
+  (`0014_neutral_extension_bag`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1037,10 +1038,18 @@ is a role in `_ROLES`, one of the prefixes `report:`, `review:`, `decision:`, `i
 ### 8.2 The extension bag
 
 Card, Issue and Product metadata keys outside `_KNOWN_METADATA` are stored under one fixed
-top-level key of the row's `extensions` column (`tasks`/`issues`/`products`), the key
-`board/sql_cards.py` and `board/sql_product_issues.py` read and write. It also holds the card's
-observed swimlane, which never overrides the lane derived from the product. A key on many rows
-indicates a missing column.
+top-level key of the row's `extensions` column (`tasks`/`issues`/`products`): `extra`, defined once
+as `EXTENSION_BAG` in `board/extension_bag.py` and read and written by `board/sql_cards.py` and
+`board/sql_product_issues.py`. A card document read through `TaskReader` carries the same bag as
+`extensions.extra`. It also holds the card's observed swimlane, which never overrides the lane
+derived from the product. A key on many rows indicates a missing column.
+
+The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
+Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that
+revision moved current rows onto `extra`. History (`board_events`, committed `requests`) and
+checkpoints written before it are not rewritten: restore reads a record's `extensions` through
+`fold_extension_bags`, which folds every top-level key other than `extra` and the markers into the
+bag, the current bag winning a field both name.
 
 ---
 
