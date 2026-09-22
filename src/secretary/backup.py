@@ -20,7 +20,6 @@ from secretary._fsutil import sha256_file
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
-    BACKUP_VERSION,
     POSTGRES_BACKUP_VERSION,
     BackupKind,
     build_components_manifest,
@@ -36,14 +35,13 @@ from secretary.backup_retention import (
 from secretary.backup_verify import (
     verify_backup,  # noqa: F401  # Public compatibility re-export.
 )
-from secretary.board.backend import BoardBackendError, card_backend
+from secretary.board.backend import CARD_BACKEND_ENV, POSTGRES, BoardBackendError, card_backend
 from secretary.board.store import STORE_FILE
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.data import (
     DataExport,
     export_all,
     init_layout,
-    raw_kanboard_dump,
 )
 
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
@@ -92,16 +90,16 @@ def create_backups(
         backend = card_backend()
     except BoardBackendError as exc:
         raise RuntimeError(str(exc)) from None
+    # An archive is the PostgreSQL format only; a board served by anything else has no engine dump.
+    if backend != POSTGRES:
+        raise RuntimeError(f"backup create requires {CARD_BACKEND_ENV}={POSTGRES}, not {backend}")
 
-    postgres_config = None
-    postgres_metadata: dict[str, Any] | None = None
-    if backend == "postgres":
-        from secretary.board.postgres_recovery import PostgresRecoveryError, inspect_source
+    from secretary.board.postgres_recovery import PostgresRecoveryError, inspect_source
 
-        try:
-            postgres_config, postgres_metadata = inspect_source(instance_file.parent)
-        except PostgresRecoveryError as exc:
-            raise RuntimeError(str(exc)) from None
+    try:
+        postgres_config, postgres_metadata = inspect_source(instance_file.parent)
+    except PostgresRecoveryError as exc:
+        raise RuntimeError(str(exc)) from None
 
     backups_dir = data_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
@@ -134,13 +132,11 @@ def create_backups(
                     raise RuntimeError("pipeline pause was not owned by backup create")
 
             init_layout(data_dir)
-            raw_dump = raw_kanboard_dump(data_dir) if backend == "kanboard" and "full" in kinds else None
             exports = export_all(data_dir, instance_file.parent, copy_transcripts=copy_transcripts)
 
             postgres_dump_path: Path | None = None
-            if backend == "postgres" and "full" in kinds:
-                assert postgres_config is not None and postgres_metadata is not None
-                from secretary.board.postgres_recovery import PostgresRecoveryError, create_dump
+            if "full" in kinds:
+                from secretary.board.postgres_recovery import create_dump
 
                 dump_staging = Path(tempfile.mkdtemp(prefix=".secretary-postgres-dump-", suffix=".tmp"))
                 dump_staging.chmod(0o700)
@@ -154,9 +150,6 @@ def create_backups(
                     raise RuntimeError(str(exc)) from None
 
             for kind, final_archive in zip(kinds, final_archives, strict=True):
-                policy = policy_for(kind, backend)
-                if policy is None:
-                    raise RuntimeError(f"unsupported backup kind: {kind}")
                 staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
                 temp_paths.append(staging)
                 payload = staging / ARCHIVE_ROOT
@@ -167,9 +160,7 @@ def create_backups(
                     backup_kind=kind,
                     instance_file=instance_file,
                     data_dir=data_dir,
-                    raw_dump=raw_dump.dump_dir if raw_dump is not None else None,
                     exports=exports,
-                    backend=backend,
                     postgres_dump=postgres_metadata if kind == "full" else None,
                 )
                 _copy_instance_config(instance_file.parent, payload / "instance")
@@ -224,9 +215,7 @@ CHECKSUM_LINE_BYTES = 100
 MANIFEST_BYTES = 64 * 1024
 
 
-def estimate_archive_bytes(
-    instance_dir: Path, data_dir: Path, *, backup_kind: BackupKind, backend: str
-) -> int:
+def estimate_archive_bytes(instance_dir: Path, data_dir: Path, *, backup_kind: BackupKind) -> int:
     """The size one archive of this kind would have if `create_backups` wrote it now.
 
     The instance configuration and the data dir are walked with the traversal and the predicates
@@ -236,7 +225,7 @@ def estimate_archive_bytes(
     The exports are rewritten when the archive is made, so their current size stands in for
     theirs; a full archive's Orca inventory is built here exactly as it would be written.
     """
-    policy = policy_for(backup_kind, backend)
+    policy = policy_for(backup_kind)
     if policy is None:
         raise RuntimeError(f"unsupported backup kind: {backup_kind}")
 
@@ -305,18 +294,16 @@ def _build_versions_manifest(
     backup_kind: BackupKind,
     instance_file: Path,
     data_dir: Path,
-    raw_dump: Path | None,
     exports: dict[str, DataExport],
-    backend: str = "kanboard",
     postgres_dump: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    policy = policy_for(backup_kind, backend)
+    policy = policy_for(backup_kind)
     if policy is None:
         raise RuntimeError(f"unsupported backup kind: {backup_kind}")
     return {
-        "version": POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION,
+        "version": POSTGRES_BACKUP_VERSION,
         "backup_kind": backup_kind,
-        "board_backend": backend,
+        "board_backend": POSTGRES.value,
         "restore_capability": policy.restore_capability,
         "created_at": created_at,
         "tool": "secretary",
@@ -330,7 +317,6 @@ def _build_versions_manifest(
         "components": build_components_manifest(
             policy=policy,
             data_dir=data_dir,
-            raw_dump=raw_dump,
             exports=exports,
             postgres_dump=postgres_dump,
         ),
@@ -486,7 +472,7 @@ def _copy_instance_config(source: Path, destination: Path) -> None:
 
 
 def _copy_data_snapshot(data_dir: Path, destination: Path, *, backup_kind: BackupKind) -> None:
-    policy = policy_for(backup_kind, card_backend())
+    policy = policy_for(backup_kind)
     if policy is None:
         raise RuntimeError(f"unsupported backup kind: {backup_kind}")
 

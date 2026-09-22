@@ -32,9 +32,8 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskReader, TaskWriter
-from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
+from tests.fakes.sprints import SprintBackendFixture, _EmptyBoardsKanboard, _write_project_registry
 from tests.observer_identity import as_observer
-from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.sprint_close_fixtures import close_decisions
 
 

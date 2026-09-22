@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import errno
 import json
 import os
 import shutil
-import sqlite3
 import stat as stat_module
-import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,15 +35,10 @@ from secretary._fsutil import (
 )
 from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.config import validate
-from secretary.infra.kanboard_compose import (
-    KANBOARD_COMPOSE_FILE,
-    KANBOARD_COMPOSE_SERVICE,
-)
 from secretary.memory_journal import export_memory_snapshot
 from secretary.tasks import TaskError, TaskReader, task_audit_for
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
-KANBOARD_DATA_PATH = "/var/www/app/data"
 PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "secretary" / "pipeline"
 ORCA_WORKSPACES_ROOT = Path.home() / "orca" / "workspaces"
 PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
@@ -60,31 +51,6 @@ class DataLayout:
     data_dir: Path
     manifest_path: Path
     created_dirs: list[Path]
-
-
-@dataclass(frozen=True)
-class KanboardDump:
-    dump_dir: Path
-    source: str
-
-
-@dataclass(frozen=True)
-class KanboardContainer:
-    """The Kanboard container a dump was taken from, and where the name came from."""
-
-    reference: str
-    origin: str
-    container_id: str | None = None
-
-
-# Compose stamps these on every container it creates.  They are how Compose itself finds the
-# containers of a project, and asking the daemon for them is the same lookup `docker compose ps`
-# performs -- with one difference that decides the matter here: `docker compose -f <file> ps`
-# parses the Compose file in the calling process, and the installed file is mode 0600 root:root
-# (as bootstrap wrote it while it still installed Kanboard), while the cutover controller and `backup create` run as the
-# unprivileged installation user.  The daemon holds the same fact and answers it over the socket.
-COMPOSE_CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
-COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 
 @dataclass(frozen=True)
@@ -137,142 +103,6 @@ def init_layout(data_dir: Path) -> DataLayout:
     )
 
 
-def resolve_kanboard_container(
-    *,
-    compose_file: Path = KANBOARD_COMPOSE_FILE,
-    service: str = KANBOARD_COMPOSE_SERVICE,
-) -> KanboardContainer:
-    """The running container of `service` in the installed Compose project.
-
-    The name is never guessed from `<project>-<service>-1` and never falls back to a historical
-    literal: either the installation's own Compose labels name a running container, or this
-    refuses and says which file and service it looked for.
-    """
-
-    command = [
-        "docker",
-        "ps",
-        "--all",
-        "--no-trunc",
-        "--filter",
-        f"label={COMPOSE_CONFIG_FILES_LABEL}={compose_file}",
-        "--filter",
-        f"label={COMPOSE_SERVICE_LABEL}={service}",
-        "--format",
-        "{{.ID}}\t{{.Names}}\t{{.State}}",
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("docker command not found") from None
-    except subprocess.CalledProcessError as exc:
-        reason = (exc.stderr or exc.stdout or "docker ps failed").strip().splitlines()
-        raise RuntimeError(
-            f"cannot list containers of Compose service {service!r} from {compose_file}: "
-            + (reason[-1] if reason else "docker ps failed")
-        ) from None
-
-    found: list[tuple[str, str, str]] = []
-    for line in completed.stdout.splitlines():
-        fields = line.split("\t")
-        if len(fields) != 3 or not fields[0]:
-            continue
-        found.append((fields[0], fields[1], fields[2]))
-
-    if not found:
-        raise RuntimeError(
-            f"no container of Compose service {service!r} from {compose_file} exists; "
-            "the installed Kanboard Compose project is not up"
-        )
-
-    running = [item for item in found if item[2] == "running"]
-    if not running:
-        states = ", ".join(f"{name} ({state})" for _, name, state in found)
-        raise RuntimeError(
-            f"the container of Compose service {service!r} from {compose_file} is not running: "
-            f"{states}"
-        )
-    if len(running) > 1:
-        names = ", ".join(name for _, name, _ in running)
-        raise RuntimeError(
-            f"Compose service {service!r} from {compose_file} has {len(running)} running "
-            f"containers ({names}); name the one to dump explicitly"
-        )
-
-    container_id, name, _ = running[0]
-    return KanboardContainer(reference=name, origin="compose-service", container_id=container_id)
-
-
-def raw_kanboard_dump(
-    data_dir: Path,
-    *,
-    container: str | None = None,
-    source_path: str = KANBOARD_DATA_PATH,
-    compose_file: Path = KANBOARD_COMPOSE_FILE,
-    compose_service: str = KANBOARD_COMPOSE_SERVICE,
-) -> KanboardDump:
-    data_dir = data_dir.expanduser().resolve()
-    board_dir = data_dir / "board"
-    try:
-        board_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise RuntimeError(f"cannot prepare board data dir: {exc}") from None
-
-    if container is None:
-        resolved = resolve_kanboard_container(compose_file=compose_file, service=compose_service)
-    else:
-        resolved = KanboardContainer(reference=container, origin="override")
-
-    staging_dir: Path | None = None
-
-    try:
-        staging_dir = Path(tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir))
-        destination = staging_dir / "data"
-        subprocess.run(
-            ["docker", "cp", f"{resolved.reference}:{source_path}", str(destination)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        metadata = {
-            "version": 1,
-            "kind": "kanboard-raw",
-            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
-            "container": resolved.reference,
-            "container_origin": resolved.origin,
-            "container_id": resolved.container_id,
-            "source_path": source_path,
-        }
-        if resolved.origin == "compose-service":
-            metadata["compose_file"] = str(compose_file)
-            metadata["compose_service"] = compose_service
-        (staging_dir / "manifest.json").write_text(
-            json.dumps(metadata, indent=2, sort_keys=False) + "\n",
-            encoding="utf-8",
-        )
-        dump_dir = _publish_dump_dir(staging_dir, board_dir)
-    except FileNotFoundError:
-        _cleanup_staging_dir(staging_dir)
-        raise RuntimeError("docker command not found") from None
-    except subprocess.CalledProcessError as exc:
-        _cleanup_staging_dir(staging_dir)
-        reason = (exc.stderr or exc.stdout or "docker cp failed").strip().splitlines()
-        raise RuntimeError(reason[-1] if reason else "docker cp failed") from None
-    except OSError as exc:
-        _cleanup_staging_dir(staging_dir)
-        raise RuntimeError(f"could not create raw dump: {exc}") from None
-
-    return KanboardDump(dump_dir=dump_dir, source=f"{resolved.reference}:{source_path}")
-
-
 def export_board(
     data_dir: Path,
     *,
@@ -294,9 +124,9 @@ def export_board(
             raise RuntimeError(
                 f"board export blocked by {audit['pending']} unresolved pending audit record(s)"
             )
-        if getattr(task_client, "backend_kind", "kanboard") != "postgres":
+        if getattr(task_client, "backend_kind", None) != "postgres":
             # SQL Product/Issue effects and claims are one transaction.  The
-            # private staged journal exists only on the Kanboard implementation.
+            # private staged journal exists only on the JSON-RPC board implementation.
             from secretary.product_issues import ProductIssueTransaction
 
             product_issue = ProductIssueTransaction(data_dir, audit_owner).status()
@@ -323,7 +153,7 @@ def export_board(
     # Sprint entities live on their own board and never reach the task board export, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
     owned_sprint_client = None
-    if sprint_client is None and getattr(task_client, "backend_kind", "kanboard") == "postgres":
+    if sprint_client is None and getattr(task_client, "backend_kind", None) == "postgres":
         from secretary.sprints import sprint_client as resolve_sprint_client
 
         owned_sprint_client = resolve_sprint_client(instance_dir)
@@ -334,16 +164,11 @@ def export_board(
         if owned_sprint_client is not None:
             owned_sprint_client.connection.close()
 
-    raw_active_task_count = _latest_raw_active_task_count(
-        board_dir,
-        board_name=os.environ.get("TA_PIPELINE_BOARD", "Pipeline"),
-    )
     summary = {
         "version": 1,
         "source": "secretary task",
         "card_count": len(normalized),
         "sprint_count": len(sprints),
-        "raw_active_task_count": raw_active_task_count,
     }
     try:
         staging = Path(tempfile.mkdtemp(prefix=".board-export-", suffix=".tmp", dir=board_dir))
@@ -376,7 +201,7 @@ def export_board(
     except RuntimeError:
         _cleanup_staging_dir(staging)
         raise
-    if reader is None and getattr(task_client, "backend_kind", "kanboard") == "postgres":
+    if reader is None and getattr(task_client, "backend_kind", None) == "postgres":
         task_client.connection.close()
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
@@ -441,7 +266,7 @@ def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[
 def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
     """Checkpoint record for one sprint entity.
 
-    The record describes the contract, not the Kanboard row it currently sits on:
+    The record describes the contract, not the board row it currently sits on:
     a restored sprint gets a new task id, and comparing it back to the export has
     to stay possible. Budget totals and thresholds are left out; they are derived
     from `by_type` and from installation config.
@@ -829,36 +654,6 @@ def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
                 pass
 
 
-def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | None:
-    dumps = sorted(board_dir.glob("kanboard-raw-*"), key=lambda path: path.name, reverse=True)
-    for dump in dumps:
-        database = dump / "data" / "db.sqlite"
-        if not database.is_file():
-            continue
-        try:
-            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as conn:
-                columns = {row[1] for row in conn.execute("pragma table_info(tasks)").fetchall()}
-                project_columns = {row[1] for row in conn.execute("pragma table_info(projects)").fetchall()}
-                project = None
-                if {"id", "name"}.issubset(project_columns):
-                    project = conn.execute(
-                        "select id from projects where name = ?",
-                        (board_name,),
-                    ).fetchone()
-                if project is None or "project_id" not in columns:
-                    # The tasks cannot be tied to the right board: a global count would pull in
-                    # other projects, so the check is skipped rather than counting the wrong set.
-                    return None
-                if "is_active" in columns:
-                    query = "select count(*) from tasks where is_active = 1 and project_id = ?"
-                else:
-                    query = "select count(*) from tasks where project_id = ?"
-                return int(conn.execute(query, (int(project[0]),)).fetchone()[0])
-        except sqlite3.Error:
-            continue
-    return None
-
-
 def _parse_jsonl_line(line: str, relative: str, number: int) -> Any:
     try:
         return json.loads(line)
@@ -946,22 +741,3 @@ def _skip_artifact_relative(relative: Path) -> bool:
         or "index.sqlite" in relative.parts
         or "backups" in relative.parts
     )
-
-
-def _publish_dump_dir(staging_dir: Path, board_dir: Path) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    candidate = board_dir / f"kanboard-raw-{stamp}"
-    suffix = 1
-    while True:
-        try:
-            os.rename(staging_dir, candidate)
-            return candidate
-        except FileExistsError:
-            candidate = board_dir / f"kanboard-raw-{stamp}-{suffix}"
-            suffix += 1
-        except OSError as exc:
-            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
-                candidate = board_dir / f"kanboard-raw-{stamp}-{suffix}"
-                suffix += 1
-                continue
-            raise

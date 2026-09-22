@@ -30,7 +30,7 @@ from tests.restore_fixtures import (
     _write_instance,
     _write_instance_to,
     create_backup,
-    on_kanboard_archive,
+    fake_engine_dump,
 )
 
 
@@ -54,6 +54,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     {"name": "board", "action": "restore"},
                     {"name": "memory", "action": "restore"},
                     {"name": "runs_state", "action": "restore"},
+                    {"name": "board_history", "action": "restore"},
                     {"name": "memory_index", "action": "rebuild"},
                     {"name": "board_restore", "action": "handoff"},
                     {"name": "host_reconcile", "action": "handoff"},
@@ -111,11 +112,12 @@ class RestoreArchiveTests(unittest.TestCase):
                 "action": "restore",
                 "archive": str(archive),
                 "backup_kind": "core",
-                "backup_version": 1,
+                "backup_version": 2,
                 "components": [
                     {"name": "board", "action": "restore"},
                     {"name": "memory", "action": "restore"},
                     {"name": "runs_state", "action": "restore"},
+                    {"name": "board_history", "action": "restore"},
                     {"name": "memory_index", "action": "rebuild"},
                     {"name": "board_restore", "action": "handoff"},
                     {"name": "host_reconcile", "action": "handoff"},
@@ -227,10 +229,8 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _full_archive(root, "test")
 
-            plan = restore_backup(
-                archive,
-                instance,
-            )
+            # The data half of `restore-postgres`; the engine half is tests/test_postgres_recovery.py's.
+            plan = restore_backup(archive, instance, _allow_postgres_engine=True)
 
             actions = {component["name"]: component["action"] for component in plan.components}
             data_dir = root / "secretary-data"
@@ -239,6 +239,41 @@ class RestoreArchiveTests(unittest.TestCase):
             self.assertTrue((data_dir / "transcripts" / "inventory.json").is_file())
             self.assertTrue((data_dir / "artifacts" / "inventory.json").is_file())
             self.assertFalse((data_dir / "debug").exists())
+
+    def test_plain_restore_refuses_a_full_archive_it_cannot_restore_the_engine_of(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _full_archive(root, "test")
+
+            with self.assertRaisesRegex(RestoreError, "require secretary restore-postgres"):
+                restore_backup(archive, instance)
+            self.assertFalse((root / "secretary-data").exists())
+
+    def test_restore_refuses_a_version_1_archive_as_an_unsupported_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            manifest["version"] = 1
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+            output = io.StringIO()
+
+            with self.assertRaises(RestoreError) as refused:
+                restore_backup(archive, instance)
+            with mock.patch("sys.stdout", output), mock.patch("sys.stderr", output):
+                code = main(["restore", str(archive), "--instance", str(instance)])
+
+            self.assertEqual(
+                str(refused.exception), "unsupported backup version: 1; this build reads version 2"
+            )
+            self.assertNotEqual(code, 0)
+            self.assertIn("unsupported backup version: 1", output.getvalue())
+            self.assertFalse((root / "secretary-data").exists())
 
     def test_restore_rejects_checksum_mismatch_without_publishing_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -495,7 +530,6 @@ class RestoreArchiveTests(unittest.TestCase):
             self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
             self.assertEqual(_git_history(data_dir / "memory" / "facts"), expected_history)
 
-    @on_kanboard_archive
     def test_create_backups_round_trip_through_restore(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -511,12 +545,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     mock.patch("secretary.backup._reject_claimed_worker_context"),
                     mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                     mock.patch("secretary.backup._pipeline_action", return_value=None),
-                    mock.patch(
-                        "secretary.backup.raw_kanboard_dump",
-                        return_value=type(
-                            "Dump", (), {"dump_dir": source_data / "board" / "kanboard-raw-test"}
-                        )(),
-                    ),
+                    fake_engine_dump(),
                     mock.patch(
                         "secretary.backup.export_all",
                         return_value=_producer_exports(source_data),
@@ -527,10 +556,8 @@ class RestoreArchiveTests(unittest.TestCase):
                         backup_kind=kind,
                     )
 
-                restore_backup(
-                    backup.archive,
-                    target_instance,
-                )
+                # A full archive's data half is what `restore-postgres` publishes after the engine.
+                restore_backup(backup.archive, target_instance, _allow_postgres_engine=kind == "full")
                 manifest = backup.manifest
                 cards = json.loads((target_data / "board" / "cards.json").read_text())["cards"]
                 facts = (target_data / "memory" / "export.ndjson").read_text().splitlines()

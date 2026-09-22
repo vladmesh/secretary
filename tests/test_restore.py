@@ -39,9 +39,9 @@ from secretary.restore import (
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.fakes.sprints import SprintKanboard
+from tests.fakes.tasks import _EmptyWriteKanboard
 from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
-    _EmptyWriteKanboard,
     _restore_card,
     _seed_instance_facts,
     _write_instance_to,
@@ -557,6 +557,7 @@ class RestoreTests(unittest.TestCase):
                 {"name": "board", "action": "initialized"},
                 {"name": "memory", "action": "initialized"},
                 {"name": "runs_state", "action": "initialized"},
+                {"name": "board_history", "action": "initialized"},
             ),
         )
 

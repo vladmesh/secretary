@@ -1420,18 +1420,11 @@ class RecoveryBackupBackendBoundaryTests(unittest.TestCase):
     def test_recovery_backup_dumps_sql_in_the_process_that_already_decided_kanboard(self) -> None:
         from secretary.board.backend import card_backend
 
-        def kanboard_engine(*_args, **_kwargs):
-            raise AssertionError(
-                "the pre-switch recovery backup reached the Kanboard engine; the process "
-                "decision did not follow the environment across the apply boundary"
-            )
-
         freeze = {"paused": True, "mode": "freeze", "actor": cutover.CUTOVER_ACTOR}
         with (
             mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
             mock.patch("secretary.backup._pipeline_status", return_value=freeze),
             mock.patch("secretary.backup.export_all", side_effect=self._exports),
-            mock.patch("secretary.backup.raw_kanboard_dump", side_effect=kanboard_engine),
         ):
             evidence = cutover.Operations(self.paths, self.state).postgresql_recovery_backup()
 

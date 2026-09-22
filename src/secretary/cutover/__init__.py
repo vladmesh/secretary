@@ -611,9 +611,8 @@ def _volume_free_bytes(path: Path) -> int:
 def _full_archive_bytes(paths: Paths) -> int:
     from secretary.backup import estimate_archive_bytes
 
-    # The window's first archive is a Kanboard one; the two after it leave the raw Kanboard dumps
-    # out and carry a dump of the same board instead, so this one size stands for all three.
-    return estimate_archive_bytes(paths.instance, paths.data, backup_kind="full", backend="kanboard")
+    # Every archive of the window is the one full format, so this one size stands for all three.
+    return estimate_archive_bytes(paths.instance, paths.data, backup_kind="full")
 
 
 def _mount_point(path: Path) -> Path:

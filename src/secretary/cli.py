@@ -20,7 +20,6 @@ from secretary.checkpoint import (
 from secretary.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
 from secretary.cutover import add_cutover_subcommands
 from secretary.data import (
-    KANBOARD_DATA_PATH,
     export_all,
     export_artifacts,
     export_board,
@@ -28,7 +27,6 @@ from secretary.data import (
     export_runs,
     export_transcripts,
     init_layout,
-    raw_kanboard_dump,
 )
 from secretary.dispatch.commands import (
     add_dispatcher_subcommands,
@@ -239,27 +237,6 @@ def build_parser() -> argparse.ArgumentParser:
         data_dir_help="override instance.yaml data_dir",
     )
     data_init.set_defaults(handler=run_data_init)
-
-    raw_dump = data_subcommands.add_parser(
-        "raw-kanboard-dump",
-        help="copy the live Kanboard storage into secretary-data/board",
-    )
-    _add_instance(
-        raw_dump,
-        data_dir=True,
-        help="path to an instance dir or instance.yaml",
-        data_dir_help="override instance.yaml data_dir",
-    )
-    raw_dump.add_argument(
-        "--container",
-        default=None,
-        help=(
-            "operator override; by default the container of the kanboard service of the "
-            "installed Compose project is resolved from the installation"
-        ),
-    )
-    raw_dump.add_argument("--source-path", default=KANBOARD_DATA_PATH)
-    raw_dump.set_defaults(handler=run_raw_kanboard_dump)
 
     export = data_subcommands.add_parser(
         "export",
@@ -1406,27 +1383,6 @@ def run_data_init(args: argparse.Namespace) -> int:
     print(f"secretary-data: {layout.data_dir}")
     print(f"manifest: {layout.manifest_path}")
     print(f"created directories: {_join([str(p.relative_to(layout.data_dir)) for p in layout.created_dirs])}")
-    print("status: ok")
-    return 0
-
-
-def run_raw_kanboard_dump(args: argparse.Namespace) -> int:
-    data_dir = _data_dir_from_args(args, validate_tree=True)
-    if data_dir is None:
-        return 1
-
-    try:
-        dump = raw_kanboard_dump(
-            data_dir,
-            container=args.container,
-            source_path=args.source_path,
-        )
-    except RuntimeError as exc:
-        print(f"secretary data raw-kanboard-dump: {exc}")
-        return 1
-
-    print(f"kanboard raw dump: {dump.dump_dir}")
-    print(f"source: {dump.source}")
     print("status: ok")
     return 0
 
