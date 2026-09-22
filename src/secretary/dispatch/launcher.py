@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from secretary.role_env import (
+from secretary.runtime.role_env import (
     RoleEnvError,
     runtime_env,
 )

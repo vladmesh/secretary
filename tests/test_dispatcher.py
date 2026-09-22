@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary import role_env
 from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
@@ -107,6 +106,7 @@ from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
+from secretary.runtime import role_env
 from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
@@ -11413,7 +11413,7 @@ class DispatcherLauncherTests(unittest.TestCase):
 
     def test_claude_snapshot_reads_the_env_the_role_wrapper_delivers(self) -> None:
         """The head does not run in the dispatcher's environment. `wrap_role_command` hands
-        it to `secretary.role_env exec`, which drops every `runtime.env` variable that is not
+        it to `secretary.runtime.role_env exec`, which drops every `runtime.env` variable that is not
         role-allowlisted, and `ANTHROPIC_MODEL` is not. A snapshot read from `os.environ` would
         journal a model the launched CLI never receives, so the record is taken from the env the
         wrapper delivers and checked here against what the wrapped process actually gets."""
@@ -11688,7 +11688,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(data["theme"], "dark")
         self.assertIn("claude --dangerously-skip-permissions --strict-mcp-config", command)
         self.assertIn("--model opus", command)
-        self.assertIn("python3 -P -m secretary.role_env exec --role worker", command)
+        self.assertIn("python3 -P -m secretary.runtime.role_env exec --role worker", command)
 
     def test_claude_command_pins_profile_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11702,7 +11702,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             ).command
 
         self.assertIn("--model opus --effort medium", command)
-        self.assertIn("python3 -P -m secretary.role_env exec --role reviewer", command)
+        self.assertIn("python3 -P -m secretary.runtime.role_env exec --role reviewer", command)
 
     def test_claude_ready_preserves_existing_theme_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12652,7 +12652,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             "worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox"
         )
 
-        self.assertIn("python3 -P -m secretary.role_env exec --role worker", wrapped)
+        self.assertIn("python3 -P -m secretary.runtime.role_env exec --role worker", wrapped)
         self.assertIn("/bin/sh -lc", wrapped)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
 

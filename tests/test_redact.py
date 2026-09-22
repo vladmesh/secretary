@@ -1,4 +1,4 @@
-"""Board-comment scrub contract (`runtime.redact.scrub_secrets`).
+"""Board-comment scrub contract (`secretary.runtime.redact.scrub_secrets`).
 
 It used to live in the pipeline dispatcher's worker.py with no coverage at all; the dispatcher is
 gone (secretary-1135) and its two surviving callers — ops.add_comment for steward bodies and the
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.runtime.redact import REDACTED, redact, scrub_secrets
+from secretary.runtime.redact import REDACTED, redact, scrub_secrets
 
 
 class ScrubSecretsTests(unittest.TestCase):
@@ -98,7 +98,7 @@ class ScrubSecretsTests(unittest.TestCase):
             selected = root / "selected.env"
             default.write_text("SERVICE_TOKEN=default-secret-value\n", encoding="utf-8")
             selected.write_text("SERVICE_TOKEN=selected-secret-value\n", encoding="utf-8")
-            with mock.patch("triggered_agents.runtime.redact.DEFAULT_ENV_FILES", [default]):
+            with mock.patch("secretary.runtime.redact.DEFAULT_ENV_FILES", [default]):
                 output = redact("default-secret-value selected-secret-value", env_files=[selected])
 
         self.assertNotIn("default-secret-value", output)

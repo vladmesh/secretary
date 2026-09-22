@@ -31,8 +31,8 @@ from unittest import mock
 from triggered_agents.runtime.head import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
-    RUNTIME_ROLE_ENV,
-    SECRETARY_ROLE_ENV,
+    HEAD_BINDING,
+    STANDING_BINDING,
     HeadCommandError,
     render_head_command,
     with_pid_heartbeat,
@@ -218,31 +218,58 @@ class UnknownAdapterTests(unittest.TestCase):
 
 
 class RoleEnvWrapperTests(unittest.TestCase):
-    """The wrapper is part of the rendered command, and which entry point binds it is the
-    launcher's fact — the two the product has render two different commands."""
+    """The wrapper is part of the rendered command, and which binding renders it is the
+    launcher's fact — the two the product has render two different PYTHONPATHs in front of the
+    one role-env entry point."""
 
-    def test_the_secretary_entry_point_writes_the_installation_into_the_command(self) -> None:
+    def test_every_launched_role_runs_the_one_role_env_entry_point(self) -> None:
+        """Worker, reviewer, observer and a standing agent: one module, one `exec --role` CLI."""
+        cases = (
+            ("worker", HEAD_BINDING, "/worktree", None),
+            ("reviewer", HEAD_BINDING, "/worktree", None),
+            (
+                "observer",
+                HEAD_BINDING,
+                "",
+                {"SECRETARY_OBSERVER_SPRINT": "sprint:9", "SECRETARY_OBSERVER_GENERATION": "3"},
+            ),
+            ("curator", STANDING_BINDING, "", None),
+        )
+        for role, binding, workspace, identity in cases:
+            with self.subTest(role=role), mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
+                command = wrap_role_command(
+                    role, "true", binding=binding, workspace=workspace, identity=identity
+                )
+                workspace_arg = f" --workspace {workspace}" if workspace else ""
+                self.assertIn(
+                    " python3 -P -m secretary.runtime.role_env exec "
+                    f"--role {role}{workspace_arg} -- /bin/sh -lc ",
+                    command,
+                )
+                self.assertEqual(command.count(" -m "), 1)
+
+    def test_the_head_binding_writes_the_installation_into_the_command(self) -> None:
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
             self.assertEqual(
                 render_head_command(
                     {"adapter": "claude"},
                     role="worker",
-                    binding=SECRETARY_ROLE_ENV,
+                    binding=HEAD_BINDING,
                     workspace="/worktree",
                 ).command,
                 f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
-                "python3 -P -m secretary.role_env exec --role worker --workspace /worktree -- "
+                "python3 -P -m secretary.runtime.role_env exec --role worker --workspace /worktree -- "
                 "/bin/sh -lc "
                 + shlex.quote(
                     "PATH=/worktree/.secretary-task-env/venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
                 ),
             )
 
-    def test_the_runtime_entry_point_is_what_a_background_agent_is_launched_under(self) -> None:
+    def test_the_standing_binding_is_what_a_background_agent_is_launched_under(self) -> None:
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
             expected = (
                 f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
-                "triggered_agents.runtime.role_env exec --role steward -- /bin/sh -lc "
+                "secretary.runtime.role_env exec --role steward -- /bin/sh -lc "
                 + shlex.quote(f"{CLAUDE_BASE} '/steward'")
             )
             self.assertEqual(
@@ -250,7 +277,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                     {"adapter": "claude"},
                     prompt="/steward",
                     role="steward",
-                    binding=RUNTIME_ROLE_ENV,
+                    binding=STANDING_BINDING,
                 ).command,
                 expected,
             )
@@ -277,12 +304,12 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with self.assertRaisesRegex(HeadCommandError, "SECRETARY_OBSERVER_SPRINT"):
             wrap_role_command("worker", "true", identity={"SECRETARY_OBSERVER_SPRINT": "s"})
 
-    def test_the_runtime_entry_point_renders_no_identity_and_says_so(self) -> None:
+    def test_the_standing_binding_renders_no_identity_and_says_so(self) -> None:
         with self.assertRaisesRegex(HeadCommandError, "renders no identity"):
             wrap_role_command(
                 "observer",
                 "true",
-                binding=RUNTIME_ROLE_ENV,
+                binding=STANDING_BINDING,
                 identity={"SECRETARY_OBSERVER_SPRINT": "s"},
             )
 
@@ -296,9 +323,9 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with self.assertRaisesRegex(HeadCommandError, "carries no identity"):
             render_head_command({"adapter": "claude"}, identity={"SECRETARY_OBSERVER_SPRINT": "s"})
 
-    def test_an_unknown_entry_point_is_refused_rather_than_defaulted(self) -> None:
-        with self.assertRaisesRegex(HeadCommandError, "unknown role env entry point"):
-            wrap_role_command("worker", "true", binding="secretary.role_env.exec")
+    def test_an_unknown_binding_is_refused_rather_than_defaulted(self) -> None:
+        with self.assertRaisesRegex(HeadCommandError, "unknown role env binding"):
+            wrap_role_command("worker", "true", binding="secretary.runtime.role_env")
 
 
 class PidHeartbeatTests(unittest.TestCase):
@@ -374,7 +401,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
                 {"adapter": "claude"},
                 prompt="/curator",
                 role="curator",
-                binding=RUNTIME_ROLE_ENV,
+                binding=STANDING_BINDING,
             ).command
 
         self.assertEqual(skill, "/curator")

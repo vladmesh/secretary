@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from ...runtime.redact import redact
+from secretary.runtime.redact import redact
+
 from . import discover
 
 PENDING_VERSION = 3

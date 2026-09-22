@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from secretary.memory import access as memory_access
-from secretary.role_env import load_env_file
+from secretary.runtime.role_env import load_env_file
 from triggered_agents.agents.pipeline import heads as head_registry
 from triggered_agents.runtime.head import (
     HeadCommandError,

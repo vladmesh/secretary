@@ -94,6 +94,8 @@ files = [
     "src/secretary/runtime/shared_state.py",
     "src/secretary/runtime/claude_sessions.py",
     "src/secretary/runtime/claude_env.py",
+    "src/secretary/runtime/role_env.py",
+    "src/secretary/runtime/redact.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true

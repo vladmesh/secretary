@@ -32,7 +32,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ...runtime.redact import scrub_secrets
+from secretary.runtime.redact import scrub_secrets
+
 from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, BoardUnavailable
 from . import signals
 

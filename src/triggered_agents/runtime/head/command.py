@@ -27,9 +27,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.runtime import role_env
 from secretary.runtime.launch_prefix import pythonpath_prefix
 
-from .. import role_env
 from ..codex_preflight import codex_home, codex_trust_paths
 
 # Valid backend names; this renderer validates the profile's choice.
@@ -58,10 +58,14 @@ CODEX_LAUNCH_MODES = {CODEX_TUI_MODE}
 
 PYTHON_SAFE_PATH_FLAG = "-P"
 
-# The launcher chooses this binding: each entry point resolves a different PYTHONPATH.
-SECRETARY_ROLE_ENV = "secretary.role_env"
-RUNTIME_ROLE_ENV = "triggered_agents.runtime.role_env"
-ROLE_ENV_ENTRY_POINTS = (SECRETARY_ROLE_ENV, RUNTIME_ROLE_ENV)
+# Every head runs the one role-env entry point, `role_env.ENTRY_POINT`. The launcher only chooses
+# where that command's PYTHONPATH comes from. A dispatcher head gets the configured checkout
+# (`TA_SECRETARY_REPO`, else `$HOME/secretary`) with the launcher's own PYTHONPATH appended, and
+# may carry an identity. A standing agent gets `role_env.runtime_pythonpath()`
+# (`TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`, else the importing checkout) and none.
+HEAD_BINDING = "head"
+STANDING_BINDING = "standing"
+ROLE_ENV_BINDINGS = (HEAD_BINDING, STANDING_BINDING)
 
 
 class HeadCommandError(RuntimeError):
@@ -140,14 +144,14 @@ def render_head_command(
     workspace: str = "",
     role: str = "",
     identity: Mapping[str, str] | None = None,
-    binding: str = SECRETARY_ROLE_ENV,
+    binding: str = HEAD_BINDING,
 ) -> HeadCommand:
     """The shell command that brings one head up, and how its prompt reaches it.
 
     `role` is what the command is wrapped for. An empty role renders the adapter command bare, for
     the one caller that is not launching a head into a pane at all: `secretary shell`. `workspace` is
     what a Codex head's directory-trust override names and is required for one. `identity` is a
-    head's own binding and only the secretary entry point renders it.
+    head's own binding and only the head binding renders it.
     """
     adapter = str(profile.get("adapter") or "")
     render = _ADAPTERS.get(adapter)
@@ -171,7 +175,7 @@ def wrap_role_command(
     command: str,
     *,
     identity: Mapping[str, str] | None = None,
-    binding: str = SECRETARY_ROLE_ENV,
+    binding: str = HEAD_BINDING,
     workspace: str = "",
 ) -> str:
     """Render one head's command under the role environment its launcher binds.
@@ -184,14 +188,12 @@ def wrap_role_command(
     `identity` is rendered beside that binding rather than left to `runtime.env`. Only names the
     role's allowlist knows are rendered; anything else is refused here instead of silently ignored.
     """
-    if binding not in ROLE_ENV_ENTRY_POINTS:
-        known = ", ".join(ROLE_ENV_ENTRY_POINTS)
-        raise HeadCommandError(f"unknown role env entry point {binding!r} (known: {known})")
-    if binding == RUNTIME_ROLE_ENV:
+    if binding not in ROLE_ENV_BINDINGS:
+        known = ", ".join(ROLE_ENV_BINDINGS)
+        raise HeadCommandError(f"unknown role env binding {binding!r} (known: {known})")
+    if binding == STANDING_BINDING:
         if identity:
-            raise HeadCommandError(
-                f"the {RUNTIME_ROLE_ENV} entry point renders no identity for role {role!r}"
-            )
+            raise HeadCommandError(f"the {STANDING_BINDING} binding renders no identity for role {role!r}")
         return role_env.wrap_shell_command(role, command, workspace=workspace or None)
     unknown = sorted(set(identity or {}) - set(role_env.ROLE_ALLOWLIST.get(role, ())))
     if unknown:
@@ -202,7 +204,7 @@ def wrap_role_command(
     workspace_arg = f" --workspace {shlex.quote(workspace)}" if workspace else ""
     return (
         f"{prefix} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} "
-        f"-m {SECRETARY_ROLE_ENV} exec --role {shlex.quote(role)}{workspace_arg} -- /bin/sh -lc "
+        f"-m {role_env.ENTRY_POINT} exec --role {shlex.quote(role)}{workspace_arg} -- /bin/sh -lc "
         f"{shlex.quote(command)}"
     )
 

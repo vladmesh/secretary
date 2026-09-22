@@ -23,7 +23,7 @@ LEGACY_FLAT_MODULES = frozenset(
     head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
     memory_write.py observer_root.py onboarding.py product_issue_commands.py product_issues.py
-    product_lanes.py provision.py restore.py restore_commands.py role_env.py role_skills.py
+    product_lanes.py provision.py restore.py restore_commands.py role_skills.py
     routing_journal.py runtime_env.py secret_commands.py secret_recover.py secret_store.py
     secret_words.py session.py sprint_close.py sprint_commands.py sprint_observer.py sprints.py
     state_repo.py status.py task_commands.py task_restore.py tasks.py upgrade.py
@@ -702,3 +702,101 @@ class OneBoardClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# One home for each of these. A second copy is how the role environment ended up with a façade and
+# two entry points (issue:a45731709558936b7b6a, secretary-1683): each lived where its first caller
+# was, and the next caller copied rather than imported.
+ROLE_ENV_HOME = "secretary/runtime/role_env.py"
+SINGLE_HOME_ASSIGNMENTS = {
+    "ROLE_ALLOWLIST": ROLE_ENV_HOME,
+    "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
+    "CODEX_EFFORTS": "triggered_agents/runtime/head/command.py",
+}
+SINGLE_HOME_FUNCTIONS = {
+    "is_sensitive_env_name": ROLE_ENV_HOME,
+    # The board's batched transport; the JSON-RPC Kanboard client that had its own is gone.
+    "call_batch": "secretary/board/sql_cards.py",
+}
+
+
+def _is_sensitive_name_pattern(text: str) -> bool:
+    """The name classifier's shape: credential words anchored between `_` or the string's ends."""
+    return "(^|_)" in text and "(_|$)" in text and "TOKEN" in text.upper()
+
+
+def _second_copies(sources: dict[str, str]) -> list[str]:
+    """Every definition in `sources` (path under `src/` -> text) that is not in its one home."""
+    offenders: list[str] = []
+    for path, text in sorted(sources.items()):
+        if Path(path).name == "role_env.py" and path != ROLE_ENV_HOME:
+            offenders.append(f"{path}: role_env module")
+        tree = ast.parse(text, filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    home = SINGLE_HOME_ASSIGNMENTS.get(getattr(target, "id", ""))
+                    if home is not None and path != home:
+                        offenders.append(f"{path}:{node.lineno}: {target.id}")  # type: ignore[attr-defined]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                home = SINGLE_HOME_FUNCTIONS.get(node.name)
+                if home is not None and path != home:
+                    offenders.append(f"{path}:{node.lineno}: def {node.name}")
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and _is_sensitive_name_pattern(node.value)
+                and path != ROLE_ENV_HOME
+            ):
+                offenders.append(f"{path}:{node.lineno}: sensitive-name pattern")
+    return offenders
+
+
+class SingleHomeTests(unittest.TestCase):
+    """The role environment, the sensitive-name pattern, the Codex effort table and the board
+    transport each have one definition under `src/`; a second one anywhere fails here."""
+
+    def test_nothing_under_src_defines_a_second_copy(self) -> None:
+        src = ROOT / "src"
+        sources = {
+            path.relative_to(src).as_posix(): path.read_text(encoding="utf-8") for path in _source_modules()
+        }
+        for home in {ROLE_ENV_HOME, *SINGLE_HOME_ASSIGNMENTS.values(), *SINGLE_HOME_FUNCTIONS.values()}:
+            self.assertIn(home, sources)
+        self.assertEqual(_second_copies(sources), [])
+
+    def test_each_second_copy_is_caught(self) -> None:
+        probes = {
+            "role_env module": ("triggered_agents/runtime/role_env.py", "X = 1\n"),
+            "ROLE_ALLOWLIST": ("secretary/session.py", "ROLE_ALLOWLIST = {}\n"),
+            "SENSITIVE_ENV_NAME_RE": ("secretary/tasks.py", "SENSITIVE_ENV_NAME_RE = None\n"),
+            "sensitive-name pattern": (
+                "triggered_agents/runtime/scrub.py",
+                'import re\nNAMES = re.compile(r"(^|_)(TOKEN|SECRET)(_|$)")\n',
+            ),
+            "def is_sensitive_env_name": (
+                "secretary/checkpoint.py",
+                "def is_sensitive_env_name(n):\n    return n\n",
+            ),
+            "CODEX_EFFORTS": ("secretary/dispatch/launcher.py", "CODEX_EFFORTS: dict = {}\n"),
+            "def call_batch": (
+                "secretary/board/kanboard.py",
+                "class Client:\n    def call_batch(self, calls):\n        return []\n",
+            ),
+        }
+        for label, (path, text) in probes.items():
+            with self.subTest(label):
+                offenders = _second_copies({path: text})
+                self.assertEqual(len(offenders), 1, offenders)
+                self.assertTrue(offenders[0].startswith(path) and offenders[0].endswith(label), offenders)
+        # The homes themselves are not second copies.
+        self.assertEqual(
+            _second_copies(
+                {
+                    ROLE_ENV_HOME: 'ROLE_ALLOWLIST = {}\nSENSITIVE_ENV_NAME_RE = r"(^|_)(TOKEN)(_|$)"\n',
+                    "secretary/board/sql_cards.py": "def call_batch(calls):\n    return []\n",
+                }
+            ),
+            [],
+        )

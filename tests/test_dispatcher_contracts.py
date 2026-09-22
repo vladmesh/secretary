@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary import role_env as head_role_env
 from secretary import upgrade
 from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
 from secretary.dispatch import claim as dispatcher_claim
@@ -62,17 +61,18 @@ from secretary.head_registry import (
 )
 from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
-from secretary.role_env import observer_binding
+from secretary.runtime import role_env
+from secretary.runtime.role_env import observer_binding
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.retired_board import legacy_runtime_lines
 from triggered_agents.agents.pipeline import heads
-from triggered_agents.runtime import dispatch, role_env
+from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.head import (
     HEAD_ALIVE,
     HEAD_OK,
-    RUNTIME_ROLE_ENV,
+    STANDING_BINDING,
     HeadCommandError,
     HeadRun,
     HeadSpec,
@@ -608,7 +608,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
             registry.profile("opus-medium"),
             role="reviewer",
             prompt="review",
-            binding=RUNTIME_ROLE_ENV,
+            binding=STANDING_BINDING,
         )
 
         self.assertIn("--model opus --effort medium", rendered.command)
@@ -763,12 +763,12 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
 
     def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
-        """The launcher's binding wins over the file's own line, in both role-env modules."""
+        """The launcher's binding wins over the file's own line, for a head and a standing role."""
         self.decoy_runtime_env()
-        for module, role in ((head_role_env, "worker"), (role_env, "steward")):
-            with self.subTest(module.__name__):
+        for role in ("worker", "steward"):
+            with self.subTest(role):
                 base = self.unit_env("secretary-dispatcher-production.service")
-                env = module.runtime_env(role, base_env=base, env_file=self.instance / "runtime.env")
+                env = role_env.runtime_env(role, base_env=base, env_file=self.instance / "runtime.env")
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
 
@@ -829,7 +829,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """End to end, in a terminal that has no ``TA_SECRETARY_REPO`` of its own.
 
         The rendered checkout has to be the real one here, because the wrapper runs
-        ``secretary.role_env`` out of it; the layout points at it the way an alternate upgrade
+        ``secretary.runtime.role_env`` out of it; the layout points at it the way an alternate upgrade
         would, and the launching shell is given a home where no checkout exists at all.
         """
         product = Path(__file__).resolve().parents[1]
@@ -1035,7 +1035,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
             role="worker",
             prompt="do the card",
             workspace="/tmp/ws",
-            binding=RUNTIME_ROLE_ENV,
+            binding=STANDING_BINDING,
         )
 
         self.assertTrue(rendered.prompt_after_start)
@@ -1072,7 +1072,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                         role=role,
                         prompt="skill",
                         workspace="/tmp/ws",
-                        binding=RUNTIME_ROLE_ENV,
+                        binding=STANDING_BINDING,
                     )
                     self.assertNotIn("codex exec", rendered.command)
 

@@ -68,7 +68,7 @@ from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
-from secretary.role_env import (
+from secretary.runtime.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,

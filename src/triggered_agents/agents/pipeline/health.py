@@ -36,7 +36,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...runtime.redact import redact
+from secretary.runtime.redact import redact
 from . import heads as heads_mod
 from .state import STATE
 
