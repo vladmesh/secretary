@@ -1,73 +1,40 @@
-"""Restore-only comment batching, including wire ambiguity and production shape."""
+"""Restore-only comment batching over a real card store, and a durable-audit sample.
+
+Each case restores into a store of its own (`tests/sql_backend_fixtures.py`) and records its
+occurrences in that store's audit (`SqlTaskAudit`).
+
+The wire-ambiguity cases the JSON-RPC board had -- a comment batch whose aggregate reply is lost at
+the first, a middle or the last wave, or partly rejected after its siblings landed -- are not asked
+here: the store restore runs in one enclosing transaction (`import_normalized_board`), so a failed
+wave leaves nothing applied. Nor is the transport benchmark of bounded JSON-RPC posts: the store
+posts no documents, so the economy it measured has no equivalent.
+"""
 
 from __future__ import annotations
 
 import os
-import tempfile
 import time
 import unittest
-from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board_transport import BoardTransport
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskWriter
+from secretary.tasks import TaskError
+from tests.fakes.tasks import CardSeed
+from tests.sql_backend_fixtures import card_store
 
 
-class _WireBoard:
-    def __init__(self, task_ids: list[int]) -> None:
-        self.comments = {task_id: [] for task_id in task_ids}
-        self.posts: list[list[str]] = []
-        self.logical: list[str] = []
-        self.write_posts = 0
-        self.lose_write: int | None = None
-        self.reject_write: tuple[int, int] | None = None
-        self.lose_reconcile_read = False
-        self.unavailable_reads = 0
-
-    def post(self, payload):
-        requests = payload if isinstance(payload, list) else [payload]
-        methods = [str(request["method"]) for request in requests]
-        if methods and methods[0] == "getAllComments" and self.unavailable_reads:
-            self.unavailable_reads -= 1
-            raise TaskError("backend_unavailable", "lost evidence read", 1)
-        self.posts.append(methods)
-        self.logical.extend(methods)
-        writing = bool(methods and methods[0] == "createComment")
-        if writing:
-            self.write_posts += 1
-        answers = []
-        for offset, request in enumerate(requests):
-            method = request["method"]
-            params = request.get("params") or {}
-            if method == "getAllComments":
-                result = [dict(value) for value in self.comments[int(params["task_id"])]]
-            elif method == "createComment":
-                if self.reject_write == (self.write_posts, offset):
-                    answers.append({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000}})
-                    continue
-                values = self.comments[int(params["task_id"])]
-                values.append({"comment": params["content"], "date_creation": "1720000000"})
-                result = len(values)
-            else:
-                raise AssertionError(method)
-            answers.append({"jsonrpc": "2.0", "id": request["id"], "result": result})
-        if writing and self.lose_write == self.write_posts:
-            if self.lose_reconcile_read:
-                self.unavailable_reads = 1
-            raise TaskError("backend_unavailable", "lost aggregate reply", 1)
-        return answers if isinstance(payload, list) else answers[0]
+def _seed(references: list[str]) -> CardSeed:
+    """One card per reference, under keys 1..n in reference order, as `_items` numbers them."""
+    tasks = [
+        {"id": key, "reference": reference, "title": reference, "column_id": 2}
+        for key, reference in enumerate(sorted(references), 1)
+    ]
+    return CardSeed(tasks, {int(task["id"]): {"project": "secretary"} for task in tasks})
 
 
-def _client(board: _WireBoard) -> KanboardClient:
-    client = KanboardClient(BoardTransport("https://board.invalid", "user", "secret"), Path.cwd())
-    client._post = board.post  # type: ignore[method-assign]
-    return client
-
-
-def _items(histories: dict[str, list[str]], *, entity: str = "card") -> list[RestoreCommentOccurrence]:
+def _items(histories: dict[str, list[str]]) -> list[RestoreCommentOccurrence]:
     result = []
     for task_id, reference in enumerate(sorted(histories), 1):
         seen: dict[str, int] = {}
@@ -80,245 +47,86 @@ def _items(histories: dict[str, list[str]], *, entity: str = "card") -> list[Res
                     task_id,
                     body,
                     occurrence,
-                    f"restore:{entity}:{reference}:{index}",
-                    entity=entity,
+                    f"restore:card:{reference}:{index}",
                 )
             )
     return result
 
 
 class BulkCommentRestoreTests(unittest.TestCase):
-    def _writer(self, root: Path, board: _WireBoard):
-        return SimpleNamespace(client=_client(board), audit=TaskAudit(root))
+    def _writer(self, histories: dict[str, list[str]]):
+        store = card_store(self, _seed(list(histories)))
+        return SimpleNamespace(client=store, audit=SqlTaskAudit(store))
+
+    @staticmethod
+    def _comments(writer, key: int) -> list[str]:
+        return [str(row["comment"]) for row in writer.client.comments(key)]
+
+    @staticmethod
+    def _creates(writer) -> int:
+        return sum(method == "createComment" for method, _params in writer.client.calls)
 
     def test_identical_occurrences_prefix_and_second_import_are_exact(self) -> None:
         target = {"secretary-1": ["same", "middle", "same"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1])
-            board.comments[1] = [{"comment": "same", "date_creation": "1"}]
-            writer = self._writer(Path(tmp), board)
-            restore_comments_batched(writer, _items(target))
-            restore_comments_batched(writer, _items(target))
-            self.assertEqual([row["comment"] for row in board.comments[1]], target["secretary-1"])
-            events = writer.audit.events("secretary-1", kind="restored_comment")
-            self.assertEqual([event["payload"]["restore_occurrence"] for event in events], [0, 0, 1])
-            self.assertTrue(all("restore_body" not in event["payload"] for event in events))
-            self.assertEqual(board.logical.count("createComment"), 2)
-
-    def test_lost_reply_at_first_middle_and_last_wave_resumes_without_duplicates(self) -> None:
-        target = {"secretary-1": ["first", "middle", "last"]}
-        for lost in (1, 2, 3):
-            with self.subTest(lost=lost), tempfile.TemporaryDirectory() as tmp:
-                board = _WireBoard([1])
-                board.lose_write = lost
-                writer = self._writer(Path(tmp), board)
-                with self.assertRaisesRegex(TaskError, "uncertain"):
-                    restore_comments_batched(writer, _items(target))
-                board.lose_write = None
-                restore_comments_batched(writer, _items(target))
-                self.assertEqual([row["comment"] for row in board.comments[1]], target["secretary-1"])
-                self.assertEqual(len(writer.audit.events("secretary-1", kind="restored_comment")), 3)
-
-    def test_partial_rejection_commits_applied_siblings_and_retries_only_the_missing_item(self) -> None:
-        target = {"secretary-1": ["a"], "secretary-2": ["b"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1, 2])
-            board.reject_write = (1, 1)
-            writer = self._writer(Path(tmp), board)
-            with self.assertRaisesRegex(TaskError, "uncertain"):
-                restore_comments_batched(writer, _items(target))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["a"])
-            self.assertEqual(board.comments[2], [])
-            board.reject_write = None
-            restore_comments_batched(writer, _items(target))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["a"])
-            self.assertEqual([row["comment"] for row in board.comments[2]], ["b"])
-            self.assertEqual(board.logical.count("createComment"), 3)
-
-    def test_append_failure_keeps_a_proven_body_free_pending_event(self) -> None:
-        target = {"sprint:1": ["record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1])
-            writer = self._writer(Path(tmp), board)
-            original = writer.audit.append
-            with (
-                mock.patch.object(writer.audit, "append", side_effect=OSError("full")),
-                self.assertRaisesRegex(TaskError, "audit repair"),
-            ):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            pending = writer.audit.pending_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", pending["payload"])
-            writer.audit.append = original
-            self.assertEqual(TaskWriter(writer.client, data_dir=tmp).reconcile(), (1, 0))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
-            self.assertEqual(len(writer.audit.events("sprint:1", kind="restored_comment")), 1)
-            restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
+        writer = self._writer(target)
+        writer.client.add_comment(1, "same", created=1)
+        restore_comments_batched(writer, _items(target))
+        restore_comments_batched(writer, _items(target))
+        self.assertEqual(self._comments(writer, 1), target["secretary-1"])
+        events = writer.audit.events("secretary-1", kind="restored_comment")
+        self.assertEqual([event["payload"]["restore_occurrence"] for event in events], [0, 0, 1])
+        self.assertTrue(all("restore_body" not in event["payload"] for event in events))
+        self.assertEqual(self._creates(writer), 2)
+        for event in events:
+            with self.subTest(event=event["request_id"]):
+                self.assertEqual(event["task_id"], "task_postgres_1")
+                self.assertEqual(event["backend"]["kind"], "postgres")
 
     def test_staging_failure_precedes_every_backend_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1])
-            writer = self._writer(Path(tmp), board)
-            with (
-                mock.patch.object(writer.audit, "stage", side_effect=OSError("full")),
-                self.assertRaises(OSError),
-            ):
-                restore_comments_batched(writer, _items({"secretary-1": ["record"]}))
-            self.assertEqual(board.logical.count("createComment"), 0)
-            self.assertEqual(board.comments[1], [])
+        writer = self._writer({"secretary-1": ["record"]})
+        with (
+            mock.patch.object(writer.audit, "stage", side_effect=OSError("full")),
+            self.assertRaises(OSError),
+        ):
+            restore_comments_batched(writer, _items({"secretary-1": ["record"]}))
+        self.assertEqual(self._creates(writer), 0)
+        self.assertEqual(self._comments(writer, 1), [])
 
     def test_non_prefix_destination_history_fails_before_a_write(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1])
-            board.comments[1] = [{"comment": "foreign", "date_creation": "1"}]
-            writer = self._writer(Path(tmp), board)
-            with self.assertRaisesRegex(TaskError, "normalized prefix"):
-                restore_comments_batched(writer, _items({"secretary-1": ["expected"]}))
-            self.assertEqual(board.logical.count("createComment"), 0)
-
-    def test_task_reconcile_proves_absent_sprint_comment_before_commit_and_retry(self) -> None:
-        target = {"sprint:1": ["private sprint record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            board = _WireBoard([1])
-            board.reject_write = (1, 0)
-            writer = self._writer(root, board)
-            with self.assertRaisesRegex(TaskError, "uncertain"):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual(board.comments[1], [])
-            self.assertIn("restore_body", writer.audit.pending_event("restore:sprint:sprint:1:0")["payload"])
-
-            board.reject_write = None
-            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
-            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
-            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", event["payload"])
-            self.assertNotIn("private sprint record", (root / "board" / "events.ndjson").read_text())
-
-            writes = board.logical.count("createComment")
-            restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual(board.logical.count("createComment"), writes)
-
-    def test_task_reconcile_scrubs_already_applied_sprint_comment_after_lost_reply(self) -> None:
-        target = {"sprint:1": ["private applied record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            board = _WireBoard([1])
-            board.lose_write = 1
-            board.lose_reconcile_read = True
-            writer = self._writer(root, board)
-            with self.assertRaisesRegex(TaskError, "uncertain"):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
-
-            writes = board.logical.count("createComment")
-            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
-            self.assertEqual(board.logical.count("createComment"), writes)
-            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", event["payload"])
-            self.assertNotIn("private applied record", (root / "board" / "events.ndjson").read_text())
+        writer = self._writer({"secretary-1": ["expected"]})
+        writer.client.add_comment(1, "foreign", created=1)
+        with self.assertRaisesRegex(TaskError, "normalized prefix"):
+            restore_comments_batched(writer, _items({"secretary-1": ["expected"]}))
+        self.assertEqual(self._creates(writer), 0)
 
 
-class _MemoryAudit:
-    def __init__(self) -> None:
-        self.pending: dict[str, dict] = {}
-        self.committed: dict[str, dict] = {}
-
-    def marker_comment_lock(self, _reference):
-        return nullcontext()
-
-    def pending_marker_owner(self, _reference, _body, *, request_id=None):
-        return None
-
-    def pending_marker_owners(self, candidates):
-        return {}
-
-    def committed_event(self, request_id):
-        return self.committed.get(request_id)
-
-    def pending_event(self, request_id):
-        return self.pending.get(request_id)
-
-    def require_claim(self, event, *, kind, reference, identity):
-        if event["kind"] != kind or event["ref"] != reference:
-            raise AssertionError("claim mismatch")
-        for key, value in identity.items():
-            if event["payload"].get(key) != value:
-                raise AssertionError("claim mismatch")
-
-    def stage(self, request_id, event):
-        if request_id not in self.committed:
-            self.pending[request_id] = event
-
-    def append(self, request_id, event):
-        self.committed.setdefault(request_id, event)
-        self.pending.pop(request_id, None)
-        return event["event_id"]
-
-
-class ProductionShapeBenchmark(unittest.TestCase):
+class DurableAuditBenchmark(unittest.TestCase):
     @staticmethod
-    def _fixture(subjects: int, comments: int, prefix: str):
+    def _fixture(subjects: int, comments: int, prefix: str) -> dict[str, list[str]]:
         base, extra = divmod(comments, subjects)
         return {
             f"{prefix}{index}": [f"record-{offset}" for offset in range(base + (index < extra))]
             for index in range(subjects)
         }
 
-    def _measure(self, histories: dict[str, list[str]], entity: str):
-        board = _WireBoard(list(range(1, len(histories) + 1)))
-        writer = SimpleNamespace(client=_client(board), audit=_MemoryAudit())
+    def _measure_durable(self, histories: dict[str, list[str]]):
+        store = card_store(self, _seed(list(histories)))
+        writer = SimpleNamespace(client=store, audit=SqlTaskAudit(store))
         started = time.monotonic()
-        restore_comments_batched(writer, _items(histories, entity=entity))
+        restore_comments_batched(writer, _items(histories))
         duration = time.monotonic() - started
-        return board, duration
-
-    def test_production_shape_transport_scales_by_bounded_waves(self) -> None:
-        cards = self._fixture(1_429, 14_174, "secretary-")
-        sprints = self._fixture(93, 1_987, "sprint:")
-        card_board, card_seconds = self._measure(cards, "card")
-        sprint_board, sprint_seconds = self._measure(sprints, "sprint")
-        card_posts = len(card_board.posts)
-        sprint_posts = len(sprint_board.posts)
-        self.assertEqual(card_board.logical.count("createComment"), 14_174)
-        self.assertEqual(sprint_board.logical.count("createComment"), 1_987)
-        self.assertLess(card_posts, 650)
-        self.assertLess(sprint_posts, 100)
-        self.assertEqual(card_board.logical.count("getAllComments"), 14_174)
-        self.assertEqual(sprint_board.logical.count("getAllComments"), 1_987)
-        print(
-            "BULK_RESTORE_TRANSPORT_ONLY durability=excluded "
-            f"cards=1429 card_comments=14174 card_posts={card_posts} "
-            f"card_logical={len(card_board.logical)} card_seconds={card_seconds:.3f} "
-            f"sprints=93 sprint_comments=1987 sprint_posts={sprint_posts} "
-            f"sprint_logical={len(sprint_board.logical)} sprint_seconds={sprint_seconds:.3f} "
-            "batch_count=200 comment_read_count=50 comment_write_count=50 "
-            "batch_bytes=1048576 legacy_card_posts=184262..212610"
-        )
-
-
-class DurableAuditBenchmark(unittest.TestCase):
-    _fixture = staticmethod(ProductionShapeBenchmark._fixture)
-
-    def _measure_durable(self, histories: dict[str, list[str]], entity: str):
-        board = _WireBoard(list(range(1, len(histories) + 1)))
-        with tempfile.TemporaryDirectory() as tmp:
-            writer = SimpleNamespace(client=_client(board), audit=TaskAudit(tmp))
-            started = time.monotonic()
-            restore_comments_batched(writer, _items(histories, entity=entity))
-            duration = time.monotonic() - started
-            events = len(writer.audit.events(kind="restored_comment"))
-        return board, duration, events
+        events = len(writer.audit.events(kind="restored_comment"))
+        creates = sum(method == "createComment" for method, _params in store.calls)
+        return duration, events, creates
 
     def test_real_audit_cost_per_occurrence(self) -> None:
         histories = self._fixture(40, 120, "secretary-")
-        board, duration, events = self._measure_durable(histories, "card")
+        duration, events, creates = self._measure_durable(histories)
         self.assertEqual(events, 120)
-        self.assertEqual(board.logical.count("createComment"), 120)
+        self.assertEqual(creates, 120)
         print(
-            "BULK_RESTORE_DURABLE_SAMPLE durability=TaskAudit "
-            f"cards=40 comments=120 posts={len(board.posts)} logical={len(board.logical)} "
-            f"seconds={duration:.3f} per_occurrence_ms={duration / 120 * 1000:.3f}"
+            "BULK_RESTORE_DURABLE_SAMPLE durability=SqlTaskAudit "
+            f"cards=40 comments=120 seconds={duration:.3f} per_occurrence_ms={duration / 120 * 1000:.3f}"
         )
 
     @unittest.skipUnless(
@@ -327,18 +135,11 @@ class DurableAuditBenchmark(unittest.TestCase):
     )
     def test_full_production_shape_real_audit(self) -> None:
         cards = self._fixture(1_429, 14_174, "secretary-")
-        sprints = self._fixture(93, 1_987, "sprint:")
-        card_board, card_seconds, card_events = self._measure_durable(cards, "card")
-        sprint_board, sprint_seconds, sprint_events = self._measure_durable(sprints, "sprint")
+        card_seconds, card_events, _creates = self._measure_durable(cards)
         self.assertEqual(card_events, 14_174)
-        self.assertEqual(sprint_events, 1_987)
         print(
-            "BULK_RESTORE_DURABLE_FULL durability=TaskAudit "
-            f"cards=1429 card_comments=14174 card_posts={len(card_board.posts)} "
-            f"card_logical={len(card_board.logical)} card_seconds={card_seconds:.3f} "
-            f"sprints=93 sprint_comments=1987 sprint_posts={len(sprint_board.posts)} "
-            f"sprint_logical={len(sprint_board.logical)} sprint_seconds={sprint_seconds:.3f} "
-            "batch_count=200 comment_read_count=50 comment_write_count=50 batch_bytes=1048576"
+            "BULK_RESTORE_DURABLE_FULL durability=SqlTaskAudit "
+            f"cards=1429 card_comments=14174 card_seconds={card_seconds:.3f}"
         )
 
 

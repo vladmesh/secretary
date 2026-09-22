@@ -1,7 +1,8 @@
 """The transport-independent read layer: cursors, the five agent states, and degraded sources.
 
 Every test here is hermetic in the strong sense the card asks for: no live Orca, no network, no
-Kanboard, no real worker. The board is `FakeKanboard`, installation health is a value the test
+Kanboard, no real worker. The board is a throwaway card store (`tests/sql_backend_fixtures.py`),
+installation health is a value the test
 supplies, and the agents are heartbeat records written into a temporary directory -- which is
 exactly the point, because a dashboard that could only be tested against production would be
 tested against production.
@@ -20,11 +21,13 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.config import validate
+from secretary.tasks import TaskError, task_audit_for
 from secretary.webproto import agents as agent_reads
 from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import InvalidCursor, TaskNotFound
 from secretary.webproto.reads import ReadLayer
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.runtime.head.identity import publish_heartbeat
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -54,12 +57,11 @@ def _instance(root: Path, *, projects: tuple[str, ...] = ("secretary",)) -> Path
     return instance_dir
 
 
-def _journal(data_dir: Path, records: list[dict]) -> None:
-    """Append records to the board journal exactly as `TaskAudit` does: whole lines, in order."""
-    path = data_dir / "board" / "events.ndjson"
-    with path.open("a", encoding="utf-8") as journal:
-        for record in records:
-            journal.write(json.dumps(record, sort_keys=True) + "\n")
+def _journal(board, records: list[dict]) -> None:
+    """Commit records to the card audit (`requests`), in order, as their writers commit them."""
+    audit = task_audit_for(board)
+    for record in records:
+        audit.append(record["request_id"], record)
 
 
 def _event(ref: str, kind: str, *, ordinal: int) -> dict:
@@ -109,7 +111,7 @@ class ReadLayerFixture(unittest.TestCase):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.instance = _instance(self.tmp)
         self.data_dir = self.tmp / "data"
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         _production(self.data_dir, {})
 
     def layer(self, **kwargs) -> ReadLayer:
@@ -125,13 +127,13 @@ class ReadLayerFixture(unittest.TestCase):
 class CursorTests(ReadLayerFixture):
     def test_paging_a_cursor_reads_every_event_exactly_once(self) -> None:
         _journal(
-            self.data_dir,
+            self.board,
             [_event("secretary-1", "card.started", ordinal=index) for index in range(5)],
         )
         # Another card's events are interleaved: a position must survive them without shifting.
-        _journal(self.data_dir, [_event("secretary-2", "card.started", ordinal=99)])
+        _journal(self.board, [_event("secretary-2", "card.started", ordinal=99)])
         _journal(
-            self.data_dir,
+            self.board,
             [_event("secretary-1", "card.reported", ordinal=index) for index in range(5, 9)],
         )
         layer = self.layer()
@@ -147,7 +149,7 @@ class CursorTests(ReadLayerFixture):
         self.assertEqual(len(seen), len(set(seen)))
 
     def test_the_same_cursor_twice_is_the_same_page(self) -> None:
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=i) for i in range(6)])
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=i) for i in range(6)])
         layer = self.layer()
         first = layer.task_events("secretary-1", None, limit=3)
         again = layer.task_events("secretary-1", None, limit=3)
@@ -161,7 +163,7 @@ class CursorTests(ReadLayerFixture):
         )
 
     def test_a_cursor_issued_before_new_events_returns_exactly_those_events(self) -> None:
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
         layer = self.layer()
         page = layer.task_events("secretary-1", None, limit=50)
         self.assertEqual(len(page["items"]), 1)
@@ -170,7 +172,7 @@ class CursorTests(ReadLayerFixture):
         # Nothing new yet: the same cursor is an empty page, not a repeat and not an error.
         self.assertEqual(layer.task_events("secretary-1", cursor, limit=50)["items"], [])
         _journal(
-            self.data_dir,
+            self.board,
             [
                 _event("secretary-2", "card.started", ordinal=7),
                 _event("secretary-1", "card.moved", ordinal=1),
@@ -180,7 +182,7 @@ class CursorTests(ReadLayerFixture):
         self.assertEqual([item["event_id"] for item in after["items"]], ["evt-secretary-1-1"])
 
     def test_a_cursor_from_another_card_is_refused_by_name(self) -> None:
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
         layer = self.layer()
         foreign = layer.task_events("secretary-1", None, limit=1)["next_cursor"]
         with self.assertRaises(InvalidCursor) as refused:
@@ -190,17 +192,18 @@ class CursorTests(ReadLayerFixture):
             layer.task_events("secretary-1", "not-a-cursor", limit=1)
 
     def test_a_cursor_past_the_end_of_the_journal_is_refused_not_reset(self) -> None:
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
         beyond = Cursor(ref="secretary-1", offset=10_000_000).encode()
         with self.assertRaises(InvalidCursor):
             self.layer().task_events("secretary-1", beyond, limit=1)
 
-    def test_an_unreadable_journal_is_a_source_fact_and_keeps_the_cursor(self) -> None:
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=0)])
+    def test_an_unreadable_audit_is_a_source_fact_and_keeps_the_cursor(self) -> None:
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
         layer = self.layer()
         cursor = layer.task_events("secretary-1", None, limit=1)["next_cursor"]
-        (self.data_dir / "board" / "events.ndjson").unlink()
-        page = layer.task_events("secretary-1", cursor, limit=1)
+        refusal = TaskError("backend_unavailable", "the board store could not answer a read", 1)
+        with mock.patch.object(self.board, "_query", side_effect=refusal):
+            page = layer.task_events("secretary-1", cursor, limit=1)
         self.assertEqual(page["source"]["state"], "unavailable")
         self.assertIn("could not be read", page["source"]["reason"])
         self.assertEqual(page["items"], [])
@@ -209,7 +212,7 @@ class CursorTests(ReadLayerFixture):
     def test_generic_audit_records_are_events_too(self) -> None:
         """A history with the transitions in it and the creations missing would not be a history."""
         _journal(
-            self.data_dir,
+            self.board,
             [
                 {
                     "schema_version": 1,
@@ -413,19 +416,19 @@ class DegradedSourceTests(ReadLayerFixture):
 
 class TaskSnapshotTests(ReadLayerFixture):
     def _card(self) -> None:
-        self.board.comments[12] = [
+        self.board.replace_comments(12, [
             {"date_creation": 1, "comment": "[report:done]\nthe work is done"},
             {"date_creation": 2, "comment": "[review:green]\nno blockers"},
             {"date_creation": 3, "comment": "[decision:release]\nship it"},
-        ]
+        ])
 
     def test_a_task_snapshot_carries_state_project_events_and_result(self) -> None:
         self._card()
-        _journal(self.data_dir, [_event("secretary-510-pilot", "card.started", ordinal=0)])
+        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
         _production(
             self.data_dir,
             {
-                "secretary-510-pilot": {
+                "secretary-510": {
                     "attempt_id": "attempt-1",
                     "state": "validate",
                     "head": "codex-worker",
@@ -436,7 +439,7 @@ class TaskSnapshotTests(ReadLayerFixture):
                 }
             },
         )
-        snapshot = self.layer().task_snapshot("secretary-510-pilot")
+        snapshot = self.layer().task_snapshot("secretary-510")
         self.assertEqual(snapshot["card"]["value"]["state"], "ready")
         self.assertEqual(
             snapshot["project"],
@@ -463,18 +466,18 @@ class TaskSnapshotTests(ReadLayerFixture):
         # The tail's cursor continues at the end of the journal, so a client polling with it is
         # never handed an event it was just shown.
         self.assertEqual(
-            self.layer().task_events("secretary-510-pilot", snapshot["events"]["next_cursor"])["items"],
+            self.layer().task_events("secretary-510", snapshot["events"]["next_cursor"])["items"],
             [],
         )
 
     def test_a_blocked_report_keeps_its_classification(self) -> None:
-        self.board.comments[12] = [
+        self.board.replace_comments(12, [
             {
                 "date_creation": 1,
                 "comment": "[report:blocked]\nclassification: external_fact\n\nthe dependency is down",
             }
-        ]
-        work = self.layer().task_snapshot("secretary-510-pilot")["work"]
+        ])
+        work = self.layer().task_snapshot("secretary-510")["work"]
         self.assertEqual(work["worker_report"]["classification"], "external_fact")
         self.assertEqual(
             work["outcome"],
@@ -486,19 +489,11 @@ class TaskSnapshotTests(ReadLayerFixture):
             self.layer().task_snapshot("secretary-does-not-exist")
 
     def test_a_task_snapshot_survives_a_board_that_will_not_answer(self) -> None:
-        class SilentBoard:
-            instance_dir = Path("/nonexistent")
-
-            def call(self, method, **params):
-                from secretary.tasks import TaskError
-
-                raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-
-            def call_batch(self, calls):
-                return []
-
-        _journal(self.data_dir, [_event("secretary-1", "card.started", ordinal=0)])
-        snapshot = self.layer(board_client=SilentBoard()).task_snapshot("secretary-1")
+        """The card read is refused and the audit of the same store still answers."""
+        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
+        refusal = TaskError("backend_error", "the board refused the read request", 1)
+        with mock.patch.object(self.board, "call", side_effect=refusal):
+            snapshot = self.layer().task_snapshot("secretary-1")
         self.assertEqual(snapshot["card"]["source"]["state"], "unavailable")
         self.assertIsNone(snapshot["card"]["value"])
         self.assertEqual(snapshot["events"]["source"]["state"], "available")
@@ -507,12 +502,12 @@ class TaskSnapshotTests(ReadLayerFixture):
 
 class SchemaTests(ReadLayerFixture):
     def test_every_document_validates_against_the_published_schema(self) -> None:
-        self.board.comments[12] = [{"date_creation": 1, "comment": "[report:done]\ndone"}]
-        _journal(self.data_dir, [_event("secretary-510-pilot", "card.started", ordinal=0)])
+        self.board.replace_comments(12, [{"date_creation": 1, "comment": "[report:done]\ndone"}])
+        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
         _production(
             self.data_dir,
             {
-                "secretary-510-pilot": {
+                "secretary-510": {
                     "attempt_id": "attempt-1",
                     "state": "validate",
                     "worker_pid_file": str(self.tmp / "worker.pid"),
@@ -523,8 +518,8 @@ class SchemaTests(ReadLayerFixture):
         layer = self.layer()
         for document in (
             layer.system_snapshot(),
-            layer.task_snapshot("secretary-510-pilot"),
-            layer.task_events("secretary-510-pilot", None, limit=10),
+            layer.task_snapshot("secretary-510"),
+            layer.task_events("secretary-510", None, limit=10),
         ):
             with self.subTest(kind=document["kind"]):
                 self.assertEqual(validate(document, "web-read", document["kind"]), [])
@@ -585,7 +580,7 @@ class WebReadCommandTests(ReadLayerFixture):
         return code, out.getvalue(), err.getvalue()
 
     def test_the_three_commands_print_their_snapshots(self) -> None:
-        _journal(self.data_dir, [_event("secretary-510-pilot", "card.started", ordinal=0)])
+        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
         with mock.patch(
             "secretary.webproto.commands.ReadLayer",
             lambda instance, **kwargs: self.layer(),
@@ -594,11 +589,11 @@ class WebReadCommandTests(ReadLayerFixture):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out)["kind"], "system")
 
-            code, out, _ = self._run("web-read", "task", "--ref", "secretary-510-pilot", "--json")
+            code, out, _ = self._run("web-read", "task", "--ref", "secretary-510", "--json")
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(out)["ref"], "secretary-510-pilot")
+            self.assertEqual(json.loads(out)["ref"], "secretary-510")
 
-            code, out, _ = self._run("web-read", "events", "--ref", "secretary-510-pilot")
+            code, out, _ = self._run("web-read", "events", "--ref", "secretary-510")
             self.assertEqual(code, 0)
             self.assertIn("next cursor:", out)
 

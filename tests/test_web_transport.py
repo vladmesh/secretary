@@ -1,7 +1,8 @@
 """The web transport: a status table, a closed route list, cursors over HTTP, and one loopback bind.
 
 Hermetic in the same sense the two layer suites are: no live Orca, no Kanboard, no network beyond a
-loopback socket this test binds itself, and no real worker. The board is `FakeKanboard`, the head
+loopback socket this test binds itself, and no real worker. The board is a throwaway card store
+(`tests/sql_backend_fixtures.py`), the head
 backend is a fake that leaves behind exactly the artefacts a supervised head leaves, and every
 route is driven through :class:`secretary.web.app.WebApp` directly, which is the same object the
 socket handler calls.
@@ -34,6 +35,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from secretary.config import ConfigError, load_schema
+from secretary.tasks import task_audit_for
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
 from secretary.web.server import (
@@ -63,7 +65,8 @@ from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.tasks import SEED_COLUMN, empty_seed
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
 from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
@@ -75,6 +78,8 @@ from triggered_agents.runtime.head.runtime import (
     StartReceipt,
     StopReceipt,
 )
+
+SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -180,12 +185,9 @@ class TransportFixture(unittest.TestCase):
             (self.data_dir / leaf).mkdir(parents=True)
         self.repo = self._repo()
         self.instance = self._instance()
-        self.board = FakeKanboard()
-        # The fake board seeds two cards of its own. Every test here says which cards exist, so it
-        # starts from an empty board and adds what it needs.
-        self.board.tasks.clear()
-        self.board.metadata.clear()
-        self.board.comments.clear()
+        # Every test here says which cards exist, so it starts from an empty board.
+        self.board = card_store(self, empty_seed(), instance_dir=self.data_dir)
+        self._cards = 0
         self.runtime = FakeHeadRuntime(self.data_dir / "webproto" / "heads")
         self._production({})
         self.clock = 1788652800.0
@@ -241,28 +243,27 @@ class TransportFixture(unittest.TestCase):
         )
 
     def _card(self, reference: str = "secretary-run-1", column: int = 1) -> int:
-        task_id = 40 + len(self.board.tasks)
-        self.board.tasks.append(
-            {
-                "id": task_id,
-                "reference": reference,
-                "title": "A small task",
-                "description": "Add a line to README.md.",
-                "column_id": column,
-                "position": 1,
-                "swimlane_id": 4,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            }
+        task_id = 40 + self._cards
+        self._cards += 1
+        self.backlog_key = task_id
+        self.board.add_card(
+            task_id,
+            reference,
+            state=SEED_STATE[column],
+            title="A small task",
+            description="Add a line to README.md.",
+            position=1,
+            created=1720000000,
+            project=None,
+            metadata={"project": "secretary", "task_type": "code", "slug": "run"},
         )
-        self.board.metadata[task_id] = {"project": "secretary", "task_type": "code", "slug": "run"}
-        self.board.comments[task_id] = []
         return task_id
 
     def _journal(self, records: list[dict[str, Any]]) -> None:
-        with (self.data_dir / "board" / "events.ndjson").open("a", encoding="utf-8") as journal:
-            for record in records:
-                journal.write(json.dumps(record, sort_keys=True) + "\n")
+        """Commit records to the card audit (`requests`), in order."""
+        audit = task_audit_for(self.board)
+        for record in records:
+            audit.append(record["request_id"], record)
 
     def _event(self, ref: str, ordinal: int) -> dict[str, Any]:
         return {
@@ -703,10 +704,10 @@ class PageTests(TransportFixture):
 
     def test_the_card_page_shows_state_events_output_and_result(self) -> None:
         task_id = self._card()
-        self.board.comments[task_id] = [
+        self.board.replace_comments(task_id, [
             {"date_creation": 1, "comment": "[report:done]\nthe worker's own words"},
             {"date_creation": 2, "comment": "[review:green]\nthe reviewer's own words"},
-        ]
+        ])
         self._journal([self._event("secretary-run-1", 0)])
         markup = self.text_of(self.get("/tasks/secretary-run-1"))
         self.assertIn("the worker&#x27;s own words", markup)
@@ -875,9 +876,9 @@ class PageTests(TransportFixture):
         the reason the layer gave.
         """
         task_id = self._card()
-        self.board.comments[task_id] = [
+        self.board.replace_comments(task_id, [
             {"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}
-        ]
+        ])
         self._journal([self._event("secretary-run-1", 0)])
         runs = self.data_dir / "webproto" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
@@ -909,7 +910,7 @@ class PageTests(TransportFixture):
 
     def test_a_page_escapes_what_the_board_gave_it(self) -> None:
         self._card(column=2)
-        self.board.tasks[0]["title"] = "<script>alert(1)</script>"
+        self.board.update(40, title="<script>alert(1)</script>")
         markup = self.text_of(self.get("/tasks/secretary-run-1"))
         self.assertNotIn("<script>alert(1)</script>", markup)
         self.assertIn("&lt;script&gt;", markup)

@@ -1,8 +1,8 @@
 """Contract tests binding the dispatcher test doubles to the real runtime classes.
 
-The dispatcher suite drives `DispatcherRuntime` against `FakeHost`/`FakeCatalog`/`FakeKanboard`
-(tests/test_dispatcher.py). Those doubles stand in for `CommandHostRuntime`, `InstanceCatalog` and
-`KanboardClient`. When a real class grew a method (`teardown`, `gate_check`) or changed a return
+The dispatcher suite drives `DispatcherRuntime` against `FakeHost`/`FakeCatalog` and a real card
+store (tests/test_dispatcher.py). Those doubles stand in for `CommandHostRuntime` and
+`InstanceCatalog`. When a real class grew a method (`teardown`, `gate_check`) or changed a return
 shape, the double had to be patched by hand, and every time it lagged the suite stayed green while
 production broke. These tests make that drift a build failure.
 
@@ -34,9 +34,6 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env as head_role_env
-from secretary import (
-    tasks as tasks_module,
-)
 from secretary import upgrade
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
@@ -48,10 +45,10 @@ from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatch import production as dispatcher_production
 from secretary.dispatch import release_lifecycle as dispatcher_release_lifecycle
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
 from secretary.dispatch import worker_report as dispatcher_worker_report
-from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
@@ -65,8 +62,8 @@ from secretary.head_registry import (
 from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
 from secretary.role_env import observer_binding
-from secretary.tasks import KanboardClient
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from tests.dispatcher_fixtures import card_audit
+from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
@@ -274,11 +271,12 @@ class HostBehaviourContractTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.real = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="noop")  # type: ignore[arg-type]
+        self.real = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="noop", audit=card_audit(self))  # type: ignore[arg-type]
         # These calls assert host return-shape parity after the pre-pane boundary.  The explicit
         # accepted run keeps the test from claiming a missing provider schema is launchable.
         self.real.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.fake = FakeHost(self.root / "fake")
+        self.fake.audit = self.real.audit
         (self.root / "fake").mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
@@ -393,46 +391,6 @@ class HostBehaviourContractTests(unittest.TestCase):
         record = self._record(str(self.root / "fake" / "w1"))
         self.assertIsNone(real.stop(record))
         self.assertIsNone(real.teardown(record))
-
-
-class KanboardContractTests(unittest.TestCase):
-    def test_fake_call_signature_matches_the_real_client(self) -> None:
-        self.assertEqual(_signature(KanboardClient.call), _signature(FakeKanboard.call))
-
-    def test_fake_only_answers_methods_the_real_code_calls(self) -> None:
-        """A branch for an RPC method nothing calls is a fake that has drifted away from the
-        protocol; the reverse direction already fails loudly through the fake's AssertionError."""
-        source = Path(inspect.getsourcefile(tasks_module)).read_text(encoding="utf-8")
-        called = {
-            node.args[0].value
-            for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "call"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        }
-        self.assertIn("getAllTasks", called)
-        handled = _handled_rpc_methods(FakeKanboard.call)
-        self.assertTrue(handled)
-        self.assertEqual(
-            sorted(handled - called),
-            [],
-            "FakeKanboard answers RPC methods secretary/tasks.py never calls",
-        )
-
-
-def _handled_rpc_methods(func) -> set[str]:
-    """String literals the fake dispatches on in `if method == "...":`."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    return {
-        comparator.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "method"
-        for comparator in node.comparators
-        if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str)
-    }
 
 
 class RuntimeWiringContractTests(unittest.TestCase):

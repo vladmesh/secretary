@@ -1,7 +1,8 @@
 """The product runtime: one owner of a card, an idempotent start, five outcomes, and no Orca.
 
 Hermetic in the same strong sense the read layer's suite is: no live Orca, no network, no Kanboard
-and no real agent. The board is `FakeKanboard`, the head registry is a table this file writes, and
+and no real agent. The board is a throwaway card store
+(`tests/sql_backend_fixtures.py`), the head registry is a table this file writes, and
 the head backend is a fake whose whole job is to leave behind exactly the artefacts a real
 supervised head leaves — a launch-identity heartbeat, a versioned journal and a result file — so
 that everything the operations conclude, they conclude from the same evidence a real run produces.
@@ -47,7 +48,9 @@ from secretary.webproto.errors import (
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.runs import RAISED, UNRESOLVED, ProductRun, RunStore, RunStoreError
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.fakes.tasks import SEED_COLUMN
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
 from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
@@ -62,6 +65,8 @@ from triggered_agents.runtime.head.runtime import (
     StartReceipt,
     StopReceipt,
 )
+
+SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -226,7 +231,8 @@ class ProductRuntimeFixture(unittest.TestCase):
         (self.data_dir / "sprints").mkdir(parents=True)
         self.repo = self._repo()
         self.instance = self._instance()
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
+        self._cards = 2
         self._backlog_card()
         self.runtime = FakeHeadRuntime(self.data_dir / "webproto" / "heads")
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
@@ -280,22 +286,20 @@ class ProductRuntimeFixture(unittest.TestCase):
         return repo
 
     def _backlog_card(self, reference: str = "secretary-run-1", column: int = 1) -> None:
-        task_id = 40 + len(self.board.tasks)
-        self.board.tasks.append(
-            {
-                "id": task_id,
-                "reference": reference,
-                "title": "A small task",
-                "description": "Add a line to README.md.",
-                "column_id": column,
-                "position": 1,
-                "swimlane_id": 4,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            }
+        task_id = 40 + self._cards
+        self._cards += 1
+        self.backlog_key = task_id
+        self.board.add_card(
+            task_id,
+            reference,
+            state=SEED_STATE[column],
+            title="A small task",
+            description="Add a line to README.md.",
+            position=1,
+            created=1720000000,
+            project=None,
+            metadata={"project": "secretary", "task_type": "code", "slug": "run"},
         )
-        self.board.metadata[task_id] = {"project": "secretary", "task_type": "code", "slug": "run"}
-        self.board.comments[task_id] = []
 
     def layer(self, **kwargs) -> OperationLayer:
         options = {
@@ -573,9 +577,9 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertEqual(self.runtime.starts, [])
 
     def test_a_card_in_the_dispatcher_lane_is_refused_by_its_state(self) -> None:
-        # `secretary-510-pilot` is the fixture board's Ready card: the dispatcher's own lane.
+        # `secretary-510` is the fixture board's Ready card: the dispatcher's own lane.
         with self.assertRaises(OwnerConflict) as refused:
-            self.layer().run_start("secretary-510-pilot", request_id="req-lane", profile=WORKER_PROFILE)
+            self.layer().run_start("secretary-510", request_id="req-lane", profile=WORKER_PROFILE)
         self.assertIn("production dispatcher's lane", str(refused.exception))
 
     def test_a_durable_dispatcher_record_refuses_the_run(self) -> None:
@@ -594,11 +598,13 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertIn("could not be read", str(refused.exception))
 
     def test_an_unregistered_project_is_refused(self) -> None:
-        self._backlog_card("other-run-1")
-        task_id = self.board.tasks[-1]["id"]
-        self.board.metadata[task_id]["project"] = "not-registered"
+        # Its own number: a card reference's number is unique within the project the card
+        # carries until the test re-homes it (§9).
+        self._backlog_card("other-run-9")
+        task_id = self.backlog_key
+        self.board.save_metadata(task_id, project="not-registered")
         with self.assertRaises(ValidationRefused):
-            self.layer().run_start("other-run-1", request_id="req-p", profile=WORKER_PROFILE)
+            self.layer().run_start("other-run-9", request_id="req-p", profile=WORKER_PROFILE)
 
     def test_every_start_path_goes_through_the_one_gate(self) -> None:
         """Both operations that raise a head call `admit`, and neither has a branch around it."""
@@ -632,8 +638,8 @@ class AdmissionTests(ProductRuntimeFixture):
         order rather than the set.
         """
         self._backlog_card("secretary-run-3")
-        task_id = self.board.tasks[-1]["id"]
-        self.board.metadata[task_id]["project"] = "not-registered"
+        task_id = self.backlog_key
+        self.board.save_metadata(task_id, project="not-registered")
         self.reserve_sprint("secretary", "sprint:1427")
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
             json.dumps({"records": {"secretary-run-3": {"state": "validate"}}}), encoding="utf-8"
@@ -648,14 +654,14 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertIn("holds no card", refusal("secretary-does-not-exist"))
         # 2. its project is registered, before the reservation index is consulted.
         self.assertIn("not registered", refusal("secretary-run-3"))
-        self.board.metadata[task_id]["project"] = "secretary"
+        self.board.save_metadata(task_id, project="secretary")
         # 3. the reservation, before the card's own state.
         self.assertIn("sprint:1427", refusal("secretary-run-3"))
         self.reserve_sprint("other", "sprint:1427")
         # 4. the card's state, before the dispatcher's durable record.
-        self.board.tasks[-1]["column_id"] = 2
+        self.board.move(self.backlog_key, "ready")
         self.assertIn("dispatcher's lane", refusal("secretary-run-3"))
-        self.board.tasks[-1]["column_id"] = 1
+        self.board.move(self.backlog_key, "issues")
         # 5. the dispatcher's record, before this layer's own runs.
         self.assertIn("durable record", refusal("secretary-run-3"))
 
@@ -1040,10 +1046,11 @@ class EventVisibilityTests(ProductRuntimeFixture):
         run_id = self.start()["run"]["run_id"]
         self.runtime.publish_result(run_id, {"status": "done"})
         self.layer().run_state(run_id)
+        # The run's history is the card audit's (`requests`); no file history exists beside it.
         journals = sorted(
             path.relative_to(self.data_dir).as_posix() for path in self.data_dir.rglob("*.ndjson")
         )
-        self.assertEqual(journals, ["board/events.ndjson"])
+        self.assertEqual(journals, [])
 
 
 class LifecycleTests(ProductRuntimeFixture):

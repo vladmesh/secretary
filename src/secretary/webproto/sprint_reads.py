@@ -117,7 +117,7 @@ from secretary.dispatch.observer import (
     observer_snapshot,
 )
 from secretary.head_registry import installed_heads
-from secretary.product_issues import ProductIssueStore, registered_projects
+from secretary.product_issues import ProductIssueStore, entity_audit_for, registered_projects
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -139,7 +139,7 @@ from secretary.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import recorded_card_transition, task_audit_for
+from secretary.tasks import recorded_card_transition
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
@@ -1572,13 +1572,14 @@ class SprintReadLayer(ProtocolBoundary):
         fails where a read would have: the journal's mark is always backed by an attempt through the
         same audit owner, and never by a whole read the document does not need.
 
-        Which store that is, is the card client's own answer (`task_audit_for`): `requests` on the
-        PostgreSQL backend and `board/events.ndjson` on Kanboard (`docs/BOARD_STORE.md` §7.3). The
+        Which store that is, is the sprint client's own answer (`entity_audit_for`): `requests` on
+        the PostgreSQL backend and `board/events.ndjson` for the Sprint Kanboard implementation
+        until it retires (`docs/BOARD_STORE.md` §7.3). The
         evidence path stays the journal either way, because that is the file an operator is pointed
         at when this source refuses on the backend that has one.
         """
         try:
-            audit = task_audit_for(client, data_dir)
+            audit = entity_audit_for(client, data_dir)
             events = audit.events() if references is None else audit.events(references=references)
         except _SOURCE_FAILURES as exc:
             return Reading(

@@ -6,6 +6,7 @@ import ast
 import inspect
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -418,24 +419,46 @@ KANBOARD_ONLY_CONSTRUCTIONS = {
 # its audit by default instead of by its client, so it is added deliberately with its reason or it
 # is a defect.
 FILE_AUDIT_CONSTRUCTIONS = {
-    "tasks.py": (
-        "`task_audit_for` itself, which is where the choice is made: it returns this for a Kanboard "
-        "client and `SqlTaskAudit` for a PostgreSQL one"
-    ),
     "board/events.py": (
         "the typed canon's own storage internal, for a caller that has no client at all -- offline "
         "or Kanboard-only; every caller that has one passes the audit its client named, and with "
         "neither an audit nor a data directory the construction refuses"
     ),
     "product_issues.py": (
-        "the pre-v2 pending-layout gate and the unmigrated-file-claim check, which are statements "
-        "about the file layout itself and are run *because* the client is PostgreSQL"
-    ),
-    "dispatch/host.py": (
-        "the default of a command host built with no audit, which only tests do; the dispatcher "
-        "hands its own backend-selected audit in (`dispatcher.py`)"
+        "`entity_audit_for`, the audit owner of the Sprint and Product/Issue Kanboard "
+        "implementations until they retire; and the pre-v2 pending-layout gate and the "
+        "unmigrated-file-claim check, which are statements about the file layout itself and are "
+        "run *because* the client is PostgreSQL"
     ),
 }
+
+#: Where a live audit reader asks for its owner. Cards have one owner (`task_audit_for`); the Sprint
+#: and Product/Issue code still has two implementations, so it asks `entity_audit_for`.
+LIVE_AUDIT_SELECTORS = {
+    "checkpoint.py": "task_audit_for(",
+    "task_commands.py": "task_audit_for(",
+    "webproto/command_reads.py": "task_audit_for(",
+    "webproto/ops.py": "task_audit_for(",
+    "webproto/reads.py": "task_audit_for(",
+    "webproto/sprint_reads.py": "entity_audit_for(",
+    "board/kanboard.py": "task_audit_for(",
+    "sprints.py": "entity_audit_for(",
+    "data.py": "task_audit_for(",
+    "dispatch/bootstrap.py": "task_audit_for(",
+    "product_issues.py": "entity_audit_for(",
+}
+
+#: The card path: every module whose `backend_kind` branch was collapsed to PostgreSQL.
+CARD_PATH_MODULES = (
+    "tasks.py",
+    "task_restore.py",
+    "task_commands.py",
+    "checkpoint.py",
+    "data.py",
+    "restore.py",
+    "webproto/reads.py",
+    "webproto/command_reads.py",
+)
 
 
 class FileAuditOwnershipTests(unittest.TestCase):
@@ -477,22 +500,80 @@ class FileAuditOwnershipTests(unittest.TestCase):
         either a deliberate removal of a reader or the bypass coming back, and both belong in a diff
         that has to change this list.
         """
-        for module in (
-            "checkpoint.py",
-            "task_commands.py",
-            "webproto/command_reads.py",
-            "webproto/ops.py",
-            "webproto/reads.py",
-            "webproto/sprint_reads.py",
-            "board/kanboard.py",
-            "sprints.py",
-            "data.py",
-            "dispatch/bootstrap.py",
-            "product_issues.py",
-        ):
+        for module, selector in LIVE_AUDIT_SELECTORS.items():
             source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")
             with self.subTest(module=module):
-                self.assertIn("task_audit_for(", source, module)
+                self.assertIn(selector, source, module)
+
+    def test_the_card_audit_has_one_owner(self) -> None:
+        """`task_audit_for` returns the SQL audit whatever it is handed; no card writer builds a file one."""
+        from secretary.board.sql_audit import SqlTaskAudit
+        from secretary.tasks import task_audit_for
+
+        self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
+        source = inspect.getsource(task_audit_for)
+        self.assertNotIn("TaskAudit(", source.replace("SqlTaskAudit(", ""))
+
+    def test_the_card_path_has_no_backend_branch(self) -> None:
+        """Cards have one implementation, so nothing on their path asks which one it is holding."""
+        for module in CARD_PATH_MODULES:
+            tree = ast.parse((ROOT / "src" / "secretary" / module).read_text(encoding="utf-8"))
+            reads = [
+                node.lineno
+                for node in ast.walk(tree)
+                if (isinstance(node, ast.Attribute) and node.attr == "backend_kind")
+                or (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                    and any(
+                        isinstance(argument, ast.Constant) and argument.value == "backend_kind"
+                        for argument in node.args
+                    )
+                )
+            ]
+            with self.subTest(module=module):
+                self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
+
+    def test_the_card_path_writes_no_retired_backend_identity(self) -> None:
+        """A new card write names the PostgreSQL backend; `task_kanboard_<n>` is only ever read.
+
+        The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
+        or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and
+        secretary-1669's first submission restored cards under the retired identity that way. The
+        one allowed use is `task_restore._restored_backend`, which answers the identity Sprint and
+        Product/Issue records still carry.
+        """
+        allowed = {("task_restore.py", "_restored_backend")}
+        for module in CARD_PATH_MODULES:
+            tree = ast.parse((ROOT / "src" / "secretary" / module).read_text(encoding="utf-8"))
+            found: list[int] = []
+            for holder in ast.walk(tree):
+                if not isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                if (module, holder.name) in allowed:
+                    continue
+                for node in ast.walk(holder):
+                    retired = (isinstance(node, ast.Name) and node.id == "KANBOARD") or (
+                        isinstance(node, ast.Attribute) and node.attr == "KANBOARD"
+                    )
+                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "entity_id":
+                        retired = retired or any(
+                            isinstance(argument, ast.Constant) and argument.value == "kanboard"
+                            for argument in node.args
+                        )
+                    if isinstance(node, ast.Dict):
+                        retired = retired or any(
+                            isinstance(key, ast.Constant)
+                            and key.value == "kind"
+                            and isinstance(value, ast.Constant)
+                            and value.value == "kanboard"
+                            for key, value in zip(node.keys, node.values, strict=True)
+                        )
+                    if retired:
+                        found.append(node.lineno)
+            with self.subTest(module=module):
+                self.assertEqual(sorted(set(found)), [], f"{module} writes the retired Kanboard identity")
 
     def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
         """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""
@@ -503,64 +584,19 @@ class FileAuditOwnershipTests(unittest.TestCase):
         self.assertEqual(_AuditOnce().events(), [])
 
 
-# The *indirect* file readers: a class that opens `<data>/board/events.ndjson` itself, so a
-# construction of it is a file audit read without a `TaskAudit(...)` call for the test above to see.
-# `secretary-1622`'s first submission is why this list exists: the product-run events had moved to
-# `requests` while `ReadLayer.task_snapshot` and `task_events` still built `EventJournal(data_dir)`,
-# so a migrated installation answered a card's history from a projection its writers never touch --
-# unavailable where it had been swept, a successful empty or stale page where an old one remained.
-# Each entry names the one function the construction may live in, which is the function that has
-# already asked the client which backend it is.
-FILE_EVENT_READER_CONSTRUCTIONS = {
-    "webproto/reads.py": (
-        "_events",
-        (
-            "the Kanboard branch of the read layer's backend-selected event reader, chosen after "
-            "the card client has been asked what it is; the PostgreSQL branch pages the audit "
-            "owner's own traversal through `CommittedAudit`"
-        ),
-    ),
-}
-
-
 class IndirectFileAuditReaderTests(unittest.TestCase):
-    """A reader that opens the journal itself is selected by the backend, like every other."""
+    """No reader opens the file journal itself: the card history is the card audit's traversal.
 
-    def _constructions(self, name: str) -> dict[str, list[tuple[str, int]]]:
-        """Every `<name>(...)` call in `src/secretary`, by module, with its enclosing function."""
-        found: dict[str, list[tuple[str, int]]] = {}
-        for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for holder in ast.walk(tree):
-                if not isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
-                    continue
-                for node in ast.walk(holder):
-                    target = node.func if isinstance(node, ast.Call) else None
-                    if isinstance(target, ast.Name) and target.id == name:
-                        key = str(path.relative_to(ROOT / "src" / "secretary"))
-                        found.setdefault(key, []).append((holder.name, node.lineno))
-        return found
+    `secretary-1622`'s first submission is why this class exists: the product-run events had moved
+    to `requests` while `ReadLayer.task_snapshot` and `task_events` still built
+    `EventJournal(data_dir)`, so a migrated installation answered a card's history from a projection
+    its writers never touch. The file reader is gone with the Kanboard card backend.
+    """
 
-    def test_only_the_named_modules_open_the_file_event_reader(self) -> None:
-        """Anything else pages a file the installation's backend may never write."""
-        built = self._constructions("EventJournal")
-        self.assertEqual(
-            sorted(set(built) - set(FILE_EVENT_READER_CONSTRUCTIONS)),
-            [],
-            "these modules build webproto.journal.EventJournal, which opens "
-            "<data>/board/events.ndjson itself, instead of reading the audit owner of their card "
-            "client (secretary.tasks.task_audit_for)",
-        )
-        self.assertEqual(sorted(built), sorted(FILE_EVENT_READER_CONSTRUCTIONS))
+    def test_the_file_event_reader_is_gone(self) -> None:
+        from secretary.webproto import journal
 
-    def test_each_one_sits_in_the_function_that_selected_the_backend(self) -> None:
-        """The allowance is the selection seam itself, not the module as a whole."""
-        for module, (function, _reason) in FILE_EVENT_READER_CONSTRUCTIONS.items():
-            with self.subTest(module=module):
-                self.assertEqual(
-                    sorted({holder for holder, _line in self._constructions("EventJournal")[module]}),
-                    [function],
-                )
+        self.assertFalse(hasattr(journal, "EventJournal"))
 
     def test_the_read_layer_selects_its_event_reader_from_its_client(self) -> None:
         """Both card-event operations read the owner the client names, and neither a file by default."""

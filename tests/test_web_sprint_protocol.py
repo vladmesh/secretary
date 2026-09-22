@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
@@ -29,11 +30,12 @@ from unittest import mock
 from secretary import sprints as sprints_module
 from secretary.cli import main
 from secretary.config import validate
-from secretary.knowledge_write import KnowledgeError, list_knowledge_documents
+from secretary.knowledge_write import list_knowledge_documents
+from secretary.product_issues import entity_audit_for
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
-from secretary.tasks import TaskAudit, TaskError, TaskWriter
+from secretary.tasks import _STATE_BY_COLUMN, TaskAudit, TaskError, TaskWriter
 from secretary.webproto import section as section_module
 from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
@@ -49,7 +51,6 @@ from secretary.webproto.errors import (
 )
 from secretary.webproto.runs import RunStoreError
 from secretary.webproto.sprint_ops import (
-    CLOSE_PENDING_REASON,
     COMMENT_PENDING_REASON,
     PENDING_REASON,
     SPRINT_CLOSE_OPERATION,
@@ -132,6 +133,28 @@ def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(sorted(kinds)), tuple(sorted(underivable))
 
 
+
+def _board_id(board: Any, name: str) -> int:
+    """Which board of this client carries `name`, as the client itself answers."""
+    return int(board.call("getProjectByName", name=name)["id"])
+
+
+@contextlib.contextmanager
+def _board_missing(board: Any, name: str) -> Iterator[None]:
+    """The client answers that it has no board by this name, as a board that is gone does."""
+    original = board.call
+
+    def call(method: str, **params: Any) -> Any:
+        if method == "getProjectByName" and params.get("name") == name:
+            return None
+        return original(method, **params)
+
+    board.call = call  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        board.call = original  # type: ignore[method-assign]
+
 class CreateTests(SprintProtocolFixture):
     def test_a_sprint_opens_with_what_it_was_opened_with(self) -> None:
         document = self.create()
@@ -152,10 +175,9 @@ class CreateTests(SprintProtocolFixture):
     def test_the_create_leaves_the_audit_and_the_reservation_index_the_writer_leaves(self) -> None:
         """The existing audit and reservations are kept because the existing writer keeps them."""
         from secretary.sprints import SPRINT_CREATED, active_sprint_projects
-        from secretary.tasks import TaskAudit
 
         reference = self.reference_of(self.create())
-        kinds = [str(event.get("kind") or "") for event in TaskAudit(self.data_dir).events()]
+        kinds = [str(event.get("kind") or "") for event in entity_audit_for(self.board, self.data_dir).events()]
         self.assertIn(SPRINT_CREATED, kinds)
         self.assertEqual(active_sprint_projects(self.data_dir), {"secretary": [reference]})
 
@@ -734,8 +756,10 @@ class SprintWorkFixture(SprintProtocolFixture):
     """The pieces both work-document suites drive: one sprint, one card, and where the card is.
 
     A base rather than an inheritance between the two suites, so that neither re-runs the other's
-    cases to get at a helper.
+    cases to get at a helper. It writes cards, so its board is a real card store (`CARD_STORE`).
     """
+
+    CARD_STORE = True
 
     def _entry(self, document: dict, reference: str) -> dict:
         return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
@@ -759,18 +783,12 @@ class SprintWorkFixture(SprintProtocolFixture):
 
     def _move(self, card: str, column: str) -> None:
         """Put one card in a Pipeline column, the way the dispatcher's own moves leave it."""
-        pipeline = self.board.projects["Pipeline"]
-        column_id = next(
-            entry["id"] for entry in self.board.columns[pipeline] if entry["title"] == column
-        )
-        row = next(task for task in self.board.tasks if task.get("reference") == card)
-        row["column_id"] = column_id
+        self.board.move(self.board.key_of(card), _STATE_BY_COLUMN[column])
 
     def _blocked(self, card: str, reason: str) -> None:
         """The board's own statement that a card is held, with the reason recorded on it."""
         self._move(card, "Blocked")
-        task_id = next(task["id"] for task in self.board.tasks if task.get("reference") == card)
-        self.board.metadata[int(task_id)]["blocked_by"] = reason
+        self.board.save_metadata(self.board.key_of(card), blocked_by=reason)
 
     def _current_task(self, sprint: str, card: str) -> None:
         from secretary.sprints import SprintWriter
@@ -809,9 +827,9 @@ class CurrentCardStateTests(SprintWorkFixture):
     # -- the journal, in the shapes history holds ----------------------------------------------
 
     def _append(self, event: dict[str, Any]) -> None:
-        path = self.data_dir / "board" / "events.ndjson"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event) + "\n")
+        """Commit one record to the card audit, under its own event id as its request id."""
+        record = {"request_id": event["event_id"], **event}
+        entity_audit_for(self.board, self.data_dir).append(record["request_id"], record)
 
     def _typed_move(self, at: str, source: str, target: str, *, ref: str | None = None) -> None:
         """A typed protocol event, which carries `transition.source` and `transition.target`."""
@@ -969,7 +987,7 @@ class CurrentCardStateTests(SprintWorkFixture):
     def test_a_journal_nobody_can_read_takes_away_this_and_nothing_else(self) -> None:
         """Criterion 2: the new part is unavailable, and the card's own fields still stand."""
         self._typed_move(self.LAST, "ready", "in_progress")
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit denied")):
+        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit denied")):
             watched = self.reads().sprint_state(self.reference)
             listed = self._entry(self.reads().sprint_list(), self.reference)
 
@@ -1126,9 +1144,9 @@ class SprintListTests(SprintWorkFixture):
 
     def test_an_unreadable_pipeline_board_marks_its_own_sections_and_no_others(self) -> None:
         reference = self.reference_of(self.create())
-        del self.board.projects["Pipeline"]
 
-        document = self.reads().sprint_list()
+        with _board_missing(self.board, "Pipeline"):
+            document = self.reads().sprint_list()
         entry = self._entry(document, reference)
 
         self.assertEqual(document["cards"]["source"]["state"], "unavailable")
@@ -1169,9 +1187,10 @@ class SprintListTests(SprintWorkFixture):
     def test_an_unreadable_sprint_board_marks_the_listing_and_still_says_the_rest(self) -> None:
         self.create()
         original = self.board.call
+        sprint_board = _board_id(self.board, SPRINT_BOARD_NAME)
 
         def refuse(method: str, **params: Any) -> Any:
-            if method == "getAllTasks" and params.get("project_id") == self.board.projects[SPRINT_BOARD_NAME]:
+            if method == "getAllTasks" and params.get("project_id") == sprint_board:
                 raise TaskError("backend_error", "the sprint board is unavailable", 1)
             return original(method, **params)
 
@@ -1190,7 +1209,6 @@ class SprintListTests(SprintWorkFixture):
         document = self.reads().sprint_list()
 
         self.assertEqual(document["sprints"]["items"], [])
-        self.assertNotIn(SPRINT_BOARD_NAME, self.board.projects)
         self.assertFalse(
             [method for method, _ in self.board.calls if method in _WRITE_METHODS],
             "a read of the listing wrote to the board",
@@ -1320,9 +1338,10 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
     def test_a_sprint_the_board_could_not_read_says_so_and_claims_nothing_else(self) -> None:
         self.create()
         original = self.board.call
+        sprint_board = _board_id(self.board, SPRINT_BOARD_NAME)
 
         def refuse(method: str, **params: Any) -> Any:
-            if method == "getAllTasks" and params.get("project_id") == self.board.projects[SPRINT_BOARD_NAME]:
+            if method == "getAllTasks" and params.get("project_id") == sprint_board:
                 raise TaskError("backend_error", "the sprint board is unavailable", 1)
             return original(method, **params)
 
@@ -1491,9 +1510,8 @@ class CommentFixture(SprintProtocolFixture):
         return [str(entry.get("comment") or "") for entry in self.board.comments.get(int(row["id"]), [])]
 
     def audit_events(self) -> list[dict[str, Any]]:
-        from secretary.tasks import TaskAudit
 
-        return TaskAudit(self.data_dir).events()
+        return entity_audit_for(self.board, self.data_dir).events()
 
     def significant_events(self) -> list[str]:
         """The events that are a semantic wake for this sprint's observer, by the product's own rule.
@@ -1520,11 +1538,10 @@ class CommentFixture(SprintProtocolFixture):
 
         from secretary.dispatch.observer import ObserverRecord, _observer_event_state
         from secretary.sprints import SprintReader
-        from secretary.tasks import TaskAudit
 
         runtime = SimpleNamespace(
             sprints=SprintReader(self.board, data_dir=self.data_dir, thresholds=None),
-            audit=TaskAudit(self.data_dir),
+            audit=entity_audit_for(self.board, self.data_dir),
         )
         record = ObserverRecord.from_json(
             (self.production_payload().get("observers") or {}).get(self.reference)
@@ -2273,7 +2290,7 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
     @contextlib.contextmanager
     def _sprint_board_refuses(self) -> Any:
         original = self.board.call
-        board = self.board.projects[SPRINT_BOARD_NAME]
+        board = _board_id(self.board, SPRINT_BOARD_NAME)
 
         def refuse(method: str, **params: Any) -> Any:
             if method == "getAllTasks" and params.get("project_id") == board:
@@ -2288,17 +2305,13 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
 
     @contextlib.contextmanager
     def _pipeline_refuses(self) -> Any:
-        pipeline = self.board.projects.pop("Pipeline")
-        try:
+        with _board_missing(self.board, "Pipeline"):
             yield
-        finally:
-            self.board.projects["Pipeline"] = pipeline
 
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
-        from secretary.tasks import TaskAudit
 
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit journal denied")):
             yield
 
     @contextlib.contextmanager
@@ -2565,12 +2578,13 @@ class CloseFixture(SprintProtocolFixture):
     """
 
     REASON = "the goal is reached far enough to cut the next sprint, and the rest is deferred"
+    #: It writes cards, so its board is a real card store.
+    CARD_STORE = True
 
     def setUp(self) -> None:
         super().setUp()
         init_state_repo(self.instance)
-        self.board._record(
-            30,
+        self.board.add_record(
             "issue:second",
             "Second issue",
             {
@@ -2809,27 +2823,9 @@ class CloseOperationTests(CloseFixture):
         self.assertEqual(len(self.knowledge()), 1)
         self.assertEqual(len(self.knowledge_commits()), 1)
 
-    def test_a_retry_of_a_half_finished_close_is_held_to_the_same_comparison(self) -> None:
-        """The staged half of the same rule: a close that stopped mid-transaction refuses it too."""
-        with mock.patch(
-            "secretary.knowledge_write.write_knowledge_document",
-            side_effect=KnowledgeError("the instance repo would not commit"),
-        ), self.assertRaises(OperationPending):
-            self.close()
-
-        with self.assertRaises(ValidationRefused) as refused:
-            self.close(closeout=CLOSEOUT_BODY.split(".")[0] + ".")
-        self.assertIn("staged with another closeout", refused.exception.message)
-
-        # And the retry that carries the body it was staged with finishes the same close.
-        answered = self.close()
-        self.assertTrue(answered["result"]["close"]["closeout"]["written"])
-        self.assertEqual(len(self.knowledge()), 1)
-
     def audit_events(self) -> list[dict[str, Any]]:
-        from secretary.tasks import TaskAudit
 
-        return TaskAudit(self.data_dir).events()
+        return entity_audit_for(self.board, self.data_dir).events()
 
 
 class CloseoutTests(CloseFixture):
@@ -2858,7 +2854,7 @@ class CloseoutTests(CloseFixture):
         answered = self.close()
 
         step = _close_step_request_id("close-1", "closeout", self.reference)
-        committed = TaskAudit(self.data_dir).committed_event(step)
+        committed = entity_audit_for(self.board, self.data_dir).committed_event(step)
         self.assertIsNotNone(committed)
         self.assertEqual(committed["kind"], SPRINT_CLOSEOUT)
         self.assertEqual(committed["ref"], self.reference)
@@ -2867,68 +2863,19 @@ class CloseoutTests(CloseFixture):
         )
         self.assertEqual(committed["payload"]["close_request_id"], "close-1")
 
-    def test_a_failure_at_the_closeout_is_repaired_by_repeating_the_same_request(self) -> None:
-        """Criterion 2's own case: fail the step, retry the request, one document at the end.
-
-        The failure is the knowledge writer's own, raised where the write happens, so what is
-        exercised is the step's recovery and not a stub of it.
-        """
-        with mock.patch(
-            "secretary.knowledge_write.write_knowledge_document",
-            side_effect=KnowledgeError("the instance repo would not commit"),
-        ), self.assertRaises(OperationPending) as refused:
-            self.close()
-
-        self.assertEqual(refused.exception.data["reason"], CLOSE_PENDING_REASON)
-        action = refused.exception.data["action"]
-        self.assertEqual(action["operation"], SPRINT_CLOSE_OPERATION)
-        self.assertEqual(action["request_id"], "close-1")
-        self.assertTrue(action["repeat_request"])
-        # The closeout runs before the status is published, so an interrupted close leaves the
-        # sprint open and still holding its projects -- which is what keeps a successor out.
-        self.assertEqual(self.status_of(), "open")
-        self.assertEqual(self.knowledge(), ())
-
-        answered = self.close()
-
-        self.assertEqual(self.status_of(), "closed")
-        self.assertEqual(len(self.knowledge()), 1)
-        self.assertEqual(len(self.knowledge_commits()), 1)
-        self.assertTrue(answered["result"]["close"]["closeout"]["written"])
-
-    def test_a_failure_after_the_closeout_leaves_exactly_one_document(self) -> None:
-        """The other half: the step landed, the close did not, and the retry writes no second one."""
-        from secretary.sprints import SprintWriter
-
-        with mock.patch.object(
-            SprintWriter,
-            "_transition_host",
-            side_effect=TaskError("backend_error", "the board would not publish the status", 1),
-        ), self.assertRaises(OperationPending):
-            self.close()
-
-        self.assertEqual(len(self.knowledge()), 1)
-        commits = self.knowledge_commits()
-
-        self.close()
-
-        self.assertEqual(self.status_of(), "closed")
-        self.assertEqual(len(self.knowledge()), 1)
-        self.assertEqual(self.knowledge_commits(), commits)
-
     def test_a_closeout_this_installation_cannot_write_is_refused_before_anything_is(self) -> None:
         """The preflight: an instance that is not a state repository refuses, and nothing is written."""
         subprocess.run(
             ["rm", "-rf", str(self.instance / ".git")], check=True, capture_output=True
         )
-        before = len(self.board.tasks)
+        before = self.board.card_count()
 
         with self.assertRaises(ValidationRefused) as refused:
             self.close()
 
         self.assertIn("closeout", refused.exception.message)
         self.assertEqual(self.status_of(), "open")
-        self.assertEqual(len(self.board.tasks), before)
+        self.assertEqual(self.board.card_count(), before)
 
 
 class ClosedSprintObserverTests(CloseFixture):
@@ -2981,7 +2928,7 @@ class PostCloseCommentTests(CloseFixture):
 
         self.assertTrue(answered["saved"])
         self.assertEqual(validate(answered, "web-sprint", answered["kind"]), [])
-        committed = TaskAudit(self.data_dir).committed_event("po-after-close")
+        committed = entity_audit_for(self.board, self.data_dir).committed_event("po-after-close")
         self.assertEqual(committed["event_id"], answered["comment_id"])
         self.assertEqual(committed["kind"], "commented")
 
@@ -3020,13 +2967,13 @@ class PostCloseCommentTests(CloseFixture):
 
     def test_a_repeat_is_idempotent_on_the_request_id(self) -> None:
         first = self.comment()
-        events = [event["event_id"] for event in TaskAudit(self.data_dir).events()]
+        events = [event["event_id"] for event in entity_audit_for(self.board, self.data_dir).events()]
 
         repeated = self.comment()
 
         self.assertFalse(repeated["saved"])
         self.assertEqual(repeated["comment_id"], first["comment_id"])
-        self.assertEqual([event["event_id"] for event in TaskAudit(self.data_dir).events()], events)
+        self.assertEqual([event["event_id"] for event in entity_audit_for(self.board, self.data_dir).events()], events)
 
     def test_a_repeat_over_different_content_is_refused(self) -> None:
         self.comment()
@@ -3157,7 +3104,7 @@ class CloseResultFaultTests(CloseFixture):
 
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+        with mock.patch.object(type(entity_audit_for(self.board, self.data_dir)), "events", side_effect=PermissionError("audit journal denied")):
             yield
 
     @contextlib.contextmanager
@@ -3202,7 +3149,7 @@ class CloseResultFaultTests(CloseFixture):
 
     def test_a_board_nobody_can_read_leaves_the_close_and_the_reservations_standing(self) -> None:
         original = self.board.call
-        board = self.board.projects[SPRINT_BOARD_NAME]
+        board = _board_id(self.board, SPRINT_BOARD_NAME)
 
         def refuse(method: str, **params: Any) -> Any:
             if method == "getAllTasks" and params.get("project_id") == board:

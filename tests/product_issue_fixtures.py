@@ -21,12 +21,21 @@ class ProductIssueFixture:
 
     BACKEND = "kanboard"
     KANBOARD_ONLY: ClassVar[dict[str, str]] = {}
+    #: Cases that write or claim a card. Cards have one implementation, PostgreSQL
+    #: (secretary-1669), so they are skipped on the Kanboard fixture and run through the SQL
+    #: contract classes (`tests/test_product_issues_sql_backend.py`).
+    CARD_STORE_ONLY: ClassVar[frozenset[str]] = frozenset()
 
     def setUp(self) -> None:
         super().setUp()
         reason = self.KANBOARD_ONLY.get(self._testMethodName)
         if reason and self.BACKEND != "kanboard":
             self.skipTest(reason)
+        if self._testMethodName in self.CARD_STORE_ONLY and self.BACKEND == "kanboard":
+            self.skipTest(
+                "writes a card, and cards have one implementation: runs on the store in "
+                "tests/test_product_issues_sql_backend.py"
+            )
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         (self.root / "projects").mkdir()

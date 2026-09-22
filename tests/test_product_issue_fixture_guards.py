@@ -24,7 +24,8 @@ STORE_METHODS = {
 class ProductIssueFixtureGuards(unittest.TestCase):
     def test_all_original_methods_are_classified_once(self) -> None:
         self.assertEqual(len(SWIMLANE_METHODS), 16)
-        self.assertEqual(len(STORE_METHODS), 30)
+        # 30 originally; secretary-1669 removed five Kanboard-only cases that write a card.
+        self.assertEqual(len(STORE_METHODS), 25)
         self.assertEqual(
             set(product_issue_tests.ProductIssueSwimlaneTests.KANBOARD_ONLY)
             | product_issue_tests.ProductIssueSwimlaneTests.PORTABLE_CONTRACT,
@@ -46,7 +47,9 @@ class ProductIssueFixtureGuards(unittest.TestCase):
         portable = product_issue_tests.ProductIssueStoreTests.PORTABLE_CONTRACT
         self.assertEqual(len(portable), 14)
         self.assertEqual(len(product_issue_tests.ProductIssueSwimlaneTests.PORTABLE_CONTRACT), 5)
-        self.assertEqual(len(SWIMLANE_METHODS | STORE_METHODS), 46)
+        self.assertEqual(len(SWIMLANE_METHODS | STORE_METHODS), 41)
+        # A case that writes a card runs on the store only, so it must be portable to run at all.
+        self.assertLessEqual(product_issue_tests.ProductIssueStoreTests.CARD_STORE_ONLY, portable)
 
     def test_portable_bodies_do_not_reach_into_the_kanboard_fake(self) -> None:
         forbidden_attrs = {

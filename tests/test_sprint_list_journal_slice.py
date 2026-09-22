@@ -178,7 +178,7 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
 
     def _narrow(self, statuses: list[str] | None) -> tuple[dict[str, Any], _NarrowOnlyAudit]:
         audit = _NarrowOnlyAudit(TaskAudit(self.data_dir))
-        with mock.patch.object(sprint_reads_module, "task_audit_for", return_value=audit):
+        with mock.patch.object(sprint_reads_module, "entity_audit_for", return_value=audit):
             return self.reads().sprint_list(statuses=statuses), audit
 
     # -- the faults ----------------------------------------------------------------------------

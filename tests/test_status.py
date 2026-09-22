@@ -28,7 +28,7 @@ from secretary.host_apply import resolve_packaged
 from secretary.secret_store import initialize_store, set_secret
 from secretary.status import collect_status
 from secretary.tasks import TaskAudit
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.sprints import SprintBoard
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -46,6 +46,7 @@ def _init_instance_repo(instance_dir: Path, instance_yaml: str) -> None:
         _git(instance_dir, "config", "--local", key, value)
     _git(instance_dir, "add", "instance.yaml")
     _git(instance_dir, "commit", "--quiet", "-m", "config")
+
 
 
 class StatusCliTests(unittest.TestCase):
@@ -328,7 +329,7 @@ class StatusCliTests(unittest.TestCase):
                 "sprint_budget:\n  signal: 20\n  hard: 40\n",
                 encoding="utf-8",
             )
-            board = FakeKanboard()
+            board = SprintBoard()
             board.add_sprint(
                 "sprint:1",
                 status="stopped",
@@ -338,7 +339,7 @@ class StatusCliTests(unittest.TestCase):
                         "selected_step": "fix",
                         "selected_why": "blocked",
                         "rejected_alternatives": "wait",
-                        "current_task": "secretary-510-pilot",
+                        "current_task": "secretary-510",
                         "dod_state": "pending",
                         "next_safe_step": "test",
                         "recorded_at": "2020-01-01T00:00:00Z",
@@ -351,7 +352,7 @@ class StatusCliTests(unittest.TestCase):
                 {
                     "event_id": "evt_later_card_event",
                     "request_id": "later-card-event",
-                    "ref": "secretary-510-pilot",
+                    "ref": "secretary-510",
                     "kind": "moved",
                     "outcome": "success",
                     "payload": {"to": "assessment"},
@@ -409,7 +410,7 @@ class StatusCliTests(unittest.TestCase):
                     "host:\n  unit_prefix: secretary-\n",
                     encoding="utf-8",
                 )
-                board = FakeKanboard()
+                board = SprintBoard()
                 for index in range(sprint_count):
                     board.add_sprint(
                         f"sprint:{index}",
@@ -419,7 +420,7 @@ class StatusCliTests(unittest.TestCase):
                                 "selected_step": "fix",
                                 "selected_why": "blocked",
                                 "rejected_alternatives": "wait",
-                                "current_task": "secretary-510-pilot",
+                                "current_task": "secretary-510",
                                 "dod_state": "pending",
                                 "next_safe_step": "test",
                                 "recorded_at": "2020-01-01T00:00:00Z",
@@ -432,7 +433,7 @@ class StatusCliTests(unittest.TestCase):
                     {
                         "event_id": "evt_later_card_event",
                         "request_id": "later-card-event",
-                        "ref": "secretary-510-pilot",
+                        "ref": "secretary-510",
                         "kind": "moved",
                         "outcome": "success",
                         "payload": {"to": "assessment"},

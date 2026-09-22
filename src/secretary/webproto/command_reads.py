@@ -18,21 +18,18 @@ a question. So this answers the same thing from the audit's own two lookups, and
 anything: not found, pending with what is already done and how to continue safely, or committed
 with its result and the entity it produced.
 
-**Which store holds the audit is the card client's answer, not this layer's.** The two reads go
-through :func:`secretary.tasks.task_audit_for`, so on `SECRETARY_CARD_BACKEND=postgres` the canon is
-`requests`/`board_events` and on Kanboard it is `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3).
-The surface below is the same either way -- that is what makes one set of rules serve both -- but the
-file journal is *not* consulted beside a PostgreSQL client: it holds nothing that backend wrote, and
-answering from it published an empty history and a `not_found` for records the installation was
-holding all along.
+**The audit is the card audit.** The two reads go through :func:`secretary.tasks.task_audit_for`,
+so the canon is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). The file journal under
+`<data>/board` is *not* consulted: it holds nothing the PostgreSQL backend wrote, and answering from
+it published an empty history and a `not_found` for records the installation was holding all along.
 
 **Neither opens a second store, index, scheduler or registry of operations.** Everything below is
 already durable and already read by the writers themselves:
 
-* the history is :meth:`secretary.tasks.TaskAudit.events`, the released cross-entity traversal,
+* the history is :meth:`secretary.board.sql_audit.SqlTaskAudit.events`, the released cross-entity traversal,
   which defaults to every entity and returns committed records in append order;
-* the request lookup is :meth:`secretary.tasks.TaskAudit.committed_event` and
-  :meth:`secretary.tasks.TaskAudit.pending_event` -- the pair `SprintWriter._write` itself consults
+* the request lookup is :meth:`secretary.board.sql_audit.SqlTaskAudit.committed_event` and
+  :meth:`secretary.board.sql_audit.SqlTaskAudit.pending_event` -- the pair `SprintWriter._write` itself consults
   to decide that a repeat is a no-op. This read re-decides none of it and calls no writer;
 * the paging is this layer's own frozen-offset cursor (:mod:`secretary.webproto.cursor`) and its
   :data:`~secretary.webproto.journal.DEFAULT_LIMIT` and
@@ -654,20 +651,16 @@ class CommandReadLayer(ProtocolBoundary):
     def _history(self, data_dir: Path, *, end: int | None, limit: int, now: float) -> Reading:
         """One page of the committed audit, read once for the document through the released traversal.
 
-        The released traversal answers `[]` for a journal that is not there, which is the one answer
-        this read may not publish: an installation whose journal is missing has not commanded
-        nothing, it has no evidence either way. So the file's absence refuses the source, and
-        everything else the read can raise -- a journal the filesystem will not open, a record shape
-        the conversion will not take -- refuses it through the span rather than through a list of
-        types.
+        Everything the read can raise -- a store that will not answer, a record shape the conversion
+        will not take -- refuses the source through the span rather than through a list of types.
 
-        What is deliberately *not* second-guessed: a line the traversal cannot parse is skipped by
-        the traversal, as it is for every other reader of this journal. This read publishes what the
+        What is deliberately *not* second-guessed: a record the traversal cannot parse is skipped by
+        the traversal, as it is for every other reader of the audit. This read publishes what the
         traversal parsed and :data:`HISTORY_EXTENT` says so.
 
         The audit owner reads the page itself (`events_page`): on PostgreSQL a count and the page
         from the committed claim-order index, so the cost is the page and the pages above it rather
-        than the history (secretary-1658); the file journal still parses the whole file. A cursor
+        than the history (secretary-1658). A cursor
         past the end reads no rows and is refused by `_page`, outside the span.
         """
 
@@ -697,41 +690,24 @@ class CommandReadLayer(ProtocolBoundary):
     def _audit(self, data_dir: Path, produce: Callable[[Any], Any], *, now: float) -> Reading:
         """One read of the one durable source of both documents, and the whole of the broad span.
 
-        *Which* source that is, is the card client's own answer and never this layer's: the audit of
-        a PostgreSQL installation is `requests`/`board_events` and the audit of a Kanboard one is
-        `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3). Read off the file journal beside a
-        PostgreSQL client, both lookups answered from a file that backend never writes -- an empty
-        history for an installation that has commanded plenty, and `not_found` for a request id it
-        holds -- which are exactly the two answers this layer may not publish.
-
-        The journal's absence is checked before anything reads it, for that same reason and only on
-        the backend that has one: both released lookups answer a missing file with the same value as
-        an empty one (`[]` and `None`). A migrated store needs no such check -- an empty `requests`
-        table is a read that happened -- and a store that cannot be reached raises inside the span
-        and refuses the source, as does a client the switch cannot build at all.
+        The source is the card audit: `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). Read
+        off the file journal beside a PostgreSQL client, both lookups answered from a file that
+        backend never writes -- an empty history for an installation that has commanded plenty, and
+        `not_found` for a request id it holds -- which are exactly the two answers this layer may
+        not publish. An empty `requests` table is a read that happened; a store that cannot be
+        reached raises inside the span and refuses the source, as does a client the switch cannot
+        build at all.
         """
-        journal: Path | None = None
 
         def read() -> Any:
-            nonlocal journal
-            client = self._client()
-            audit = task_audit_for(client, data_dir)
-            if getattr(client, "backend_kind", "kanboard") != "postgres":
-                journal = Path(audit.events_path)
-                if not journal.exists():
-                    raise _Unreadable("the journal is not there, so nothing about it is established")
-            return produce(audit)
+            return produce(task_audit_for(self._client(), data_dir))
 
         return _source(
             SOURCE_AUDIT,
             read,
-            refusal=lambda exc: (
-                f"the committed board audit could not be read: {journal} ({_reason(exc)})"
-                if journal is not None
-                else f"the committed board audit could not be read: {_reason(exc)}"
-            ),
+            refusal=lambda exc: f"the committed board audit could not be read: {_reason(exc)}",
             now=now,
-            evidence=journal,
+            evidence=None,
         )
 
     def _client(self) -> Any:

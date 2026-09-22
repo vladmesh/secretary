@@ -209,8 +209,8 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.sprints import SprintReader, budget_thresholds
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import (
-    TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -235,7 +235,7 @@ class DispatcherRuntime:
         self,
         reader: TaskReader,
         writer: TaskWriter,
-        audit: TaskAudit,
+        audit: SqlTaskAudit,
         data_dir: Path,
         catalog: InstanceCatalog,
         host: CommandHostRuntime,

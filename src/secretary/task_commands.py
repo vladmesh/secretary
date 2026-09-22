@@ -23,6 +23,7 @@ from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
+    CARD_BACKEND,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -513,20 +514,19 @@ def run_task_reconcile_audit(args: argparse.Namespace) -> int:
 
 
 def run_task_verify_audit(args: argparse.Namespace) -> int:
-    """The audit of the backend this installation serves cards from, not of a directory.
+    """The audit of the store this installation serves cards from, not of a directory.
 
     The status answers "is anything staged and unsettled", so it has to be asked of the store that
-    holds the claims: `requests` on PostgreSQL and `board/pending-audit/` on Kanboard
-    (`docs/BOARD_STORE.md` §7.3). Asked of the file journal beside a PostgreSQL client it reported
-    a clean installation it had never read -- the same false green secretary-1614 was declared
-    stalled by. The exit contract is unchanged: 0 when nothing is staged, 1 when something is, and
+    holds the claims: `requests` (`docs/BOARD_STORE.md` §7.3). Asked of the file journal beside a
+    PostgreSQL client it reported a clean installation it had never read -- the same false green
+    secretary-1614 was declared stalled by. The exit contract is unchanged: 0 when nothing is staged, 1 when something is, and
     the named `TaskError` status of any command that cannot reach its backend.
     """
 
     def command() -> object:
         client = card_client(_instance(args))
         status = dict(task_audit_for(client, resolve_data_dir(args)).status())
-        status["backend"] = getattr(client, "backend_kind", "kanboard")
+        status["backend"] = CARD_BACKEND
         return status
 
     return run_task_command(command, exit_code=lambda result: 0 if result["ok"] else 1)

@@ -15,7 +15,7 @@ from tests import (
     test_sprints,
 )
 from tests.fakes.sprints import SprintBackendFixture, SprintFixture
-from tests.sprint_contract import KANBOARD_ONLY
+from tests.sprint_contract import CARD_STORE_ONLY, KANBOARD_ONLY
 
 SUITES = (
     test_sprints,
@@ -24,9 +24,9 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 150,
+    "tests.test_sprints": 131,
     "tests.test_sprint_executors": 24,
-    "tests.test_sprint_restore": 26,
+    "tests.test_sprint_restore": 21,
     "tests.test_sprint_listing_budget": 4,
 }
 BEFORE_REACH_INS = {
@@ -38,8 +38,8 @@ BEFORE_REACH_INS = {
     "client.comments": 6,
 }
 AFTER_REACH_INS = {
-    "client.calls": 22,
-    "client.tasks": 13,
+    "client.calls": 12,
+    "client.tasks": 6,
     "_sprint_rows": 12,
     "client.metadata": 8,
     "_transactions": 9,
@@ -49,12 +49,12 @@ EXPECTED_CLASSES = {
     "tests.test_sprints.SprintOwnershipTests": 33,
     "tests.test_sprints.TwoOpenSprintAdmissionTests": 18,
     "tests.test_sprints.TwoOpenSprintIsolationTests": 9,
-    "tests.test_sprints.SprintTests": 35,
+    "tests.test_sprints.SprintTests": 30,
     "tests.test_sprints.SprintStatusHeadlessCommandTests": 3,
-    "tests.test_sprints.SprintAuditTraversalTests": 9,
-    "tests.test_sprints.SprintSingleWriterGuardTests": 15,
+    "tests.test_sprints.SprintAuditTraversalTests": 8,
+    "tests.test_sprints.SprintSingleWriterGuardTests": 11,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
-    "tests.test_sprints.SprintCloseDecisionTests": 19,
+    "tests.test_sprints.SprintCloseDecisionTests": 10,
     "tests.test_sprints.CloseDecisionFileTests": 3,
     "tests.test_sprint_executors.ExecutorValueTests": 2,
     "tests.test_sprint_executors.SprintExecutorPinTests": 7,
@@ -62,7 +62,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprint_executors.SprintCardExecutorTests": 5,
     "tests.test_sprint_executors.SprintExecutorRecoveryTests": 4,
     "tests.test_sprint_executors.CardEditExecutorTests": 3,
-    "tests.test_sprint_restore.SprintRestoreTests": 26,
+    "tests.test_sprint_restore.SprintRestoreTests": 21,
     "tests.test_sprint_listing_budget.SprintListingBudgetTests": 4,
 }
 
@@ -224,11 +224,12 @@ class _HelperBypass:
 
 
 class SprintFixtureGuards(unittest.TestCase):
-    def test_all_204_original_methods_are_classified_once(self) -> None:
+    def test_every_original_method_is_classified_once(self) -> None:
+        """204 originally; secretary-1669 removed the 24 Kanboard-only cases that write a card."""
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 204)
+        self.assertEqual(len(methods), 180)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]
@@ -237,8 +238,10 @@ class SprintFixtureGuards(unittest.TestCase):
         self.assertEqual(set(KANBOARD_ONLY) - set(methods), set())
         portable = set(methods) - set(KANBOARD_ONLY)
         self.assertFalse(portable & set(KANBOARD_ONLY))
-        self.assertEqual(len(portable) + len(KANBOARD_ONLY), 204)
-        self.assertEqual((len(portable), len(KANBOARD_ONLY)), (147, 57))
+        self.assertEqual(len(portable) + len(KANBOARD_ONLY), 180)
+        self.assertEqual((len(portable), len(KANBOARD_ONLY)), (147, 33))
+        # A case that writes a card runs on the store only, so it must be portable to run at all.
+        self.assertEqual(set(CARD_STORE_ONLY) - portable, set())
         self.assertTrue(all(reason.strip() for reason in KANBOARD_ONLY.values()))
 
     def test_saved_before_inventory_is_reproducible(self) -> None:

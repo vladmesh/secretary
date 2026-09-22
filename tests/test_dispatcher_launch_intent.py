@@ -80,25 +80,26 @@ from secretary.projects.contract import (
 from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import RoutingHeadSnapshot
 from secretary.routing_journal import attempts as routing_attempts
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
-from tests.dispatcher_fixtures import ensure_attempt
+from secretary.tasks import TaskReader, TaskWriter, task_audit_for
+from tests.dispatcher_fixtures import card_audit, ensure_attempt
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
-    FakeKanboard,
     FakeSprints,
     _configure_production_shaped_codex_relaunch,
     _legacy_unbound_v1_run,
+    dispatcher_seed,
 )
 from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.runtime.head import HeadCommand
 from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.head.command import with_pid_heartbeat
 from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 
-REF = "secretary-510-pilot"
+REF = "secretary-510"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
 DEAD_PID = 999999
 
@@ -484,11 +485,12 @@ class LaunchIntentTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
         # for a decision: these tests drive the rework that decision opens.
         self.sprints = FakeSprints()
@@ -497,14 +499,14 @@ class LaunchIntentTests(unittest.TestCase):
             "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
-        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        self.board.save_metadata(12, sprint_ref="sprint:1031")
         bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
         self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -2032,7 +2034,7 @@ class LaunchIntentTests(unittest.TestCase):
     # an adopted head belongs to the round's routing history ------------------
 
     def routing_history(self) -> list:
-        return routing_attempts(TaskAudit(self.data_dir).events(REF, kind="routing"))
+        return routing_attempts(task_audit_for(self.board).events(REF, kind="routing"))
 
     def test_an_adopted_worker_is_recorded_as_the_round_that_ran_it(self) -> None:
         """The head an interrupted tick launched is a head that ran, so the round has to name it.
@@ -3147,7 +3149,7 @@ class LaunchIntentTests(unittest.TestCase):
         Path(pid_file_path("worker", REF)).unlink()
         self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")  # type: ignore[arg-type]
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real", audit=card_audit(self))  # type: ignore[arg-type]
         real_host._run_json = mock.Mock(side_effect=HostError("orca terminal list unavailable"))
 
         with mock.patch.object(self.host, "stop_head", real_host.stop_head):
@@ -3291,7 +3293,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.orca_repo_path = str(self.repo)
         self.workspaces = self.data_dir / "workspaces"
         self.binding_name: str | None = "codegen_orchestrator"
-        self.host = CommandHostRuntime(self.catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host = CommandHostRuntime(self.catalog(), self.data_dir, mode="real", audit=card_audit(self))  # type: ignore[arg-type]
         self.host._prepare_workspace_environment = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
@@ -3579,7 +3581,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name)
-        self.host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="real", audit=card_audit(self))  # type: ignore[arg-type]
         self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
@@ -4111,7 +4113,7 @@ class HostLaunchContourTests(unittest.TestCase):
         ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
-        self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
+        self.assertIn("worker-report-done-secretary-510-3", task_at_delivery[0])
         # The document the worker is sent back to and the prompt that wakes it name one round.
         self.assertIn("Generation 3", prompt_at_delivery[0])
         self.assertIn("not an earlier turn's", prompt_at_delivery[0])
@@ -4461,7 +4463,7 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         self.data_dir = Path(self.tmpdir.name)
         self.session = self.WorkingPane()
         self.runner = self.NoRunner()
-        self.host = CommandHostRuntime(self.Catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host = CommandHostRuntime(self.Catalog(), self.data_dir, mode="real", audit=card_audit(self))  # type: ignore[arg-type]
         self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         # Both halves of the runtime's own access to Orca: the JSON runner every `orca terminal`
@@ -4633,11 +4635,12 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         # The card belongs to a sprint with a concrete observer, so a substantive verdict parks
         # for a decision: these tests drive the rework that decision opens.
         self.sprints = FakeSprints()
@@ -4646,14 +4649,14 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
-        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        self.board.save_metadata(12, sprint_ref="sprint:1031")
         bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
         self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -4801,7 +4804,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-neighbor",
+            reference="secretary-511",
             target="issues",
             reason="park the neighbour",
             request_id="park-neighbor",
@@ -4821,7 +4824,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-neighbor",
+            reference="secretary-511",
             target="issues",
             reason="make the requeue claimable",
             sprint_override=True,
@@ -4933,7 +4936,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
     def claim_moved_to(self, worker: str) -> None:
         """Someone else's claim on the card this record was launched for."""
-        self.board.metadata[12]["claim"] = worker
+        self.board.save_metadata(12, claim=worker)
 
     def test_a_claim_that_moved_under_a_live_launch_stops_its_head_first(self) -> None:
         """The mismatch drops the record, and the intent on it is the only pointer to that head.

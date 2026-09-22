@@ -20,7 +20,7 @@ from typing import Any
 from unittest import mock
 
 from secretary.dispatcher import DispatcherRuntime
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints
@@ -31,7 +31,12 @@ EXISTING_CARD = "secretary-12"
 
 
 class PauseProtocolFixture(SprintProtocolFixture):
-    """One installation, one data plane, one dispatcher runtime over it."""
+    """One installation, one data plane, one dispatcher runtime over it.
+
+    The dispatcher's cards are PostgreSQL rows, so the board is a real store (`CARD_STORE`).
+    """
+
+    CARD_STORE = True
 
     def setUp(self) -> None:
         super().setUp()
@@ -45,10 +50,11 @@ class PauseProtocolFixture(SprintProtocolFixture):
         legacy.start()
         self.addCleanup(legacy.stop)
         self.host = FakeHost(self.data_dir / "workspaces", FakeCatalog(instance_dir=self.instance))
+        self.host.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             TaskReader(self.board),  # type: ignore[arg-type]
             TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             FakeCatalog(instance_dir=self.instance),  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -81,27 +87,16 @@ class PauseProtocolFixture(SprintProtocolFixture):
 
     def link_card(self, reference: str, sprint: str, *, state: str = "ready") -> None:
         """Put one of the Pipeline board's cards inside a sprint, as the board records it."""
-        task = next(task for task in self.board.tasks if task["reference"] == reference)
-        columns = {"ready": 2, "in_progress": 3, "validate": 4, "blocked": 5, "done": 6}
-        task["column_id"] = columns[state]
-        self.board.call("saveTaskMetadata", task_id=int(task["id"]), values={"sprint_ref": sprint})
+        key = self.board.key_of(reference)
+        self.board.move(key, state)
+        self.board.save_metadata(key, sprint_ref=sprint)
 
     def add_card(self, reference: str, *, state: str = "ready", sprint: str | None = None) -> None:
         """One more Pipeline card, linked to a sprint or held by none."""
-        columns = {"ready": 2, "in_progress": 3, "validate": 4, "blocked": 5, "done": 6}
-        task_id = int(
-            self.board.call(
-                "createTask",
-                project_id=7,
-                title=reference,
-                column_id=columns[state],
-                reference=reference,
-            )
-        )
-        values: dict[str, str] = {"record_type": "task", "project": "secretary"}
+        values: dict[str, str] = {"record_type": "task"}
         if sprint is not None:
             values["sprint_ref"] = sprint
-        self.board.call("saveTaskMetadata", task_id=task_id, values=values)
+        self.board.add_card(self.board.next_key(), reference, state=state, metadata=values)
 
     def corrupt_pause_flag(self, **fields: Any) -> None:
         """A pause flag that is valid JSON and still cannot be read as a pause state."""

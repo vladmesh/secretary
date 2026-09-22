@@ -20,8 +20,9 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import pause_ops as dispatcher_pause_ops
+from secretary.board.sql_cards import BOARD_ID
 from secretary.config import validate
+from secretary.dispatch import pause_ops as dispatcher_pause_ops
 from secretary.dispatch.pause_ops import PauseCommandCompleted
 from secretary.dispatch.pause_ops import pause as dispatcher_pause
 from secretary.dispatch.pause_ops import resume as dispatcher_resume
@@ -104,7 +105,7 @@ class ScopeReadTests(PauseProtocolFixture):
         listings = [
             method
             for method, params in self.board.calls[before:]
-            if method == "getAllTasks" and params.get("project_id") == 7
+            if method == "getAllTasks" and params.get("project_id") == BOARD_ID
         ]
         self.assertEqual(len(listings), 1)
 
@@ -122,12 +123,9 @@ class ScopeReadTests(PauseProtocolFixture):
         self.add_card("secretary-77", state="ready")
         document = self.pause_reads().pause_scope()
 
+        # Every live card the board holds: Products and Issues are not cards (§3.1, §3.2).
         claimable = {
-            str(task["reference"])
-            for task in self.board.tasks
-            if task["project_id"] == 7
-            and int(task.get("is_active", 1) or 0) != 0
-            and self.board.metadata.get(int(task["id"]), {}).get("record_type") not in {"product", "issue"}
+            str(row["reference"]) for row in self.board.restore_card_rows() if row["is_active"]
         }
         self.assertEqual({item["ref"] for item in document["cards"]["items"]}, claimable)
         statement = document["extent"]["statement"].lower()

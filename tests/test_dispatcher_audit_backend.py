@@ -4,8 +4,8 @@ On 2026-09-10 the production dispatcher ran on `SECRETARY_CARD_BACKEND=postgres`
 `TaskAudit(data_dir)`: the file journal, which the PostgreSQL writer never touches. A worker's
 `report:done` committed in `requests`/`board_events` was therefore invisible to the report wait, the
 worker was declared stalled twice, and the observer got no wake for the Blocked move
-(sprint:1437, secretary-1614). One helper now decides the audit for every reader and writer from
-the client that was built by the switch, and the command host reads the same object.
+(sprint:1437, secretary-1614). One helper now names the audit for every reader and writer: the SQL audit of
+the card client the switch built, and the command host reads the same object.
 """
 
 from __future__ import annotations
@@ -16,22 +16,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import bootstrap as dispatcher_bootstrap
 from secretary.board.sql_audit import SqlTaskAudit
-from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch import bootstrap as dispatcher_bootstrap
 from secretary.dispatch.bootstrap import runtime_from_args
+from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.types import HostError
 from secretary.head_registry import materialize_snapshot, record_source
-from secretary.tasks import TaskAudit, task_audit_for
-from tests.fakes.dispatcher import FakeKanboard
-
-
-class _PostgresClient(FakeKanboard):
-    """What the switch hands out on the PostgreSQL backend, as far as construction is concerned."""
-
-    backend_kind = "postgres"
-
-    def _query(self, sql, params=()):  # pragma: no cover - never reached at construction
-        raise AssertionError("no query is issued while the runtime is built")
+from secretary.tasks import task_audit_for
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.sql_backend_fixtures import CardStoreCase
 
 
 def _instance(root: Path, data_dir: Path) -> Path:
@@ -47,21 +40,15 @@ def _instance(root: Path, data_dir: Path) -> Path:
     return root
 
 
-class TaskAuditForTests(unittest.TestCase):
-    def test_a_postgres_client_gets_the_sql_audit_and_a_kanboard_client_the_journal(self) -> None:
+class TaskAuditForTests(CardStoreCase):
+    def test_a_card_client_gets_the_sql_audit_whatever_data_dir_it_is_handed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            sql = task_audit_for(_PostgresClient(), tmp)
-            self.assertIsInstance(sql, SqlTaskAudit)
-            journal = task_audit_for(FakeKanboard(), tmp)
-            self.assertIsInstance(journal, TaskAudit)
-            self.assertEqual(Path(journal.board_dir), Path(tmp) / "board")
-
-    def test_a_client_that_names_no_backend_is_kanboard(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsInstance(task_audit_for(object(), tmp), TaskAudit)
+            audit = task_audit_for(self.card_store(dispatcher_seed()), tmp)
+            self.assertIsInstance(audit, SqlTaskAudit)
+            self.assertFalse((Path(tmp) / "board").exists())
 
 
-class RuntimeAuditSelectionTests(unittest.TestCase):
+class RuntimeAuditSelectionTests(CardStoreCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -86,8 +73,8 @@ class RuntimeAuditSelectionTests(unittest.TestCase):
         with mock.patch.object(dispatcher_bootstrap, "board_client", return_value=client):
             return runtime_from_args(str(self.instance), None, host_mode="noop", owner="secretary-production")
 
-    def test_on_postgres_every_reader_and_the_host_share_the_sql_audit(self) -> None:
-        runtime = self._runtime(_PostgresClient())
+    def test_every_reader_and_the_host_share_the_sql_audit(self) -> None:
+        runtime = self._runtime(self.card_store(dispatcher_seed(), instance_dir=self.instance))
         self.assertIsInstance(runtime.audit, SqlTaskAudit)
         self.assertIsInstance(runtime.writer.audit, SqlTaskAudit)
         self.assertIsInstance(runtime.sprints.audit, SqlTaskAudit)
@@ -95,15 +82,12 @@ class RuntimeAuditSelectionTests(unittest.TestCase):
         self.assertIs(runtime.host.audit, runtime.audit)
         self.assertEqual(runtime.data_dir, self.data_dir)
 
-    def test_on_kanboard_the_journal_stays_and_the_host_still_shares_it(self) -> None:
-        runtime = self._runtime(FakeKanboard())
-        self.assertIsInstance(runtime.audit, TaskAudit)
-        self.assertEqual(Path(runtime.audit.board_dir), self.data_dir / "board")
-        self.assertIs(runtime.host.audit, runtime.audit)
-
-    def test_a_host_built_alone_keeps_the_journal_default(self) -> None:
+    def test_a_host_built_alone_has_no_card_audit_and_refuses_the_task_document_read(self) -> None:
+        """No default: a file journal built from the data dir alone is one nobody writes."""
         host = CommandHostRuntime(mock.Mock(instance_dir=self.instance), self.data_dir, mode="noop")
-        self.assertIsInstance(host.audit, TaskAudit)
+        self.assertIsNone(host.audit)
+        with self.assertRaisesRegex(HostError, "without the card audit"):
+            host._card_audit()
 
 
 if __name__ == "__main__":

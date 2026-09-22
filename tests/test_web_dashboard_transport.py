@@ -711,6 +711,9 @@ class DashboardPageTests(FakeAppFixture):
 
 
 class CardOperationTests(SprintProtocolFixture):
+    #: The card writes land in a real card store.
+    CARD_STORE = True
+
     def layer(self) -> CardOperationLayer:
         return CardOperationLayer(
             self.instance, data_dir=self.data_dir, board_client=self.board, clock=lambda: self.clock
@@ -720,7 +723,7 @@ class CardOperationTests(SprintProtocolFixture):
         return TaskWriter(self.board, data_dir=self.data_dir)
 
     def card(self) -> tuple[str, str]:
-        """The card the fake board seeds, and the state it is in: `secretary-12`, in Ready."""
+        """The card the board is seeded with, and the state it is in: `secretary-12`, in Ready."""
         return "secretary-12", self.state_of("secretary-12")
 
     def state_of(self, ref: str) -> str:
@@ -731,11 +734,7 @@ class CardOperationTests(SprintProtocolFixture):
         answer = self.layer().task_comment(request_id="r-1", actor="web", reference=ref, body="hold on")
         self.assertEqual(answer["kind"], "card_commented")
         self.assertEqual(answer["ref"], ref)
-        comments = [
-            str(comment.get("comment") if isinstance(comment, dict) else comment)
-            for held in getattr(self.board, "comments", {}).values()
-            for comment in held
-        ]
+        comments = [str(comment.get("comment")) for comment in self.board.comments(self.board.key_of(ref))]
         self.assertTrue(any("hold on" in comment for comment in comments), comments)
 
     def test_a_comment_on_no_card_is_not_found(self) -> None:

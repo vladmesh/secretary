@@ -26,8 +26,9 @@ from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.observer import render_observer_prompt
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.dispatcher import FakeCatalog, FakeKanboard
+from tests.fakes.dispatcher import FakeCatalog
 from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard
 
 INFRA_REPORT = "## What was done\nRotated the relay key.\n\n## How to verify\n`ssh relay true` exits 0\n"
 # Host calls that would publish a branch, open a pull request, poll CI or dispatch a workflow: the
@@ -43,19 +44,19 @@ def _git(repo: Path, *args: str) -> str:
 
 def setUpModule() -> None:
     """Confirm this CI shard can build its disposable board seam before tests run."""
-    require_disposable_board_fixture(FakeKanboard)
+    require_disposable_board_fixture(PostgresBoard.shared)
 
 
 class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def _kind(self, kind: str, *, review: str = "") -> None:
         """The card as `task create --type` stores it, with the kind's default review choice."""
-        self.board.metadata[12]["task_type"] = kind
-        self.board.metadata[12]["review"] = review or ("required" if kind == "code" else "skipped")
+        self.board.save_metadata(12, task_type=kind)
+        self.board.save_metadata(12, review=review or ("required" if kind == "code" else "skipped"))
 
     def _unobserved(self) -> None:
-        self.board.metadata[12].pop("sprint_ref", None)
+        self.board.save_metadata(12, {"sprint_ref": ""})
         self.sprints.rows.clear()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
 
     def _comments(self, marker_line: str) -> list[str]:
         return [
@@ -164,9 +165,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "assessment")
         # The record is gone by the time the observer releases: the check reads the board, not the
         # acceptance that wrote it.
-        self.board.comments[12] = [
-            comment for comment in self.board.comments[12] if "[completion:infra]" not in comment["comment"]
-        ]
+        self.board.remove_comments(12, "[completion:infra]")
         self._decide("release")
 
         blocked = self.tick()
@@ -446,8 +445,8 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
 class NoCandidateReviewerDocumentTests(DispatcherRuntimeFixture, unittest.TestCase):
     def _review_document(self, kind: str) -> str:
-        self.board.metadata[12]["task_type"] = kind
-        self.board.metadata[12]["review"] = "required"
+        self.board.save_metadata(12, task_type=kind)
+        self.board.save_metadata(12, review="required")
         host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="noop")  # type: ignore[arg-type]
         return host._review_prompt(self.reader.show(CARD_REF), "attempt-1", 1)
 

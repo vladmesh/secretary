@@ -11,8 +11,8 @@ from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatch import attempt_accounting
-from secretary.dispatch.state import OutcomeTerminalPath
 from secretary.dispatch.gate import GateResult
+from secretary.dispatch.state import OutcomeTerminalPath
 from secretary.dispatch.types import HostError
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
@@ -279,9 +279,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_no_observer_green_release_seals_the_reviewed_round(self) -> None:
         self.start_dispatcher()
-        self.board.metadata[12].pop("sprint_ref", None)
+        self.board.save_metadata(12, {"sprint_ref": ""})
         self.sprints.rows.clear()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
         self.writer.verdict(
@@ -604,7 +604,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_divergent_specification_boundary_is_an_incomplete_outcome_not_a_permanent_debt(self) -> None:
         self._start_worker_round()
-        self.board.tasks[0]["description"] = "edited outside audited task operations"
+        self.board.update(12, description="edited outside audited task operations")
         self.writer.report(
             role="worker",
             actor="worker",

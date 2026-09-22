@@ -4,23 +4,10 @@ Two things are proved here and they are deliberately different in kind.
 
 `SqlBackendSwitchTests` is about the switch itself (`board/backend.py`) and needs no database.
 
-Everything below it is the card contract on the second implementation: the reader returns what
-`TaskReader` returns today, and the writer's mutations land — request claim, card effect and
-event together — as one transaction (`docs/BOARD_STORE.md` §7.1).  The classes reuse the Kanboard
-fakes' own board as their starting state (`tests/sql_backend_fixtures.py`) so the two backends are
-asked the same questions about the same cards rather than about two boards that happen to look
-alike.
-
-The writer's cases reach the board the same way: since secretary-1590 they arrange it through
-the card client's own protocol (`BoardFixture` in tests/test_tasks.py) and read it back through
-`TaskReader`, rather than assigning into the Kanboard fake's rows and metadata map.  That is why
-`KANBOARD_ONLY` below is now the whole list of omissions and "the fixture looks inside the fake"
-is no longer one of its reasons.
-
-Where an expectation genuinely cannot be shared, the difference is stated here rather than
-softened: the card's identity. The stable public reference and per-project task number are not the
-PostgreSQL board-client identity; `tasks.board_key` is. A test that asserted the old overloaded
-suffix therefore changes with this contract.
+Everything below it is the store-specific half of the card contract: the writer's mutations land —
+request claim, card effect and event together — as one transaction (`docs/BOARD_STORE.md` §7.1),
+and the reads that have no case in `tests/test_tasks.py`.  The reader's and writer's general cases
+live there and run on this same store (`tests/sql_backend_fixtures.py` `card_store`).
 """
 
 from __future__ import annotations
@@ -28,7 +15,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -36,15 +22,10 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.board import backend
-from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_audit_for
-
-# Imported as a module, not by name: a bare import would make unittest collect the Kanboard
-# cases a second time here, once more on the backend they already run on in test_tasks.py.
-from tests import test_tasks as kanboard_cases
-from tests.fakes.tasks import FakeKanboard, WriteKanboard, _EmptyWriteKanboard
-from tests.sql_backend_fixtures import PostgresBoard, seed_client
+from secretary.tasks import TaskError, TaskReader, TaskWriter
+from tests.fakes.tasks import open_sprint, reader_seed, writer_seed
+from tests.sql_backend_fixtures import CardStoreCase
 
 
 class SqlBackendSwitchTests(unittest.TestCase):
@@ -107,61 +88,21 @@ class SqlBackendSwitchTests(unittest.TestCase):
         self.assertTrue(report["findings"])
 
 
-class SqlBoardCase(unittest.TestCase):
-    """One container per module, one migrated database and one seeded board per test."""
+class SqlBoardCase(CardStoreCase):
+    """One migrated database and one seeded board per test."""
 
-    board: PostgresBoard
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        for module in ("psycopg", "sqlalchemy", "alembic"):
-            __import__(module)
-        cls.board = PostgresBoard()
-        cls.addClassCleanup(cls.board.stop)
-
-    def client_for(self, fake) -> object:
+    def client_for(self, seed) -> object:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        config = self.board.fresh_database()
-        client = seed_client(config, fake, Path(self.tmpdir.name))
-        self.addCleanup(client.close)
-        return client
+        return self.card_store(seed, instance_dir=self.tmpdir.name)
 
 
 class SqlTaskReaderTests(SqlBoardCase):
     """AC2: everything the reader returns today, returned from PostgreSQL in the same shape."""
 
     def setUp(self) -> None:
-        self.client = self.client_for(FakeKanboard())
+        self.client = self.client_for(reader_seed())
         self.reader = TaskReader(self.client)  # type: ignore[arg-type]
-
-    def test_list_normalizes_and_filters_the_same_fields(self) -> None:
-        result = self.reader.list(states={"ready"}, project="secretary")
-
-        self.assertEqual([task["ref"] for task in result], ["secretary-468"])
-        task = result[0]
-        # The one field that cannot be shared with the Kanboard run: §9's identity.
-        self.assertEqual(task["id"], "task_postgres_1")
-        self.assertEqual(task["claim"], {"worker": "codex-terra", "claimed_at": None})
-        self.assertEqual(
-            task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]}
-        )
-        self.assertEqual(task["routing"]["complexity"], "standard")
-        self.assertEqual(task["routing"]["codex_launch_mode"], "tui")
-        self.assertEqual(
-            task["extensions"]["kanboard"], {"steward_report": "1", "swimlane": "Secretary"}
-        )
-        self.assertNotIn("comments", task)
-
-    def test_show_preserves_comments_and_legacy_defaults(self) -> None:
-        task = self.reader.show("old-1")
-
-        self.assertEqual(task["project"], "")
-        self.assertEqual(task["type"], "")
-        self.assertIsNone(task["blocked_by"])
-        self.assertEqual(task["position"], 0)
-        self.assertEqual(task["state"], "issues")
-        self.assertEqual(task["audit"]["backend"]["kind"], "postgres")
 
     def test_export_carries_the_same_projection(self) -> None:
         rows = {row["reference"]: row for row in self.reader.export()}
@@ -200,8 +141,7 @@ class SqlTaskWriterTests(SqlBoardCase):
     """AC3: one transaction per protocol mutation, and the request-id refusal it must keep."""
 
     def setUp(self) -> None:
-        fake = WriteKanboard()
-        self.client = self.client_for(fake)
+        self.client = self.client_for(writer_seed())
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)  # type: ignore[arg-type]
         self.reader = TaskReader(self.client)  # type: ignore[arg-type]
 
@@ -689,7 +629,7 @@ class SqlTaskWriterTests(SqlBoardCase):
             )
         with (
             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
-            kanboard_cases.open_sprint() as sprint,
+            open_sprint() as sprint,
         ):
             return self.writer.create(
                 role="observer",
@@ -775,338 +715,3 @@ class SqlTaskWriterTests(SqlBoardCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
-
-
-#: The cases of `tests/test_tasks.py` that cannot be asked of this backend, and why each one
-#: cannot.  They are listed rather than quietly dropped: a case absent from a run is a hole, and a
-#: hole nobody named is the failure the card's fourth criterion is about.  None of them is
-#: excluded for being inconvenient, and none for how its fixture is written: since
-#: secretary-1590 the writer cases arrange the board through the card client's own protocol and
-#: read it back through `TaskReader`, so "the test looks inside the Kanboard fake" is no longer a
-#: reason anything is here.  What is left is exactly three kinds of reason, and each entry says
-#: which one it is:
-#:
-#: * a Kanboard *transport* fact with no equivalent here (a malformed row on the wire, two
-#:   threads on one connection, a batch that is a round trip, the order two writes were issued
-#:   in);
-#: * a board state the store's constraints make unrepresentable (§9's primary key and task
-#:   number, §3.5's CHECKs);
-#: * a half-applied write of the kind §7.3 removes, where the whole mutation is one transaction
-#:   (§7.1) and the failure leaves nothing to recover.  `SqlTaskWriterTests` proves that
-#:   property directly, at the create's boundary and at the transition's three post-effect
-#:   points.  Since secretary-1591 this covers the transition too: the eleven cases that were
-#:   parked here as a defect of this backend — a state edge whose effect could outlive its
-#:   record — are §7.3 omissions like the rest, and the block that names them says so.
-KANBOARD_ONLY = {
-    "test_duplicate_reference_retry_reallocates_a_stolen_pending_target": (
-        "two cards under one reference again; `tasks.task_ref` is the primary key (§9)"
-    ),
-    "test_reconcile_audit_reallocates_a_stolen_pending_target": (
-        "the same duplicate-reference fixture, plus the `reconcile` that §7.3 removes"
-    ),
-    "test_restoring_a_card_preserves_ordinary_long_text_byte_for_byte": (
-        "it creates `secretary-restore-long`, a reference that does not end in -<number>.  "
-        "`tasks.task_number` is NOT NULL and UNIQUE (project_id, task_number) has no value for "
-        "such a reference.  A finding about the schema, not a licence to change 0003"
-    ),
-    "test_auto_reference_serializes_concurrent_creates": (
-        "it creates from two threads at once.  `SqlCardClient` holds one connection, and one "
-        "libpq connection cannot carry two transactions, so the concurrency this asserts needs a "
-        "connection pool, which the store client does not have (§5.6)"
-    ),
-    "test_pending_blocks_export_from_the_same_data_root": (
-        "the export's gate reads `pending-audit/` on disk.  §6.3 says it becomes a query over "
-        "`requests WHERE status = 'staged'`; `export_board` is a group-(c) consumer and is "
-        "explicitly out of this card's scope, so the gate is still blind to a staged row here"
-    ),
-    "test_steward_signal_cards_reject_invalid_backend_shapes": (
-        "injects a metadata value that is not a map and a task list that is not a list.  Both are "
-        "malformed JSON-RPC replies; `tasks.state`'s CHECK and the column types make neither "
-        "storable, so the refusal has nothing to refuse"
-    ),
-    "test_unknown_column_is_backend_error": (
-        "sets a column id the board does not have.  §3.5's CHECK on `tasks.state` admits exactly "
-        "the seven states, so an eighth cannot be written to be read back"
-    ),
-    "test_show_prefers_live_duplicate_reference": (
-        "two cards sharing one reference.  `tasks.task_ref` is the primary key (§9), so the "
-        "duplicate this case resolves cannot exist in the store"
-    ),
-    "test_show_returns_archived_reference_when_no_live_duplicate_exists": (
-        "the other half of the same duplicate-reference fixture, and it asserts the Kanboard row "
-        "id.  Reading an archived card is covered here by "
-        "SqlTaskReaderTests.test_restore_snapshot_returns_every_card_by_reference"
-    ),
-    # --- §7.3, the transition's eleven: a half-applied state edge, which this backend no longer
-    # has.  Until secretary-1591 `TaskWriter._transition_card` called `board_host.transition`
-    # outside `_mutation()`, so the staged `requests` row and the card RPC committed separately
-    # and a post-effect failure really did leave a moved card beside a staged request.  These
-    # eleven were parked here as *"the invariant is not met yet"*: they would have passed
-    # precisely because §7.1's promise was broken.  The transition now runs inside
-    # `_mutation()`, the rollback takes the column effect, the caller's `finish` work and the
-    # claim together, and the state every one of them asserts — an applied board write beside a
-    # record that is not committed — does not exist here.  So they are the same kind of omission
-    # as the §7.3 block at the end of this table, not a debt: the class is impossible, and the
-    # eleven are listed one by one rather than by their class so that nothing hides in the
-    # summary.  What replaces them is not a recount of them: `SqlTaskWriterTests` proves the
-    # invariant positively at the three post-effect points they covered — after the column move,
-    # after the claim's metadata write, and after the Ready cleanup — by showing that neither the
-    # board effect nor a staged request survives the failure.  Each of the eleven keeps running,
-    # unchanged, on Kanboard, where the state and its `recover_*` path are exactly as before.
-    "test_typed_pending_transition_recovers_only_after_proving_the_live_target": (
-        "asserts an In progress card beside a pending protocol record after the journal append "
-        "failed, which is the §7.3 state the transition's transaction removes; see the header "
-        "above"
-    ),
-    "test_reconcile_publishes_a_typed_pending_transition_whose_board_work_is_done": (
-        "recovers from that same half-applied move (`_pending_typed_move`)"
-    ),
-    "test_recovery_refuses_a_typed_pending_transition_the_board_contradicts": (
-        "the same half-applied move, refused by recovery"
-    ),
-    "test_recovery_refuses_a_typed_pending_transition_whose_card_vanished": (
-        "the same half-applied move, with the card gone"
-    ),
-    "test_a_transport_failure_after_the_move_keeps_the_typed_pending_record": (
-        "asserts a moved Validate card beside one pending record after the read back was lost"
-    ),
-    "test_a_state_race_after_the_move_keeps_the_typed_pending_record": (
-        "its twin: the move landed, another writer moved the card on, and the record stays "
-        "pending beside it"
-    ),
-    "test_a_claim_whose_metadata_write_fails_keeps_its_pending_event": (
-        "asserts the column moved and the claim metadata did not, with the event held open"
-    ),
-    "test_reconcile_publishes_a_proven_start_and_leaves_the_claim_to_the_dispatcher": (
-        "recovery over that same half-applied claim"
-    ),
-    "test_pending_ready_replay_finishes_cleanup_before_success_audit": (
-        "asserts a moved card and a pending record after the Ready reset's metadata write failed"
-    ),
-    "test_reconcile_completes_stale_ready_cleanup_before_closing_pending": (
-        "the same half-applied Ready reset, from the reconcile side"
-    ),
-    "test_partial_move_failure_keeps_pending_until_reconcile": (
-        "asserts a moved Validate card and a pending record after the follow-up comment failed; "
-        "the comment is issued inside the transition's transaction, so its failure takes the move"
-    ),
-    # --- Kanboard's wire behaviour, not the product's request.  These three assert what a
-    # *batch* is: one JSON-RPC round trip carrying several reads, in the order they were asked
-    # for.  `SqlCardClient.call_batch` is `[self.call(...) for ...]` — one batch because there is
-    # no round trip — so the same assertion passes here while proving nothing about the economy
-    # it exists to protect.  Vacuous is not the same as true, so they stay Kanboard-only.
-    "test_export_includes_archived_cards_in_one_metadata_comments_batch": (
-        "asserts the JSON-RPC batch the export posts and its order.  The store answers the same "
-        "reads in one connection and posts no batch, so there is no equivalent fact"
-    ),
-    "test_steward_signal_cards_are_bounded_normalized_and_filtered": (
-        "same: its bound is the number of JSON-RPC batches.  The projection it also asserts is "
-        "covered on this backend by SqlTaskReaderTests.test_steward_signal_cards_report_the_"
-        "bounded_view"
-    ),
-    "test_archive_retry_after_failed_comment_recreates_reason_before_close": (
-        "its subject is the order of two board writes — the reason comment is recreated before "
-        "the close — which is a claim about the sequence of calls rather than about any state a "
-        "reader can see.  The archive's own effects are covered on both backends by "
-        "test_archive_closes_card_and_writes_audit"
-    ),
-    "test_steward_report_read_is_bounded_and_exposes_no_backend_row": (
-        "same bound, and the case builds its own Kanboard board rather than taking "
-        "`board_client`'s: the read under test would never reach this backend's client, so "
-        "counting it as a PostgreSQL execution would be counting a Kanboard run twice"
-    ),
-    # --- §9: one reference, one card.  `tasks.task_ref` is the primary key, so every fixture
-    # that puts two cards under one reference builds a board this store cannot hold.
-    "test_duplicate_reference_preview_and_apply_use_exact_producer_evidence": (
-        "the duplicate-reference fixture: four rows under two references (§9)"
-    ),
-    "test_duplicate_reference_repair_refuses_missing_evidence_and_dependent_state": (
-        "the same fixture"
-    ),
-    "test_duplicate_reference_repair_refuses_missing_metadata": ("the same fixture"),
-    "test_duplicate_reference_preview_refuses_unrecognized_active_column": (
-        "the same fixture, plus a column id no board has; §3.5's CHECK on `tasks.state` admits "
-        "exactly the seven states"
-    ),
-    "test_duplicate_reference_repair_resumes_after_reference_write": ("the same fixture"),
-    "test_restore_placement_uses_live_duplicate_reference": (
-        "an archived and a live card under `secretary-468`, which the primary key forbids (§9)"
-    ),
-    # --- §9 again, from the other side: a reference the store cannot number, or none at all.
-    "test_pending_create_repairs_legacy_orphaned_reference_by_recorded_id": (
-        "it creates `secretary-restore` and then blanks that row's reference.  "
-        "`tasks.task_number` is NOT NULL and has no value for a reference that does not end in "
-        "-<number>, and `task_ref` is the primary key, so neither state is storable"
-    ),
-    "test_pending_create_does_not_repair_a_different_task_with_its_reference": (
-        "the same two shapes: `secretary-interrupted`, and a row whose reference is cleared"
-    ),
-    "test_auto_reference_uses_board_wide_project_high_water_mark": (
-        "it seeds `secretary-nope` so the allocator has a malformed reference to skip.  "
-        "`tasks.task_number` cannot hold one"
-    ),
-    "test_backend_ignoring_atomic_reference_leaves_pending_create_unrepaired": (
-        "it drops the reference from `createTask`.  `SqlCardClient` refuses that write outright "
-        "(§9: the store identifies a card by its reference), so the card it repairs never exists"
-    ),
-    # --- §3.5: a value the schema's CHECK does not admit.
-    "test_a_card_already_carrying_exec_reads_as_carrying_no_mode": (
-        "it stamps the retired `codex_launch_mode = exec` on a card to prove the reader ignores "
-        "it.  `tasks_codex_launch_mode_check` refuses that value, so the legacy row this reads "
-        "cannot be written here.  A finding about the importer's treatment of legacy `exec` "
-        "rows, not a licence to widen the CHECK"
-    ),
-    # --- §7.3: the effect and the record are one transaction (§7.1), so the state each of these
-    # recovers from — a board write that landed while its record did not — does not exist here.
-    # The refusal itself is proved on this backend by `SqlTaskWriterTests`.
-    "test_pending_is_visible_and_reconciles_without_backend_retry": (
-        "the comment lands and the journal append fails; here both roll back, so there is no "
-        "pending record to see or reconcile (§7.3)"
-    ),
-    "test_archive_retry_after_lost_close_reply_does_not_close_twice": (
-        "the close lands and its reply is lost; the transaction rolls the close back with it"
-    ),
-    "test_archive_reconcile_without_missing_reason_does_not_close": (
-        "the same half-applied archive, from the reconcile side"
-    ),
-    "test_restore_move_failure_keeps_pending_audit": (
-        "a refused move leaves nothing staged here, because the claim rolls back with it"
-    ),
-    "test_reconcile_finishes_pending_restore_before_auditing_success": (
-        "the same, from the reconcile side: there is no owed board work to finish"
-    ),
-    "test_restore_comment_retry_after_lost_reply_does_not_duplicate_history": (
-        "the comment lands and its reply is lost; the comment rolls back, so the retry is a "
-        "first write rather than a replay"
-    ),
-    "test_pending_atomic_create_without_recorded_id_stays_unresolved": (
-        "the card is created and the staging that records its id fails; here the card is not "
-        "created either, so there is no unresolved half to leave"
-    ),
-    "test_pending_create_replay_restores_metadata_before_audit": (
-        "the same create, failing at the metadata write instead"
-    ),
-    "test_steward_report_pending_metadata_recovers_without_duplicate_create": (
-        "the same, for a steward report: nothing survives the failure to recover from, so the "
-        "retry creates rather than replays"
-    ),
-    "test_pending_create_replay_restores_review_and_live_impact": (
-        "a metadata write refused after the create committed.  One transaction rolls both back, so "
-        "there is no pending create to repair"
-    ),
-    "test_sigint_before_atomic_create_does_not_adopt_same_identity_later_reference": (
-        "a SIGINT inside the create.  The interrupt rolls the transaction back, leaving no "
-        "staged record for a later card to be wrongly adopted into"
-    ),
-}
-
-
-class KanboardFixtureCase(SqlBoardCase):
-    """A parity class: the same cases, the other backend, and every omission named."""
-
-    def setUp(self) -> None:
-        reason = KANBOARD_ONLY.get(self._testMethodName)
-        if reason is not None:
-            self.skipTest(f"Kanboard-only: {reason}")
-        super().setUp()
-
-
-class SqlTaskReaderParityTests(KanboardFixtureCase, kanboard_cases.TaskReaderTests):
-    """`tests/test_tasks.py`'s reader cases, unchanged, over the PostgreSQL backend.
-
-    Nothing is overridden but the board the cases run against and the one case that asserts the
-    card identity, which §9 spells differently here.
-    """
-
-    def board_client(self):
-        return self.client_for(FakeKanboard())
-
-    def test_list_names_the_card_identity_of_its_backend(self) -> None:
-        task = self.reader.list(states={"ready"}, project="secretary")[0]
-        self.assertEqual(task["id"], "task_postgres_1")
-        self.assertEqual(task["audit"]["backend"]["kind"], "postgres")
-
-
-class SqlTaskWriterParityTests(KanboardFixtureCase, kanboard_cases.TaskWriterTests):
-    """The same, for the writer's cases."""
-
-    def board_client(self):
-        return self.client_for(WriteKanboard())
-
-    def test_the_audit_that_follows_the_client_sees_the_report_the_journal_never_gets(self) -> None:
-        """What the dispatcher must read on this backend, and what it read on 2026-09-10.
-
-        The worker's `report:done` is committed to `requests`/`board_events`; the file journal
-        under the same data dir stays empty. A reader built from the data dir alone (`TaskAudit`)
-        would wait for that report forever, which is how secretary-1614 was declared stalled.
-        """
-        # A done report is refused from a dirty checkout, so give the writer a clean one of its
-        # own rather than whatever the test process was started in.
-        workspace = Path(self.tmpdir.name) / "workspace"
-        workspace.mkdir()
-        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
-        subprocess.run(
-            ["git", *identity, "commit", "-q", "--allow-empty", "-m", "seed"],
-            cwd=workspace,
-            check=True,
-        )
-        self.writer.workspace = workspace
-        self.writer.report(
-            role="worker",
-            actor="w",
-            reference="secretary-468",
-            kind="done",
-            body="ready",
-            request_id="audit-follows-the-client",
-        )
-        audit = task_audit_for(self.client, self.tmpdir.name)
-        self.assertIsInstance(audit, SqlTaskAudit)
-        reported = audit.events("secretary-468", kind="reported")
-        self.assertEqual([event["request_id"] for event in reported], ["audit-follows-the-client"])
-        self.assertEqual(reported[0]["data"]["marker"], "report:done")
-        self.assertEqual(TaskAudit(self.tmpdir.name).events("secretary-468"), [])
-
-    @contextlib.contextmanager
-    def open_sprint(self, ref: str = "sprint:test", project: str = "secretary"):
-        """The same open sprint, plus the row `tasks.sprint_ref` refers to (§3.3).
-
-        Sprints on this backend are a later card; this is the one row that card's absence makes
-        necessary, and it is stated here so no create case has to know which backend it runs on.
-        """
-        now = datetime.now(UTC)
-        with self.client.transaction():
-            self.client._execute(
-                "INSERT INTO sprints (ref, board_key, goal, definition_of_done, status, created_at, "
-                "updated_at) VALUES (%s, %s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
-                (ref, backend.record_key("sprint", ref), "a goal", "a definition", now, now),
-            )
-        with (
-            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
-            kanboard_cases.open_sprint(ref, project) as sprint,
-        ):
-            yield sprint
-
-    def restore_destination(self):
-        """A fresh migrated store holding only the project and sprint the restored cards name."""
-        destination = seed_client(self.board.fresh_database(), _EmptyWriteKanboard(), Path(self.tmpdir.name))
-        self.addCleanup(destination.close)
-        now = datetime.now(UTC)
-        with destination.transaction():
-            destination._execute(
-                "INSERT INTO projects (project_id, enabled, registry_present) VALUES ('secretary', true, true)"
-            )
-            destination._execute(
-                "INSERT INTO sprints (ref, board_key, goal, definition_of_done, status, created_at, "
-                "updated_at) VALUES (%s, %s, 'a goal', 'a definition', 'open', %s, %s)",
-                ("sprint:test", backend.record_key("sprint", "sprint:test"), now, now),
-            )
-        return destination
-
-    def remove_card(self, reference: str) -> None:
-        """The one fixture verb the card protocol does not carry (see `BoardFixture`)."""
-        with self.client.transaction():
-            self.client._execute("DELETE FROM tasks WHERE task_ref = %s", (reference,))
-
-    def tearDown(self) -> None:
-        pass

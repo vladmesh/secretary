@@ -67,15 +67,29 @@ HEAD_SNAPSHOT = yaml.safe_dump(
 
 
 class SprintProtocolFixture(unittest.TestCase):
-    """One instance, one Product/Issue board, one installed head registry, one data plane."""
+    """One instance, one Product/Issue board, one installed head registry, one data plane.
+
+    The board is the Sprint and Product/Issue Kanboard fixture, whose implementations are still two
+    until sprint:1452 retires them. A suite that also writes cards sets `CARD_STORE`: cards have one
+    implementation, PostgreSQL, so its board is a real store seeded with the same rows
+    (`tests/sql_backend_fixtures.py`), and its sprints go through the store's Sprint vocabulary too.
+    """
+
+    #: Whether this suite's board is a real card store rather than the Kanboard fixture.
+    CARD_STORE = False
 
     def setUp(self) -> None:
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data_dir = self.tmp / "data"
         for relative in ("board", "dispatcher", "sprints"):
             (self.data_dir / relative).mkdir(parents=True)
-        self.board = ProductSprintKanboard()
         self.instance = self._instance()
+        if self.CARD_STORE:
+            from tests.sql_backend_fixtures import card_store
+
+            self.board = card_store(self, ProductSprintKanboard(), instance_dir=self.instance)
+        else:
+            self.board = ProductSprintKanboard()
         self._production({})
         self.clock = 1788652800.0
 
@@ -190,7 +204,7 @@ class SprintProtocolFixture(unittest.TestCase):
         sixty sprints in a test. The writes this fixture does exercise go through `create`.
         """
         board = ensure_sprint_board(self.board)
-        column = self.board.columns[board][0]["id"]
+        column = self.board.call("getColumns", project_id=board)[0]["id"]
         task_id = int(
             self.board.call(
                 "createTask", project_id=board, title=goal, column_id=column, reference=reference
@@ -204,30 +218,44 @@ class SprintProtocolFixture(unittest.TestCase):
             "sprint_issues": json.dumps(["issue:open"]),
             "sprint_reservations": json.dumps([]),
         }
-        if current_task is not None:
+        # The store holds a sprint's current task only as a card linked to that sprint, so there
+        # the card is put on the board, linked, and named once the sprint row exists.
+        if current_task is not None and not self.CARD_STORE:
             values["sprint_current_task"] = current_task
         if observer is not None:
             values[OBSERVER_FIELD] = json.dumps({"kind": "head", "profile": observer})
         if resume is not None:
             values["sprint_resume"] = json.dumps(resume)
         self.board.call("saveTaskMetadata", task_id=task_id, values=values)
+        if current_task is not None and self.CARD_STORE:
+            try:
+                self.board.link_card(self.board.key_of(current_task), reference)
+            except KeyError:
+                self.board.add_card(
+                    self.board.next_key(),
+                    current_task,
+                    metadata={"task_type": "code", "sprint_ref": reference},
+                )
+            self.board.call(
+                "saveTaskMetadata", task_id=task_id, values={"sprint_current_task": current_task}
+            )
         return reference
 
     # -- what the board holds ------------------------------------------------------------------
 
     def sprint_rows(self) -> list[dict[str, Any]]:
-        board = self.board.projects.get(SPRINT_BOARD_NAME)
-        if board is None:
+        found = self.board.call("getProjectByName", name=SPRINT_BOARD_NAME)
+        if not isinstance(found, dict):
             return []
         return [
             task
-            for task in self.board.tasks
-            if task["project_id"] == board and str(task.get("reference") or "").startswith("sprint:")
+            for task in self.board.call("getAllTasks", project_id=found["id"], status_id=1) or []
+            if str(task.get("reference") or "").startswith("sprint:")
         ]
 
     def metadata_of(self, reference: str) -> dict[str, str]:
         row = next(task for task in self.sprint_rows() if task["reference"] == reference)
-        return self.board.metadata[int(row["id"])]
+        return self.board.call("getTaskMetadata", task_id=int(row["id"]))
 
     def reference_of(self, document: dict[str, Any]) -> str:
         return str(document["sprint"]["ref"])

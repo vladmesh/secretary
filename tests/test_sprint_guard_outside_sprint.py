@@ -6,6 +6,8 @@ its project, for every kind and with no override; running it is the dispatcher's
 override, and an index that cannot be verified still fails closed.
 
 Kept out of `tests.test_sprints`, whose method inventory `tests.test_sprint_fixture_guards` freezes.
+The cases write cards, and cards have one implementation, so the board is a real store seeded with the
+Sprint fixture's rows (`tests/sql_backend_fixtures.py`).
 """
 
 from __future__ import annotations
@@ -17,16 +19,22 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.sprints import SprintReader, SprintWriter, refresh_active_sprint_projects
-from secretary.tasks import TaskAudit, TaskError, TaskWriter
-from tests.fakes.sprints import SprintBackendFixture
+from secretary.tasks import TaskError, TaskWriter, task_audit_for
+from tests.fakes.sprints import ProductSprintKanboard, SprintBackendFixture
 from tests.observer_identity import bind_observer
+from tests.sql_backend_fixtures import card_store
 
 
 class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
+    BACKEND = "postgres"
+
+    def make_sprint_client(self):
+        return card_store(self, ProductSprintKanboard(), instance_dir=self.tmp.name)
+
     def setUp(self) -> None:
-        self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.client = self.make_sprint_client()
         self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
         # The same open sprint `SprintSingleWriterGuardTests` seeds: it reserves both projects.
@@ -82,7 +90,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
                     self.assertEqual(moved["task"]["state"], target)
         guard_events = [
             event
-            for event in TaskAudit(self.tmp.name).events()
+            for event in task_audit_for(self.client).events()
             if event["kind"] in {"sprint_guard_denied", "sprint_guard_override"}
         ]
         self.assertEqual(guard_events, [])

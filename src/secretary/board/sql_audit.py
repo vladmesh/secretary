@@ -688,12 +688,15 @@ class SqlTaskAudit:
             candidate = str(record.get("request_id") or "")
             identity: tuple[str, str] | None = None
             if self._is_protocol_event(record):
+                # A staged Card event that is not a marker (a usage record whose publication was
+                # refused, say) renders no marker and so reserves none; it must not refuse the
+                # marker write that is asking.
                 try:
                     event = Event.from_record(record)
+                    if event.entity_kind is EntityKind.CARD:
+                        identity = (event.ref, render_marker_comment(event))
                 except (TypeError, ValueError):
                     continue
-                if event.entity_kind is EntityKind.CARD:
-                    identity = (event.ref, render_marker_comment(event))
             else:
                 payload = record.get("payload")
                 if (

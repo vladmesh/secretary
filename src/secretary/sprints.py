@@ -57,6 +57,7 @@ from secretary.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
+from secretary.product_issues import entity_audit_for
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -83,7 +84,6 @@ from secretary.tasks import (
     _text,
     is_significant_observer_event,
     reference_allocation_lock,
-    task_audit_for,
 )
 from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 
@@ -531,7 +531,7 @@ class SprintReader:
         )
         # PostgreSQL needs no data dir for its audit; a Kanboard reader without one has none.
         if data_dir is not None or getattr(client, "backend_kind", "kanboard") == "postgres":
-            self.audit = task_audit_for(client, data_dir or "")
+            self.audit = entity_audit_for(client, data_dir)
         else:
             self.audit = None
 
@@ -910,7 +910,7 @@ class SprintWriter:
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
-        self.audit = task_audit_for(client, data_dir)
+        self.audit = entity_audit_for(client, data_dir)
         # Reuse the Product/Issue transaction's staged-intent semantics.
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         if getattr(client, "backend_kind", "kanboard") == "postgres":

@@ -19,18 +19,19 @@ from typing import Any
 from unittest import mock
 
 from secretary._fsutil import file_lock
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
 from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard, FakeSprints
+from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
+from secretary.tasks import TaskReader, TaskWriter
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.runtime.head import operations as head_ops
 
-CARD_REF = "secretary-510-pilot"
+CARD_REF = "secretary-510"
 STOPPED_STATUS = {
     "known": True,
     "live": True,
@@ -80,8 +81,15 @@ def ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: s
     return attempt_id
 
 
+def card_audit(test: unittest.TestCase):
+    """The card audit of a store of this test's own, for a host that renders TASK.md."""
+    from secretary.tasks import task_audit_for
+
+    return task_audit_for(card_store(test, dispatcher_seed()))
+
+
 # The one card these tests drive through the tick.
-CARD_REF = "secretary-510-pilot"
+CARD_REF = "secretary-510"
 
 
 class DispatcherRuntimeFixture:
@@ -102,7 +110,7 @@ class DispatcherRuntimeFixture:
         env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
         env.start()
         self.addCleanup(env.stop)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         # workspace is pinned off the repo checkout: these tests stand in for a worker
         # report, and the done gate would otherwise read this repo's own working tree.
@@ -125,11 +133,12 @@ class DispatcherRuntimeFixture:
         )
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = self.writer.audit
         self.sprints = FakeSprints()
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            self.writer.audit,
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -194,7 +203,7 @@ class DispatcherRuntimeFixture:
         self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind=kind,
             body=reason,
             protocol_prerequisites=protocol_prerequisites,
@@ -215,7 +224,7 @@ class DispatcherRuntimeFixture:
         self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
         for request_id in request_ids:
             self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
-        self.assertIn(f"secretary-report-secretary-510-pilot-{expected}.md", document)
+        self.assertIn(f"secretary-report-secretary-510-{expected}.md", document)
 
     def _park_and_decide(
         self,
@@ -228,7 +237,7 @@ class DispatcherRuntimeFixture:
         """Tick the parked verdict through the seam and hand back the tick that acted on it."""
         parked = self.tick()
         self.assertEqual(parked["to"], "assessment")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510")["state"], "assessment")
         self._decide(kind, reason, protocol_prerequisites=protocol_prerequisites, request_id=request_id)
         return self.tick()
 
@@ -237,7 +246,7 @@ class DispatcherRuntimeFixture:
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="done",
             body=body,
             request_id=self._worker_report_request_id(),
@@ -247,7 +256,7 @@ class DispatcherRuntimeFixture:
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body=body,
             request_id=request_id or self._review_verdict_request_id("red"),
@@ -271,8 +280,8 @@ class DispatcherRuntimeFixture:
         The record may be gone (a dispatcher restart), which changes nothing about what the live
         worker is holding: the document is in the checkout either way.
         """
-        record = self.runtime.production_state.load()["records"].get("secretary-510-pilot") or {}
-        workspace = record.get("workspace") or (self.data_dir / "workspaces" / "secretary-510-pilot-pilot")
+        record = self.runtime.production_state.load()["records"].get("secretary-510") or {}
+        workspace = record.get("workspace") or (self.data_dir / "workspaces" / "secretary-510-pilot")
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
         wanted = f"--kind {kind}"
         if classification:
@@ -290,7 +299,6 @@ class DispatcherRuntimeFixture:
         observer's decision is guarded by that reservation: an observer decides only about a card
         whose project its own open sprint holds.
         """
-        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
         # The decisions these tests make are this sprint's head deciding about its own card, so
         # the caller carries the binding the dispatcher gives a head it launches.
         bind_observer(self, "sprint:1031")
@@ -299,15 +307,8 @@ class DispatcherRuntimeFixture:
             "status": status,
             "observer": {"kind": "head", "profile": profile},
         }
-        row = next((row for row in self.board.sprints if row["reference"] == "sprint:1031"), None)
-        if row is None:
-            self.board.add_sprint(
-                "sprint:1031",
-                status=status,
-                sprint_reservations='["secretary"]',
-            )
-        else:
-            self.board.metadata[int(row["id"])]["sprint_status"] = status
+        self.board.add_sprint("sprint:1031", status=status, sprint_reservations='["secretary"]')
+        self.board.save_metadata(12, sprint_ref="sprint:1031")
 
     def start_dispatcher(self) -> None:
         """Put the production state where a running dispatcher leaves it, with an observed card."""
@@ -350,7 +351,7 @@ class DispatcherRuntimeFixture:
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="done",
             body="done",
             request_id=self._worker_report_request_id(),
@@ -359,7 +360,7 @@ class DispatcherRuntimeFixture:
         self.assertEqual(advanced["to"], "validate")
 
     def _pilot_record(self) -> dict:
-        return self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        return self.runtime.production_state.load()["records"]["secretary-510"]
 
     def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
         """The live incident's head: its process is alive and it is not working on anything.
@@ -427,7 +428,7 @@ class DispatcherRuntimeFixture:
         no-episode tests drive, and aging is simply skipped.
         """
         payload = self.runtime.production_state.load()
-        record = payload["records"]["secretary-510-pilot"]
+        record = payload["records"]["secretary-510"]
         episode = record.get(f"{kind}_vitality_episode")
         if episode is None:
             return

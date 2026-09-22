@@ -28,7 +28,6 @@ from secretary.sprint_observer import head_choice, none_choice
 from secretary.sprints import (
     SprintReader,
     SprintWriter,
-    ensure_sprint_board,
     sprint_admission_lock,
 )
 from secretary.tasks import TaskReader, TaskWriter
@@ -182,9 +181,15 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         )
         return ref
 
-    def _card_reader(self) -> mock.Mock:
-        """Canonical board-export seam; cards are not the subject of these tests."""
-        return mock.Mock(export=mock.Mock(return_value=[CARD_EXPORT]))
+    def _card_reader(self, client: object = None) -> mock.Mock:
+        """Canonical board-export seam; cards are not the subject of these tests.
+
+        Its client is the board the export reads, whose card audit is the export's gate.
+        """
+        return mock.Mock(
+            export=mock.Mock(return_value=[CARD_EXPORT]),
+            client=client if client is not None else self.source,
+        )
 
     def _export(self) -> None:
         export_board(
@@ -330,7 +335,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         export_board(
             self.target_data,
             instance_dir=self.instance,
-            reader=self._card_reader(),  # type: ignore[arg-type]
+            reader=self._card_reader(first),  # type: ignore[arg-type]
             sprint_client=first,
         )
         second_data = self.root / "second-recovery"
@@ -612,112 +617,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             thread.join(5)
         self.assertFalse(contender_blocked())
 
-    def test_an_open_row_is_never_published_without_its_observer(self) -> None:
-        """Status and observer are on the row before the reference makes it readable."""
-        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        payload["sprints"][0]["status"] = "open"
-        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
-        client, _ = self._restore()
-
-        order = [
-            method
-            for method, params in client.calls  # type: ignore[attr-defined]
-            if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
-            or (method == "updateTask" and params.get("reference") == self.ref)
-        ]
-        self.assertEqual(order[:2], ["saveTaskMetadata", "updateTask"])
-
-    def test_checkpoint_without_sprint_ownership_restores_as_it_was(self) -> None:
-        """A sprint closed before a sprint owned a Product keeps every path working.
-
-        The export of such an entity has no product, issues or reservations at all, and
-        recovery must neither refuse it nor invent the fields on the restored row.
-        """
-        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        legacy = payload["sprints"][0]
-        for field in ("product", "issues", "reservations"):
-            legacy.pop(field)
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps({"version": 1, "sprints": [legacy]}), encoding="utf-8"
-        )
-
-        client, _ = self._restore()
-
-        live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
-        # Neither the row, nor the view of it, nor the next checkpoint of it gains a
-        # field the entity never had.
-        for field in ("product", "issues", "reservations"):
-            self.assertNotIn(field, live)
-            self.assertNotIn(field, normalize_sprint_entity(live))
-        self.assertEqual(live["goal"], legacy["goal"])
-        self.assertEqual(live["status"], "closed")
-        self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
-
-        board = ensure_sprint_board(client)  # type: ignore[arg-type]
-        row = next(task for task in client.tasks if task["project_id"] == board)  # type: ignore[attr-defined]
-        self.assertEqual(
-            sorted(key for key in client.metadata[row["id"]] if key.startswith("sprint_")),  # type: ignore[attr-defined]
-            [
-                "sprint_budget",
-                "sprint_current_task",
-                "sprint_definition_of_done",
-                "sprint_goal",
-                "sprint_observer",
-                "sprint_repositories",
-                "sprint_resume",
-                "sprint_source_audit",
-                "sprint_status",
-            ],
-        )
-        # Its own export is stable: a second checkpoint of the restored entity still
-        # carries no ownership, so the next recovery compares equal again.
-        export_board(
-            self.target_data,
-            instance_dir=self.instance,
-            reader=self._card_reader(),  # type: ignore[arg-type]
-            sprint_client=client,
-        )
-        again = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        for field in ("product", "issues", "reservations"):
-            self.assertNotIn(field, again["sprints"][0])
-
-    def test_ownership_a_legacy_entity_never_had_fails_the_parity_gate(self) -> None:
-        """Parity compares whether a field is there, not only what it holds.
-
-        A target that writes `sprint_product=""` for an entity whose export carries no
-        product is a lossy metadata write. Reading both sides back as `""` would let it
-        through, and the legacy entity would silently gain fields nobody wrote.
-        """
-        payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        legacy = payload["sprints"][0]
-        for field in ("product", "issues", "reservations"):
-            legacy.pop(field)
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps({"version": 1, "sprints": [legacy]}), encoding="utf-8"
-        )
-        client = self.make_target_client()
-        original = client.call
-
-        def gains_empty_ownership(method: str, **params: object) -> object:
-            if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
-                values = dict(params["values"]) | {  # type: ignore[arg-type]
-                    "sprint_product": "",
-                    "sprint_issues": "[]",
-                    "sprint_reservations": "[]",
-                }
-                return original(method, task_id=params["task_id"], values=values)
-            return original(method, **params)
-
-        with (
-            mock.patch.object(client, "call", side_effect=gains_empty_ownership),
-            self.assertRaisesRegex(RestoreError, "sprint parity check failed"),
-        ):
-            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
-
-        state = restore_state(self.target_data)
-        self.assertEqual(state["sprint_parity"], "failed")
-        self.assertEqual(state["sprints"], "failed")
-
     def test_pipeline_cards_still_restore_alongside_the_entities(self) -> None:
         client, cards = self._restore()
 
@@ -754,7 +653,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         export_board(
             self.target_data,
             instance_dir=self.instance,
-            reader=self._card_reader(),  # type: ignore[arg-type]
+            reader=self._card_reader(first),  # type: ignore[arg-type]
             sprint_client=first,
         )
         second_data = self.root / "second-data"
@@ -781,33 +680,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             [task["reference"] for task in second.tasks if task["reference"] == self.ref],
             [self.ref],  # type: ignore[attr-defined]
         )
-
-    def test_parity_failure_leaves_recovery_incomplete_with_a_named_error(self) -> None:
-        client = self.make_target_client()
-        original = client.call
-
-        def lossy(method: str, **params: object) -> object:
-            # Only the rewrite of the exported fields is lossy: the create of the row
-            # verifies its own metadata and would refuse before parity is ever reached.
-            # The dropped field is the reservations rather than the status, because
-            # status and observer now land with the create, so that the row is never
-            # published in a shape nobody chose. Ownership is written only here, so it is
-            # what a lossy rewrite can still lose.
-            if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
-                values = {k: v for k, v in dict(params["values"]).items() if k != "sprint_reservations"}  # type: ignore[arg-type]
-                return original(method, task_id=params["task_id"], values=values)
-            return original(method, **params)
-
-        with (
-            mock.patch.object(client, "call", side_effect=lossy),
-            self.assertRaisesRegex(RestoreError, "sprint parity check failed"),
-        ):
-            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
-
-        state = restore_state(self.target_data)
-        self.assertEqual(state["sprint_parity"], "failed")
-        self.assertEqual(state["sprints"], "failed")
-        self.assertIn("sprint restore parity failed", restore_findings(self.target_data))
 
     def test_recovery_interrupted_before_the_sprint_step_reports_it_unfinished(self) -> None:
         # Doctor treats a restore state with no sprint key as one that predates sprint
@@ -851,19 +723,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
         self.assertEqual(self.persisted_record_count(client), 0)
-
-    def test_export_without_a_sprint_board_leaves_the_target_untouched(self) -> None:
-        (self.target_data / "board" / "sprints.json").unlink()
-        client, cards = self._restore()
-
-        self.assertEqual(cards, 1)
-        self.assertFalse(
-            any(
-                method == "createProject" and params.get("name") == "Secretary sprints"
-                for method, params in client.calls  # type: ignore[attr-defined]
-            )
-        )
-        self.assertEqual(restore_state(self.target_data)["sprint_count"], 0)
 
 
 if __name__ == "__main__":

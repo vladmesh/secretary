@@ -124,17 +124,6 @@ def export_board(
             raise RuntimeError(
                 f"board export blocked by {audit['pending']} unresolved pending audit record(s)"
             )
-        if getattr(task_client, "backend_kind", None) != "postgres":
-            # SQL Product/Issue effects and claims are one transaction.  The
-            # private staged journal exists only on the JSON-RPC board implementation.
-            from secretary.product_issues import ProductIssueTransaction
-
-            product_issue = ProductIssueTransaction(data_dir, audit_owner).status()
-            if not product_issue["ok"]:
-                raise RuntimeError(
-                    "board export blocked by "
-                    f"{product_issue['pending']} unresolved Product/Issue transaction(s)"
-                )
         cards = task_reader.export()
         history = audit_owner.events()
     except TaskError as exc:
@@ -153,7 +142,7 @@ def export_board(
     # Sprint entities live on their own board and never reach the task board export, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
     owned_sprint_client = None
-    if sprint_client is None and getattr(task_client, "backend_kind", None) == "postgres":
+    if sprint_client is None:
         from secretary.sprints import sprint_client as resolve_sprint_client
 
         owned_sprint_client = resolve_sprint_client(instance_dir)
@@ -201,7 +190,7 @@ def export_board(
     except RuntimeError:
         _cleanup_staging_dir(staging)
         raise
-    if reader is None and getattr(task_client, "backend_kind", None) == "postgres":
+    if reader is None:
         task_client.connection.close()
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
