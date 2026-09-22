@@ -79,8 +79,8 @@ from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
-from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head import (
     with_pid_heartbeat,
 )
 from secretary.runtime.pane_host import PaneSplitSourceMissing

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     EXITED,
     HEAD_ALIVE,
     HEAD_BUSY,

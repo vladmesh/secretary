@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from triggered_agents.runtime.codex_preflight import (
+from secretary.runtime.codex_preflight import (
     EVENT_CHILD_THREAD_EDGE,
     EVENT_COLLABORATION_CALL,
     EVENT_UNKNOWN_THREAD_EDGE,
@@ -28,7 +28,7 @@ from triggered_agents.runtime.codex_preflight import (
     codex_provider_source_descriptor,
     enforce_provider_event,
 )
-from triggered_agents.runtime.head import HeadRun
+from secretary.runtime.head import HeadRun
 
 SOURCE_VERSION = 1
 SOURCE_KIND = "codex_session_event_jsonl"

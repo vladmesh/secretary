@@ -52,7 +52,7 @@ from secretary.dispatch.watchdog import (
 
 # The lifecycle vocabulary of the run itself, from the module that defines it. Spelling these two
 # states as string literals here would be a second copy of a contract that already has one owner.
-from triggered_agents.runtime.head import EXITED, FINISHING
+from secretary.runtime.head import EXITED, FINISHING
 
 RUNNING = "running"
 FINISHED = "finished"

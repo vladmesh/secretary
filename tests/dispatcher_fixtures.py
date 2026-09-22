@@ -26,12 +26,12 @@ from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
+from secretary.runtime.head import operations as head_ops
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.runtime.head import operations as head_ops
 
 CARD_REF = "secretary-510"
 STOPPED_STATUS = {
@@ -476,7 +476,7 @@ class ReviewCatalog(FakeCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        from triggered_agents.runtime.head import HeadCommand
+        from secretary.runtime.head import HeadCommand
 
         return HeadCommand(f"run-{role}", prompt_after_start=False)
 
@@ -613,6 +613,6 @@ class PromptAfterStartCatalog(ReviewCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        from triggered_agents.runtime.head import HeadCommand
+        from secretary.runtime.head import HeadCommand
 
         return HeadCommand(f"run-{role}", prompt_after_start=True)

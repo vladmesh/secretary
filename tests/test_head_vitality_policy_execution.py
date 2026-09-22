@@ -28,8 +28,8 @@ from secretary.dispatch.watchdog import (
     head_process_status,
     suspension_response_window_seconds,
 )
+from secretary.runtime.head import with_pid_heartbeat
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
-from triggered_agents.runtime.head import with_pid_heartbeat
 
 
 class WindowExpiryTests(DispatcherRuntimeFixture, unittest.TestCase):

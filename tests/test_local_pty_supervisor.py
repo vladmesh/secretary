@@ -30,16 +30,16 @@ from secretary.dispatch.watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from triggered_agents.runtime.head.local_pty import journal as journal_module
-from triggered_agents.runtime.head.local_pty import protocol
-from triggered_agents.runtime.head.local_pty import supervisor as supervisor_module
-from triggered_agents.runtime.head.local_pty.client import (
+from secretary.runtime.head.local_pty import journal as journal_module
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty import supervisor as supervisor_module
+from secretary.runtime.head.local_pty.client import (
     HeadHandle,
     LocalPtySpawnError,
     SupervisorClient,
     spawn_head,
 )
-from triggered_agents.runtime.head.local_pty.journal import (
+from secretary.runtime.head.local_pty.journal import (
     DRAIN_REQUESTED,
     EVENT_KINDS,
     INPUT_ACCEPTED,
@@ -1023,7 +1023,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 "-P",
                 "-c",
                 "import sys;sys.path.insert(0, sys.argv[1]);"
-                "from triggered_agents.runtime.head.local_pty.journal import read_events;"
+                "from secretary.runtime.head.local_pty.journal import read_events;"
                 "import json;result=read_events(sys.argv[2]);"
                 "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
                 str(REPO / "src"),
@@ -1307,9 +1307,9 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
     """
 
     def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
-        substrate = "triggered_agents.runtime.head.local_pty"
+        substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path == backend:
@@ -1326,7 +1326,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         verbs = {"start", "deliver", "observe", "request_drain", "attach"}
         for path in sorted(package.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

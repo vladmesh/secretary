@@ -134,11 +134,11 @@ from secretary.runtime import claude_env
 from secretary.runtime.claude_sessions import claude_session_paths
 
 from . import finalizer, orca_rpc
-from .codex_preflight import (
+from secretary.runtime.codex_preflight import (
     CodexPreflightError,
     preflight_codex_launch,
 )
-from .head import (
+from secretary.runtime.head import (
     HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_GONE,
@@ -153,9 +153,9 @@ from .head import (
     render_head_command,
     with_pid_heartbeat,
 )
-from .head.identity import head_process_status
+from secretary.runtime.head.identity import head_process_status
 from .head_runtime_backends import build_head_runtime, head_runtime_name
-from .head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
+from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from secretary.runtime.pane_host import Pane, SessionHost, safe_command_label, session_host
 from .production_telemetry import data_dir as _installation_data_dir
 from .state import AgentState
@@ -403,7 +403,7 @@ def _registry_snapshot() -> RegistrySnapshot:
     caller outside a tick (a test, a one-shot helper) passes no snapshot and gets one of its own.
     """
     try:
-        from ..agents.pipeline import heads as pipeline_heads
+        from secretary.runtime import heads as pipeline_heads
 
         return RegistrySnapshot(pipeline_heads.load_registry())
     except Exception:

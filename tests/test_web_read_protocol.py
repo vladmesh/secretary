@@ -21,6 +21,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.config import validate
+from secretary.runtime.head.identity import publish_heartbeat
 from secretary.tasks import TaskError, task_audit_for
 from secretary.webproto import agents as agent_reads
 from secretary.webproto.cursor import Cursor
@@ -28,7 +29,6 @@ from secretary.webproto.errors import InvalidCursor, TaskNotFound
 from secretary.webproto.reads import ReadLayer
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.runtime.head.identity import publish_heartbeat
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

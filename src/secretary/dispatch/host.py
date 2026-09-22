@@ -233,37 +233,37 @@ from secretary.tasks import (
     durability_dirt,
     specification_revision,
 )
-from triggered_agents.agents.pipeline.heads import (
+from secretary.runtime.heads import (
     HeadRegistryError,
 )
-from triggered_agents.agents.pipeline.heads import (
+from secretary.runtime.heads import (
     resolve_head_id as _resolve_head_id,
 )
-from triggered_agents.runtime import head as head_ops
-from triggered_agents.runtime.codex_preflight import (
+from secretary.runtime import head as head_ops
+from secretary.runtime.codex_preflight import (
     CodexFanoutPolicyError,
     preflight_codex_launch,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     CODEX_TUI_MODE,
     HeadCommand,
     HeadCommandError,
     HeadSpec,
     HeadSpecError,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     render_head_command as _render_head_command,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
 from triggered_agents.runtime.head_runtime_backends import (
@@ -271,7 +271,7 @@ from triggered_agents.runtime.head_runtime_backends import (
     build_head_runtime,
     head_runtime_name,
 )
-from triggered_agents.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
+from secretary.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 from secretary.runtime.launch_prefix import pythonpath_prefix
 from secretary.runtime.pane_host import (
     OrcaSessionHost,

@@ -78,6 +78,8 @@ from secretary.dispatch.worker_lifecycle import (
 )
 from secretary.infra.env import positive_int
 from secretary.role_skills import skill_delivery
+from secretary.runtime import head as head_ops
+from secretary.runtime.codex_preflight import CodexFanoutRecordingError
 from secretary.runtime.role_env import observer_binding
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -89,8 +91,6 @@ from secretary.sprint_observer import (
     pinned_executor,
 )
 from secretary.tasks import TaskError, is_significant_observer_event
-from triggered_agents.runtime import head as head_ops
-from triggered_agents.runtime.codex_preflight import CodexFanoutRecordingError
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"

@@ -25,8 +25,8 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import TextContent
 
 from secretary.memory import access
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
-from triggered_agents.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
+from secretary.runtime.head.identity import publish_heartbeat
 
 DEFAULT_MEMORY_URL = "http://127.0.0.1:8077/mcp"
 MEMORY_URL_ENV = "SECRETARY_MEMORY_URL"

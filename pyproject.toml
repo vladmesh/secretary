@@ -100,6 +100,22 @@ files = [
     "src/secretary/runtime/pane_host.py",
     "src/secretary/runtime/agent_prompt_transport.py",
     "src/secretary/runtime/tui_delivery.py",
+    "src/secretary/runtime/head_runtimes.py",
+    "src/secretary/runtime/codex_preflight.py",
+    "src/secretary/runtime/heads.py",
+    "src/secretary/runtime/head/__init__.py",
+    "src/secretary/runtime/head/command.py",
+    "src/secretary/runtime/head/identity.py",
+    "src/secretary/runtime/head/operations.py",
+    "src/secretary/runtime/head/run.py",
+    "src/secretary/runtime/head/runtime.py",
+    "src/secretary/runtime/head/spec.py",
+    "src/secretary/runtime/head/task_ref.py",
+    "src/secretary/runtime/head/local_pty/__init__.py",
+    "src/secretary/runtime/head/local_pty/client.py",
+    "src/secretary/runtime/head/local_pty/journal.py",
+    "src/secretary/runtime/head/local_pty/protocol.py",
+    "src/secretary/runtime/head/local_pty/supervisor.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true
@@ -180,6 +196,7 @@ include = ["secretary*", "triggered_agents*"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.
 "secretary.board.migrations" = ["script.py.mako", "versions/*.py"]
+"secretary.runtime" = ["heads.toml"]
 "triggered_agents.agents.curator" = ["*.toml"]
 "triggered_agents.agents.pipeline" = ["*.toml"]
 "triggered_agents.agents.retro" = ["*.toml"]

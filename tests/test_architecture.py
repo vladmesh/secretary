@@ -711,7 +711,7 @@ ROLE_ENV_HOME = "secretary/runtime/role_env.py"
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
-    "CODEX_EFFORTS": "triggered_agents/runtime/head/command.py",
+    "CODEX_EFFORTS": "secretary/runtime/head/command.py",
 }
 SINGLE_HOME_FUNCTIONS = {
     "is_sensitive_env_name": ROLE_ENV_HOME,

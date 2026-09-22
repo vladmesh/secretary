@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 # One definition, beside the writer and the reader of the record it versions.
-from triggered_agents.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION
+from secretary.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION
 
 
 def heartbeat_role(role: str) -> str:
@@ -61,7 +61,7 @@ def intent_heartbeat_identity(intent: Mapping[str, Any], *, task: str = "") -> d
 def run_heartbeat_identity(
     run: Mapping[str, Any] | None, *, role: str, task: str = "", leaf: str = ""
 ) -> dict[str, str]:
-    """Expected identity for a persisted ``triggered_agents.runtime.head.HeadRun``."""
+    """Expected identity for a persisted ``secretary.runtime.head.HeadRun``."""
     payload = run if isinstance(run, Mapping) else {}
     return heartbeat_identity(
         run_id=str(payload.get("run_id") or ""),

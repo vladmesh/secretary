@@ -30,7 +30,7 @@ from typing import Any
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
 
-SUPERVISOR_MODULE = "triggered_agents.runtime.head.local_pty.supervisor"
+SUPERVISOR_MODULE = "secretary.runtime.head.local_pty.supervisor"
 #: How long `spawn_head` waits for the run directory to say the head is up.
 SPAWN_TIMEOUT_SECONDS = 20.0
 _POLL_SECONDS = 0.02

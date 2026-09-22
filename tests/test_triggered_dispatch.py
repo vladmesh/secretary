@@ -15,13 +15,14 @@ from unittest import mock
 from secretary.runtime.claude_sessions import claude_project_dir_name
 from tests.fakes.triggered_dispatch import FakeSessionHost
 from secretary.runtime import tui_delivery
-from triggered_agents.runtime import codex_preflight, dispatch
+from secretary.runtime import codex_preflight
+from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
 from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
-from triggered_agents.runtime.head import HeadSpec
+from secretary.runtime.head import HeadSpec
 from secretary.runtime.pane_host import Pane, PaneHostError
 
 
@@ -373,14 +374,14 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.workspace = str(Path(self.tmp.name) / "workspace")
         Path(self.workspace).mkdir()
-        from triggered_agents.agents.pipeline import heads as pipeline_heads
+        from secretary.runtime import heads as pipeline_heads
 
         self.registry = pipeline_heads.Registry(
             self.REGISTRY["resources"], self.REGISTRY["profiles"], self.REGISTRY["role_defaults"]
         )
 
     def test_a_codex_service_head_is_launched_without_its_skill(self) -> None:
-        from triggered_agents.agents.pipeline import heads as pipeline_heads
+        from secretary.runtime import heads as pipeline_heads
         from triggered_agents.agents.pipeline import health as pipeline_health
 
         with (
@@ -499,7 +500,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
 
     def test_an_agent_pinned_to_an_old_codex_id_still_resolves(self) -> None:
         """The spec's last-resort head is a product-side id; the installation republished its own."""
-        from triggered_agents.agents.pipeline import heads as pipeline_heads
+        from secretary.runtime import heads as pipeline_heads
 
         registry = pipeline_heads.Registry(self.REGISTRY["resources"], self.REGISTRY["profiles"], {})
 
@@ -514,7 +515,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         head this registry does publish — and when it publishes none, the dispatch is refused
         rather than quietly rendered as some other family's launch command.
         """
-        from triggered_agents.agents.pipeline import heads as pipeline_heads
+        from secretary.runtime import heads as pipeline_heads
 
         resources = self.REGISTRY["resources"]
         with_codex = pipeline_heads.Registry(

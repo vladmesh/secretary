@@ -24,9 +24,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatch.host import InstanceCatalog
+from secretary.runtime import codex_preflight, heads
 from tests import _SUITE_CODEX_HOME
-from triggered_agents.agents.pipeline import heads
-from triggered_agents.runtime import codex_preflight
 
 # A registry in the shape the offending dispatcher tests use: a Codex profile that says nothing
 # about `codex_home`, because which home an installation runs its heads with is not something a

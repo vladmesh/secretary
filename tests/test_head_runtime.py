@@ -32,7 +32,7 @@ from typing import Any
 
 from tests.fakes.host import FakeSessionHost
 from tests.support.head_runtime_contract import HeadRuntimeContract
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     EXITED,
     FINISHING,
     HEAD_ALIVE,
@@ -60,7 +60,7 @@ from triggered_agents.runtime.head import (
     TurnLease,
     TurnLeaseError,
 )
-from triggered_agents.runtime.head import operations as head_operations
+from secretary.runtime.head import operations as head_operations
 from triggered_agents.runtime.orca_legacy_head import (
     STOP_ACTIVITY_SINCE,
     STOP_TURN_IN_FLIGHT,

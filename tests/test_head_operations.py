@@ -32,7 +32,7 @@ import unittest
 from pathlib import Path
 
 from tests.fakes.host import FakeSessionHost
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     EXITED,
     FINISHING,
     SPAWNED,
@@ -52,7 +52,7 @@ from triggered_agents.runtime.head import (
     spawn,
     stop,
 )
-from triggered_agents.runtime.head import operations as head_operations
+from secretary.runtime.head import operations as head_operations
 from secretary.runtime.pane_host import PaneSplitSourceMissing
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
@@ -506,7 +506,7 @@ class TaskPointerTests(unittest.TestCase):
         self.assertEqual(run.task_ref.document, "")
 
     def test_a_pointer_of_no_known_kind_is_refused(self) -> None:
-        from triggered_agents.runtime.head import TaskRefError
+        from secretary.runtime.head import TaskRefError
 
         with self.assertRaises(TaskRefError):
             TaskRef(kind="whatever", ref="x")

@@ -23,7 +23,7 @@ import json
 import os
 from pathlib import Path
 
-from . import heads
+from secretary.runtime import heads
 
 SESSIONS_ROOT = Path(os.environ.get("TA_CODEX_SESSIONS", str(Path(heads.CODEX_HOME) / "sessions")))
 # A TUI head alive right now wrote its rollout today, or yesterday across midnight.

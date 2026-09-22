@@ -18,13 +18,13 @@ from pathlib import Path
 
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.types import HostError
-from triggered_agents.agents.pipeline.heads import HEADS_TOML, Registry, load_registry
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     HeadSpec,
     HeadSpecError,
     head_spec,
     load_head_specs,
 )
+from secretary.runtime.heads import HEADS_TOML, Registry, load_registry
 
 INSTALLED_SNAPSHOT = Path(__file__).parent / "fixtures" / "heads" / "installed-heads.yaml"
 

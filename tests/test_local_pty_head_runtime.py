@@ -39,8 +39,7 @@ import unittest
 from pathlib import Path
 
 from secretary.dispatch.watchdog import clear_head_heartbeat, head_process_status
-from tests.support.head_runtime_contract import HeadRuntimeContract
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     EXITED,
     HEAD_ALIVE,
     HEAD_BUSY,
@@ -55,9 +54,9 @@ from triggered_agents.runtime.head import (
     TaskRef,
     TurnLease,
 )
-from triggered_agents.runtime.head.local_pty import protocol
-from triggered_agents.runtime.head.local_pty.client import SupervisorClient
-from triggered_agents.runtime.head.local_pty.journal import (
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.client import SupervisorClient
+from secretary.runtime.head.local_pty.journal import (
     DRAIN_REQUESTED,
     INPUT_ACCEPTED,
     JOURNAL_SCHEMA_VERSION,
@@ -71,6 +70,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
+from tests.support.head_runtime_contract import HeadRuntimeContract
 from triggered_agents.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
     DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
@@ -2179,9 +2179,9 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """
 
     def test_the_substrate_is_reached_only_through_its_one_backend(self) -> None:
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
-        substrate = "triggered_agents.runtime.head.local_pty"
+        substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path == backend:

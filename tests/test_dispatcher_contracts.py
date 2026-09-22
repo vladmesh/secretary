@@ -61,15 +61,8 @@ from secretary.head_registry import (
 )
 from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
-from secretary.runtime import role_env
-from secretary.runtime.role_env import observer_binding
-from tests.dispatcher_fixtures import card_audit
-from tests.fakes.dispatcher import FakeCatalog, FakeHost
-from tests.fanout_fixtures import accepted_transport_run
-from tests.retired_board import legacy_runtime_lines
-from triggered_agents.agents.pipeline import heads
-from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.head import (
+from secretary.runtime import heads, role_env
+from secretary.runtime.head import (
     HEAD_ALIVE,
     HEAD_OK,
     STANDING_BINDING,
@@ -82,12 +75,18 @@ from triggered_agents.runtime.head import (
     render_head_command,
     wrap_role_command,
 )
-from triggered_agents.runtime.head_runtimes import (
+from secretary.runtime.head_runtimes import (
     DEFAULT_HEAD_RUNTIME,
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
 )
+from secretary.runtime.role_env import observer_binding
+from tests.dispatcher_fixtures import card_audit
+from tests.fakes.dispatcher import FakeCatalog, FakeHost
+from tests.fanout_fixtures import accepted_transport_run
+from tests.retired_board import legacy_runtime_lines
+from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
 from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 
@@ -1112,7 +1111,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
     def test_the_preflight_is_shared_with_the_triggered_agents_launcher(self) -> None:
         """One implementation reachable from both sides, and the dependency direction that forces
         where it lives: `triggered_agents` may not import `secretary` back."""
-        from triggered_agents.runtime import codex_preflight
+        from secretary.runtime import codex_preflight
         from triggered_agents.runtime import dispatch as ta_dispatch
 
         self.assertIs(
@@ -1356,7 +1355,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         reading them. So the two fingerprints have to be indifferent to it, and this is that.
         """
         from secretary.dispatch.worker_lifecycle import head_run_binding
-        from triggered_agents.runtime import codex_preflight
+        from secretary.runtime import codex_preflight
 
         def run_on(runtime: str) -> HeadRun:
             return HeadRun(
@@ -1423,7 +1422,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         product = Path(tmp.name) / "product"
-        canon = product / "src" / "triggered_agents" / "agents" / "pipeline"
+        canon = product / "src" / "secretary" / "runtime"
         canon.mkdir(parents=True)
         (canon / "heads.toml").write_text(
             '[resources.acct]\naccount = "acct"\n\n'

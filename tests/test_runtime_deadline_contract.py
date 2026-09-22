@@ -18,9 +18,9 @@ import unittest
 from pathlib import Path
 
 from secretary.dispatch.watchdog import head_process_status
-from triggered_agents.runtime.head import HeadSpec, TaskRef
-from triggered_agents.runtime.head.local_pty import protocol
-from triggered_agents.runtime.head.local_pty.client import SupervisorClient, spawn_head
+from secretary.runtime.head import HeadSpec, TaskRef
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.client import SupervisorClient, spawn_head
 from triggered_agents.runtime.local_pty_head import (
     DELIVERY_GRACE_SECONDS,
     STOP_CONFIRM_SECONDS,

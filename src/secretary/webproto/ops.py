@@ -28,7 +28,7 @@ run_start` and `run_state` are the two paths criterion 2 names, and `tests/test_
 fails if either of them grows one.
 
 **Which head runs is configuration, not code.** A profile id is an argument, it is resolved through
-the head registry (`triggered_agents.agents.pipeline.heads`), and it must name the `local-pty`
+the head registry (`secretary.runtime.heads`), and it must name the `local-pty`
 runtime — a profile that names Orca's backend is refused here rather than quietly run under a
 backend it does not declare. Nothing in this module knows the name of a model, an adapter or an
 effort.
@@ -64,6 +64,10 @@ from typing import Any
 
 from secretary.board.backend import CARD, board_client
 from secretary.config import InstanceReport, validate_instance
+from secretary.runtime.head.command import HeadCommandError
+from secretary.runtime.head.spec import HeadSpec, HeadSpecError
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from secretary.runtime.heads import HeadRegistryError, load_registry
 from secretary.tasks import task_audit_for
 from secretary.webproto import run_events, sources
 from secretary.webproto import run_state as run_state_reads
@@ -109,11 +113,7 @@ from secretary.webproto.runs import (
 )
 from secretary.webproto.store_io import write_document
 from secretary.webproto.workspaces import provision, workspace_path
-from triggered_agents.agents.pipeline.heads import HeadRegistryError, load_registry
-from triggered_agents.runtime.head.command import HeadCommandError
-from triggered_agents.runtime.head.spec import HeadSpec, HeadSpecError
 from triggered_agents.runtime.head_runtime_backends import build_head_runtime
-from triggered_agents.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 #: Re-exported so that the names an operator and a test already know keep resolving here, while the
 #: transitions that use them live in one place. See :mod:`secretary.webproto.lifecycle`.

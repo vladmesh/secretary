@@ -51,12 +51,12 @@ from secretary.projects.contract import (
     ModuleContract,
 )
 from secretary.projects.integration_base import resolve_integration_base
+from secretary.runtime import codex_preflight
+from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.host import FakeSessionHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.production_runtime_fixtures import registered_production_runtime
-from triggered_agents.runtime import codex_preflight
-from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 class CodexProviderEventIngressTests(unittest.TestCase):

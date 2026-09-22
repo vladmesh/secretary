@@ -53,9 +53,10 @@ from secretary.host import (
 )
 from secretary.host_apply import ApplyInputs, apply_host
 from secretary.projects.availability import ProjectAvailability
+from secretary.runtime import heads
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from triggered_agents.agents.pipeline import heads, health
+from triggered_agents.agents.pipeline import health
 
 UNIT_PREFIX = "secretary-"
 
@@ -1567,7 +1568,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
         (self.instance / "heads" / "heads.toml").write_text(
             (
-                self.context.product_root / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
+                self.context.product_root / "src" / "secretary" / "runtime" / "heads.toml"
             ).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
@@ -1927,7 +1928,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
 
             self.assertEqual(
                 path,
-                product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml",
+                product / "src" / "secretary" / "runtime" / "heads.toml",
             )
             self.assertEqual(origin, PRODUCT_ORIGIN)
             self.assertEqual(canonical_heads(product, instance), canonical_heads(product))

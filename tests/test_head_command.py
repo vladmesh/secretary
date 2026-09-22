@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
     HEAD_BINDING,
@@ -375,7 +375,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 
     def test_the_operator_shell_renders_the_same_command_the_registry_would(self) -> None:
         from secretary import session
-        from triggered_agents.agents.pipeline import heads
+        from secretary.runtime import heads
 
         registry = heads.load_registry()
         for pid in registry.known():
@@ -416,7 +416,7 @@ def _module_paths() -> list[Path]:
     allowed = {
         REPO_ROOT / "src" / "secretary" / "runtime" / "pane_host.py",
     }
-    head_package = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "head"
+    head_package = REPO_ROOT / "src" / "secretary" / "runtime" / "head"
     paths = []
     for package in ("secretary", "triggered_agents"):
         for path in sorted((REPO_ROOT / "src" / package).rglob("*.py")):

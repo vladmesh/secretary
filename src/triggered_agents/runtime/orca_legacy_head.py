@@ -56,8 +56,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from . import head as head_ops
-from .head.operations import (
+from secretary.runtime import head as head_ops
+from secretary.runtime.head.operations import (
     Commit,
     HeadPaneBusy,
     HeadSpawnAborted,
@@ -65,8 +65,8 @@ from .head.operations import (
     LaunchPreflight,
     NudgePointer,
 )
-from .head.run import HeadRun, StopInitiator
-from .head.runtime import (
+from secretary.runtime.head.run import HeadRun, StopInitiator
+from secretary.runtime.head.runtime import (
     HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_DRAINING,
@@ -86,8 +86,8 @@ from .head.runtime import (
     StartReceipt,
     StopReceipt,
 )
-from .head.spec import HeadSpec
-from .head.task_ref import TaskRef
+from secretary.runtime.head.spec import HeadSpec
+from secretary.runtime.head.task_ref import TaskRef
 from secretary.runtime.pane_host import Pane, PaneHostError, SessionHost
 from secretary.runtime.tui_delivery import (
     READINESS_BUSY,

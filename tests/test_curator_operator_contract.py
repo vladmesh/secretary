@@ -38,7 +38,7 @@ class CuratorOperatorContractTests(unittest.TestCase):
                 self.assertIn(required, operations)
 
     def test_the_shipped_registry_keeps_installation_policy_out(self) -> None:
-        shipped = ROOT / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
+        shipped = ROOT / "src" / "secretary" / "runtime" / "heads.toml"
         canon = tomllib.loads(shipped.read_text(encoding="utf-8"))
 
         self.assertNotIn("codex-curator", canon["profiles"])

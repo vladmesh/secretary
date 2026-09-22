@@ -107,7 +107,7 @@ from secretary.projects.contract import (
     ModuleContract,
 )
 from secretary.runtime import role_env
-from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
+from secretary.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatch.state import (
@@ -151,6 +151,18 @@ from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import (
     attempts as routing_attempts,
 )
+from secretary.runtime.head import (
+    HEAD_DRAINING,
+    HEAD_OK,
+    DeliverReceipt,
+    HeadCommand,
+    HeadRun,
+    HeadSpec,
+    TaskRef,
+    render_head_command,
+    wrap_role_command,
+)
+from secretary.runtime.head import operations as head_ops
 from secretary.runtime.prompt_document import (
     NUDGE_FILE_MODE,
     NUDGE_MAX_BYTES,
@@ -181,18 +193,6 @@ from tests.fakes.dispatcher import (
 from tests.integration_setup import require_disposable_board_fixture
 from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, legacy_runtime_lines
 from tests.sql_backend_fixtures import PostgresBoard, card_store
-from triggered_agents.runtime.head import (
-    HEAD_DRAINING,
-    HEAD_OK,
-    DeliverReceipt,
-    HeadCommand,
-    HeadRun,
-    HeadSpec,
-    TaskRef,
-    render_head_command,
-    wrap_role_command,
-)
-from triggered_agents.runtime.head import operations as head_ops
 
 
 def setUpModule() -> None:

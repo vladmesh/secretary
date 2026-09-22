@@ -26,12 +26,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .head_runtimes import (
+from secretary.runtime.head_runtimes import (
     DEFAULT_HEAD_RUNTIME,
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
 )
+
 from .local_pty_head import LocalPtyHeadRuntime
 from .orca_legacy_head import OrcaLegacyHeadRuntime
 
