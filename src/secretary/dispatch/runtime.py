@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import has_candidate, review_required
@@ -132,6 +132,9 @@ from secretary.dispatch.review_verdict import (
 from secretary.dispatch.state import (
     DispatcherRecord,
     OutcomeTerminalPath,
+    PersistedHeadRun,
+    PersistedLaunchIntent,
+    PersistedRoutingHeadSnapshot,
     now_rfc3339,
 )
 from secretary.dispatch.state import (
@@ -294,7 +297,7 @@ class DispatcherRuntime:
         intent = dict(record.launch_intent or {})
         if not isinstance(stored, dict) or not stored.get("run_id"):
             candidate = intent.get("head_run")
-            stored = candidate if isinstance(candidate, dict) else {}
+            stored = cast(PersistedHeadRun, candidate if isinstance(candidate, dict) else {})
         if not stored.get("run_id"):
             return
         try:
@@ -312,7 +315,7 @@ class DispatcherRuntime:
                 existing = record.worker_head_run
                 if isinstance(existing, dict) and existing.get("run_id"):
                     updated_json = _merge_launch_head_run(existing, updated_json)
-                record.worker_head_run = updated_json
+                record.worker_head_run = cast(PersistedHeadRun, updated_json)
                 record.workspace = updated.workspace or record.workspace
                 record.handle = updated.handle or record.handle
                 record.worker_leaf = updated.leaf or record.worker_leaf
@@ -321,7 +324,7 @@ class DispatcherRuntime:
                 existing = record.review_head_run
                 if isinstance(existing, dict) and existing.get("run_id"):
                     updated_json = _merge_launch_head_run(existing, updated_json)
-                record.review_head_run = updated_json
+                record.review_head_run = cast(PersistedHeadRun, updated_json)
                 record.workspace = updated.workspace or record.workspace
                 record.review_handle = updated.handle or record.review_handle
                 record.review_leaf = updated.leaf or record.review_leaf
@@ -330,7 +333,7 @@ class DispatcherRuntime:
             intent_run = current_intent.get("head_run")
             if isinstance(intent_run, dict) and str(intent_run.get("run_id") or "") == updated.run_id:
                 current_intent["head_run"] = _merge_launch_head_run(intent_run, updated_json)
-                record.launch_intent = current_intent
+                record.launch_intent = cast(PersistedLaunchIntent, current_intent)
             records[reference] = record
             self.save_records(payload, records)
 
@@ -352,7 +355,7 @@ class DispatcherRuntime:
                     "Codex provider fan-out policy blocked this head: "
                     f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
                 ),
-                request_id=_attempt_request_id(
+                request_id=_attempt_request_id(  # type: ignore[call-arg]  # pre-existing 5-arg call; fixed by the follow-up provider-block card of sprint:1455
                     record.attempt_id, "codex-provider-event-blocked", reference, role, run.run_id
                 ),
                 terminal_state="blocked",
@@ -841,8 +844,8 @@ class DispatcherRuntime:
         """Start the card's next worker round: stamp its number and drop the previous round's heads."""
         record.attempt_round = round_number or (record.attempt_round + 1)
         record.outcome_terminal_path = OutcomeTerminalPath.NO_ACCEPTED_REPORT
-        record.worker_run = {}
-        record.review_run = {}
+        record.worker_run = cast(PersistedRoutingHeadSnapshot, {})
+        record.review_run = cast(PersistedRoutingHeadSnapshot, {})
 
     def record_worker_routing(
         self,
@@ -864,7 +867,7 @@ class DispatcherRuntime:
         snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.worker_head_run)
         if record.worker_run and _run_key(record.worker_run) == _run_key(snapshot):
             snapshot = record.worker_run.snapshot or snapshot
-        record.worker_run = snapshot
+        record.worker_run = cast(PersistedRoutingHeadSnapshot, snapshot)
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
     def record_review_routing(
@@ -887,7 +890,7 @@ class DispatcherRuntime:
         snapshot = _routing_head_snapshot_from_launch(snapshot, lifecycle_run=record.review_head_run)
         if record.review_run and _run_key(record.review_run) == _run_key(snapshot):
             snapshot = record.review_run.snapshot or snapshot
-        record.review_run = snapshot
+        record.review_run = cast(PersistedRoutingHeadSnapshot, snapshot)
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
     def _record_routing(
@@ -927,9 +930,9 @@ class DispatcherRuntime:
                     if recorded is None:
                         continue
                     if role == WORKER:
-                        record.worker_run = recorded
+                        record.worker_run = cast(PersistedRoutingHeadSnapshot, recorded)
                     elif role == REVIEWER:
-                        record.review_run = recorded
+                        record.review_run = cast(PersistedRoutingHeadSnapshot, recorded)
             return
         self.writer.routing(
             role="dispatcher",
@@ -1008,8 +1011,14 @@ class DispatcherRuntime:
             # A reviewer launches only over a green gate, so a card in review inherits a passed gate.
             gate_state="green" if launched else "",
             attempt_round=round_record.attempt if round_record else 0,
-            worker_run=round_record.worker.to_json() if round_record and round_record.worker else {},
-            review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
+            worker_run=cast(
+                PersistedRoutingHeadSnapshot,
+                round_record.worker.to_json() if round_record and round_record.worker else {},
+            ),
+            review_run=cast(
+                PersistedRoutingHeadSnapshot,
+                round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
+            ),
             outcome_terminal_path=adopted_path,
         )
         # A lost record may be recovered from the worker's own heartbeat, but only after its
@@ -1017,7 +1026,9 @@ class DispatcherRuntime:
         # A legacy pid or another card's process stays unbound and is never signalled.
         pid_file = _launch_pid_file(WORKER_ROLE, task["ref"])
         heartbeat = _head_process_status(pid_file) if task.get("state") == "in_progress" else {}
-        raw = heartbeat.get("record") if isinstance(heartbeat.get("record"), dict) else {}
+        raw = cast(
+            dict[str, Any], heartbeat.get("record") if isinstance(heartbeat.get("record"), dict) else {}
+        )
         if (
             _heartbeat_is_live_match(heartbeat)
             and str(raw.get("role") or "") == WORKER_ROLE
@@ -1042,7 +1053,7 @@ class DispatcherRuntime:
                 leaf=recovered.leaf,
             )
             if _heartbeat_is_live_match(verified):
-                record.worker_head_run = recovered.to_json()
+                record.worker_head_run = cast(PersistedHeadRun, recovered.to_json())
                 record.worker_pid_file = pid_file
                 record.worker_started_at = record.worker_progress_at = time.time()
         return record
