@@ -312,10 +312,13 @@ class NoPhraseBranchCase(RecoveryCase):
 
         code, output = self.recover()
 
-        self.assertEqual(code, 1, output)
+        # The runtime file the operator wrote is used as it is; the store stays locked and says so.
+        # The recovery no longer fails on a JSON-RPC transport tuple the board store never reads.
+        self.assertEqual(code, 0, output)
         self.assertIn("locked    secret:example_api_token", output)
         self.assertIn("3 secret(s) locked", output)
-        self.assertIn("refuse to guess or rotate", output)
+        self.assertIn("status: board and memory are ready, but store is locked", output)
+        self.assertNotIn("refuse to guess or rotate", output)
 
 
 class MissingValueCase(RecoveryCase):
