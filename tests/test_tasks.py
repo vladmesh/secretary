@@ -1657,8 +1657,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         }
         data_dir = Path(self.tmpdir.name) / "round-trip"
         init_layout(data_dir)
+        # The subject is the cards: the sprint set comes from a store that holds none.
         export_board(
-            data_dir, instance_dir=Path(self.tmpdir.name), reader=self.writer.reader, sprint_client=self.writer.client
+            data_dir,
+            instance_dir=Path(self.tmpdir.name),
+            reader=self.writer.reader,
+            sprint_client=self.card_store(empty_seed()),
         )
         exported = {
             card["reference"]: card
