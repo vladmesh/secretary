@@ -237,7 +237,7 @@ def describe(entry: dict) -> str:
 def describe_incident(incident: dict) -> str:
     """One-line diagnostic for an incident: when it started, how long it ran, what caused it.
 
-    The cause is the tick that opened it, not the newest failing one: every tick of a Kanboard outage
+    The cause is the tick that opened it, not the newest failing one: every tick of a board outage
     says the same thing, and what an operator needs is where it began.
     """
     if not incident:

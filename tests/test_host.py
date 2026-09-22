@@ -827,7 +827,7 @@ class ReconcilePlanTests(unittest.TestCase):
         )
         self.assertEqual(service["managed_by"], "secretary")
         self.assertIn("production-tick", service["runtime"])
-        self.assertNotIn("KANBOARD_API_TOKEN", service["env"])
+        self.assertNotIn("EXAMPLE_API_TOKEN", service["env"])
         self.assertIn("SECRETARY_INSTANCE", service["env"])
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 

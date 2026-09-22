@@ -51,9 +51,9 @@ class ScrubSecretsTests(unittest.TestCase):
     def test_plain_runtime_url_is_not_an_exact_value_secret(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = Path(tmpdir) / "runtime.env"
-            url = "https://board.example.invalid/jsonrpc.php"
+            url = "https://board.example.invalid/rpc"
             runtime.write_text(
-                f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN=opaque-token-value\n",
+                f"EXAMPLE_URL={url}\nEXAMPLE_API_TOKEN=opaque-token-value\n",
                 encoding="utf-8",
             )
 
@@ -62,7 +62,7 @@ class ScrubSecretsTests(unittest.TestCase):
     def test_named_runtime_secret_is_an_exact_value_secret(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = Path(tmpdir) / "runtime.env"
-            runtime.write_text("KANBOARD_API_TOKEN=opaque-token-value\n", encoding="utf-8")
+            runtime.write_text("EXAMPLE_API_TOKEN=opaque-token-value\n", encoding="utf-8")
 
             self.assertEqual(
                 redact("token opaque-token-value", env_files=[runtime]),
@@ -107,8 +107,8 @@ class ScrubSecretsTests(unittest.TestCase):
     def test_url_with_embedded_credentials_stays_an_exact_value_secret(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = Path(tmpdir) / "runtime.env"
-            url = "https://operator:password@board.example.invalid/jsonrpc.php"
-            runtime.write_text(f"KANBOARD_URL={url}\n", encoding="utf-8")
+            url = "https://operator:password@board.example.invalid/rpc"
+            runtime.write_text(f"EXAMPLE_URL={url}\n", encoding="utf-8")
 
             self.assertEqual(redact(f"board is {url}", env_files=[runtime]), f"board is {REDACTED}:env-value")
 

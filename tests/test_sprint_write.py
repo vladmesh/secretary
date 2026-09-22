@@ -10,6 +10,7 @@ from secretary.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
+from tests.retired_board import RETIRED_STORE
 
 
 class SprintWriteValueTests(TestCase):
@@ -42,7 +43,7 @@ class SprintWriteValueTests(TestCase):
         self.assertTrue(admission.is_open is False)
 
     def test_snapshot_keeps_reader_legacy_unknown_state_fallback(self) -> None:
-        snapshot = SprintWriteSnapshot.from_document({"id": "sprint_kanboard_1", "status": "mystery"})
+        snapshot = SprintWriteSnapshot.from_document({"id": f"sprint_{RETIRED_STORE}_1", "status": "mystery"})
         self.assertEqual(snapshot.state, SprintState.OPEN)
 
     def test_create_intent_round_trips_released_document(self) -> None:

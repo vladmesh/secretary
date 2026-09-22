@@ -28,10 +28,11 @@ from secretary.secret_store import (
 )
 from secretary.secret_words import RECOVERY_WORDS
 from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 RUNTIME_ENV = (
-    "EXAMPLE_URL=http://127.0.0.1/jsonrpc.php\nEXAMPLE_API_USER=jsonrpc\nEXAMPLE_API_TOKEN=live-token\n"
+    "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_USER=rpc-user\nEXAMPLE_API_TOKEN=live-token\n"
 )
 
 
@@ -141,49 +142,46 @@ class RecoveryCase(unittest.TestCase):
 
 
 class LegacyBoardOnlyRecoveryTests(RecoveryCase):
-    def _add_historical_board_secret(self) -> None:
-        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
-            secret_store.set_secret(
-                self.source,
-                secret_id="kanboard_api_token",
-                value=b"historic-token",
-                scope="installation",
-                purpose="historic board transport",
-                environment="KANBOARD_API_TOKEN",
-                materialize={"target": "runtime-env"},
-                actor="tester",
-            )
+    def test_legacy_ids_recover_as_ordinary_entries_locked_or_unlocked(self) -> None:
+        """Nothing names the retired transport's ids, so recovery treats them like any secret.
 
-    def test_legacy_only_store_is_inert_when_locked_or_unlocked(self) -> None:
-        # The fixture starts with unrelated secrets; make the assertion on a fresh store whose
-        # catalog has only the historical entry, as a pre-transport recovery really does.
+        A store holding only them reports them locked without the phrase and puts them back with
+        it; the file they land in stays a valid runtime.env whose extra keys nothing reads.
+        """
         root = Path(self.tmpdir.name) / "legacy-only"
         root.mkdir()
         _git(root, "init")
         _git(root, "config", "user.name", "Test")
         _git(root, "config", "user.email", "test@example.invalid")
+        (root / ".gitignore").write_text("runtime.env\n", encoding="utf-8")
         with mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params):
             initialize_store(root, phrase=PHRASE, actor="tester")
-        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+        for secret_id, environment, value in zip(LEGACY_SECRET_IDS, LEGACY_ENV, LEGACY_VALUES):
             secret_store.set_secret(
                 root,
-                secret_id="kanboard_api_token",
-                value=b"historic-token",
+                secret_id=secret_id,
+                value=value.encode(),
                 scope="installation",
-                purpose="historic board transport",
-                environment="KANBOARD_API_TOKEN",
+                purpose="historic board configuration",
+                environment=environment,
                 materialize={"target": "runtime-env"},
                 actor="tester",
             )
         secret_store.key_path(root).unlink()
+        runtime_env = root / "runtime.env"
 
-        locked = secret_recover.recover_secrets(root)
-        opened = secret_recover.recover_secrets(root, phrase=PHRASE)
+        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime_env)}):
+            locked = secret_recover.recover_secrets(root)
+            opened = secret_recover.recover_secrets(root, phrase=PHRASE)
 
-        self.assertEqual((locked.locked, locked.missing), ((), ()))
         self.assertFalse(locked.unlocked)
+        self.assertEqual(sorted(entry["id"] for entry in locked.locked), sorted(LEGACY_SECRET_IDS))
+        self.assertEqual(locked.missing, ())
         self.assertTrue(opened.unlocked)
-        self.assertEqual(opened.materialized, ())
+        self.assertEqual([result.path for result in opened.materialized], [runtime_env])
+        self.assertEqual(
+            installation.read_runtime_env(root, None), dict(zip(LEGACY_ENV, LEGACY_VALUES))
+        )
 
 
 class PhraseBranchCase(RecoveryCase):
@@ -201,7 +199,7 @@ class PhraseBranchCase(RecoveryCase):
 
         values = installation.read_runtime_env(self.target, None)
         self.assertEqual(values["EXAMPLE_API_TOKEN"], "live-token")
-        self.assertEqual(values["EXAMPLE_URL"], "http://127.0.0.1/jsonrpc.php")
+        self.assertEqual(values["EXAMPLE_URL"], "http://127.0.0.1/rpc")
 
     def test_the_phrase_arrives_through_stdin_without_touching_argv(self) -> None:
         with mock.patch("sys.stdin", io.StringIO(PHRASE + "\n")):

@@ -16,6 +16,7 @@ from unittest import mock
 
 from secretary.board import backend
 from secretary.tasks import TaskError
+from tests.retired_board import RETIRED_STORE
 
 
 class EntityIdentityTests(unittest.TestCase):
@@ -32,11 +33,11 @@ class EntityIdentityTests(unittest.TestCase):
 
     def test_an_identity_stored_before_the_cutover_still_reads_back(self) -> None:
         """History carries the store word of the board that minted it; the number is what counts."""
-        self.assertEqual(backend.entity_number("task", "task_kanboard_12"), 12)
-        self.assertEqual(backend.entity_number("sprint", "sprint_kanboard_7"), 7)
+        self.assertEqual(backend.entity_number("task", f"task_{RETIRED_STORE}_12"), 12)
+        self.assertEqual(backend.entity_number("sprint", f"sprint_{RETIRED_STORE}_7"), 7)
 
     def test_an_identity_of_the_other_kind_is_not_this_kind_s_number(self) -> None:
-        self.assertIsNone(backend.entity_number("task", "sprint_kanboard_9"))
+        self.assertIsNone(backend.entity_number("task", f"sprint_{RETIRED_STORE}_9"))
         self.assertIsNone(backend.entity_number("sprint", "task_postgres_468"))
 
     def test_a_bare_number_is_still_read_and_anything_else_is_not(self) -> None:
@@ -87,7 +88,7 @@ class BoardHostIdentityTests(unittest.TestCase):
             return host._card_task_id("secretary-468")
 
     def test_a_card_minted_now_or_before_the_cutover_resolves_to_its_number(self) -> None:
-        self.assertEqual(self._host("task_kanboard_468"), 468)
+        self.assertEqual(self._host(f"task_{RETIRED_STORE}_468"), 468)
         self.assertEqual(self._host("task_postgres_468"), 468)
 
     def test_an_identity_outside_the_convention_is_still_refused(self) -> None:
@@ -104,7 +105,7 @@ class SprintIdentityTests(unittest.TestCase):
     def test_a_sprint_minted_now_or_before_the_cutover_resolves_to_its_number(self) -> None:
         from secretary.sprints import _sprint_number
 
-        self.assertEqual(_sprint_number({"id": "sprint_kanboard_9"}), 9)
+        self.assertEqual(_sprint_number({"id": f"sprint_{RETIRED_STORE}_9"}), 9)
         self.assertEqual(_sprint_number({"id": "sprint_postgres_9"}), 9)
 
     def test_a_missing_sprint_is_still_a_named_refusal(self) -> None:

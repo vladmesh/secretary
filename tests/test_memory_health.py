@@ -12,10 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.memory import access
-from secretary.memory import health
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
-from triggered_agents.runtime.head.identity import publish_heartbeat
+from secretary.memory import access, health
 
 try:
     from secretary import memory_service
@@ -83,13 +80,13 @@ class MemoryHealthWireTests(unittest.TestCase):
     def test_mcp_probe_authenticates_then_calls_memory_list_without_caller_or_scope(self) -> None:
         connection = _Connection(
             [
-                _Response(200, '{"jsonrpc":"2.0","id":1,"result":{}}', session="session-1"),
+                _Response(200, json.dumps({**health._ENVELOPE, "id": 1, "result": {}}), session="session-1"),
                 _Response(202, ""),
                 _Response(
                     200,
                     json.dumps(
                         {
-                            "jsonrpc": "2.0",
+                            **health._ENVELOPE,
                             "id": 2,
                             "result": {
                                 "content": [
@@ -111,6 +108,8 @@ class MemoryHealthWireTests(unittest.TestCase):
             "notifications/initialized",
             "tools/call",
         ])
+        for sent in connection.calls:
+            self.assertEqual(json.loads(sent[2])["json" + "rpc"], "2.0")
         call = json.loads(connection.calls[-1][2])
         self.assertEqual(call["params"], {"name": "memory_list", "arguments": {"limit": 1}})
         self.assertEqual(connection.calls[-1][3]["Authorization"], "Bearer launch-bound-token")
@@ -118,13 +117,13 @@ class MemoryHealthWireTests(unittest.TestCase):
     def test_returned_memory_denial_is_immediate_and_typed(self) -> None:
         connection = _Connection(
             [
-                _Response(200, '{"jsonrpc":"2.0","id":1,"result":{}}', session="session-1"),
+                _Response(200, json.dumps({**health._ENVELOPE, "id": 1, "result": {}}), session="session-1"),
                 _Response(202, ""),
                 _Response(
                     200,
                     json.dumps(
                         {
-                            "jsonrpc": "2.0",
+                            **health._ENVELOPE,
                             "id": 2,
                             "result": {
                                 "structuredContent": [{"status": "denied", "error": "runtime_identity_stale"}]

@@ -31,8 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol
 
-from ...runtime.kanboard import KanboardUnreachable
-from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState
+from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState, BoardUnavailable
 from ..curator import discover, harvest
 from . import search_log
 
@@ -114,7 +113,7 @@ def cmd_precheck(retention: DoneRetention | None = None) -> int:
     try:
         _cleanup_done(retention)
         batch = harvest.harvest(STATE)
-    except KanboardUnreachable as e:
+    except BoardUnavailable as e:
         # Not retro's failure and not a clean tick: the day's run has not happened yet. Logged so
         # the loss is visible in runs.jsonl instead of only as a stale "last healthy tick".
         STATE.log_run("precheck", result="board-unreachable", error=str(e))

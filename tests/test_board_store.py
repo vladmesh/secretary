@@ -168,7 +168,7 @@ class ConnectionFileTests(unittest.TestCase):
 
     def test_a_checkout_with_no_store_and_no_ignore_entry_reports_nothing(self) -> None:
         """A pre-store installation is not an unhealthy one; only a lifecycle marker makes
-        absence a finding, exactly as `board_transport.findings` decides it."""
+        absence a finding."""
         self.assertEqual(findings(self.instance), [])
 
     def test_findings_reports_a_broken_file_without_disclosing_it(self) -> None:
@@ -571,7 +571,7 @@ class InstanceRepository(unittest.TestCase):
 
 
 class IgnoreLifecycleTests(InstanceRepository):
-    """The durable exclusion `board_transport.ensure` gives the transport (criterion 2, §5.4).
+    """The durable exclusion of `board-store.env` (criterion 2, §5.4).
 
     A finding that the file is tracked is not a lifecycle; making `/board-store.env` excluded is.
     This card ships the operation and calls it against no live installation: the bootstrap path

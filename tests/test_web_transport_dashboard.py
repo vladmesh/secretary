@@ -811,7 +811,6 @@ class HealthSummaryTests(unittest.TestCase):
                     "checkpoint_last_failure_reason": "push refused",
                     "blocked_reason": "no remote",
                 },
-                "board_transport": {"findings": ["x"]},
                 "secret_store": {"installation_key": {"present": True, "usable": False}},
                 "memory": {"index_present": False},
             }
@@ -827,7 +826,6 @@ class HealthSummaryTests(unittest.TestCase):
                 "2 dispatcher divergence(s) are open",
                 "the checkpoint is blocked: no remote",
                 "the last checkpoint failed: push refused",
-                "board_transport has 1 finding(s)",
                 "the secret store's installation key is not usable",
                 "the memory index is missing",
             ],

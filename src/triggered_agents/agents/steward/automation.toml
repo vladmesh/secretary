@@ -35,7 +35,7 @@ enabled = false
 # packaging/systemd/secretary-<name>.timer and installed by `secretary reconcile apply`.
 calendar = "00/3:00:00"
 randomized_delay_sec = 150   # jitter so the three-hour sweep never races curator/board at :00-:03
-# precheck hits Kanboard directly (signals.py), before any LLM head is up; ta-gate loads the
+# precheck reads the board store directly (signals.py), before any LLM head is up; ta-gate loads the
 # steward allowlist through role-scoped runtime env.
 
 # Second, unconditional mode (triggered-agents-254): once a day the head wakes up with NO

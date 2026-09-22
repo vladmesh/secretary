@@ -28,7 +28,6 @@ from secretary.board import (
     InvalidTransition,
     Issue,
     IssueState,
-    SqlBoardHost,
     MutationEventTransaction,
     Product,
     RelatedRefs,
@@ -36,6 +35,7 @@ from secretary.board import (
     Sprint,
     SprintState,
     SprintSupplement,
+    SqlBoardHost,
     TransitionRequest,
 )
 from secretary.board.card_transitions import (
@@ -44,6 +44,7 @@ from secretary.board.card_transitions import (
     card_transition,
 )
 from secretary.tasks import TaskAudit, TaskError
+from tests.retired_board import RETIRED_STORE
 
 
 class BoardHostContractTests(unittest.TestCase):
@@ -585,7 +586,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             "actor": {"role": "worker", "id": "worker-1419"},
             "kind": "moved",
             "outcome": "success",
-            "task_id": "task_kanboard_1",
+            "task_id": f"task_{RETIRED_STORE}_1",
             "ref": "secretary-1419",
             "request_id": request_id,
             "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:1"},
@@ -747,7 +748,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             "actor": {"role": "worker", "id": "worker-1"},
             "kind": "moved",
             "outcome": "success",
-            "task_id": "task_kanboard_7",
+            "task_id": f"task_{RETIRED_STORE}_7",
             "ref": "secretary-1419",
             "request_id": "released-1",
             "backend": {"kind": "kanboard", "task_id": 7, "revision": "updated_at:1"},

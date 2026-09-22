@@ -10,7 +10,7 @@ Which heads exist is installation configuration, not product code, so an upgrade
 reads its own `<instance>/heads/heads.yaml` snapshot and the shipped `heads.toml` is the portable
 default. Both go through the same validator.
 
-Pure and I/O-light (`load_registry` caches its read per process): no Kanboard, no orca, no
+Pure and I/O-light (`load_registry` caches its read per process): no board, no orca, no
 subprocess.
 """
 

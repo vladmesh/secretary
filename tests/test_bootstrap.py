@@ -15,6 +15,7 @@ from secretary.bootstrap import (
     _install_platform,
     bootstrap,
 )
+from tests.retired_board import RETIRED_STORE, STALE_FILE
 
 
 class BootstrapTests(unittest.TestCase):
@@ -132,7 +133,7 @@ class BootstrapTests(unittest.TestCase):
             code = bootstrap(args)
         return code, steps
 
-    def test_bootstrap_provisions_migrates_and_verifies_the_store_with_no_kanboard_step(self) -> None:
+    def test_bootstrap_provisions_migrates_and_verifies_the_store_with_no_retired_board_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
 
@@ -151,10 +152,10 @@ class BootstrapTests(unittest.TestCase):
                     mock.call.set_owner(target, "dev"),
                 ],
             )
-            self.assertFalse((target / "board-transport.env").exists())
+            self.assertFalse((target / STALE_FILE).exists())
             gitignore = target / ".gitignore"
             self.assertNotIn(
-                "board-transport.env", gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+                STALE_FILE, gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
             )
             self.assertTrue((target / BOOTSTRAP_STAMP).is_file())
             exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
@@ -163,9 +164,9 @@ class BootstrapTests(unittest.TestCase):
             for removed in (
                 "ensure_pipeline_board",
                 "migrate_assessment_column",
-                "_wait_for_kanboard",
+                "_wait_for_" + RETIRED_STORE,
                 "_compose_file",
-                "KANBOARD_IMAGE",
+                RETIRED_STORE.upper() + "_IMAGE",
             ):
                 self.assertFalse(hasattr(bootstrap_module, removed), removed)
 

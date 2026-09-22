@@ -20,9 +20,9 @@ from secretary import tasks
 from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
-from secretary.board.sql_host import SqlBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.sql_host import SqlBoardHost
 from secretary.board.steward_reports import StewardReportBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.cli import main
@@ -50,6 +50,7 @@ from secretary.tasks import (
 )
 from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
+from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
 from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
 from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun
 from triggered_agents.runtime.head import HeadSpec, TaskRef
@@ -97,8 +98,8 @@ class BoardFixture:
     Every helper here speaks either the card client's own protocol — the one `TaskReader` and
     `TaskWriter` speak to Kanboard and to the store alike — or the reader's normalized card.
     None of them reaches into a fake's rows, its metadata map or its RPC log, which is what used
-    to pin ninety writer cases to one backend (`KANBOARD_FIXTURE_ONLY` in
-    tests/test_tasks_sql_backend.py).  A case built on these runs unchanged on both.
+    to pin ninety writer cases to one backend (a fixture-only list that
+    tests/test_tasks_sql_backend.py once kept).  A case built on these runs unchanged on both.
 
     `self.rpc` is the transport log, and it is the test's own rather than a fake's: it records
     what the product asked the *client interface* for.  That makes it truthful on either backend,
@@ -108,7 +109,7 @@ class BoardFixture:
     and backend-neutral by construction rather than by argument.  A count survives only where the
     claim *is* the absence of a call and no state distinguishes it; there are five such cases and
     each says so at the assertion.  Anything whose subject is Kanboard's wire behaviour — the
-    batch log below, the order two writes were issued in — is named in `KANBOARD_ONLY`
+    batch log below, the order two writes were issued in — was named in a Kanboard-only list
     (tests/test_tasks_sql_backend.py).
     """
 
@@ -164,7 +165,7 @@ class BoardFixture:
         and that is exactly why it must not be read as parity.  A Kanboard batch is one JSON-RPC
         round trip and the economy is the point; `SqlCardClient.call_batch` is
         `[self.call(...) for ...]`, one batch because there is no round trip, so the same
-        assertion proves nothing there.  Every case that uses this is named in `KANBOARD_ONLY`
+        assertion proves nothing there.  Every case that uses this was named in a Kanboard-only list
         (tests/test_tasks_sql_backend.py).  What *is* portable is the other log, `self.rpc`:
         which methods of the client interface the product invoked, and how many times.
         """
@@ -487,32 +488,18 @@ class TaskCliTests(CardStoreCase):
 
         The installation is named and is one this test built: unnamed, the command resolves
         `DEFAULT_INSTANCE` — `~/secretary-instance`, which on the appliance host is the *live*
-        installation, whose transport and card backend this suite must never read (secretary-1622).
-        The ambient `KANBOARD_*` are still exported while it runs, because "not a source of transport
-        configuration" is part of what this case is about (secretary-1026); the credential that must
-        not be echoed is the one in the transport file the named instance owns.
+        installation, whose card backend this suite must never read (secretary-1622).
+        The retired transport's variables are still exported while it runs and its stale file is
+        still in the named instance, because "not a source of board configuration" is part of what
+        this case is about (secretary-1026); the credential that must not be echoed is theirs.
         """
         output, errors = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            transport = instance / "board-transport.env"
-            transport.write_text(
-                "KANBOARD_URL=https://board.invalid/token\n"
-                "KANBOARD_API_USER=user\nKANBOARD_API_TOKEN=super-secret\n",
-                encoding="utf-8",
-            )
-            transport.chmod(0o600)
+            write_stale_leftovers(instance)
             with (
-                mock.patch.dict(
-                    "os.environ",
-                    {
-                        "KANBOARD_URL": "https://board.invalid/token",
-                        "KANBOARD_API_USER": "user",
-                        "KANBOARD_API_TOKEN": "super-secret",
-                    },
-                    clear=False,
-                ),
-                mock.patch("urllib.request.urlopen", side_effect=OSError("super-secret")),
+                mock.patch.dict("os.environ", dict(zip(LEGACY_ENV, LEGACY_VALUES)), clear=False),
+                mock.patch("urllib.request.urlopen", side_effect=OSError(LEGACY_VALUES[2])),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(errors),
             ):
@@ -521,7 +508,7 @@ class TaskCliTests(CardStoreCase):
         self.assertEqual(code, 1)
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
-        self.assertNotIn("super-secret", errors.getvalue())
+        self.assertNotIn(LEGACY_VALUES[2], errors.getvalue())
 
     def test_missing_runtime_configuration_is_json_error(self) -> None:
         # The instance is named explicitly and points at an empty directory. Clearing the
@@ -913,7 +900,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         board.move_report(reference=reference, target="done", reason="sweep complete")
         self.assertEqual(self.writer.reader.show(reference)["state"], "done")
 
-    def test_kanboard_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
+    def test_board_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
         host = self.writer.board_host
         for index, declaration in enumerate(TRANSITIONS[EntityKind.CARD].values()):
             self.place_card("secretary-468", declaration.source.value)
@@ -1119,9 +1106,9 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_comment_scrubs_runtime_secret_before_board_and_audit(self) -> None:
         runtime = Path(self.tmpdir.name) / "external" / "runtime.env"
         secret = "opaque-token-value"
-        url = "https://board.example.invalid/jsonrpc.php"
+        url = "https://board.example.invalid/rpc"
         runtime.parent.mkdir()
-        runtime.write_text(f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN={secret}\n", encoding="utf-8")
+        runtime.write_text(f"EXAMPLE_URL={url}\nEXAMPLE_API_TOKEN={secret}\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime)}):
             self.writer.comment(
                 role="worker",
@@ -4457,7 +4444,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             "actor": {"role": "worker", "id": "w"},
             "kind": "reported",
             "outcome": "success",
-            "task_id": "task_kanboard_12",
+            "task_id": f"task_{RETIRED_STORE}_12",
             "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
@@ -4693,7 +4680,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             "actor": {"role": "dispatcher", "id": "pilot"},
             "kind": "routing",
             "outcome": "success",
-            "task_id": "task_kanboard_12",
+            "task_id": f"task_{RETIRED_STORE}_12",
             "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
             "request_id": "round-1",

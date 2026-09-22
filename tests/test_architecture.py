@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LEGACY_FLAT_MODULES = frozenset(
     """
     __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
-    backup_policy.py backup_retention.py backup_verify.py board_transport.py bootstrap.py
+    backup_policy.py backup_retention.py backup_verify.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py dispatcher.py
     gate.py
@@ -513,7 +513,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
                 self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
-        """A new write names the PostgreSQL store; `task_kanboard_<n>`/`sprint_kanboard_<n>` are only read.
+        """A new write names the PostgreSQL store; the retired store word's identities are only read.
 
         The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
         or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and

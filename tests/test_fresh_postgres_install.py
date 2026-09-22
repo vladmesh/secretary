@@ -36,6 +36,7 @@ from secretary.data import init_layout
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.installation import CARD as CHECKPOINT_CARD
 from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.retired_board import STALE_FILE
 from tests.sql_backend_fixtures import PostgresBoard
 
 STORE_DATABASE = "secretary"
@@ -163,7 +164,7 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         self.assertEqual(self._bootstrap(str(remote), target), 0)
         # Nothing selects the board, so bootstrap records nothing in runtime.env.
         self.assertFalse((target / "runtime.env").exists())
-        self.assertFalse((target / "board-transport.env").exists())
+        self.assertFalse((target / STALE_FILE).exists())
 
         orca_version = mock.Mock(return_value="orca v1")
         real_run = installation._run
@@ -211,10 +212,10 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", result.steps)
-        self.assertEqual(steps["board-transport"][0], "skipped")
+        self.assertFalse([name for name in steps if "transport" in name], steps)
         self.assertEqual(steps["prerequisites"], ("unchanged", "PostgreSQL and Orca are reachable"))
         self.assertEqual(steps["board"], ("changed", "1 card(s) at parity"))
-        self.assertFalse((target / "board-transport.env").exists())
+        self.assertFalse((target / STALE_FILE).exists())
         self.assertFalse((target / "runtime.env").exists())
 
         # Read back through the store the units will use, not through the recovery's own client.

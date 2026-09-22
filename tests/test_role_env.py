@@ -11,8 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import role_env as secretary_role_env
-from secretary.board_transport import ensure as ensure_board_transport
-from triggered_agents.runtime import kanboard, role_env
+from tests.retired_board import LEGACY_ENV, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
+from triggered_agents.runtime import role_env
 from triggered_agents.runtime.head.command import wrap_role_command
 
 
@@ -69,7 +69,6 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             ruff.chmod(0o755)
             python = root / role_env.WORKSPACE_ENV_DIR / "bin" / "python3"
             python.symlink_to("/usr/bin/python3")
-            ensure_board_transport(root, allow_default=True)
             base_env = {
                 "PATH": os.environ["PATH"],
                 "SECRETARY_INSTANCE": str(root),
@@ -117,10 +116,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"
             env_file.write_text(
-                "KANBOARD_URL=https://board.invalid\n"
-                "KANBOARD_API_USER=bot\n"
-                "KANBOARD_API_TOKEN=token\n"
-                "SECRETARY_OBSERVER_SPRINT=sprint:forged\n"
+                legacy_runtime_lines() + "SECRETARY_OBSERVER_SPRINT=sprint:forged\n"
                 "SECRETARY_OBSERVER_GENERATION=forged\n",
                 encoding="utf-8",
             )
@@ -158,12 +154,13 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     self.assertNotIn(role_env.MEMORY_ACCESS_TOKEN_ENV, env)
                     self.assertEqual(launched[role_env.MEMORY_ACCESS_TOKEN_ENV], "launch-bound")
 
-    def test_every_merged_role_builds_an_environment(self) -> None:
+    def test_every_merged_role_builds_an_environment_with_no_transport_requirement(self) -> None:
+        """No role needs, reads or passes on the retired transport, even where its leftovers remain."""
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             env_file = instance / "runtime.env"
-            env_file.write_text("EXAMPLE_API_TOKEN=secret\n", encoding="utf-8")
-            transport = ensure_board_transport(instance, allow_default=True).transport
+            env_file.write_text("EXAMPLE_API_TOKEN=secret\n" + legacy_runtime_lines(), encoding="utf-8")
+            write_stale_leftovers(instance)
             for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
                 with self.subTest(role=role):
                     env = role_env.runtime_env(
@@ -171,26 +168,26 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                         base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
                         env_file=env_file,
                     )
-                    self.assertNotIn("KANBOARD_API_TOKEN", env)
-                    with mock.patch.dict(os.environ, env, clear=True):
-                        self.assertEqual(kanboard._creds(), transport)
+                    self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
+                    for name in LEGACY_ENV:
+                        self.assertNotIn(name, env)
+                    self.assertFalse(any(STALE_FILE in value for value in env.values()))
 
-    def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
+    def test_a_role_builds_its_environment_with_no_transport_file_and_no_runtime_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            with mock.patch("triggered_agents.runtime.board_transport.resolve", side_effect=AssertionError):
-                env = role_env.runtime_env(
-                    "worker",
-                    base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
-                    env_file=instance / "runtime.env",
-                )
+            env = role_env.runtime_env(
+                "worker",
+                base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                env_file=instance / "runtime.env",
+            )
         self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
 
 
 class NoBoardTransportGateTests(unittest.TestCase):
-    """The board is the PostgreSQL store, so no role's launch demands the JSON-RPC tuple."""
+    """The board is the PostgreSQL store, so no role's launch demands a transport."""
 
-    def test_every_board_role_execs_without_a_tuple(self) -> None:
+    def test_every_board_role_execs_without_a_transport(self) -> None:
         for role in ("pipeline", "observer", "steward", "retro"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:
                 instance = Path(tmp)
@@ -205,9 +202,6 @@ class NoBoardTransportGateTests(unittest.TestCase):
                     ),
                     mock.patch.object(
                         role_env.os, "execvpe", side_effect=lambda file, *_, sink=launched: sink.append(file)
-                    ),
-                    mock.patch(
-                        "triggered_agents.runtime.board_transport.resolve", side_effect=AssertionError
                     ),
                 ):
                     code = role_env.main(

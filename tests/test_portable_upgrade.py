@@ -22,7 +22,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import installation, role_skills, upgrade
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.cli import main as cli_main
 from secretary.config import validate_instance
 from secretary.head_registry import (
@@ -33,6 +32,14 @@ from secretary.head_registry import (
     snapshot_path,
 )
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.retired_board import (
+    LEGACY_ENV,
+    LEGACY_VALUES,
+    STALE_FILE,
+    STATUS_SECTION,
+    legacy_runtime_lines,
+    write_stale_leftovers,
+)
 
 UNIT_PREFIX = "secretary-"
 # Read at import, before any fixture patches the home or the account database: these are the two
@@ -181,7 +188,7 @@ class PortableFixture(unittest.TestCase):
         self.write_product()
         self.write_instance()
         self._initialize_instance_repo()
-        # A fully replaced environment: an inherited SECRETARY_INSTANCE, TA_* or KANBOARD_* would
+        # A fully replaced environment: an inherited SECRETARY_INSTANCE, TA_* or runtime variable would
         # point some part of the run back at the live installation, which is exactly the failure
         # this fixture exists to rule out.
         env = mock.patch.dict(
@@ -273,10 +280,6 @@ class PortableFixture(unittest.TestCase):
             + f"host:\n  unit_prefix: {UNIT_PREFIX}\n",
             encoding="utf-8",
         )
-        # This fixture exercises upgrades unrelated to board migration.  Seed the explicit local
-        # transport a prior fresh install would have created, so the upgrade remains an upgrade
-        # rather than silently adopting a new live token.
-        ensure_board_transport(self.instance, allow_default=True)
 
     def _initialize_instance_repo(self) -> None:
         """Give the materializer the private checkpoint it requires in production."""
@@ -384,6 +387,57 @@ class PortableFixture(unittest.TestCase):
         """Nothing in a result may name the developing machine's home or this checkout."""
         for foreign in (RUNNING_CHECKOUT, LIVE_HOME):
             self.assertNotIn(foreign, text)
+
+
+class StaleTransportLeftoverTests(PortableFixture):
+    """An older installation still carries the retired transport's file and runtime.env lines.
+
+    Upgrade and doctor neither read nor report them: they are files and variables nothing names.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.instance / ".gitignore").write_text("/runtime.env\n/" + STALE_FILE + "\n", encoding="utf-8")
+        self.runtime = self.instance / "runtime.env"
+        self.runtime_body = "OTHER=value\n" + legacy_runtime_lines()
+        self.runtime.write_text(self.runtime_body, encoding="utf-8")
+        self.runtime.chmod(0o600)
+        self.stale = write_stale_leftovers(self.instance)
+        self.stale_body = self.stale.read_bytes()
+
+    def assert_nothing_names_the_transport(self, text: str) -> None:
+        self.assertNotIn(STALE_FILE, text)
+        self.assertNotIn("board transport", text.lower())
+        self.assertNotIn(STATUS_SECTION, text)
+        for name, value in zip(LEGACY_ENV, LEGACY_VALUES):
+            self.assertNotIn(name, text)
+            self.assertNotIn(value, text)
+
+    def test_upgrade_and_doctor_neither_read_nor_report_the_leftovers(self) -> None:
+        real_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if Path(path).name == STALE_FILE:
+                raise AssertionError(f"{path} was opened")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", guarded_open):
+            result = self.run_upgrade()
+            instance = ["--instance", str(self.instance), "--offline", "--json"]
+            code, report = self.run_json_cli(["doctor", *instance])
+            status_code, status_text = self.run_cli(["status", *instance])
+
+        self.assertTrue(result.ok, result.render())
+        self.assertFalse([step.name for step in result.steps if "transport" in step.name])
+        self.assert_nothing_names_the_transport(result.render())
+        self.assertEqual(code, 0, report)
+        self.assertNotIn(STATUS_SECTION, report["status"])
+        self.assert_nothing_names_the_transport(json.dumps(report))
+        self.assertEqual(status_code, 0, status_text)
+        self.assertNotIn(STATUS_SECTION, json.loads(status_text))
+        self.assert_nothing_names_the_transport(status_text)
+        self.assertEqual(self.stale.read_bytes(), self.stale_body)
+        self.assertEqual(self.runtime.read_text(encoding="utf-8"), self.runtime_body)
 
 
 class PortableInstallationTests(PortableFixture):

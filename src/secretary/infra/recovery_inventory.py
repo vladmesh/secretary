@@ -20,9 +20,7 @@ from secretary.infra.github_credential import (
     project_remote_execution,
 )
 from secretary.secret_store import (
-    LEGACY_BOARD_SECRET_IDS,
     SecretStoreError,
-    list_secrets,
     store_divergence,
     store_health,
 )
@@ -46,7 +44,6 @@ def collect_recovery_inventory(
     consumers = _credential_consumers(instance_dir, resources, checkpoint, projects)
     paths = _path_rows(report)
     bypasses = _git_bypasses(instance_dir, projects)
-    bypasses.extend(_legacy_board_bypasses(instance_dir))
     materializations = _materialization_rows(instance_dir)
     store = store_health(instance_dir)
     if store.get("initialized"):
@@ -601,27 +598,6 @@ def _git_configuration_scope(origin: str, instance_dir: Path) -> str:
             return "file"
         return "repository" if configured == local else "ambient-file"
     return "command" if origin.startswith("command line:") else "unknown"
-
-
-def _legacy_board_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
-    try:
-        legacy = sorted(
-            entry["id"] for entry in list_secrets(instance_dir) if entry.get("id") in LEGACY_BOARD_SECRET_IDS
-        )
-    except SecretStoreError:
-        return []
-    return [
-        {
-            "capability": "board-transport",
-            "kind": "retired-secret-catalog-entry",
-            "state": "stale",
-            "supported": False,
-            "entry": secret_id,
-            "reason": "retired Kanboard catalog metadata is ignored and cannot overwrite board transport",
-            "supported_next_action": f"remove retired entry {secret_id} with the supported secret-store command",
-        }
-        for secret_id in legacy
-    ]
 
 
 def _materialization_rows(instance_dir: Path) -> list[dict[str, Any]]:

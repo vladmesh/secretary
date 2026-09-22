@@ -42,7 +42,7 @@ class IssueVocabularyTests(unittest.TestCase):
         self.assertIsNone(issue.issue_kind)
         self.assertIsNone(issue.close_reason)
 
-    def test_staged_kanboard_pending_pair_does_not_extend_vocabularies(self) -> None:
+    def test_staged_pending_pair_does_not_extend_vocabularies(self) -> None:
         issue = Issue(
             "issue:pending",
             "Pending metadata",

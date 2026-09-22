@@ -8,7 +8,7 @@ has already used, counted over the board's open **and** archived rows. The archi
 made this a defect twice. A counter that forgets what it handed out re-issues it: on 2026-08-06 a
 sprint created without an explicit reference took `sprint:804`, already the reference of a sprint
 closed on 2026-07-27, and `sprint show` then resolved the new sprint's reference to the old row;
-on 2026-08-18 `create` derived `codegen-orchestrator-1127` from a fresh Kanboard row id and
+on 2026-08-18 `create` derived `codegen-orchestrator-1127` from a fresh board row id and
 addressed a card archived long before it.
 
 Allocation alone cannot make a reference unique, because the rule can only count the rows the
@@ -40,8 +40,8 @@ class BoardRowsUnavailable(RuntimeError):
 def board_rows(call: Callable[..., Any], project_id: int) -> list[dict[str, Any]]:
     """Every row of one board, open and archived alike.
 
-    Kanboard 1.2 splits rows into status 1 (open) and status 0 (closed, which is where an archived
-    row lands) and has no complete-set status, so both sets are read and the first copy of each task
+    The card client splits rows into status 1 (open) and status 0 (closed, which is where an
+    archived row lands) and has no complete-set status, so both sets are read and the first copy of each task
     id is kept in case a backend returns a row in both answers.
     """
     rows: list[dict[str, Any]] = []
@@ -49,7 +49,7 @@ def board_rows(call: Callable[..., Any], project_id: int) -> list[dict[str, Any]
     for status_id in (1, 0):
         answer = call("getAllTasks", project_id=project_id, status_id=status_id)
         if not isinstance(answer, list):
-            raise BoardRowsUnavailable("Kanboard returned an invalid task list")
+            raise BoardRowsUnavailable("the board returned an invalid task list")
         for row in answer:
             if not isinstance(row, dict):
                 continue
@@ -74,7 +74,7 @@ def next_reference(rows: Iterable[Mapping[str, Any]], prefix: str) -> str:
 def reference_allocation_lock(data_dir: Path | str | None = None) -> Iterator[None]:
     """Serialize allocate, claim and write across every local writer of one board.
 
-    Kanboard accepts duplicate references and offers no compare-and-swap, so the three steps are
+    The card client offers no compare-and-swap on a reference, so the three steps are
     only atomic if one boundary covers all of them. Every local writer of the same board takes this
     one file, whichever entry point it came through: two processes that each read the high-water
     mark, each find the reference unclaimed and each create it would otherwise manufacture exactly

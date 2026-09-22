@@ -3,7 +3,7 @@
 One line per agent: is the systemd timer active, and how fresh is the last *healthy* tick in
 runs.jsonl (a tick that answered counts — precheck-nothing-to-do still proves the timer fires and
 the runtime runs). A result of "error" or "board-unreachable" does NOT count on its own: precheck
-logs one of those every tick a broken Kanboard/env keeps failing, so if freshness went by the raw
+logs one of those every tick a broken board/env keeps failing, so if freshness went by the raw
 last event a permanently down board would look perpetually alive (fresh error every 3 minutes)
 instead of red. "board-unreachable" is the deferred-run record (secretary-964): it is not the
 agent's own failure, but it is not an answered tick either, and a board that never comes back must

@@ -1,13 +1,12 @@
 """The board is not listening yet: a precheck defers its run instead of spending it.
 
 A timer with `Persistent=true` catches its missed run up seconds after boot, which is exactly when
-a docker-hosted Kanboard is least likely to answer.  Before secretary-964 that refused connection
-travelled as a plain KanboardError all the way out of `precheck`, left the unit `failed`, and — for
-the daily retro — consumed the only scheduled run of the day.
+a docker-hosted board store is least likely to answer.  Before secretary-964 that unavailability
+travelled as a plain error all the way out of `precheck`, left the unit `failed`, and — for the
+daily retro — consumed the only scheduled run of the day.
 
-Three seams carry the fix and are covered here: the client retries a refused connection for a
-bounded window and then raises the distinct KanboardUnreachable; the board-dependent prechecks turn
-that one error into exit code 101; the gate waits and re-runs a precheck that answers 101, a
+Two seams carry the fix and are covered here: the board-dependent prechecks turn the distinct
+BoardUnavailable into exit code 101; the gate waits and re-runs a precheck that answers 101, a
 bounded number of times, and dispatches nothing while the board is out of reach.
 """
 
@@ -19,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.error
 import venv
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,121 +25,17 @@ from unittest import mock
 
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
-from triggered_agents.runtime import health, kanboard
-from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_DEFERRED, AgentState
+from triggered_agents.runtime import health
+from triggered_agents.runtime.state import (
+    PRECHECK_BOARD_UNREACHABLE,
+    PRECHECK_DEFERRED,
+    AgentState,
+    BoardUnavailable,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE = REPO_ROOT / "scripts" / "secretary-agent-gate.sh"
 UNITS = REPO_ROOT / "packaging" / "systemd"
-
-
-def refused(*_args, **_kwargs):
-    raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
-
-
-class Response:
-    def __init__(self, body: bytes):
-        self.body = body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
-
-    def read(self) -> bytes:
-        return self.body
-
-
-class ClientRetryTests(unittest.TestCase):
-    """`_post` rides out a refused connection, and only a refused connection."""
-
-    def setUp(self) -> None:
-        patch = mock.patch.object(
-            kanboard,
-            "_creds",
-            return_value=mock.Mock(
-                url="http://board.invalid/jsonrpc.php", authorization_header=lambda: "Basic x"
-            ),
-        )
-        patch.start()
-        self.addCleanup(patch.stop)
-        for name, value in (("_CONNECT_RETRY_WINDOW_S", 9.0), ("_CONNECT_RETRY_SLEEP_S", 3.0)):
-            p = mock.patch.object(kanboard, name, value)
-            p.start()
-            self.addCleanup(p.stop)
-        # A fake clock, so the retry window is exercised at full length without waiting for it and
-        # without touching the real `time` module every other test shares.
-        self.slept: list[float] = []
-        self.now = 0.0
-
-        def sleep(seconds: float) -> None:
-            self.slept.append(seconds)
-            self.now += seconds
-
-        clock = mock.patch.object(kanboard, "time", mock.Mock(monotonic=lambda: self.now, sleep=sleep))
-        clock.start()
-        self.addCleanup(clock.stop)
-
-    def test_a_board_that_comes_up_late_is_waited_for_not_crashed_on(self):
-        answers = [refused, refused, lambda *a, **k: Response(b'{"result": 7}')]
-
-        def urlopen(*args, **kwargs):
-            return answers.pop(0)(*args, **kwargs)
-
-        with mock.patch.object(kanboard.urllib.request, "urlopen", urlopen):
-            self.assertEqual(kanboard.call("getAllProjects"), 7)
-        self.assertEqual(self.slept, [3.0, 3.0])
-
-    def test_a_board_that_never_comes_up_raises_the_distinct_unreachable_error(self):
-        with mock.patch.object(kanboard.urllib.request, "urlopen", refused):
-            with self.assertRaises(kanboard.KanboardUnreachable) as caught:
-                kanboard.call("getAllProjects")
-        self.assertIn("getAllProjects", str(caught.exception))
-        # Bounded: it gives up inside the window instead of retrying forever.
-        self.assertLessEqual(sum(self.slept), 9.0)
-        self.assertTrue(self.slept)
-
-    def test_unreachable_is_still_a_kanboard_error_for_every_existing_handler(self):
-        self.assertTrue(issubclass(kanboard.KanboardUnreachable, kanboard.KanboardError))
-
-    def test_an_answering_board_is_never_retried(self):
-        """An HTTP error and an RPC error come from something that is listening: no second call."""
-        calls = []
-
-        def http_error(*_args, **_kwargs):
-            calls.append("http")
-            raise urllib.error.HTTPError("http://board.invalid", 500, "boom", {}, None)
-
-        with mock.patch.object(kanboard.urllib.request, "urlopen", http_error):
-            with self.assertRaises(kanboard.KanboardError) as caught:
-                kanboard.call("getAllProjects")
-        self.assertNotIsInstance(caught.exception, kanboard.KanboardUnreachable)
-        self.assertEqual(calls, ["http"])
-        self.assertEqual(self.slept, [])
-
-        with (
-            mock.patch.object(
-                kanboard.urllib.request, "urlopen", lambda *a, **k: Response(b'{"error": {"code": -32601}}')
-            ),
-            self.assertRaises(kanboard.KanboardError) as rpc,
-        ):
-            kanboard.call("nope")
-        self.assertNotIsInstance(rpc.exception, kanboard.KanboardUnreachable)
-
-    def test_a_timeout_is_not_treated_as_a_refused_connection(self):
-        """A timeout may mean the request was already delivered; retrying it is not free."""
-        with (
-            mock.patch.object(
-                kanboard.urllib.request,
-                "urlopen",
-                mock.Mock(side_effect=urllib.error.URLError(TimeoutError("timed out"))),
-            ),
-            self.assertRaises(kanboard.KanboardError) as caught,
-        ):
-            kanboard.call("getAllProjects")
-        self.assertNotIsInstance(caught.exception, kanboard.KanboardUnreachable)
-        self.assertEqual(self.slept, [])
 
 
 class PrecheckDeferralTests(unittest.TestCase):
@@ -167,7 +61,7 @@ class PrecheckDeferralTests(unittest.TestCase):
         self.assertIn("unreachable", events[0]["error"])
 
     def test_retro_defers_the_daily_run_instead_of_crashing_on_it(self):
-        unreachable = kanboard.KanboardUnreachable("getAllProjects: board unreachable after 90s")
+        unreachable = BoardUnavailable("board store unreachable: connection refused")
         retention = mock.Mock()
         retention.close_old_done.side_effect = unreachable
         with (
@@ -192,7 +86,7 @@ class PrecheckDeferralTests(unittest.TestCase):
         self.assertEqual(retention.calls, 1)
 
     def test_steward_defers_its_tick_instead_of_failing_the_unit(self):
-        unreachable = kanboard.KanboardUnreachable("getAllTasks: board unreachable after 90s")
+        unreachable = BoardUnavailable("board store unreachable: connection refused")
         with (
             mock.patch.object(steward_cli, "STATE", self.state),
             mock.patch.object(steward_cli.signals, "scan", side_effect=unreachable),
@@ -203,7 +97,9 @@ class PrecheckDeferralTests(unittest.TestCase):
         """The deferral branch is for the board being absent, not for the agent being broken."""
         with (
             mock.patch.object(steward_cli, "STATE", self.state),
-            mock.patch.object(steward_cli.signals, "scan", side_effect=kanboard.KanboardError("rpc error")),
+            mock.patch.object(
+                steward_cli.signals, "scan", side_effect=RuntimeError("malformed board answer")
+            ),
         ):
             self.assertEqual(steward_cli.cmd_precheck(), 2)
         self.assertEqual([r["result"] for r in self.runs() if r["event"] == "precheck"], ["error"])

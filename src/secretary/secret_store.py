@@ -58,15 +58,10 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
 from secretary._fsutil import publish_state_atomic
-from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, transport_path
-from secretary.board_transport import resolve as resolve_board_transport
 from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
 from triggered_agents.runtime.redact import looks_like_credential, redact
-
-LEGACY_BOARD_SECRET_IDS = frozenset({"kanboard_url", "kanboard_api_user", "kanboard_api_token"})
-
 
 CATALOG_NAME = "catalog.yaml"
 KEY_PARAMS_NAME = "installation-key.json"
@@ -513,9 +508,7 @@ def store_health(instance_dir: Path) -> dict[str, Any]:
         "secret_count": len(secrets),
         "last_modified_at": _mtime(catalog_path(instance_dir)),
         "installation_key": {"present": present, "usable": usable},
-        "materialize": _materialize_summary(
-            tuple(entry for entry in secrets if entry.get("id") not in LEGACY_BOARD_SECRET_IDS)
-        ),
+        "materialize": _materialize_summary(tuple(secrets)),
     }
 
 
@@ -645,7 +638,7 @@ def set_secret(
 ) -> SetResult:
     """Seal one value and record its metadata, as a single commit."""
     actor = _clean_actor(actor)
-    secret_id = _new_secret_id(secret_id)
+    secret_id = _clean_secret_id(secret_id)
     scope = _clean_scope(scope)
     purpose = _clean_purpose(purpose)
     environment = _clean_environment(environment)
@@ -720,10 +713,6 @@ def set_secret(
 def read_secret(instance_dir: Path, secret_id: str) -> bytes:
     """Internal API. No command in this card puts the result on stdout."""
     secret_id = _clean_secret_id(secret_id)
-    if secret_id in LEGACY_BOARD_SECRET_IDS:
-        raise SecretStoreValidationError(
-            f"{secret_id} is board transport configuration, not a recoverable secret"
-        )
     instance_dir = state_repo.require_repo(instance_dir)
     if not any(entry["id"] == secret_id for entry in list_secrets(instance_dir)):
         raise SecretStoreStateError(f"no secret named {secret_id!r} in the catalog")
@@ -745,17 +734,11 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     values: list[str] = []
     if _store_exists(instance_dir) and is_initialized(instance_dir) and key_path(instance_dir).is_file():
         try:
-            key: bytes | None = None
             for entry in list_secrets(instance_dir):
                 secret_id = str(entry["id"])
                 environment = str(entry.get("environment") or "")
                 try:
-                    if secret_id in LEGACY_BOARD_SECRET_IDS:
-                        # Retired values remain redacted while a running container may use them.
-                        key = key if key is not None else load_installation_key(instance_dir)
-                        plaintext = _read_value(instance_dir, secret_id, key)
-                    else:
-                        plaintext = read_secret(instance_dir, secret_id)
+                    plaintext = read_secret(instance_dir, secret_id)
                     value = plaintext.decode("utf-8", errors="strict")
                 except (SecretStoreError, UnicodeDecodeError):
                     # A valid binary secret cannot appear in text verbatim.  A
@@ -766,15 +749,6 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
                     values.append(value)
         except SecretStoreError:
             pass
-    try:
-        transport = resolve_board_transport(instance_dir)
-    except BoardTransportError as exc:
-        path = transport_path(instance_dir)
-        if path.exists() or path.is_symlink():
-            raise SecretStoreStateError(f"board transport redaction is unavailable: {exc}") from None
-    else:
-        if transport.token != DEFAULT_TOKEN:
-            values.append(transport.token)
     return tuple(values)
 
 
@@ -939,8 +913,6 @@ def materialize_secrets(
         key = load_installation_key(instance_dir)
         groups: dict[Path, list[dict[str, Any]]] = {}
         for entry in list_secrets(instance_dir):
-            if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
-                continue
             instruction = entry.get("materialize")
             if not instruction:
                 continue
@@ -1039,7 +1011,7 @@ def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
 
 def secret_id_for_variable(name: str) -> str:
     """Map an environment-variable name to its validated store identifier."""
-    return _new_secret_id(str(name).strip().lower())
+    return _clean_secret_id(str(name).strip().lower())
 
 
 def _entry(
@@ -1284,15 +1256,6 @@ def _clean_secret_id(secret_id: str) -> str:
         )
     if ".." in value:
         raise SecretStoreValidationError("secret id must not contain '..'")
-    return value
-
-
-def _new_secret_id(secret_id: str) -> str:
-    value = _clean_secret_id(secret_id)
-    if value in LEGACY_BOARD_SECRET_IDS:
-        raise SecretStoreValidationError(
-            f"{value} is board transport configuration, not a recoverable secret"
-        )
     return value
 
 

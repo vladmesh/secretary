@@ -12,7 +12,6 @@ from unittest import mock
 import yaml
 
 from secretary import installation, secret_commands, secret_store, state_repo
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.cli import main
 from secretary.config import validate
 from secretary.secret_store import (
@@ -37,6 +36,7 @@ from secretary.secret_store import (
     store_divergence,
 )
 from secretary.secret_words import RECOVERY_WORDS
+from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
 
 
 def git(repo: Path, *args: str) -> str:
@@ -478,96 +478,62 @@ class InterruptedWriteCase(SecretStoreCase):
 
 
 class LegacyBoardSecretTests(SecretStoreCase):
-    """Pre-transport catalog entries remain removable but never regain authority."""
+    """An installed store still holding the retired transport's three ids keeps working.
+
+    The catalog is open, so nothing names those ids: they are ordinary entries, listed, read,
+    redacted by the ordinary rule and removable with the supported command.  No store operation
+    refuses or special-cases them.
+    """
 
     def setUp(self) -> None:
         super().setUp()
         self.initialize()
-
-    def _historical_entry(
-        self, *, materialize: dict | None = None, value: bytes = b"migrated-live-token"
-    ) -> None:
-        # Historical stores legitimately contain this id.  Bypass only the new-write guard to
-        # construct that on-disk predecessor, then exercise the public behavior normally.
-        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+        # The on-disk shape an older build left: the three legacy ids, each catalogued with its
+        # runtime variable, next to a current secret.
+        for secret_id, environment, value in zip(LEGACY_SECRET_IDS, LEGACY_ENV, LEGACY_VALUES):
             set_secret(
                 self.instance_dir,
-                secret_id="kanboard_api_token",
-                value=value,
+                secret_id=secret_id,
+                value=value.encode(),
                 scope="installation",
-                purpose="historic board token",
-                environment="KANBOARD_API_TOKEN",
-                materialize=materialize,
+                purpose="historic board configuration",
+                environment=environment,
                 actor="tester",
             )
-
-    def test_legacy_entries_cannot_be_created_or_read_but_can_be_removed(self) -> None:
-        with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
-            set_secret(
-                self.instance_dir,
-                secret_id="kanboard_api_token",
-                value=b"new",
-                scope="installation",
-                purpose="no",
-                actor="tester",
-            )
-        self._historical_entry()
-        with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
-            read_secret(self.instance_dir, "kanboard_api_token")
-
-        remove_secret(self.instance_dir, secret_id="kanboard_api_token", actor="tester")
-
-        self.assertEqual(list_secrets(self.instance_dir), ())
-
-    def test_legacy_entry_is_not_materialized_but_migrated_transport_is_redacted(self) -> None:
-        self._historical_entry(materialize={"target": "runtime-env"}, value=b"still-live-old-token")
-        transport = ensure_board_transport(
+        set_secret(
             self.instance_dir,
-            legacy_values={
-                "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "migrated-live-token",
-            },
-        ).transport
+            secret_id="current.provider",
+            value=b"ghp_" + b"a" * 36,
+            scope="installation",
+            purpose="current credential",
+            environment="GITHUB_TOKEN",
+            actor="tester",
+        )
 
-        self.assertEqual(materialize_secrets(self.instance_dir), ())
-        self.assertEqual(secret_store.store_health(self.instance_dir)["materialize"], [])
-        self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
-        self.assertIn("still-live-old-token", secret_store.redaction_values(self.instance_dir))
+    def test_the_store_opens_lists_and_reads_with_the_legacy_ids_present(self) -> None:
+        ids = [entry["id"] for entry in list_secrets(self.instance_dir)]
+        self.assertEqual(sorted(ids), sorted([*LEGACY_SECRET_IDS, "current.provider"]))
+        self.assertEqual(read_secret(self.instance_dir, "current.provider"), b"ghp_" + b"a" * 36)
+        self.assertEqual(read_secret(self.instance_dir, LEGACY_SECRET_IDS[2]), LEGACY_VALUES[2].encode())
+        self.assertEqual(store_divergence(self.instance_dir), ())
+        self.assertEqual(secret_store.store_findings(self.instance_dir), ())
+        health = secret_store.store_health(self.instance_dir)
+        self.assertEqual(health["secret_count"], 4)
+        self.assertEqual(health["installation_key"], {"present": True, "usable": True})
 
-    def test_legacy_board_url_and_user_are_not_global_redaction_needles(self) -> None:
-        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
-            for secret_id, environment, value in (
-                ("kanboard_url", "KANBOARD_URL", b"http://127.0.0.1:8080/jsonrpc.php"),
-                ("kanboard_api_user", "KANBOARD_API_USER", b"jsonrpc"),
-            ):
-                set_secret(
-                    self.instance_dir,
-                    secret_id=secret_id,
-                    value=value,
-                    scope="installation",
-                    purpose="historic board configuration",
-                    environment=environment,
-                    actor="tester",
-                )
+    def test_redaction_keeps_working_and_applies_the_ordinary_rule(self) -> None:
         values = secret_store.redaction_values(self.instance_dir)
-        self.assertNotIn("http://127.0.0.1:8080/jsonrpc.php", values)
-        self.assertNotIn("jsonrpc", values)
+        # The token's variable name is sensitive; the URL and user are plain configuration.
+        self.assertIn(LEGACY_VALUES[2], values)
+        self.assertNotIn(LEGACY_VALUES[0], values)
+        self.assertNotIn(LEGACY_VALUES[1], values)
+        self.assertIn("ghp_" + "a" * 36, values)
 
-    def test_insecure_migrated_transport_blocks_redaction_instead_of_dropping_its_token(self) -> None:
-        transport = ensure_board_transport(
-            self.instance_dir,
-            legacy_values={
-                "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "migrated-live-token",
-            },
-        ).transport
-        (self.instance_dir / "board-transport.env").chmod(0o644)
-
-        with self.assertRaisesRegex(SecretStoreStateError, "redaction is unavailable"):
-            secret_store.redaction_values(self.instance_dir)
-        self.assertEqual(transport.token, "migrated-live-token")
+    def test_the_legacy_ids_are_removable_with_the_supported_command(self) -> None:
+        for secret_id in LEGACY_SECRET_IDS:
+            remove_secret(self.instance_dir, secret_id=secret_id, actor="tester")
+        self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)], ["current.provider"])
+        self.assertEqual(store_divergence(self.instance_dir), ())
 
 
 # The three keys the live installation's runtime.env holds, in the order the live
@@ -575,7 +541,7 @@ class LegacyBoardSecretTests(SecretStoreCase):
 # '=' padding so a value that looks like another KEY=VALUE split has to survive
 # the round trip too.
 LIVE_RUNTIME_ENV = (
-    "EXAMPLE_URL=https://board.example.invalid/jsonrpc.php\n"
+    "EXAMPLE_URL=https://board.example.invalid/rpc\n"
     "EXAMPLE_API_USER=secretary\n"
     "EXAMPLE_API_TOKEN=1f2e3d4c5b6a==\n"
 )
@@ -904,7 +870,7 @@ class MaterializeCase(EnvStoreCase):
             {
                 "EXAMPLE_API_TOKEN": "1f2e3d4c5b6a==",
                 "EXAMPLE_API_USER": "secretary",
-                "EXAMPLE_URL": "https://board.example.invalid/jsonrpc.php",
+                "EXAMPLE_URL": "https://board.example.invalid/rpc",
             },
         )
 
@@ -995,7 +961,7 @@ class MaterializeCase(EnvStoreCase):
         set_secret(
             self.instance_dir,
             secret_id="kanboard.url.copy",
-            value=b"https://other.example.invalid/jsonrpc.php",
+            value=b"https://other.example.invalid/rpc",
             scope="installation",
             purpose="a second claim on the same variable",
             environment="EXAMPLE_URL",
