@@ -200,7 +200,7 @@ from .head.runtime import (
 )
 from .head.spec import HeadSpec
 from .head.task_ref import TaskRef
-from .tui_delivery import (
+from secretary.runtime.tui_delivery import (
     DELIVERY_CONFIRMED,
     NUDGE_FILE_MODE,
     READINESS_BUSY,

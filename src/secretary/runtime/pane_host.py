@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from .tui_delivery_types import RunJson
 
@@ -331,7 +331,7 @@ class OrcaSessionHost(OrcaPaneHost):
         handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
         if not isinstance(handle, str) or not handle:
             raise PaneHostError("orca did not return a terminal handle")
-        return Pane(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
+        return Pane(handle=handle, leaf=_pane_key_leaf(cast("dict[str, Any]", terminal).get("paneKey")))
 
     def split_pane(self, handle: str, command: str) -> Pane:
         try:
@@ -357,7 +357,7 @@ class OrcaSessionHost(OrcaPaneHost):
         opened = split.get("handle") if isinstance(split, dict) else None
         if not isinstance(opened, str) or not opened:
             raise PaneHostError("orca did not return a split terminal handle")
-        return Pane(handle=opened, leaf=_pane_key_leaf(split.get("paneKey")))
+        return Pane(handle=opened, leaf=_pane_key_leaf(cast("dict[str, Any]", split).get("paneKey")))
 
     def rename_pane(self, handle: str, title: str) -> None:
         self.run_json(

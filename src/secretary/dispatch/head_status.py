@@ -57,7 +57,7 @@ from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.tui import provider_progress_for_persisted_run
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
-from triggered_agents.runtime.pane_host import RuntimeLayout, WorkspaceInventory
+from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
 # prove, and the honest third that keeps an unanswerable channel from being rounded to either.

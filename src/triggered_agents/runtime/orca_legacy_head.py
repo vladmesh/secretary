@@ -88,8 +88,8 @@ from .head.runtime import (
 )
 from .head.spec import HeadSpec
 from .head.task_ref import TaskRef
-from .pane_host import Pane, PaneHostError, SessionHost
-from .tui_delivery import (
+from secretary.runtime.pane_host import Pane, PaneHostError, SessionHost
+from secretary.runtime.tui_delivery import (
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,

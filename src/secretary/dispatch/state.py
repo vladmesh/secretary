@@ -10,7 +10,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from triggered_agents.runtime.head import HeadRun
-from triggered_agents.runtime.tui_delivery import DeliveryEvidence
+from secretary.runtime.tui_delivery import DeliveryEvidence
 
 from secretary.dispatch.types import DispatcherError
 from secretary.routing_journal import RoutingHeadSnapshot

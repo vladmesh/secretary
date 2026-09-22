@@ -102,8 +102,9 @@ from tests.observer_identity import as_observer, bind_observer
 from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.runtime import codex_preflight, tui_delivery
-from triggered_agents.runtime.agent_prompt_transport import (
+from secretary.runtime import tui_delivery
+from triggered_agents.runtime import codex_preflight
+from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
@@ -1265,10 +1266,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         with (
             mock.patch.object(real_host, "_run_json", side_effect=run_json),
             mock.patch.object(tui_delivery, "time", delivery_time),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
         ):
             self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
@@ -5976,13 +5977,13 @@ class ObserverConfigurationTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, environment),
                 mock.patch.object(host, "_run_json", side_effect=run_json),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
                 mock.patch(
-                    "triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]
+                    "secretary.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]
                 ),
-                mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
+                mock.patch("secretary.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
                 mock.patch(
-                    "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
+                    "secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
                     0,
                 ),
             ):
@@ -6100,10 +6101,10 @@ class ObserverConfigurationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(host, "_run_json", side_effect=run_json),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
                 self.assertRaises(HostError) as raised,
             ):
                 host.nudge_observer(record, sprint={"ref": "sprint:1", "comments": []})

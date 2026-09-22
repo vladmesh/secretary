@@ -17,10 +17,10 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from secretary.runtime.prompt_document import NUDGE_FILE_MODE
 
@@ -815,7 +815,7 @@ def _refused_wait_readiness(exc: Exception) -> str:
 
 def _wait_error_code(body: dict[str, Any], exc: Exception) -> str:
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
-    code = str(error.get("code") or "")
+    code = str(cast("dict[str, Any]", error).get("code") or "")
     if not code:
         # A body too damaged to parse can still carry its code in the text.
         codes = _WAIT_ERROR_CODE_RE.findall(str(exc))
@@ -1057,7 +1057,7 @@ def _settle_pre_delivery(
 
 
 @contextmanager
-def _transport_evidence(evidence: DeliveryEvidence, step: str):
+def _transport_evidence(evidence: DeliveryEvidence, step: str) -> Iterator[None]:
     """Turn a refused Orca call inside the delivery into an evidence-carrying delivery failure.
 
     A `terminal wait` or `terminal send` the host will not perform is exactly as much a delivery that

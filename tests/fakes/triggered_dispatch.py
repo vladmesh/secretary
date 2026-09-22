@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from triggered_agents.runtime.pane_host import Pane
+from secretary.runtime.pane_host import Pane
 
 
 class FakeSessionHost:

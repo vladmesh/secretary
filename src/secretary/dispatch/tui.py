@@ -21,8 +21,8 @@ from secretary.runtime.claude_sessions import (
 )
 from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
 from triggered_agents.runtime.head import HeadRun, HeadRunError
-from triggered_agents.runtime.pane_host import PaneHost
-from triggered_agents.runtime.tui_delivery import (
+from secretary.runtime.pane_host import PaneHost
+from secretary.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     DELIVERY_ACCEPTED,

@@ -75,7 +75,7 @@ from tests.fakes.dispatcher import (
 from tests.fanout_fixtures import accepted_transport_run
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard, card_store
-from triggered_agents.runtime.agent_prompt_transport import (
+from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
@@ -83,8 +83,8 @@ from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.head import (
     with_pid_heartbeat,
 )
-from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
-from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
+from secretary.runtime.pane_host import PaneSplitSourceMissing
+from secretary.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 
 def setUpModule() -> None:
@@ -397,7 +397,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     def _bounded_delivery(self):
         return mock.patch.multiple(
-            "triggered_agents.runtime.tui_delivery",
+            "secretary.runtime.tui_delivery",
             TUI_DELIVERY_TIMEOUT_S=0.05,
             TUI_DELIVERY_POLL_S=0.01,
             TUI_DELIVERY_RESEND_GRACE_S=0,
@@ -635,7 +635,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
 
     def _bounded_delivery(self):
         return mock.patch.multiple(
-            "triggered_agents.runtime.tui_delivery",
+            "secretary.runtime.tui_delivery",
             TUI_DELIVERY_TIMEOUT_S=0.05,
             TUI_DELIVERY_POLL_S=0.01,
             TUI_DELIVERY_RESEND_GRACE_S=0,
@@ -746,7 +746,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def _bounded_delivery(self):
         return mock.patch.multiple(
-            "triggered_agents.runtime.tui_delivery",
+            "secretary.runtime.tui_delivery",
             TUI_DELIVERY_TIMEOUT_S=0.05,
             TUI_DELIVERY_POLL_S=0.01,
             TUI_DELIVERY_RESEND_GRACE_S=0,
@@ -1023,7 +1023,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def _bounded_delivery(self):
         return mock.patch.multiple(
-            "triggered_agents.runtime.tui_delivery",
+            "secretary.runtime.tui_delivery",
             TUI_DELIVERY_TIMEOUT_S=0.05,
             TUI_DELIVERY_POLL_S=0.01,
             TUI_DELIVERY_RESEND_GRACE_S=0,

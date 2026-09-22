@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.agent_prompt_transport import (
+from secretary.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
@@ -14,8 +14,8 @@ from triggered_agents.runtime.agent_prompt_transport import (
     prepare_agent_prompt,
     send_agent_prompt,
 )
-from triggered_agents.runtime.pane_host import safe_command_label
-from triggered_agents.runtime.tui_delivery import read_pane, wait_for_tui_idle
+from secretary.runtime.pane_host import safe_command_label
+from secretary.runtime.tui_delivery import read_pane, wait_for_tui_idle
 
 
 class AgentPromptTransportTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class AgentPromptTransportTests(unittest.TestCase):
             }
 
         prepared = prepare_agent_prompt(text, adapter=adapter)
-        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+        with mock.patch("secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             receipt = send_agent_prompt("term-1", prepared, run_json=run_json)
         return calls, receipt
 
@@ -110,7 +110,7 @@ class AgentPromptTransportTests(unittest.TestCase):
             return {"send": {"accepted": accepted, "bytesWritten": 5 if accepted else 0}}
 
         with (
-            mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
+            mock.patch("secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
             self.assertRaises(AgentPromptTransportError) as raised,
         ):
             send_agent_prompt("term-1", prepared, run_json=run_json)
@@ -139,7 +139,7 @@ class AgentPromptTransportTests(unittest.TestCase):
 
             send_agent_prompt("term-shared", prepared, run_json=run_json)
 
-        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+        with mock.patch("secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             first = threading.Thread(target=runner, args=("first",))
             second = threading.Thread(target=runner, args=("second",))
             first.start()
@@ -172,7 +172,7 @@ class AgentPromptTransportTests(unittest.TestCase):
 
         host = FakePaneHost()
         prepared = prepare_agent_prompt("hello", adapter="codex")
-        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+        with mock.patch("secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             receipt = send_agent_prompt("term-1", prepared, host=host)
 
         self.assertEqual(
