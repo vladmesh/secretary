@@ -22,6 +22,7 @@ to the construction seam every one of these readers already has.
 
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -33,7 +34,7 @@ from unittest import mock
 
 import yaml
 
-from secretary.board.events import BoardEventCanon, BoardEventCanonUnowned
+from secretary.board.events import BoardEventCanon, BoardEventCanonUnowned, MutationEventTransaction
 from secretary.board.sql_host import SqlBoardHost
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.sql_audit import SqlTaskAudit
@@ -47,7 +48,7 @@ from secretary.webproto.command_reads import (
     STATE_PENDING,
     CommandReadLayer,
 )
-from secretary.webproto.cursor import POSITION_ORDINAL, Cursor
+from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import InvalidCursor
 from secretary.webproto.journal import CommittedAudit
 from secretary.webproto.ops import OperationLayer
@@ -108,7 +109,7 @@ class SqlAuditCase(CardStoreCase):
         return self.data_dir / "board" / "events.ndjson"
 
     def stale_projection(self) -> None:
-        """A file journal left behind by the Kanboard era, holding a board that is not this one."""
+        """A pre-2026-09-10 file journal left behind, holding a board that is not this one."""
         record = {
             "schema_version": 1,
             "event_id": "evt_stale",
@@ -149,13 +150,13 @@ class SqlAuditCase(CardStoreCase):
     def commit(self, request_id: str, **kwargs: Any) -> Event:
         """One committed typed protocol event, in SQL, written the way its writer writes one."""
         event = self.event(**kwargs)
-        BoardEventCanon(self.data_dir, audit=self.audit).commit(request_id, event)
+        BoardEventCanon(self.audit).commit(request_id, event)
         return event
 
     def stage(self, request_id: str, **kwargs: Any) -> Event:
         """One staged event whose backend effect never confirmed: a request that is part-done."""
         event = self.event(**kwargs)
-        BoardEventCanon(self.data_dir, audit=self.audit).stage(request_id, event)
+        BoardEventCanon(self.audit).stage(request_id, event)
         return event
 
 
@@ -207,7 +208,7 @@ class CommandReadTests(SqlAuditCase):
         """The one state where both lookups answer for one id, in SQL as in the file journal."""
         self.no_projection()
         event = self.event(event_id="evt_both")
-        canon = BoardEventCanon(self.data_dir, audit=self.audit)
+        canon = BoardEventCanon(self.audit)
         canon.stage("req-both", event)
         self.audit._claim_row("req-both", event.to_record("req-both"), status="committed")
         self.audit._commit()
@@ -453,11 +454,10 @@ class CardHistoryReadTests(SqlAuditCase):
         )
 
     def test_the_layer_reads_the_card_history_of_the_backend_its_client_names(self) -> None:
-        reader, semantics = self.layer()._events(self.data_dir)
+        reader = self.layer()._events(self.data_dir)
 
         self.assertIsInstance(reader, CommittedAudit)
         self.assertIsInstance(reader.audit, SqlTaskAudit)
-        self.assertEqual(semantics, POSITION_ORDINAL)
 
     def test_the_snapshot_tail_holds_the_sql_events_with_no_projection_at_all(self) -> None:
         self.commit("req-1", event_id="evt_1", minute=1)
@@ -524,12 +524,16 @@ class CardHistoryReadTests(SqlAuditCase):
         """A file byte offset is never read as an ordinal, and the refusal has a way out."""
         self.no_projection()
         self.commit("req-1", event_id="evt_1", minute=1)
-        released = Cursor(ref=self.REF, offset=137).encode()
+        # Exactly as the file-journal reader issued one: a byte offset, and no `pos`.
+        released = (
+            base64.urlsafe_b64encode(json.dumps({"v": 1, "ref": self.REF, "offset": 137}).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
 
         with self.assertRaises(InvalidCursor) as refused:
             self.layer().task_events(self.REF, released, limit=10)
 
-        self.assertIn("'offset'", str(refused.exception))
         self.assertIn("fresh task snapshot", str(refused.exception))
         continuation = self.layer().task_snapshot(self.REF)["events"]["next_cursor"]
         self.assertEqual(self.layer().task_events(self.REF, continuation, limit=10)["items"], [])
@@ -544,7 +548,7 @@ class CardHistoryReadTests(SqlAuditCase):
 
         with self.assertRaises(InvalidCursor):
             self.layer().task_events("secretary-12", mine, limit=1)
-        beyond = Cursor(ref=self.REF, offset=99, position=POSITION_ORDINAL).encode()
+        beyond = Cursor(ref=self.REF, offset=99).encode()
         with self.assertRaises(InvalidCursor):
             self.layer().task_events(self.REF, beyond, limit=1)
 
@@ -592,10 +596,9 @@ class TypedCanonAndSprintReadTests(SqlAuditCase):
         event = self.commit("req-1", event_id="evt_1")
         self.stale_projection()
 
-        canon = BoardEventCanon(self.data_dir, audit=self.audit)
+        canon = BoardEventCanon(self.audit)
 
         self.assertEqual([held.event_id for held in canon.events(ref="secretary-468")], [event.event_id])
-        self.assertEqual(BoardEventCanon(self.data_dir).events(ref="secretary-468"), ())
 
     def test_the_sprint_reader_traverses_the_sql_audit_and_never_the_file(self) -> None:
         self.commit("req-1", event_id="evt_1")
@@ -610,6 +613,113 @@ class TypedCanonAndSprintReadTests(SqlAuditCase):
         """The PostgreSQL audit needs no data directory at all; the file journal is what needed one."""
         reader = SprintReader(self.client)
         self.assertIsInstance(reader.audit, SqlTaskAudit)
+
+
+class ClaimOwnershipTests(SqlAuditCase):
+    """The claim rules the typed canon relies on, held by the card audit itself.
+
+    These were guarded against the file journal's `TaskAudit` until secretary-1673 deleted it; the
+    same rules are `requests` rows here: a request id is owned by one record, a generic stage may
+    replace only a generic staged record, a committed record is what a replay answers with, and the
+    typed canon reads only the typed records beside the generic ones.
+    """
+
+    REQUEST = "req-claimed"
+
+    def generic(self, event_id: str = "evt_generic", **payload: Any) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "schema_version": 1,
+            "occurred_at": "2026-09-07T12:00:00Z",
+            "actor": {"role": "worker", "id": "worker-468"},
+            "kind": "moved",
+            "outcome": "success",
+            "ref": "secretary-468",
+            "request_id": self.REQUEST,
+            "payload": payload or {"to": "in_progress"},
+        }
+
+    def canon(self) -> BoardEventCanon:
+        return BoardEventCanon(self.audit)
+
+    def test_generic_writers_cannot_touch_a_typed_staged_owner(self) -> None:
+        event = self.event(event_id="evt_typed")
+        self.canon().stage(self.REQUEST, event)
+        typed = event.to_record(self.REQUEST)
+
+        for label, operation in (
+            ("stage", lambda: self.audit.stage(self.REQUEST, self.generic())),
+            ("append", lambda: self.audit.append(self.REQUEST, self.generic())),
+            ("discard", lambda: self.audit.discard(self.REQUEST)),
+        ):
+            with self.subTest(label):
+                with self.assertRaisesRegex(TaskError, "another operation or payload"):
+                    operation()
+                self.assertEqual(self.audit.pending_event(self.REQUEST), typed)
+                self.assertIsNone(self.audit.committed_event(self.REQUEST))
+
+    def test_a_typed_effect_is_refused_before_it_starts_against_a_generic_staged_owner(self) -> None:
+        generic = self.generic()
+        self.audit.stage(self.REQUEST, generic)
+        transaction = MutationEventTransaction(
+            self.canon(), request_id=self.REQUEST, event=self.event(event_id="evt_typed")
+        )
+
+        with self.assertRaisesRegex(ValueError, "generic audit record"):
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(AssertionError("foreign effect ran")),
+                confirm=lambda: (_ for _ in ()).throw(AssertionError("foreign effect replayed")),
+            )
+
+        self.assertEqual(self.audit.pending_event(self.REQUEST), generic)
+        self.assertIsNone(self.audit.committed_event(self.REQUEST))
+
+    def test_a_generic_owner_can_restage_then_commit(self) -> None:
+        first = self.generic("evt_generic_first")
+        restaged = self.generic("evt_generic_restaged", to="validate")
+
+        self.audit.stage(self.REQUEST, first)
+        self.audit.stage(self.REQUEST, restaged)
+        self.assertEqual(self.audit.pending_event(self.REQUEST), restaged)
+        self.assertEqual(self.audit.append(self.REQUEST, restaged), "evt_generic_restaged")
+        self.assertEqual(self.audit.committed_event(self.REQUEST), restaged)
+        self.assertIsNone(self.audit.pending_event(self.REQUEST))
+
+    def test_a_committed_record_answers_every_replay_and_refuses_another_payload(self) -> None:
+        event = self.event(event_id="evt_typed")
+        canon = self.canon()
+        canon.commit(self.REQUEST, event)
+        canon.commit(self.REQUEST, event)
+
+        self.assertEqual(canon.event(self.REQUEST), event)
+        self.assertEqual(canon.committed(self.REQUEST), event)
+        self.assertEqual([held.event_id for held in canon.events(ref="secretary-468")], ["evt_typed"])
+        self.assertIsNone(self.audit.pending_event(self.REQUEST))
+        with self.assertRaisesRegex(ValueError, "another operation or payload"):
+            canon.stage(self.REQUEST, self.event(event_id="evt_other", kind=EventKind.CARD_BLOCKED))
+
+    def test_an_event_id_names_one_request(self) -> None:
+        event = self.event(event_id="evt_typed")
+        self.canon().commit(self.REQUEST, event)
+
+        with self.assertRaisesRegex(ValueError, "already belongs to another request"):
+            self.canon().stage("req-duplicate", event)
+        self.assertIsNone(self.audit.event("req-duplicate"))
+
+    def test_generic_and_typed_records_share_the_audit_and_the_canon_reads_only_typed(self) -> None:
+        generic = {**self.generic("evt_released"), "request_id": "req-released"}
+        self.audit.stage("req-released", generic)
+        self.audit.append("req-released", generic)
+        event = self.event(event_id="evt_typed")
+        self.canon().commit(self.REQUEST, event)
+
+        self.assertEqual(
+            [record["request_id"] for record in self.audit.events("secretary-468")],
+            ["req-released", self.REQUEST],
+        )
+        self.assertEqual(self.canon().events(ref="secretary-468"), (event,))
+        with self.assertRaisesRegex(ValueError, "generic audit record"):
+            self.canon().event("req-released")
 
 
 if __name__ == "__main__":

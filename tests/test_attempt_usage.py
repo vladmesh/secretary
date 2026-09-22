@@ -1027,7 +1027,7 @@ class AttemptUsageProjectionTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         self.audit = task_audit_for(card_store(self, dispatcher_seed(), instance_dir=self.root))
-        self.canon = BoardEventCanon(self.root, audit=self.audit)
+        self.canon = BoardEventCanon(self.audit)
 
     def test_committed_and_pending_occurrences_share_one_validated_view(self) -> None:
         committed = usage_event(attempt=1, report_generation=1)

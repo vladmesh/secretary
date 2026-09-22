@@ -14,17 +14,14 @@ beside it. And no unfiltered audit read passes through `sprint_list`, whichever 
 from __future__ import annotations
 
 import contextlib
-import json
-import tempfile
-import unittest
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from secretary.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskAudit, TaskError, task_audit_for
+from secretary.tasks import TaskError, task_audit_for
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
@@ -130,7 +127,7 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
             {
                 "event_id": f"board-event-{card}-{at}-{target}",
                 "schema_version": 1,
-                "record_type": TaskAudit._PROTOCOL_EVENT_RECORD_TYPE,
+                "record_type": PROTOCOL_EVENT_RECORD_TYPE,
                 "kind": "card.moved",
                 "ref": card,
                 "occurred_at": at,
@@ -322,36 +319,3 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
                 document, audit = self._narrow(statuses)
                 self.assertEqual(document["journal"]["source"]["state"], "available")
                 self.assertTrue(audit.reads)
-
-
-class FileJournalProbeTests(unittest.TestCase):
-    """On the file journal an empty slice opens the file and reads none of it.
-
-    `TaskAudit`'s own storage: it is no audit owner of anything (secretary-1670), and these hold
-    only what its reader does with the file.
-    """
-
-    def setUp(self) -> None:
-        self.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        (self.data_dir / "board").mkdir()
-
-    def test_the_probe_opens_the_journal_and_decodes_no_line(self) -> None:
-        journal = self.data_dir / "board" / "events.ndjson"
-        journal.write_text(
-            "".join(json.dumps({"ref": f"secretary-{index}", "kind": "created"}) + "\n" for index in range(500)),
-            encoding="utf-8",
-        )
-        audit = TaskAudit(self.data_dir)
-        with mock.patch("secretary.tasks.json.loads", side_effect=AssertionError("a line was decoded")):
-            self.assertEqual(audit.events(references=()), [])
-
-    def test_the_probe_fails_where_a_read_fails_and_not_where_it_does_not(self) -> None:
-        journal = self.data_dir / "board" / "events.ndjson"
-        audit = TaskAudit(self.data_dir)
-        self.assertFalse(journal.exists())
-        self.assertEqual(audit.events(references=()), audit.events())
-        journal.mkdir()
-        with self.assertRaises(IsADirectoryError):
-            audit.events()
-        with self.assertRaises(IsADirectoryError):
-            audit.events(references=())

@@ -35,7 +35,7 @@ from secretary.tasks import TaskError, TaskReader, task_audit_for
 from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.cursor import POSITION_ORDINAL, Cursor, decode
+from secretary.webproto.cursor import Cursor, decode
 from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, ReadError, TaskNotFound
 from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
 
@@ -152,8 +152,8 @@ class ReadLayer(ProtocolBoundary):
             )
         return self._resolved_client
 
-    def _events(self, data_dir: Path) -> tuple[Any, str]:
-        """The reader of this card's history, and the position semantics its cursors carry.
+    def _events(self, data_dir: Path) -> CommittedAudit:
+        """The reader of this card's history.
 
         The one place this layer decides where a card's events come from, and it decides it the way
         every other live audit reader of this installation does: resolve the card client, ask
@@ -167,7 +167,7 @@ class ReadLayer(ProtocolBoundary):
         where an old one was left behind -- with every committed record, a product run's included,
         invisible.
         """
-        return CommittedAudit(task_audit_for(self._client(), data_dir)), POSITION_ORDINAL
+        return CommittedAudit(task_audit_for(self._client(), data_dir))
 
     def _unselected(
         self, ref: str, cursor: str | None, exc: Exception, data_dir: Path, *, now: float
@@ -285,7 +285,7 @@ class ReadLayer(ProtocolBoundary):
         recomputed index -- see :mod:`secretary.webproto.cursor`.
 
         The history is the card audit's (:meth:`_events`): an ordinal in the committed `requests`
-        traversal. A cursor says what it measures, so a byte offset into the retired file journal --
+        traversal. A cursor says what it measures, so a byte offset into the pre-2026-09-10 file journal --
         kept by a client across an installation's migration, say -- is refused by name instead of
         read as a position here, and the caller gets its continuation from a fresh
         :meth:`task_snapshot`.
@@ -296,14 +296,14 @@ class ReadLayer(ProtocolBoundary):
             raise TaskNotFound("a task reference is required")
         data_dir = self.data_dir()
         try:
-            reader, semantics = self._events(data_dir)
+            reader = self._events(data_dir)
         except _SOURCE_FAILURES as exc:
             page = self._unselected(reference, cursor, exc, data_dir, now=now)
             return _events_document(reference, page, now=now, cursor=cursor)
         position: Cursor | None = (
             None
             if cursor in (None, "")
-            else decode(str(cursor), ref=reference, position=semantics)
+            else decode(str(cursor), ref=reference)
         )
         page = reader.page(reference, cursor=position, limit=limit, now=now)
         return _events_document(reference, page, now=now, cursor=cursor)
@@ -316,7 +316,7 @@ class ReadLayer(ProtocolBoundary):
         project and the attempt.
         """
         try:
-            reader, _semantics = self._events(data_dir)
+            reader = self._events(data_dir)
         except _SOURCE_FAILURES as exc:
             return self._unselected(ref, None, exc, data_dir, now=now)
         return reader.tail(ref, limit=limit, now=now)

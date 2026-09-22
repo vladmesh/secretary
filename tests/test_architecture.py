@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -398,7 +399,7 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)
 
 
-# Every place in `secretary` that builds the *file* audit (`TaskAudit(<data dir>)`) rather than
+# Every place in `secretary` that builds the *file* audit (`TaskAudit` over a data dir) rather than
 # asking `secretary.tasks.task_audit_for` for the audit owner of a card client, and the reason each
 # one may. `requests`/`board_events` is the card audit (`docs/BOARD_STORE.md` §7.3), so a live
 # reader built from the file journal of a data directory alone answers from a store the
@@ -407,13 +408,10 @@ class SourceLayoutTests(unittest.TestCase):
 # as an empty command history or a false `not_found`. A new entry here is a new reader that decided
 # its audit by default instead of by its client, so it is added deliberately with its reason or it
 # is a defect.
-FILE_AUDIT_CONSTRUCTIONS = {
-    "board/events.py": (
-        "the typed canon's own storage internal, for a caller that has no client at all -- the fake "
-        "host and storage fixtures; every caller that has one passes the audit its client named, and with "
-        "neither an audit nor a data directory the construction refuses"
-    ),
-}
+#
+# Since secretary-1673 the file audit class is gone, so the allowance is empty: the typed canon takes
+# its audit owner as a required argument, and the fake host hands in an in-memory one.
+FILE_AUDIT_CONSTRUCTIONS: dict[str, str] = {}
 
 #: Where a live audit reader asks for its owner. Cards, Sprints and Products/Issues have one
 #: implementation, PostgreSQL, and so one audit owner (`task_audit_for`).
@@ -441,7 +439,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
     """A live audit reader follows its card client, and the exceptions are named with their reasons."""
 
     def _constructions(self) -> dict[str, list[int]]:
-        """Every `TaskAudit(...)` call in `src/secretary`, by module and line."""
+        """Every call of a `TaskAudit` name in `src/secretary`, by module and line."""
         found: dict[str, list[int]] = {}
         for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -468,6 +466,20 @@ class FileAuditOwnershipTests(unittest.TestCase):
         """The allowance is a statement about live code, not a list that outlives its reasons."""
         self.assertEqual(sorted(self._constructions()), sorted(FILE_AUDIT_CONSTRUCTIONS))
 
+    def test_the_file_audit_is_gone_and_the_canon_names_its_owner(self) -> None:
+        """No `TaskAudit` to build, and no canon that falls back to one (secretary-1673)."""
+        from secretary import tasks
+        from secretary.board.events import BoardEventCanon
+
+        self.assertFalse(hasattr(tasks, "TaskAudit"))
+        parameters = inspect.signature(BoardEventCanon.__init__).parameters
+        self.assertEqual([name for name in parameters if name != "self"], ["audit"])
+        self.assertIs(parameters["audit"].default, inspect.Parameter.empty)
+        source = inspect.getsource(BoardEventCanon)
+        for forbidden in ("data_dir", "events.ndjson", "TaskAudit"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
     def test_every_live_reader_construction_site_goes_through_the_selector(self) -> None:
         """The readers this card enumerated, each holding the selector call in its own source.
 
@@ -488,7 +500,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
 
         self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
         source = inspect.getsource(task_audit_for)
-        self.assertNotIn("TaskAudit(", source.replace("SqlTaskAudit(", ""))
+        self.assertIsNone(re.search(r"(?<!Sql)TaskAudit\(", source))
 
     def test_no_source_module_has_a_backend_branch(self) -> None:
         """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds."""

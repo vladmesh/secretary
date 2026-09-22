@@ -9,15 +9,13 @@ import json
 import os
 import re
 import subprocess
-import tempfile
-import threading
 import uuid
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from secretary.board import budget_candidates
+from secretary.board.audit_contract import is_protocol_event
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
@@ -239,7 +237,7 @@ def _projection_slice(
 
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     """Read a legacy payload or the typed marker data without rewriting history."""
-    if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+    if is_protocol_event(event):
         data = event.get("data")
         return data if isinstance(data, dict) else {}
     payload = event.get("payload")
@@ -309,7 +307,7 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
         payload = _event_payload(event)
         lifecycle = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         if (event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment") or (
-            event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE
+            is_protocol_event(event)
             and str(lifecycle.get("target") or "") == "assessment"
         ):
             latest_park = index
@@ -346,7 +344,7 @@ def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
     recording a move that did not happen is not a transition at all -- which is the same reason
     :func:`is_significant_card_event`, the caller this shape was lifted out of, has always asked.
     """
-    if TaskAudit._is_protocol_event(event):
+    if is_protocol_event(event):
         typed = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         target = str(typed.get("target") or "")
         return (str(typed.get("source") or ""), target) if target else None
@@ -366,7 +364,7 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
-    typed = event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE
+    typed = is_protocol_event(event)
     if not typed and str(event.get("outcome") or "") != "success":
         return False
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
@@ -804,669 +802,6 @@ class TaskReader:
         if comments is not None:
             result["comments"] = comments
         return result
-
-
-class TaskAudit:
-    """Durable, append-only audit log with retry-safe pending records."""
-
-    # Recovery distinguishes protocol effects from generic audit records by this typed value.
-    _PROTOCOL_EVENT_RECORD_TYPE = Event.RECORD_TYPE
-
-    def __init__(self, data_dir: str | os.PathLike[str]) -> None:
-        self.board_dir = os.path.join(os.fspath(data_dir), "board")
-        self.events_path = os.path.join(self.board_dir, "events.ndjson")
-        self.pending_dir = os.path.join(self.board_dir, "pending-audit")
-        self.lock_path = os.path.join(self.board_dir, ".audit.lock")
-        # Incremental request index avoids rescanning the journal on every write.
-        self._committed_offsets: dict[str, int] = {}
-        # Event ownership is indexed under the same lock.
-        self._committed_event_ids: dict[str, str] = {}
-        self._committed_read = 0
-        self._committed_ident: tuple[int, int] | None = None
-        self._committed_anchor = b""
-        self._marker_lock_depth = threading.local()
-
-    def _pending_path(self, request_id: str) -> str:
-        """Keep untrusted request ids out of the installation filesystem layout."""
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-        return os.path.join(self.pending_dir, f"v2-{digest}.json")
-
-    def _require_v2_pending_layout(self) -> None:
-        """Do not guess how a released generic transient record maps to v2."""
-        if not os.path.isdir(self.pending_dir):
-            return
-        legacy = [
-            name
-            for name in os.listdir(self.pending_dir)
-            if name.endswith(".json") and not name.startswith("v2-")
-        ]
-        if legacy:
-            raise TaskError(
-                "upgrade_required",
-                "generic pending audit records use the pre-v2 filename layout; reconcile them with the previous Secretary version before upgrading",
-                4,
-            )
-
-    @contextlib.contextmanager
-    def _locked_audit(self, *, create_pending: bool = False) -> Iterator[None]:
-        """Hold the one lock that owns journal and pending-record identity."""
-        os.makedirs(self.board_dir, exist_ok=True)
-        if create_pending:
-            os.makedirs(self.pending_dir, exist_ok=True)
-        with open(self.lock_path, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._require_v2_pending_layout()
-                yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-    @contextlib.contextmanager
-    def marker_comment_lock(self, reference: str) -> Iterator[None]:
-        """Serialize all internal Card comment effects for one marker identity.
-
-        Generic restore replay re-enters this guard while finishing its own pending record, so the file
-        lock stays process-wide while that same-thread contour is re-entrant; a second process still
-        blocks at the flock until the outer effect completes.
-        """
-        from secretary.board.events import marker_comment_lock
-
-        held = getattr(self._marker_lock_depth, "held", None)
-        if held is None:
-            held = self._marker_lock_depth.held = {}
-        depth = held.get(reference, 0)
-        if depth:
-            held[reference] = depth + 1
-            try:
-                yield
-            finally:
-                held[reference] -= 1
-            return
-        with marker_comment_lock(Path(self.board_dir).parent, reference):
-            held[reference] = 1
-            try:
-                yield
-            finally:
-                del held[reference]
-
-    def pending_marker_owner(
-        self, reference: str, content: str, *, request_id: str | None = None
-    ) -> str | None:
-        """Return a different pending owner of an indistinguishable marker.
-
-        Runs under the audit lock while callers hold the per-Card marker lock, so no writer can put a
-        matching row on the board between the reservation check and its own effect.
-        """
-        from secretary.board.events import render_marker_comment
-
-        with self._locked_audit():
-            for record in self.pending_events():
-                candidate = str(record.get("request_id") or "")
-                if candidate == request_id:
-                    continue
-                if record.get("record_type") == self._PROTOCOL_EVENT_RECORD_TYPE:
-                    try:
-                        event = Event.from_record(record)
-                        rendered = render_marker_comment(event)
-                    except (TypeError, ValueError):
-                        continue
-                    if (
-                        event.entity_kind is EntityKind.CARD
-                        and event.ref == reference
-                        and rendered == content
-                    ):
-                        return candidate
-                    continue
-                # Restore comment records are generic by design, but their
-                # pending payload keeps the unreconciled body.  Treat that body
-                # as the rendered marker identity until this exact owner either
-                # proves and commits it or is safely discarded before effect.
-                payload = record.get("payload")
-                if (
-                    record.get("kind") == "restored_comment"
-                    and record.get("ref") == reference
-                    and isinstance(payload, dict)
-                    and payload.get("restore_body") == content
-                ):
-                    return candidate
-        return None
-
-    def pending_marker_owners(self, candidates: Iterable[tuple[str, str, str]]) -> dict[str, str]:
-        """Resolve many per-Card marker reservations in one pending-journal scan.
-
-        Callers hold every candidate's marker lock.  One restore wave can then
-        retain the same cross-process exclusion without reopening every pending
-        file once per occurrence.
-        """
-        from secretary.board.events import render_marker_comment
-
-        wanted = {(reference, content): request_id for reference, content, request_id in candidates}
-        owners: dict[str, str] = {}
-        with self._locked_audit():
-            for record in self.pending_events():
-                candidate = str(record.get("request_id") or "")
-                identity: tuple[str, str] | None = None
-                if record.get("record_type") == self._PROTOCOL_EVENT_RECORD_TYPE:
-                    try:
-                        event = Event.from_record(record)
-                        if event.entity_kind is EntityKind.CARD:
-                            identity = (event.ref, render_marker_comment(event))
-                    except (TypeError, ValueError):
-                        continue
-                else:
-                    payload = record.get("payload")
-                    if (
-                        record.get("kind") == "restored_comment"
-                        and isinstance(record.get("ref"), str)
-                        and isinstance(payload, dict)
-                        and isinstance(payload.get("restore_body"), str)
-                    ):
-                        identity = (record["ref"], payload["restore_body"])
-                request_id = wanted.get(identity) if identity is not None else None
-                if request_id is not None and candidate != request_id:
-                    owners[request_id] = candidate
-        return owners
-
-    @classmethod
-    def _is_protocol_event(cls, event: dict[str, Any]) -> bool:
-        return event.get("record_type") == cls._PROTOCOL_EVENT_RECORD_TYPE
-
-    def _pending_owner(
-        self,
-        request_id: str,
-        event: dict[str, Any] | None,
-        *,
-        operation: str,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
-        """Resolve a request-id owner while ``.audit.lock`` is held.
-
-        Returns ``(committed, pending, replace_generic_pending)``. A generic ``stage`` is the sole
-        released operation allowed to replace a pending record, and only when both records are generic.
-        Every other pending mismatch fails before a write, append, unlink or discard.
-        """
-        committed = self.committed_event(request_id)
-        if committed is not None:
-            if event is not None:
-                self._require_same_event(committed, event)
-            return committed, None, False
-
-        pending = self.pending_event(request_id)
-        if pending is None:
-            return None, None, False
-        # Only MutationEventTransaction can attest a protocol backend effect.
-        if operation == "reconcile" and self._is_protocol_event(pending):
-            self._require_same_event(pending, {})
-        if event is not None and pending == event:
-            return None, pending, False
-        if (
-            operation == "stage"
-            and event is not None
-            and not self._is_protocol_event(pending)
-            and not self._is_protocol_event(event)
-        ):
-            return None, pending, True
-        if operation == "discard" and event is None and not self._is_protocol_event(pending):
-            return None, pending, False
-        self._require_same_event(pending, event or {})
-        raise AssertionError("unreachable")
-
-    def stage(self, request_id: str, event: dict[str, Any]) -> None:
-        with self._locked_audit(create_pending=True):
-            committed, _pending, replace = self._pending_owner(
-                request_id,
-                event,
-                operation="stage",
-            )
-            if committed is not None:
-                return
-            if self._product_issue_pending(request_id):
-                raise TaskError("validation", "request id belongs to another operation or payload", 2)
-            # A matching pending record is already the exact durable owner.  Do not replace it:
-            # besides avoiding needless I/O, this preserves the evidence across a retry.
-            if _pending is not None and not replace:
-                return
-            self._atomic_json(self._pending_path(request_id), event)
-
-    def claim(
-        self,
-        request_id: str,
-        event: dict[str, Any],
-        *,
-        verify: Callable[[dict[str, Any]], None] | None = None,
-    ) -> dict[str, Any] | None:
-        """Resolve request-id ownership and stage the record in one critical section."""
-        with self._locked_audit(create_pending=True):
-            committed, pending, _replace = self._pending_owner(
-                request_id,
-                event,
-                operation="claim",
-            )
-            if committed is not None:
-                return committed
-            if pending is not None:
-                return pending
-            if self._product_issue_pending(request_id):
-                raise TaskError("validation", "request id belongs to another operation or payload", 2)
-            if verify is not None:
-                verify(event)
-            self._atomic_json(self._pending_path(request_id), event)
-            return None
-
-    def event_id_owner(self, event_id: str) -> str | None:
-        """Which request id already published `event_id`, committed or pending."""
-        self._refresh_committed_index()
-        owner = self._committed_event_ids.get(event_id)
-        if owner is not None:
-            return owner
-        for record in self.pending_events():
-            if record.get("event_id") == event_id:
-                candidate = record.get("request_id")
-                if isinstance(candidate, str):
-                    return candidate
-        return None
-
-    def append(self, request_id: str, event: dict[str, Any]) -> str:
-        with self._locked_audit():
-            return self._append_owned(request_id, event)
-
-    def _append_owned(
-        self,
-        request_id: str,
-        event: dict[str, Any],
-        *,
-        operation: str = "append",
-    ) -> str:
-        """Append one exact owner and clear only that owner's pending evidence.
-
-        The caller holds ``.audit.lock``. Reconciliation shares this primitive so it cannot race a stage
-        or recover a file another owner has replaced.
-        """
-        committed, pending, _replace = self._pending_owner(request_id, event, operation=operation)
-        if operation == "reconcile" and committed is None and pending is None:
-            raise TaskError("validation", "pending audit record disappeared", 2)
-        if committed is None:
-            with open(self.events_path, "a", encoding="utf-8") as events:
-                events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-                events.flush()
-                os.fsync(events.fileno())
-        else:
-            # A committed replay is already durable.  Look at pending only now, and only remove
-            # an exact duplicate; a foreign pending file remains recovery evidence.
-            pending = self.pending_event(request_id)
-            if pending is not None and pending != event:
-                return str(event["event_id"])
-        if pending is not None:
-            os.unlink(self._pending_path(request_id))
-        return str(event["event_id"])
-
-    def discard(self, request_id: str, event: dict[str, Any] | None = None) -> None:
-        """Discard a generic pending retry, or the supplied exact protocol event."""
-        with self._locked_audit():
-            committed, pending, _replace = self._pending_owner(
-                request_id,
-                event,
-                operation="discard",
-            )
-            if committed is not None or pending is None:
-                return
-            try:
-                os.unlink(self._pending_path(request_id))
-            except FileNotFoundError:
-                pass
-
-    def reconcile(self) -> tuple[int, int]:
-        if not os.path.isdir(self.pending_dir):
-            return 0, 0
-        self._require_v2_pending_layout()
-        repaired = 0
-        unresolved = 0
-        for name in sorted(os.listdir(self.pending_dir)):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(self.pending_dir, name)
-            try:
-                with open(path, encoding="utf-8") as source:
-                    event = json.load(source)
-                request_id = str(event["request_id"])
-                # These effects have operation-specific proof rules. Only
-                # TaskWriter can re-read the exact Done episode or active
-                # restore group before publishing success; the generic journal
-                # repairer must leave that evidence pending.
-                if event.get("kind") in {"retired", "restored_order"}:
-                    unresolved += 1
-                    continue
-                with self._locked_audit():
-                    self._append_owned(request_id, event, operation="reconcile")
-                repaired += 1
-            except (OSError, TaskError, ValueError, KeyError, TypeError):
-                unresolved += 1
-        return repaired, unresolved
-
-    def pending_events(self) -> list[dict[str, Any]]:
-        if not os.path.isdir(self.pending_dir):
-            return []
-        self._require_v2_pending_layout()
-        result = []
-        for name in sorted(os.listdir(self.pending_dir)):
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(self.pending_dir, name), encoding="utf-8") as source:
-                    result.append(json.load(source))
-            except (OSError, ValueError):
-                continue
-        return result
-
-    def _occurrence_projection_records(
-        self, kinds: Iterable[str] | None = None, *, outcome_owed: bool = False
-    ) -> list[tuple[dict[str, Any], bool]]:
-        """Read committed and pending audit records atomically for a fail-closed projection.
-
-        Generic audit readers retain their released best-effort behaviour. The usage projection
-        cannot skip an unreadable record, because that record may be the causal boundary a later
-        phase must subtract.
-
-        `kinds` narrows to the slice `SqlTaskAudit` answers for the same arguments: records of those
-        kinds, records sharing a request id or an event id with one of them and, with
-        `outcome_owed`, records carrying an `attempt_outcome_owed` obligation. The whole journal is
-        still read and checked here; only the answer is narrowed.
-        """
-        records = self._occurrence_projection_all()
-        if kinds is None:
-            return records
-        return _projection_slice(records, frozenset(str(kind) for kind in kinds), outcome_owed)
-
-    def _occurrence_projection_all(self) -> list[tuple[dict[str, Any], bool]]:
-        result: list[tuple[dict[str, Any], bool]] = []
-        with self._locked_audit():
-            try:
-                with open(self.events_path, encoding="utf-8") as events:
-                    for line_number, line in enumerate(events, 1):
-                        if not line.strip():
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except ValueError as exc:
-                            raise ValueError(f"audit journal record {line_number} is unreadable") from exc
-                        if not isinstance(record, dict):
-                            raise TypeError(f"audit journal record {line_number} is not an object")
-                        result.append((record, False))
-            except FileNotFoundError:
-                pass
-            if not os.path.isdir(self.pending_dir):
-                return result
-            for name in sorted(os.listdir(self.pending_dir)):
-                if not name.endswith(".json"):
-                    continue
-                path = os.path.join(self.pending_dir, name)
-                try:
-                    with open(path, encoding="utf-8") as source:
-                        record = json.load(source)
-                except (OSError, ValueError) as exc:
-                    raise ValueError(f"pending audit record {name} is unreadable") from exc
-                if not isinstance(record, dict):
-                    raise TypeError(f"pending audit record {name} is not an object")
-                result.append((record, True))
-        return result
-
-    def status(self) -> dict[str, int | bool]:
-        self._require_v2_pending_layout()
-        pending = 0
-        if os.path.isdir(self.pending_dir):
-            pending = sum(name.endswith(".json") for name in os.listdir(self.pending_dir))
-        return {"ok": pending == 0, "pending": pending}
-
-    def event(self, request_id: str) -> dict[str, Any] | None:
-        committed = self.committed_event(request_id)
-        if committed is not None:
-            return committed
-        return self.pending_event(request_id)
-
-    def events(
-        self,
-        reference: str = "",
-        *,
-        kind: str = "",
-        references: Iterable[str] | None = None,
-        since: datetime | None = None,
-    ) -> list[dict[str, Any]]:
-        """Committed events in append order, optionally narrowed to one card and/or kind.
-
-        `references` narrows to a set of refs. `since` is a lower bound the SQL store applies to its
-        settle time; a journal line records none, so here it narrows nothing and every caller that
-        passes it must already be idempotent over what it sees again.
-
-        An empty `references` answers no rows and still opens the journal, reading none of it: a
-        caller whose document needs no events establishes that the journal answers, and fails
-        exactly where a read would have (secretary-1660).
-        """
-        del since
-        wanted = None if references is None else {str(item) for item in references if item}
-        if wanted is not None and not wanted:
-            try:
-                with open(self.events_path, encoding="utf-8"):
-                    pass
-            except FileNotFoundError:
-                pass
-            return []
-        result: list[dict[str, Any]] = []
-        try:
-            with open(self.events_path, encoding="utf-8") as events:
-                for line in events:
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    if reference and event.get("ref") != reference:
-                        continue
-                    if wanted is not None and event.get("ref") not in wanted:
-                        continue
-                    if kind and event.get("kind") != kind and _event_action(event) != kind:
-                        continue
-                    result.append(event)
-        except FileNotFoundError:
-            return []
-        return result
-
-    def uncharged_budget_candidates(self, *, limit: int) -> list[dict[str, Any]]:
-        """`SqlTaskAudit.uncharged_budget_candidates` over the journal, which has no index to use.
-
-        The same set by the same definition (`budget_candidates`): the oldest `limit` candidates in
-        append order whose charge id has no committed record.
-        """
-        journal: list[dict[str, Any]] = []
-        try:
-            with open(self.events_path, encoding="utf-8") as events:
-                for line in events:
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(event, dict):
-                        journal.append(event)
-        except FileNotFoundError:
-            return []
-        committed = {str(event.get("request_id") or "") for event in journal}
-        result: list[dict[str, Any]] = []
-        for event in journal:
-            if len(result) >= limit:
-                break
-            identity = budget_candidates.identity(event)
-            if (
-                identity
-                and budget_candidates.is_candidate(event)
-                and budget_candidates.CHARGE_PREFIX + identity not in committed
-            ):
-                result.append(event)
-        return result
-
-    def events_page(self, *, end: int | None, limit: int) -> tuple[int, list[dict[str, Any]]]:
-        """How many events are committed, and the ordinals `[end - limit, end)` of `events()`."""
-        records = self.events()
-        total = len(records)
-        stop = total if end is None else end
-        if stop > total or limit <= 0:
-            return total, []
-        return total, records[max(0, stop - limit) : stop]
-
-    def _anchor_intact(self) -> bool:
-        """Лежит ли последняя прочитанная строка всё там же.
-
-        Журнал по контракту только дописывается, но переписать его на месте может починка: inode тот же,
-        размер не меньше, и одних stat-полей не хватает.
-        """
-        if not self._committed_anchor:
-            return True
-        start = self._committed_read - len(self._committed_anchor)
-        if start < 0:
-            return False
-        try:
-            with open(self.events_path, "rb") as events:
-                events.seek(start)
-                return events.read(len(self._committed_anchor)) == self._committed_anchor
-        except OSError:
-            return False
-
-    def _refresh_committed_index(self) -> None:
-        """Дочитать журнал с прошлой позиции, оставив недописанный хвост следующему разу."""
-        try:
-            stat = os.stat(self.events_path)
-        except FileNotFoundError:
-            self._committed_offsets = {}
-            self._committed_event_ids = {}
-            self._committed_read = 0
-            self._committed_ident = None
-            self._committed_anchor = b""
-            return
-        ident = (stat.st_dev, stat.st_ino)
-        if ident != self._committed_ident or stat.st_size < self._committed_read or not self._anchor_intact():
-            # журнал пересоздан, усечён или переписан — индекс больше не про этот файл
-            self._committed_offsets = {}
-            self._committed_event_ids = {}
-            self._committed_read = 0
-            self._committed_ident = ident
-            self._committed_anchor = b""
-        if stat.st_size == self._committed_read:
-            return
-        with open(self.events_path, "rb") as events:
-            events.seek(self._committed_read)
-            chunk = events.read()
-        consumed = 0
-        for raw in chunk.splitlines(keepends=True):
-            if not raw.endswith(b"\n"):
-                break  # писатель не дописал строку; вернёмся к ней при следующем обновлении
-            offset = self._committed_read + consumed
-            consumed += len(raw)
-            self._committed_anchor = raw
-            if not raw.strip():
-                continue
-            try:
-                candidate = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(candidate, dict):
-                continue
-            request_id = candidate.get("request_id")
-            # первым побеждает самое раннее совпадение — так вёл себя скан сверху вниз
-            if isinstance(request_id, str) and request_id not in self._committed_offsets:
-                self._committed_offsets[request_id] = offset
-            event_id = candidate.get("event_id")
-            if (
-                isinstance(event_id, str)
-                and isinstance(request_id, str)
-                and event_id not in self._committed_event_ids
-            ):
-                self._committed_event_ids[event_id] = request_id
-        self._committed_read += consumed
-
-    def committed_event(self, request_id: str) -> dict[str, Any] | None:
-        self._refresh_committed_index()
-        offset = self._committed_offsets.get(request_id)
-        if offset is None:
-            return None
-        try:
-            with open(self.events_path, "rb") as events:
-                events.seek(offset)
-                line = events.readline()
-        except FileNotFoundError:
-            return None
-        try:
-            candidate = json.loads(line)
-        except ValueError:
-            return None
-        return candidate if isinstance(candidate, dict) else None
-
-    def pending_event(self, request_id: str) -> dict[str, Any] | None:
-        self._require_v2_pending_layout()
-        pending = self._pending_path(request_id)
-        try:
-            with open(pending, encoding="utf-8") as source:
-                return json.load(source)
-        except FileNotFoundError:
-            return None
-
-    def _product_issue_pending(self, request_id: str) -> bool:
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-        return os.path.exists(os.path.join(self.board_dir, "product-issue-transactions", f"v1-{digest}.json"))
-
-    @staticmethod
-    def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
-        """A request id is an ownership claim, not merely an append de-duplication key."""
-        if existing != event:
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
-
-    @staticmethod
-    def require_claim(
-        existing: dict[str, Any],
-        *,
-        kind: str,
-        reference: str | None,
-        identity: dict[str, Any] | None,
-    ) -> None:
-        """Refuse a replay whose caller meant an operation other than the recorded one.
-
-        The event kind, the card ref and the `identity` every write declares all have to match. The only
-        fields left out are the ones a retry cannot recompute after the write went through, because they
-        describe the state the write replaced: `moved`, `edited`'s digests, and `restored_comment`'s
-        body once the comment is known to be on the card. Comparing those would turn a retry into a
-        conflict.
-        """
-        if str(existing.get("kind") or "") != kind:
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
-        if reference is not None and str(existing.get("ref") or "") != reference:
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
-        if not identity:
-            return
-        payload = existing.get("payload")
-        if not isinstance(payload, dict):
-            raise TaskError("validation", "request id belongs to another operation or payload", 2)
-        for key, value in identity.items():
-            if payload.get(key) != value:
-                raise TaskError("validation", "request id belongs to another operation or payload", 2)
-
-    def require_pending_layout(self) -> None:
-        """Run the released generic-pending upgrade gate before a new mutation starts."""
-        self._require_v2_pending_layout()
-
-    @staticmethod
-    def _atomic_json(path: str, document: dict[str, Any]) -> None:
-        directory = os.path.dirname(path)
-        fd, temp = tempfile.mkstemp(prefix=".pending-", suffix=".tmp", dir=directory)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                json.dump(document, output, sort_keys=True, separators=(",", ":"))
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temp, path)
-        finally:
-            if os.path.exists(temp):
-                os.unlink(temp)
 
 
 def task_audit_for(client: Any, data_dir: str | os.PathLike[str] | None = None) -> Any:
@@ -1959,7 +1294,7 @@ class TaskWriter:
         """Create the steward's accounting artifact directly in In progress.
 
         The generic create transaction owns its reference reservation, staged
-        identity and pending-audit recovery.  This narrow facade only supplies
+        identity and staged-claim recovery.  This narrow facade only supplies
         the invariant report shape; it never creates a temporary Ready card and
         deliberately does not require a sprint.
         """
@@ -3042,7 +2377,7 @@ class TaskWriter:
         a payload.
         """
         record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
-        if record is None or record.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+        if record is None or is_protocol_event(record):
             return None
         return record
 
@@ -4221,7 +3556,7 @@ class TaskWriter:
                     # finish this obligation. Generic per-card reconciliation must not publish it.
                     unresolved += 1
                     continue
-                if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+                if is_protocol_event(event):
                     subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
                     if str(event.get("kind") or "") in _MARKER_EVENT_ACTIONS:
                         self.board_host.recover_marker_comment(str(event["request_id"]))

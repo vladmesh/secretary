@@ -208,21 +208,9 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if any(part.startswith(".") for part in relative.parts) and relative.parts[:2] != ("memory", "facts"):
         return True
-    if is_retired_raw_board_dump(relative):
-        return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)
     return is_memory_model_cache_entry(relative)
-
-
-def is_retired_raw_board_dump(relative: Path) -> bool:
-    """A raw file dump of the retired board engine, `board/<engine>-raw-<stamp>/`.
-
-    Nothing writes one any more, but a data dir from before the PostgreSQL board may still hold
-    them; the engine dump in `engine/postgres.dump` is the board's recovery copy, so no archive
-    carries them.
-    """
-    return relative.parts[:1] == ("board",) and len(relative.parts) > 1 and "-raw-" in relative.parts[1]
 
 
 def is_memory_model_cache_entry(relative: Path) -> bool:

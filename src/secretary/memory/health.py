@@ -17,11 +17,6 @@ from triggered_agents.runtime.head.identity import publish_heartbeat
 from . import access
 
 
-# The JSON-RPC 2.0 envelope member every MCP message carries.  Spelt from its parts so a search
-# for the retired board transport's JSON-RPC client does not land on the MCP wire format.
-_ENVELOPE: dict[str, str] = {"json" + "rpc": "2.0"}
-
-
 class MemoryProbeError(RuntimeError):
     """The restarted MCP service did not complete an authorized read."""
 
@@ -63,7 +58,7 @@ def _request(
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
-    connection.request("POST", "/mcp", body=json.dumps({**_ENVELOPE, **payload}), headers=headers)
+    connection.request("POST", "/mcp", body=json.dumps(payload), headers=headers)
     return _response_json(connection.getresponse())
 
 
@@ -115,6 +110,7 @@ def _authenticated_list(token: str, *, port: int, timeout_seconds: float) -> lis
             connection,
             token,
             {
+                "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
                 "params": {
@@ -129,13 +125,14 @@ def _authenticated_list(token: str, *, port: int, timeout_seconds: float) -> lis
         _request(
             connection,
             token,
-            {"method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
             session_id=session_id,
         )
         result, _ = _request(
             connection,
             token,
             {
+                "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
                 "params": {"name": "memory_list", "arguments": {"limit": 1}},

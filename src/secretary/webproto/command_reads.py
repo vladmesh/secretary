@@ -40,12 +40,11 @@ the writer, so two events can share a second and a clock can go backwards; the a
 only order that is a fact. A page is therefore the tail of the traversal, handed back in reverse,
 and the document says which order it is in rather than letting a reader assume a sort by time.
 
-**A position is an ordinal here, not a byte offset.** `task_events` pages one card's slice of the
-journal by seeking to a byte, because it reads the file itself. This read pages the traversal's own
-sequence, so its cursor carries how many committed records stand before the oldest row of the next
-page. Both are positions in one append-only file and both are frozen for the same reason -- nothing
-before them can ever change -- and the two cannot be confused for each other: a history cursor is
-bound to :data:`HISTORY_SCOPE`, the empty reference, and every card cursor is bound to a card.
+**A position is an ordinal.** This read pages the traversal's own sequence, so its cursor carries
+how many committed records stand before the oldest row of the next page -- the same count
+`task_events` keeps for one card's slice. Both are frozen for the same reason -- nothing before them
+can ever change -- and the two cannot be confused for each other: a history cursor is bound to
+:data:`HISTORY_SCOPE`, the empty reference, and every card cursor is bound to a card.
 
 **What the history is honest about.** An audit nobody could read is an unavailable source and never
 an empty history -- including the case the released traversal answers `[]` for, a journal file that
@@ -396,7 +395,7 @@ class CommandSections(SectionSet):
     def operation(self, read: SourceSet) -> Section:
         """What became of one request id, decided from the audit's own two lookups and nothing else.
 
-        Committed wins over staged, exactly as :meth:`secretary.tasks.TaskAudit.event` decides it:
+        Committed wins over staged, exactly as :meth:`secretary.board.sql_audit.SqlTaskAudit.event` decides it:
         a committed record is proof the operation finished, whatever else is still on disk. When a
         stale pending record stands beside it, `staged` says so -- an owed cleanup is a fact about
         this installation and not a reason to answer differently.

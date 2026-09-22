@@ -22,9 +22,6 @@ from tests.restore_fixtures import (
     fake_engine_dump,
 )
 
-#: A raw file dump the retired board engine left under `board/`; no archive carries one.
-RETIRED_RAW_DUMP = "board/engine-raw-20260710T000000Z"
-
 
 class BackupTests(unittest.TestCase):
     def setUp(self):
@@ -43,9 +40,6 @@ class BackupTests(unittest.TestCase):
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
             (instance / "runtime.env").write_text("BOARD_API_TOKEN=do-not-archive\n", encoding="utf-8")
-            retired = data_dir / RETIRED_RAW_DUMP / "data"
-            retired.mkdir(parents=True)
-            (retired / "db.sqlite").write_bytes(b"sqlite")
 
             pipeline_calls: list[str] = []
 
@@ -99,7 +93,6 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/secretary-data/board/cards.json", names)
             self.assertIn("secretary-backup/engine/postgres.dump", names)
             self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
-            self.assertEqual([name for name in names if RETIRED_RAW_DUMP in name], [])
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
             self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
             self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
@@ -1063,15 +1056,6 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
         ):
             with self.subTest(relative=relative):
                 self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
-
-    def test_no_archive_carries_a_retired_raw_board_dump(self):
-        for policy in POLICIES.values():
-            for relative in (RETIRED_RAW_DUMP, f"{RETIRED_RAW_DUMP}/data/db.sqlite"):
-                with self.subTest(kind=policy.kind, relative=relative):
-                    self.assertTrue(should_skip_data_entry(Path(relative), policy=policy))
-            for relative in ("board/cards.json", "board/audit.json", "board/assessment-decisions/x.json"):
-                with self.subTest(kind=policy.kind, relative=relative):
-                    self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
 
 
 def _write_instance(instance: Path, data_dir: Path) -> None:

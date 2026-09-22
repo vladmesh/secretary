@@ -19,7 +19,7 @@ written only once the terminal is actually gone.
 
 Every lifecycle event is staged on disk before the host call it describes and committed to the
 log after it, the same order `TaskWriter` uses for a card. Storage that refuses the commit does
-not propagate: the staged copy is what `TaskAudit.reconcile()` repairs later, the record is
+not propagate: the staged copy is what the stale-staged settlement settles later, the record is
 written regardless, and the outcome says `audit: pending`.
 
 The record itself is fixed the same way. A launch intent — sprint, generation, head, attempt,
@@ -2383,7 +2383,7 @@ def _launch_observer(
         delivery_event_id = _prepare_launch_delivery(record, pending_event)
     try:
         # Staged before the host is asked for anything, so a head that comes up while the process
-        # dies mid-launch still has its event on disk for `TaskAudit.reconcile()` to pick up.
+        # dies mid-launch still has its event staged for the stale-staged settlement to pick up.
         event = stage_event(
             runtime,
             kind,
@@ -3224,7 +3224,8 @@ def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:
     """Move a staged event into the log. False means the pending copy is what carries it now.
 
     A refused commit is never raised at the caller: the effect the event describes has already
-    happened, and `TaskAudit.reconcile()` appends the pending copy on the next repair pass.
+    happened, and the stale-staged settlement (`SqlTaskAudit.settle_stale_staged`) commits the
+    pending copy on a later tick.
     """
     audit = getattr(runtime, "audit", None)
     if audit is None or event is None:
