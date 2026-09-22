@@ -34,7 +34,7 @@ from unittest import mock
 import yaml
 
 from secretary.board.events import BoardEventCanon, BoardEventCanonUnowned
-from secretary.board.kanboard import KanboardBoardHost
+from secretary.board.sql_host import SqlBoardHost
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointWriter
@@ -307,7 +307,7 @@ class CheckpointGateTests(SqlAuditCase):
         self.assertNotIn("unresolved pending record", result.reason)
         self.assertNotIn("Product/Issue", result.reason)
 
-    def test_a_card_backend_that_cannot_be_established_blocks_by_name(self) -> None:
+    def test_a_card_store_that_cannot_be_established_blocks_by_name(self) -> None:
         result = self.writer(client=_RefusingClient()).write()
 
         self.assertEqual(result.status, "blocked")
@@ -559,7 +559,7 @@ class CardHistoryReadTests(SqlAuditCase):
         self.assertNotIn("password", page["source"]["reason"].lower())
         self.assertEqual(page["items"], [])
 
-    def test_a_card_backend_that_cannot_be_established_takes_the_events_and_nothing_else(
+    def test_a_card_store_that_cannot_be_established_takes_the_events_and_nothing_else(
         self,
     ) -> None:
         self.stale_projection()
@@ -581,7 +581,7 @@ class TypedCanonAndSprintReadTests(SqlAuditCase):
     """AC5: the typed canon and the sprint reads cannot read a file beside a PostgreSQL client."""
 
     def test_a_host_over_a_postgres_client_owns_the_sql_canon(self) -> None:
-        host = KanboardBoardHost(self.client, data_dir=str(self.data_dir))
+        host = SqlBoardHost(self.client, data_dir=str(self.data_dir))
         self.assertIsInstance(host.canon.audit, SqlTaskAudit)
 
     def test_the_canon_refuses_when_no_store_can_be_chosen_for_it(self) -> None:

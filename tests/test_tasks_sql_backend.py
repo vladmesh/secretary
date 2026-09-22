@@ -1,10 +1,6 @@
 """`TaskReader` and `TaskWriter` on the PostgreSQL backend, against a real `postgres:16`.
 
-Two things are proved here and they are deliberately different in kind.
-
-`SqlBackendSwitchTests` is about the switch itself (`board/backend.py`) and needs no database.
-
-Everything below it is the store-specific half of the card contract: the writer's mutations land —
+This is the store-specific half of the card contract: the writer's mutations land —
 request claim, card effect and event together — as one transaction (`docs/BOARD_STORE.md` §7.1),
 and the reads that have no case in `tests/test_tasks.py`.  The reader's and writer's general cases
 live there and run on this same store (`tests/sql_backend_fixtures.py` `card_store`).
@@ -14,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -26,66 +21,6 @@ from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
 from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.fakes.tasks import open_sprint, reader_seed, writer_seed
 from tests.sql_backend_fixtures import CardStoreCase
-
-
-class SqlBackendSwitchTests(unittest.TestCase):
-    """The switch is one named place, decided once, and refuses what it does not know."""
-
-    def setUp(self) -> None:
-        backend.reset_card_backend()
-        self.addCleanup(backend.reset_card_backend)
-
-    def _with(self, value: str | None):
-        previous = os.environ.get(backend.CARD_BACKEND_ENV)
-        if value is None:
-            os.environ.pop(backend.CARD_BACKEND_ENV, None)
-        else:
-            os.environ[backend.CARD_BACKEND_ENV] = value
-        self.addCleanup(
-            lambda: os.environ.__setitem__(backend.CARD_BACKEND_ENV, previous)
-            if previous is not None
-            else os.environ.pop(backend.CARD_BACKEND_ENV, None)
-        )
-
-    def test_a_missing_selector_refuses_instead_of_falling_back(self) -> None:
-        self._with(None)
-        with self.assertRaises(backend.BoardBackendError) as raised:
-            backend.card_backend()
-        self.assertIn("SECRETARY_CARD_BACKEND must be set", str(raised.exception))
-        report = backend.card_backend_status()
-        self.assertIsNone(report["backend"])
-        self.assertEqual(report["source"], backend.CARD_BACKEND_ENV)
-        self.assertIsNone(report["default"])
-        self.assertTrue(report["findings"])
-
-    def test_kanboard_is_chosen_only_when_named_explicitly(self) -> None:
-        self._with("kanboard")
-        self.assertEqual(backend.card_backend(), "kanboard")
-        self.assertEqual(backend.card_backend_status()["source"], backend.CARD_BACKEND_ENV)
-
-    def test_postgres_is_chosen_by_the_name_and_not_by_a_present_store_file(self) -> None:
-        self._with("postgres")
-        self.assertEqual(backend.card_backend(), "postgres")
-        self.assertEqual(backend.card_backend_status()["backend"], "postgres")
-
-    def test_an_unknown_value_refuses_with_its_reason(self) -> None:
-        self._with("mysql")
-        with self.assertRaises(backend.BoardBackendError) as raised:
-            backend.card_backend()
-        self.assertIn("kanboard, postgres", str(raised.exception))
-        self.assertIn("mysql", str(raised.exception))
-
-    def test_the_decision_is_taken_once_per_process(self) -> None:
-        self._with("postgres")
-        self.assertEqual(backend.card_backend(), "postgres")
-        os.environ[backend.CARD_BACKEND_ENV] = "kanboard"
-        self.assertEqual(backend.card_backend(), "postgres")
-
-    def test_status_reports_the_refusal_rather_than_a_backend(self) -> None:
-        self._with("mysql")
-        report = backend.card_backend_status()
-        self.assertIsNone(report["backend"])
-        self.assertTrue(report["findings"])
 
 
 class SqlBoardCase(CardStoreCase):

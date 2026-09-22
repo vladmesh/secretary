@@ -1,7 +1,7 @@
-"""Stable parsers for the legacy Kanboard task wire format.
+"""Stable parsers for the legacy flat task wire format.
 
 Legacy readers, restore code, and the one-shot board importer all have to interpret
-old Kanboard rows exactly the same way.  Keep those small, pure normalization rules
+old board rows exactly the same way.  Keep those small, pure normalization rules
 here instead of making feature packages import private helpers from ``tasks.py``.
 """
 

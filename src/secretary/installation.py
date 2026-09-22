@@ -42,14 +42,9 @@ from secretary._fsutil import (
     write_text_atomic,
 )
 from secretary.automations import OrcaAutomationClient, workspaces_root
-from secretary.board.backend import CARD, CARD_BACKEND_ENV, POSTGRES, board_client, card_backend_status
+from secretary.board.backend import CARD, board_client
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
-from secretary.board_transport import (
-    BoardTransport,
-    BoardTransportError,
-    ensure_from_runtime_values,
-    transport_path,
-)
+from secretary.board_transport import transport_path
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import (
@@ -77,7 +72,6 @@ from secretary.runtime_env import (
     RuntimeEnvMissing,
     instance_runtime_env_path,
     read_runtime_env,
-    select_card_backend,
 )
 from secretary.secret_recover import SecretRecovery, recover_secrets
 from secretary.secret_store import (
@@ -834,17 +828,7 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def _board_label() -> str:
-    """The board this installation serves cards from, named for an operator message.
-
-    `card_backend_status` reports rather than refuses, so naming the board cannot itself be the
-    thing that fails; an unusable switch value is refused by the call that needs the board.
-    """
-    return "PostgreSQL" if card_backend_status().get("backend") == POSTGRES else "Kanboard"
-
-
 def check_prerequisites(
-    transport: BoardTransport | None,
     instance_dir: Path,
     installation_user: str | None = None,
 ) -> None:
@@ -859,14 +843,11 @@ def check_prerequisites(
         _run(["runuser", "--user", installation_user, "--", "orca", "--version"], label="inspect Orca")
     else:
         _run(["orca", "--version"], label="inspect Orca")
-    # The prerequisite is the board this installation will actually serve cards from, so the
-    # switch names it (board/backend.py).  The Kanboard transport is still handed over, and
-    # still used, when the switch says `kanboard`; under `postgres` the store answers instead.
-    label = _board_label()
+    # The prerequisite is the board this installation serves cards from: the PostgreSQL store.
     try:
-        TaskReader(board_client(instance_dir, serves=(CARD,), transport=transport)).list()
+        TaskReader(board_client(instance_dir, serves=(CARD,))).list()
     except TaskError as exc:
-        raise InstallError(f"{label} prerequisite failed: {exc.message}") from None
+        raise InstallError(f"PostgreSQL prerequisite failed: {exc.message}") from None
 
 
 def _valid_existing_layout(data_dir: Path) -> bool:
@@ -1543,7 +1524,7 @@ def _restore_without_credentials(
     result: InstallResult,
     bootstrap_credential: Path | None,
 ) -> None:
-    """Recover everything that does not go through Kanboard.
+    """Recover everything that does not go through the board.
 
     A locked store costs the operator their credentials, not their installation. What is left undone
     is named as skipped rather than quietly attempted with half a configuration, and the caller then
@@ -1722,8 +1703,8 @@ def install(args: argparse.Namespace) -> InstallResult:
         except OSError:
             canonical_runtime_env = False
         if bootstrap_checkout and runtime_loaded:
-            # Bootstrap writes runtime.env with nothing but the backend selector, so on its
-            # checkout the file being there no longer says the store's variables arrived.
+            # A bootstrap checkout may hold a runtime.env that carries none of the store's
+            # variables, so on it the file being there does not say they arrived.
             unavailable = sorted(
                 {
                     str(entry["environment"])
@@ -1737,40 +1718,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 raise _blocked_by_secrets(
                     InstallError(f"runtime.env lacks {', '.join(unavailable)}"), secrets, runtime_env
                 ) from None
-        if bootstrap_checkout and canonical_runtime_env:
-            # A fresh installation serves cards from the PostgreSQL store bootstrap provisioned.
-            # A store that materializes runtime.env rewrites the whole file, so the selector
-            # bootstrap recorded is put back here rather than trusted to have survived.
-            if not args.dry_run:
-                try:
-                    select_card_backend(runtime_env, POSTGRES)
-                except RuntimeEnvError as exc:
-                    raise InstallError(str(exc)) from None
-            values = {**values, CARD_BACKEND_ENV: POSTGRES}
-        transport: BoardTransport | None = None
-        if values.get(CARD_BACKEND_ENV, "").strip() == POSTGRES:
-            # The PostgreSQL store is reached through board-store.env; the Kanboard JSON-RPC
-            # tuple is not this installation's transport, so nothing materializes it.
-            result.add("board-transport", "skipped", "the PostgreSQL board store needs no Kanboard transport")
-        else:
-            try:
-                transport_outcome = ensure_from_runtime_values(
-                    target,
-                    legacy_values=values,
-                    runtime_env=runtime_env,
-                    dry_run=args.dry_run,
-                    allow_default=detail.startswith(("cloned", "would clone")),
-                )
-            except BoardTransportError as exc:
-                raise InstallError(str(exc)) from None
-            transport = transport_outcome.transport
-            result.add(
-                "board-transport",
-                "would-change"
-                if args.dry_run and transport_outcome.changed
-                else ("changed" if transport_outcome.changed else "unchanged"),
-                transport_outcome.render(dry_run=args.dry_run),
-            )
+        # The PostgreSQL store is reached through board-store.env; the JSON-RPC tuple is not
+        # this installation's transport, so nothing materializes it.  A stale backend selector
+        # line an older build wrote into runtime.env is an ordinary unread variable.
+        result.add("board-transport", "skipped", "the PostgreSQL board store needs no JSON-RPC transport")
         if not args.dry_run:
             if canonical_runtime_env:
                 _set_installation_owner(runtime_env, args.installation_user)
@@ -1785,8 +1736,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             else "not required by this installation",
         )
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
-            check_prerequisites(transport, target, args.installation_user)
-            result.add("prerequisites", "unchanged", f"{_board_label()} and Orca are reachable")
+            check_prerequisites(target, args.installation_user)
+            result.add("prerequisites", "unchanged", "PostgreSQL and Orca are reachable")
             report = _validated_instance(target)
             assert report.data_dir is not None
             data_dir = report.data_dir

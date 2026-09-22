@@ -17,7 +17,6 @@ because it never reached a database is worth less than none.
 from __future__ import annotations
 
 import getpass
-import os
 import subprocess
 import tempfile
 import unittest
@@ -31,10 +30,9 @@ import psycopg
 from secretary import bootstrap as bootstrap_module
 from secretary import installation
 from secretary.board import store
-from secretary.board.backend import CARD, CARD_BACKEND_ENV, board_client, reset_card_backend
+from secretary.board.backend import CARD, board_client
 from secretary.board.store import BoardStoreConfig
 from secretary.data import init_layout
-from secretary.runtime_env import read_runtime_env
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.installation import CARD as CHECKPOINT_CARD
 from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
@@ -67,19 +65,6 @@ class FreshStoreCase(unittest.TestCase):
         cls.config = cls.board.config(STORE_DATABASE)
 
     def setUp(self) -> None:
-        # The selector is this process's decision; each case makes its own and leaves none behind.
-        previous = os.environ.get(CARD_BACKEND_ENV)
-        reset_card_backend()
-
-        def restore() -> None:
-            if previous is None:
-                os.environ.pop(CARD_BACKEND_ENV, None)
-            else:
-                os.environ[CARD_BACKEND_ENV] = previous
-            reset_card_backend()
-
-        self.addCleanup(restore)
-        os.environ.pop(CARD_BACKEND_ENV, None)
         temporary = tempfile.TemporaryDirectory(prefix="fresh-postgres-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -121,7 +106,6 @@ class EmptyStoreTests(FreshStoreCase):
         data = self.root / "data"
         init_layout(data)
 
-        os.environ[CARD_BACKEND_ENV] = "postgres"
         client = board_client(instance, serves=(CARD,))
         self.addCleanup(client.close)
         self.assertEqual(TaskReader(client).list(), [])
@@ -177,7 +161,8 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         _git(source, "push", str(remote), "HEAD:master")
 
         self.assertEqual(self._bootstrap(str(remote), target), 0)
-        self.assertEqual(read_runtime_env(target)[CARD_BACKEND_ENV], "postgres")
+        # Nothing selects the board, so bootstrap records nothing in runtime.env.
+        self.assertFalse((target / "runtime.env").exists())
         self.assertFalse((target / "board-transport.env").exists())
 
         orca_version = mock.Mock(return_value="orca v1")
@@ -205,7 +190,6 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
             host_fixture=None,
         )
         with ExitStack() as stack:
-            transport = stack.enter_context(mock.patch("secretary.installation.ensure_from_runtime_values"))
             for patch in (
                 mock.patch("secretary.installation._ensure_installation_user"),
                 mock.patch("secretary.installation._set_installation_owner"),
@@ -227,16 +211,13 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", result.steps)
-        transport.assert_not_called()
         self.assertEqual(steps["board-transport"][0], "skipped")
         self.assertEqual(steps["prerequisites"], ("unchanged", "PostgreSQL and Orca are reachable"))
         self.assertEqual(steps["board"], ("changed", "1 card(s) at parity"))
         self.assertFalse((target / "board-transport.env").exists())
-        self.assertEqual(read_runtime_env(target)[CARD_BACKEND_ENV], "postgres")
+        self.assertFalse((target / "runtime.env").exists())
 
         # Read back through the store the units will use, not through the recovery's own client.
-        os.environ[CARD_BACKEND_ENV] = "postgres"
-        reset_card_backend()
         client = board_client(target, serves=(CARD,))
         self.addCleanup(client.close)
         cards = TaskReader(client).list()

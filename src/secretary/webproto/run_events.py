@@ -8,10 +8,9 @@ installation's card client (:func:`secretary.tasks.task_audit_for`) — the comm
 under the same lock, in the same generic record shape the control plane's own records
 (`sprint_guard_denied`, `sprint_guard_override`) already use — and
 :class:`secretary.webproto.journal.EventJournal` reads it back with no change at all, cursor
-included. On Kanboard that store is `<data>/board/events.ndjson`; on
-`SECRETARY_CARD_BACKEND=postgres` it is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3), and
-the events are the same either way. Published into the file journal beside a PostgreSQL client they
-went to a file the installation's own readers never open.
+included. That store is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). Published into
+the file journal beside a board client they went to a file the installation's own readers never
+open.
 
 Two events per run, and there are two because a run has exactly two things worth a place in a
 card's history:
@@ -48,7 +47,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.tasks import CARD_BACKEND, TaskError
+from secretary.tasks import BOARD_STORE_KIND, TaskError
 from secretary.webproto.errors import RuntimeUnavailable
 from secretary.webproto.runs import ProductRun
 
@@ -148,7 +147,7 @@ def _publish(
         "outcome": outcome,
         "task_id": "",
         "ref": run.ref,
-        "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
+        "backend": {"kind": BOARD_STORE_KIND, "task_id": None, "revision": "not_written"},
         "request_id": request_id,
         "payload": payload,
     }

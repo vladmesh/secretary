@@ -1,10 +1,9 @@
-"""The card reader's and writer's second implementation: the PostgreSQL board store.
+"""The card reader's and writer's implementation: the PostgreSQL board store.
 
 `docs/BOARD_STORE.md` §2.2 is the reason this module has the shape it has.  Almost every consumer
 of the board reaches cards through `TaskReader` and `TaskWriter`, not through the JSON-RPC client,
-so the cheapest honest place to put a second implementation is *underneath* those two classes and
-nowhere else.  `SqlCardClient` therefore answers the same eleven-method board vocabulary
-`tasks.py` and `board/kanboard.py` speak — `getAllTasks`, `getTaskMetadata`, `saveTaskMetadata`,
+so the cheapest honest place to put the store is *underneath* those two classes and nowhere else.  `SqlCardClient` therefore answers the same eleven-method board vocabulary
+`tasks.py` and `board/sql_host.py` speak — `getAllTasks`, `getTaskMetadata`, `saveTaskMetadata`,
 `createTask`, `updateTask`, `moveTaskPosition`, `closeTask`, `createComment`, `getAllComments`,
 `getColumns`, `getActiveSwimlanes`, `getProjectByName`, `getTaskByReference`, `addSwimlane` — over
 `tasks`, `task_comments` and their satellites (§3.5, §3.7).  The public behaviour of the two
@@ -18,7 +17,7 @@ Three mappings do the whole job:
 * **metadata bag ↔ columns.**  §8.1: the keys the model names are columns, and the keys it does
   not are `tasks.extensions.kanboard` (§8.2).  `saveTaskMetadata` writes columns for the former
   and the bag for the latter, so a key nobody modelled is still readable rather than dropped.
-* **swimlane ↔ nothing.**  The store has no lane: a lane is a Kanboard presentation of the
+* **swimlane ↔ nothing.**  The store has no lane: a lane is a legacy board presentation of the
   product a card belongs to.  It is kept exactly where the importer keeps it —
   `extensions.kanboard.swimlane` — and the lane *table* is virtual, derived from the lanes the
   rows themselves name plus the products the store holds.
@@ -45,8 +44,8 @@ from secretary.board.store import BoardStoreCredentials
 from secretary.board.task_routing import live_impact_flag
 from secretary.tasks import TaskError
 
-#: The seven columns of the Pipeline board, in board order.  Their ids are this module's, not
-#: Kanboard's: nothing outside the client may depend on the number, only on the title.
+#: The seven columns of the Pipeline board, in board order.  Their ids are this module's own:
+#: nothing outside the client may depend on the number, only on the title.
 BOARD_COLUMNS = (
     (1, "Issues"),
     (2, "Ready"),
@@ -69,8 +68,8 @@ _COLUMN_ID_BY_STATE = {
 }
 _STATE_BY_COLUMN_ID = {identifier: state for state, identifier in _COLUMN_ID_BY_STATE.items()}
 
-#: The one virtual board this client serves.  A second board is a Kanboard concept the store does
-#: not have; a name that is not this one is not found, exactly as Kanboard answers.
+#: The one virtual board this client serves.  The store has no second board; a name that is not
+#: this one (or the sprint board's) is not found.
 BOARD_NAME = "Pipeline"
 BOARD_ID = 1
 SPRINT_BOARD_NAME = "Secretary sprints"
@@ -119,7 +118,7 @@ class SqlCardError(TaskError):
     A `TaskError`, not a bare `RuntimeError`: every command above this client renders that one
     vocabulary as a named refusal with an exit status (`task_commands.run_task_command`), and a
     `RuntimeError` reaching a CLI handler is a traceback with a connection string somewhere up
-    the stack.  The code is the one Kanboard's own malformed-reply refusals already use.
+    the stack.  The code is the one every malformed-reply refusal of the board vocabulary uses.
     """
 
     def __init__(self, message: str) -> None:
@@ -131,8 +130,8 @@ def _driver_error(action: str, exc: BaseException) -> TaskError:
 
     Three classes and each keeps its own name.  A driver that is not installed at all, and a
     server that will not accept or keep a connection, are `backend_unavailable` — the code the
-    Kanboard transport already uses for exactly that, and the one `board/kanboard.py` treats as
-    "the effect may or may not have landed".  Everything else psycopg raises — a constraint, a
+    board vocabulary uses for exactly that, and the one callers treat as "the effect may or may
+    not have landed".  Everything else psycopg raises — a constraint, a
     type, a statement the schema refuses — is `backend_error`.  What PostgreSQL said is carried
     through, and only that: psycopg's diagnostics do not contain the connection string, so an
     operator gets the reason without the credentials.
@@ -238,11 +237,6 @@ class SqlCardClient:
     a mutation issued inside `transaction()` is one transaction (§7.1) and one issued outside it
     still commits on its own — which is what keeps the reads of a read-only consumer cheap.
     """
-
-    #: Which of the two card backends this client is (board/backend.py).  The reader spells the
-    #: card's identity and its `audit.backend` from this, so a normalized card always says which
-    #: store it came out of.
-    backend_kind = "postgres"
 
     def __init__(self, credentials: BoardStoreCredentials, instance_dir: Path | str) -> None:
         self.credentials = credentials
@@ -460,7 +454,7 @@ class SqlCardClient:
     def _rpc_addSwimlane(self, *, project_id: int, name: str) -> Any:
         lanes = self._lane_names()
         if name in lanes:
-            return False  # Kanboard answers a duplicate name with false, not with the existing id.
+            return False  # A duplicate name answers false, not the existing id.
         lanes.append(name)
         lanes.sort()
         return lanes.index(name) + 1
@@ -550,7 +544,7 @@ class SqlCardClient:
         return rows
 
     def _rpc_getAllTasks(self, *, project_id: int, status_id: int = 1) -> list[dict[str, Any]]:
-        """Every row of the board, which is three tables here and one on Kanboard (§8.1).
+        """Every row of the board, which is three tables here and was one table before them (§8.1).
 
         `all_project_cards` is how `ProductIssueStore` sees the board at all, so a Product or an
         Issue that is not in this answer is a record the catalogue cannot report.  The status

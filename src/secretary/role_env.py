@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from triggered_agents.runtime.role_env import (
     BOARD_ROLES,
-    BOARD_TRANSPORT_ROLES,
     LAUNCH_BOUND_ENV,
     LAUNCHER_ONLY_ENV,
     MEMORY_ACCESS_TOKEN_ENV,
@@ -33,7 +32,6 @@ from triggered_agents.runtime.role_env import (
 
 __all__ = [
     "BOARD_ROLES",
-    "BOARD_TRANSPORT_ROLES",
     "LAUNCHER_ONLY_ENV",
     "MEMORY_ACCESS_TOKEN_ENV",
     "LAUNCH_BOUND_ENV",

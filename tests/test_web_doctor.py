@@ -58,7 +58,6 @@ EVERY_PROBLEM: dict[str, Any] = {
         "rpo_reason": "checkpoint gate blocked since 2026-09-20T11:15:00Z: no remote",
     },
     "board_transport": {"findings": ["x"]},
-    "card_backend": {"backend": "postgres", "findings": ["y"]},
     "secret_store": {"installation_key": {"present": True, "usable": False}},
     "memory": {"index_present": False},
 }
@@ -124,7 +123,6 @@ class TheColourRuleTests(unittest.TestCase):
                 "checkpoint.last_failed",
                 "checkpoint.rpo_exceeded",
                 "board_transport.finding",
-                "card_backend.finding",
                 "secret_store.key_unusable",
                 "memory.index_missing",
             ],
@@ -143,7 +141,6 @@ class TheColourRuleTests(unittest.TestCase):
             "checkpoint.rpo_exceeded",
             "secret_store.key_unusable",
             "board_transport.finding",
-            "card_backend.finding",
             "health.unreadable",
         }
         yellow = {
@@ -296,7 +293,7 @@ class TheDoctorPageTests(TransportFixture):
         self.assertLess(red, yellow, "what makes the lamp red is read first")
         for code, message in (
             ("unit.failed", "a.service is failed"),
-            ("card_backend.finding", "card_backend has 1 finding(s)"),
+            ("board_transport.finding", "board_transport has 1 finding(s)"),
             ("pipeline.paused", "the pipeline is paused (drain)"),
             ("memory.index_missing", "the memory index is missing"),
         ):

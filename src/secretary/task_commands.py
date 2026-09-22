@@ -23,7 +23,7 @@ from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
-    CARD_BACKEND,
+    BOARD_STORE_KIND,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -526,7 +526,7 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
     def command() -> object:
         client = card_client(_instance(args))
         status = dict(task_audit_for(client, resolve_data_dir(args)).status())
-        status["backend"] = CARD_BACKEND
+        status["backend"] = BOARD_STORE_KIND
         return status
 
     return run_task_command(command, exit_code=lambda result: 0 if result["ok"] else 1)

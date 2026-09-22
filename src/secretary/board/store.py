@@ -5,7 +5,7 @@ The same category as ``board_transport.py``, and deliberately the same mechanism
 git-ignored, refused rather than repaired when it is partial.  It is not a secret-store value:
 a database password is regenerable by recreating the role, is meaningless without the volume it
 guards, and is needed by ``docker compose up`` before the instance repository is necessarily in
-a state where the store can be opened — exactly the argument that kept Kanboard's API token out
+a state where the store can be opened — exactly the argument that kept the old board API token out
 of the store.
 
 It carries one credential **per role**, not one credential, because §5.5's three-role boundary is

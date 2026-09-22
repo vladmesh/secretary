@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary import _proc, state_repo
 from secretary._fsutil import file_lock, write_text_atomic
@@ -51,13 +51,16 @@ from secretary.sprint_observer import (
 )
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import (
-    KanboardClient,
     TaskError,
     TaskReader,
     TaskWriter,
     all_project_cards,
 )
+
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
 
 @dataclass(frozen=True)
@@ -112,7 +115,7 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 
 
 def import_normalized_board(
-    data_dir: Path, *, client: KanboardClient | None = None, instance: Path | None = None
+    data_dir: Path, *, client: SqlCardClient | None = None, instance: Path | None = None
 ) -> int:
     """Populate an empty board, using one outer transaction when the target is PostgreSQL."""
     if client is None:
@@ -126,7 +129,7 @@ def import_normalized_board(
 
 
 def _import_normalized_board(
-    data_dir: Path, *, client: KanboardClient, instance: Path | None = None
+    data_dir: Path, *, client: SqlCardClient, instance: Path | None = None
 ) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry."""
     from secretary.sprints import sprint_admission_lock
@@ -255,7 +258,7 @@ def _set_restore_phase(client: Any, phase: str) -> None:
 
 
 def _existing_sprints(
-    data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]
+    data_dir: Path, client: SqlCardClient, sprints: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
     """The sprint entities the target already holds, read once before any write."""
     if not sprints:
@@ -265,7 +268,7 @@ def _existing_sprints(
     return {sprint["ref"]: sprint for sprint in SprintReader(client, data_dir=data_dir).export()}
 
 
-def _existing_board_cards(client: KanboardClient, board_id: int) -> dict[str, dict[str, Any]]:
+def _existing_board_cards(client: SqlCardClient, board_id: int) -> dict[str, dict[str, Any]]:
     """Read both active and closed Pipeline records before deciding a restore is empty."""
     sql_rows = getattr(client, "restore_card_rows", None)
     raw_cards = sql_rows() if callable(sql_rows) else all_project_cards(client, board_id)
@@ -282,7 +285,7 @@ def _existing_board_cards(client: KanboardClient, board_id: int) -> dict[str, di
 
 
 def _ensure_restore_swimlanes(
-    client: KanboardClient,
+    client: SqlCardClient,
     board_id: int,
     columns: dict[int, str],
     swimlanes: dict[int, str],
@@ -415,7 +418,7 @@ def _validate_deferred_restore_comments(
 
 def _import_sprints(
     data_dir: Path,
-    client: KanboardClient,
+    client: SqlCardClient,
     sprints: list[dict[str, Any]],
     existing: dict[str, dict[str, Any]],
     prefix: str,
@@ -999,7 +1002,7 @@ def _restore_position(card: dict[str, Any]) -> int | None:
 def _restored_order_mismatch(cards: list[dict[str, Any]], actual: dict[str, dict[str, Any]]) -> bool:
     """Сверяет порядок открытых карточек внутри (колонка, свимлейн).
 
-    Абсолютные номера позиций сравнивать нельзя: Kanboard держит позиции плотными среди активных
+    Абсолютные номера позиций сравнивать нельзя: старая доска держала позиции плотными среди активных
     задач, а закрытая задача сохраняет устаревшее значение и перестаёт занимать слот, поэтому
     экспорт живой доски содержит и дыры, и повторы. Восстановимо здесь только относительное
     расположение; у закрытых карточек позиции нет вовсе.
@@ -1295,7 +1298,6 @@ def restore_postgres_backup(
     if not isinstance(component, dict):
         raise RestoreError("PostgreSQL archive has no engine dump component")
     from secretary._fsutil import sha256_file
-    from secretary.board.backend import card_backend
     from secretary.board.postgres_recovery import (
         PostgresRecoveryError,
         restore_dump,
@@ -1304,8 +1306,6 @@ def restore_postgres_backup(
     )
     from secretary.board.store import BoardStoreError, resolve
 
-    if card_backend() != "postgres":
-        raise RestoreError("PostgreSQL local restore requires SECRETARY_CARD_BACKEND=postgres")
     marker = target / "postgres-restore.json"
     if target.exists():
         try:

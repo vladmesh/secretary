@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from secretary.board.backend import entity_id, entity_number, record_key
+from secretary.board.backend import entity_id, entity_number, record_key, sprint_reference_number
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.sprints import SprintFixture
 from tests.observer_identity import as_observer
+from tests.sql_backend_fixtures import ensure_sprint_row
 
 
 def _identity_fields(event: dict[str, Any]) -> list[str]:
@@ -102,7 +103,7 @@ class NewWritesNamePostgresTests(SprintFixture):
 
         committed = self._committed("released-product")
         number = committed["backend"]["task_id"]
-        self.assertEqual(committed["task_id"], entity_id("task", "postgres", number))
+        self.assertEqual(committed["task_id"], entity_id("task", number))
         self.assertEqual(committed["backend"]["kind"], "postgres")
         self.assertEqual(number, record_key("product", "released"))
         self.assert_no_retired_identity(committed)
@@ -152,3 +153,58 @@ class HistoricalKanboardIdentityTests(SprintFixture):
         # The sprint's own new events beside it name the store.
         self.assertTrue(audit.committed_event("history-create")["task_id"].startswith("sprint_postgres_"))
         self.assertEqual(self.sprint(sprint["ref"])["id"], sprint["id"])
+
+
+class LiteralPreCutoverIdentityTests(SprintFixture):
+    """`task_kanboard_12` and `sprint_kanboard_7`, exactly as stored before the cutover, still resolve.
+
+    `entity_number` no longer knows any store word by name (secretary-1671): it reads the number out
+    of any `<kind>_<word>_<n>`. These cases hold that against the real store, through the lookups a
+    reader of old history makes: the card by its board number, the sprint by its numbered ref.
+    """
+
+    def _seed(self, request_id: str, *, ref: str, task_id: str, number: int) -> dict[str, Any]:
+        event = {
+            "event_id": f"evt_{request_id}",
+            "schema_version": 1,
+            "occurred_at": "2026-09-01T00:00:00Z",
+            "actor": {"role": "po", "id": "operator"},
+            "kind": "commented",
+            "outcome": "success",
+            "task_id": task_id,
+            "ref": ref,
+            "backend": {"kind": "kanboard", "task_id": number, "revision": "history"},
+            "request_id": request_id,
+            "payload": {},
+        }
+        SqlTaskAudit(self.client).append(request_id, event)
+        return event
+
+    def test_task_kanboard_12_resolves_to_the_card_the_store_holds_under_12(self) -> None:
+        seeded = self._seed("literal-card", ref="secretary-12", task_id="task_kanboard_12", number=12)
+
+        number = entity_number("task", "task_kanboard_12")
+        self.assertEqual(number, 12)
+        reader = TaskReader(self.client)  # type: ignore[arg-type]
+        card = reader.show_id(number)
+        self.assertEqual(card["ref"], "secretary-12")
+        # The live row names the store, and it is the same number.
+        self.assertEqual(card["id"], "task_postgres_12")
+        self.assertEqual(entity_number("task", card["id"]), number)
+        audit = SqlTaskAudit(self.client)
+        self.assertEqual(audit.committed_event("literal-card"), seeded)
+        self.assertIn(seeded, audit.events(reference=card["ref"]))
+
+    def test_sprint_kanboard_7_resolves_to_the_numbered_sprint_it_names(self) -> None:
+        ensure_sprint_row(self.client, "sprint:7")  # type: ignore[arg-type]
+        seeded = self._seed("literal-sprint", ref="sprint:7", task_id="sprint_kanboard_7", number=7)
+
+        number = entity_number("sprint", "sprint_kanboard_7")
+        self.assertEqual(number, 7)
+        sprint = self.sprint(f"sprint:{number}")
+        self.assertEqual(sprint["ref"], "sprint:7")
+        self.assertEqual(sprint_reference_number(sprint["ref"]), number)
+        self.assertTrue(sprint["id"].startswith("sprint_postgres_"), sprint)
+        audit = SqlTaskAudit(self.client)
+        self.assertEqual(audit.committed_event("literal-sprint"), seeded)
+        self.assertIn(seeded, audit.events(reference=sprint["ref"]))

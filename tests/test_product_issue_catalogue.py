@@ -22,7 +22,7 @@ from typing import Any
 from unittest import mock
 
 from secretary.product_issues import ProductIssueStore
-from secretary.tasks import TaskError, _BatchCallRejected
+from secretary.tasks import TaskError
 from tests.sql_backend_fixtures import CardStoreClient, card_store
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
 
@@ -181,7 +181,7 @@ class CatalogueBudgetTests(unittest.TestCase):
         self.assertEqual(cost["batch:getTaskMetadata"], 1)
 
     def test_a_rejected_batch_member_refuses_instead_of_truncating_the_catalogue(self) -> None:
-        with mock.patch.object(self.board, "call_batch", side_effect=_BatchCallRejected({0})):
+        with mock.patch.object(self.board, "call_batch", side_effect=TaskError("backend_error", "the board rejected a batch member", 1)):
             with self.assertRaises(TaskError) as refused:
                 self.store.catalogue(include_closed=False)
             self.assertEqual(refused.exception.code, "backend_error")
@@ -199,7 +199,7 @@ class CatalogueSectionRefusalTests(SprintProtocolFixture):
         self.assertEqual(available["products"]["source"]["state"], "available")
 
         def reject(calls: Any) -> list[Any]:
-            raise _BatchCallRejected({0})
+            raise TaskError("backend_error", "the board rejected a batch member", 1)
 
         self.board.call_batch = reject  # type: ignore[method-assign]
         options = self.reads().sprint_options()

@@ -23,7 +23,7 @@ T = TypeVar("T", bound=BoardEntity)
 
 
 class FakeBoardHost:
-    """A deterministic host with no Kanboard, container, or network dependency.
+    """A deterministic host with no board store, container, or network dependency.
 
     Passing ``data_dir`` exercises the same durable event canon future adapters
     use.  The no-data-dir mode remains a compact in-memory contract double, but

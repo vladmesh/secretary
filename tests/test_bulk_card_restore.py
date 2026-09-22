@@ -7,8 +7,8 @@ records its obligations in that store's audit (`SqlTaskAudit`). Each case gets a
 The partial-RPC ambiguity cases the JSON-RPC board had -- a create or initialization batch whose
 aggregate reply is lost after a prefix was applied, or answered malformed -- are not asked here:
 `import_normalized_board` runs the whole restore in one enclosing transaction on the store, so a
-failure leaves nothing applied to recover from. Nor is the per-request byte preflight: it bounds a
-JSON-RPC document (`KanboardClient.preflight_call`), and the store posts no documents.
+failure leaves nothing applied to recover from. Nor is a per-request byte preflight: the store
+posts no documents to bound.
 """
 
 from __future__ import annotations

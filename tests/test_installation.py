@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import _proc, installation, restore_commands, secret_store, state_repo
-from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.checkpoint import CheckpointPusher
 from secretary.cli import main
 from secretary.config import InstanceReport
@@ -41,7 +40,7 @@ from secretary.installation import (
 )
 from secretary.projects.availability import ProjectAvailability
 from secretary.routing_journal import attempts
-from secretary.runtime_env import RuntimeEnvError, select_card_backend
+from secretary.runtime_env import RuntimeEnvError
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.upgrade import UpgradeResult, step_host
 from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
@@ -802,18 +801,18 @@ class InstallationTests(unittest.TestCase):
                 _clone_or_reuse("remote", target, recovery=True, dry_run=False)
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
-    def test_prerequisite_probe_accepts_the_planned_transport_before_it_exists_on_disk(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            transport = DEFAULT_TRANSPORT
-            with (
-                mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
-                mock.patch("secretary.installation._run"),
-                mock.patch("secretary.installation.board_client") as selected,
-                mock.patch("secretary.installation.TaskReader") as reader,
-            ):
-                check_prerequisites(transport=transport, instance_dir=Path(tmp))
+    def test_prerequisite_probe_reads_the_installation_s_board_store(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
+            mock.patch("secretary.installation._run"),
+            mock.patch("secretary.installation.board_client") as selected,
+            mock.patch("secretary.installation.TaskReader") as reader,
+        ):
+            check_prerequisites(instance_dir=Path(tmp))
 
-        self.assertEqual(selected.call_args.kwargs["transport"], transport)
+        self.assertEqual(selected.call_args.args, (Path(tmp),))
+        self.assertNotIn("transport", selected.call_args.kwargs)
         self.assertIs(reader.call_args.args[0], selected.return_value)
 
     def test_only_an_absent_runtime_env_is_ignored_for_an_unlocked_store(self):
@@ -835,12 +834,10 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
             mock.patch("secretary.installation._open_secret_store", return_value=unlocked),
             mock.patch("secretary.installation.read_runtime_env", side_effect=RuntimeEnvError("unsafe mode")),
-            mock.patch("secretary.installation.ensure_from_runtime_values") as migrate,
         ):
             result = install(args)
 
         self.assertFalse(result.ok)
-        migrate.assert_not_called()
 
     def test_recovery_materializes_pipeline_state_before_host_steps_can_start_units(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1417,11 +1414,6 @@ class InstallationTests(unittest.TestCase):
                 recovery_phrase_stdin=False,
                 host_fixture=None,
             )
-            transport = SimpleNamespace(
-                transport=DEFAULT_TRANSPORT,
-                changed=False,
-                render=lambda **_kwargs: "unchanged",
-            )
             host_result = SimpleNamespace(
                 steps=[
                     SimpleNamespace(
@@ -1447,7 +1439,6 @@ class InstallationTests(unittest.TestCase):
                     return_value=installation.SecretRecovery(store_present=True, unlocked=True),
                 ),
                 mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
                 mock.patch("secretary.installation.import_normalized_board", return_value=1),
@@ -1521,11 +1512,6 @@ class InstallationTests(unittest.TestCase):
                 recovery_phrase_stdin=False,
                 host_fixture=None,
             )
-            transport = SimpleNamespace(
-                transport=DEFAULT_TRANSPORT,
-                changed=False,
-                render=lambda **_kwargs: "unchanged",
-            )
 
             def restore_runs(*_args, **_kwargs):
                 run_state.mkdir(parents=True)
@@ -1546,7 +1532,6 @@ class InstallationTests(unittest.TestCase):
                     return_value=installation.SecretRecovery(store_present=True, unlocked=True),
                 ),
                 mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
                 mock.patch("secretary.installation.import_normalized_board", return_value=0),
@@ -1617,9 +1602,6 @@ class InstallationTests(unittest.TestCase):
                 recovery_phrase_stdin=False,
                 host_fixture=None,
             )
-            transport = SimpleNamespace(
-                transport=DEFAULT_TRANSPORT, changed=False, render=lambda **_kwargs: "unchanged"
-            )
             with (
                 mock.patch("secretary.installation._ensure_installation_user"),
                 mock.patch(
@@ -1630,7 +1612,6 @@ class InstallationTests(unittest.TestCase):
                     return_value=installation.SecretRecovery(True, True),
                 ),
                 mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
                 mock.patch("secretary.installation.check_prerequisites"),
                 mock.patch("secretary.installation._validated_instance", return_value=report),
                 mock.patch(
@@ -1702,7 +1683,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.board_client"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
-            check_prerequisites(DEFAULT_TRANSPORT, Path("/tmp/instance"), "dev")
+            check_prerequisites(Path("/tmp/instance"), "dev")
 
         self.assertIn(
             ["runuser", "--user", "dev", "--", "orca", "--version"],
@@ -1710,7 +1691,7 @@ class InstallationTests(unittest.TestCase):
         )
         reader.return_value.list.assert_called_once()
 
-    def test_prerequisite_probe_requires_the_selected_transport(self):
+    def test_prerequisite_probe_requires_the_instance(self):
         with self.assertRaises(TypeError):
             check_prerequisites()  # type: ignore[call-arg]
 
@@ -2132,7 +2113,7 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(code, 0, output)
             self.assertIn("would-change checkpoint", output)
             self.assertIn("preview made no recovery changes", output)
-            self.assertTrue(prerequisites.call_args.args[0].token)
+            self.assertEqual(Path(prerequisites.call_args.args[0]).resolve(), target.resolve())
             after = {path.relative_to(data): path.read_bytes() for path in data.rglob("*") if path.is_file()}
             self.assertEqual(after, before)
             board.assert_not_called()
@@ -2239,7 +2220,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         _git(source, "add", "instance.yaml")
         _git(source, "commit", "-m", "remote identity")
         _git(source, "push", str(self.remote), "HEAD:master")
-        # What bootstrap leaves before any install: the clone, its stamp and the backend selector.
+        # What bootstrap leaves before any install: the clone and its stamp.
         from secretary.bootstrap import _mark_bootstrap_checkout
 
         self.assertEqual(
@@ -2247,7 +2228,6 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
             "cloned private instance remote",
         )
         _mark_bootstrap_checkout(self.target)
-        select_card_backend(self.target / "runtime.env", "postgres")
 
     def _install(
         self, secrets: installation.SecretRecovery | None = None
@@ -2274,7 +2254,6 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
             mock.patch("secretary.installation._ensure_installation_user"),
             mock.patch("secretary.installation._set_installation_owner"),
             mock.patch("secretary.installation._open_secret_store", return_value=store),
-            mock.patch("secretary.installation.ensure_from_runtime_values", steps.ensure_from_runtime_values),
             mock.patch("secretary.installation.check_prerequisites", steps.check_prerequisites),
             mock.patch("secretary.installation.import_normalized_board", steps.import_normalized_board),
             mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
@@ -2298,7 +2277,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         self.assertEqual(
             steps.mock_calls,
             [
-                mock.call.check_prerequisites(None, self.target, getpass.getuser()),
+                mock.call.check_prerequisites(self.target, getpass.getuser()),
                 mock.call.import_normalized_board(self.data, instance=self.target),
             ],
         )
@@ -2307,22 +2286,23 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         self.assertEqual(board["board"], ("changed", "1 card(s) at parity"))
         self.assertFalse((self.target / "board-transport.env").exists())
 
-    def test_a_store_written_runtime_env_gets_the_postgres_selector_back(self) -> None:
-        # A store that materializes runtime.env rewrites the whole file, dropping bootstrap's line.
+    def test_a_store_written_runtime_env_is_left_as_the_store_wrote_it(self) -> None:
+        # Nothing selects the board, so recovery adds no line to the file a store materialized.
         runtime = self.target / "runtime.env"
         runtime.write_text("EXAMPLE_TOKEN=from-the-store\n", encoding="utf-8")
         runtime.chmod(0o600)
 
-        result, steps = self._install()
+        result, _steps = self._install()
 
         self.assertEqual(result.status, "ok", result.steps)
-        self.assertEqual(
-            runtime.read_text(encoding="utf-8"),
-            "EXAMPLE_TOKEN=from-the-store\nSECRETARY_CARD_BACKEND=postgres\n",
-        )
-        steps.ensure_from_runtime_values.assert_not_called()
+        self.assertEqual(runtime.read_text(encoding="utf-8"), "EXAMPLE_TOKEN=from-the-store\n")
+        self.assertFalse((self.target / "board-transport.env").exists())
 
-    def test_locked_runtime_secrets_still_block_although_bootstrap_wrote_the_file(self) -> None:
+    def test_locked_runtime_secrets_still_block_although_a_runtime_file_exists(self) -> None:
+        # A runtime.env carrying none of the store's variables does not say they arrived.
+        runtime = self.target / "runtime.env"
+        runtime.write_text("OTHER=value\n", encoding="utf-8")
+        runtime.chmod(0o600)
         locked = installation.SecretRecovery(
             store_present=True,
             unlocked=False,

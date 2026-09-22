@@ -1,6 +1,6 @@
 """Typed Sprint read model and legacy metadata boundary.
 
-Sprint storage remains string/JSON shaped at the Kanboard and PostgreSQL adapters.  This
+Sprint storage remains string/JSON shaped at the PostgreSQL adapter.  This
 module owns the stable parsing rules for the closed Sprint vocabularies and compound metadata
 so readers and one-shot migration code normalize those values exactly once before consuming them.
 """

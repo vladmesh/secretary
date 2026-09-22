@@ -115,7 +115,7 @@ class HermeticGitTestCase(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
-        for name in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_DIR", "GIT_WORK_TREE", "SECRETARY_CARD_BACKEND"):
+        for name in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_DIR", "GIT_WORK_TREE"):
             os.environ.pop(name, None)
 
     def repository(self, name: str, origin: str | None = None) -> Path:

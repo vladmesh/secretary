@@ -64,12 +64,6 @@ def runtime_pythonpath() -> str:
     return str(root / "src")
 
 
-# The process-wide board selector, spelled here because this package may not import `secretary`
-# (`tests/test_architecture.py`).  The name and its two values are the product's, and the launch
-# boundary only reads them; `secretary.board.backend` remains the one place a backend is chosen.
-CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
-POSTGRES_BACKEND = "postgres"
-
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
@@ -79,10 +73,6 @@ NONSECRET_ENV = (
     "SECRETARY_INSTANCE",
     "SECRETARY_DATA_DIR",
     "TA_SECRETARY_REPO",
-    # The process-wide board selector is ordinary routing configuration.  Every
-    # role must receive the same value as the dispatcher and web units or the
-    # installation would serve cards from two stores at once.
-    CARD_BACKEND_ENV,
 )
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
 # file, which is itself a file inside one installation.
@@ -130,29 +120,11 @@ WORKSPACE_EXCLUDES = (
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
-# Roles whose executable boundary must prove a usable board transport.  This is
-# deliberately separate from BOARD_ROLES, which controls only BOARD_ROLE injection.
-BOARD_TRANSPORT_ROLES = frozenset(("pipeline", "worker", "reviewer", "observer", "steward", "retro"))
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
     re.IGNORECASE,
 )
-
-
-def board_transport_required(environ: dict[str, str]) -> bool:
-    """Whether a role's launch must still prove a Kanboard JSON-RPC tuple.
-
-    The tuple is the Kanboard backend's transport and nothing else's: an
-    installation the switch points at the PostgreSQL store reaches its board
-    over `board-store.env`, and refusing to exec a head there for a missing
-    `board-transport.env` fences the whole pipeline on a file that backend never
-    reads.  Only an explicit `postgres` lifts the requirement.  An unset or
-    unknown selector keeps it, because a launch boundary is not where a missing
-    selector gets to mean PostgreSQL -- the product's own switch refuses it, and
-    with a reason.
-    """
-    return str(environ.get(CARD_BACKEND_ENV, "") or "").strip() != POSTGRES_BACKEND
 
 
 def is_sensitive_env_name(name: str) -> bool:
@@ -370,13 +342,6 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         if ns.role in RUFF_ROLES and not ns.workspace:
             raise RoleEnvError(f"role {ns.role!r} requires a workspace-owned Python environment")
         env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
-        if ns.role in BOARD_TRANSPORT_ROLES and board_transport_required(env):
-            from .board_transport import BoardTransportError, resolve_for_environ
-
-            try:
-                resolve_for_environ(env)
-            except BoardTransportError as exc:
-                raise RoleEnvError(f"board transport configuration is unavailable: {exc}") from None
     except RoleEnvError as e:
         print(f"role-env: {e}", file=sys.stderr)
         return 125

@@ -15,7 +15,6 @@ from unittest import mock
 from secretary.backup import create_backups
 from secretary.backup_verify import verify_backup
 from secretary.board import migrate, provision, schema
-from secretary.board.backend import reset_card_backend
 from secretary.board.postgres_recovery import (
     PostgresRecoveryError,
     restore_dump,
@@ -72,12 +71,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.addCleanup(self._cleanup_projects)
         self.source_instance, self.source_config = self._store("source")
         self.target_instance, self.target_config = self._store("target")
-        self.environment = mock.patch.dict(
-            os.environ, {"SECRETARY_CARD_BACKEND": "postgres", "BOARD_ROLE": ""}
-        )
+        self.environment = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.environment.start()
-        reset_card_backend()
-        self.addCleanup(reset_card_backend)
         self.addCleanup(self.environment.stop)
 
     def _store(self, name: str) -> tuple[Path, BoardStoreConfig]:

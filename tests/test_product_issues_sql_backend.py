@@ -335,11 +335,7 @@ class SqlProductIssueAppendTransactionTests(ProductIssueFixture, unittest.TestCa
         self.assertEqual(self.issue(issue["ref"])["description"].count("[issue:appended "), 1)
 
 
-class SqlBackendProductIssueSwitchTests(unittest.TestCase):
-    def setUp(self) -> None:
-        backend.reset_card_backend()
-        self.addCleanup(backend.reset_card_backend)
-
+class SqlBackendProductIssueKeyTests(unittest.TestCase):
     def test_postgres_serves_product_issue_and_sprint(self) -> None:
         self.assertIn(backend.PRODUCT_ISSUE, backend.POSTGRES_SERVES)
         self.assertIn(backend.SPRINT, backend.POSTGRES_SERVES)

@@ -1,4 +1,4 @@
-"""Kanboard implementation of normalized BoardHost reads and lifecycle transitions."""
+"""The normalized BoardHost over the board store client: reads, lifecycle transitions and markers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary.board.backend import entity_number
 from secretary.board.card_transitions import card_transition
@@ -45,7 +45,6 @@ from secretary.board.transitions import BoardProtocolError, transition, transiti
 from secretary.product_issues import ProductIssueStore, product_swimlane_id
 from secretary.sprints import SprintReader
 from secretary.tasks import (
-    KanboardClient,
     TaskReader,
     _digest,
     _positive_int,
@@ -55,13 +54,16 @@ from secretary.tasks import (
     task_audit_for,
 )
 
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
-class KanboardBoardHost:
-    """Translate current Kanboard readers and migrated lifecycle edges at the host seam."""
+
+class SqlBoardHost:
+    """Translate the board store's readers and lifecycle edges at the normalized host seam."""
 
     def __init__(
         self,
-        client: KanboardClient,
+        client: SqlCardClient,
         *,
         data_dir: str | None = None,
         instance: str | None = None,
@@ -158,12 +160,12 @@ class KanboardBoardHost:
                     return
                 if reference_row is not None or marker_row is not None:
                     return
-                raise BoardProtocolError("Kanboard refused the Product/Issue row")
+                raise BoardProtocolError("board store refused the Product/Issue row")
 
         def confirm() -> dict[str, Any]:
             row = self._row_for_create(entity, request_id)
             if row is None:
-                raise BoardProtocolError("Product/Issue create is not proven on the Kanboard board")
+                raise BoardProtocolError("Product/Issue create is not proven on the board store")
             return row
 
         def finish(_created: dict[str, Any]) -> None:
@@ -175,12 +177,12 @@ class KanboardBoardHost:
                 if not self.client.call(
                     "updateTask", id=task_id, reference=entity.ref, description=entity.description
                 ):
-                    raise BoardProtocolError("Kanboard rejected Product/Issue details")
+                    raise BoardProtocolError("board store rejected Product/Issue details")
             if (
                 self.client.call("saveTaskMetadata", task_id=task_id, values=self._metadata_for(entity))
                 is not True
             ):
-                raise BoardProtocolError("Kanboard rejected Product/Issue metadata")
+                raise BoardProtocolError("board store rejected Product/Issue metadata")
             confirmed = self._raw_by_ref(entity.ref)
             if confirmed is None or self._normalized_row(confirmed) != entity:
                 raise BoardProtocolError("Product/Issue create remains incomplete")
@@ -239,7 +241,7 @@ class KanboardBoardHost:
             ):
                 saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 if not _comment_saved(saved):
-                    raise BoardProtocolError("Kanboard rejected issue priority comment")
+                    raise BoardProtocolError("board store rejected issue priority comment")
 
         def confirm() -> BoardEntity:
             row = self._raw_by_ref(entity.ref)
@@ -261,7 +263,7 @@ class KanboardBoardHost:
                 )
                 is not True
             ):
-                raise BoardProtocolError("Kanboard rejected issue priority")
+                raise BoardProtocolError("board store rejected issue priority")
             row = self._raw_by_ref(entity.ref)
             confirmed = self._normalized_row(row) if row is not None else None
             if not isinstance(confirmed, Issue) or confirmed.priority != entity.priority:
@@ -286,7 +288,7 @@ class KanboardBoardHost:
                 raise BoardProtocolError("Issue description changed before the block was appended")
             saved = self.client.call("updateTask", id=self._row_id(row), description=entity.description)
             if not saved:
-                raise BoardProtocolError("Kanboard rejected the issue description")
+                raise BoardProtocolError("board store rejected the issue description")
 
         def confirm() -> BoardEntity:
             row = self._raw_by_ref(entity.ref)
@@ -359,7 +361,7 @@ class KanboardBoardHost:
         def confirm() -> Card:
             entity = self.read(EntityKind.CARD, operation.ref)
             if not isinstance(entity, Card) or entity.state is not operation.target:
-                raise BoardProtocolError("Card transition is not proven on the Kanboard board")
+                raise BoardProtocolError("Card transition is not proven on the board store")
             return entity
 
         def effect() -> None:
@@ -378,7 +380,7 @@ class KanboardBoardHost:
         return MutationResult(entity, event)
 
     def marker_comment(self, operation: MarkerComment) -> MutationResult:
-        """Render one staged control-plane Card event as its Kanboard marker."""
+        """Render one staged control-plane Card event as its marker comment."""
         if self.canon is None:
             raise BoardProtocolError("Card marker comments require a configured data directory")
         with self.canon.audit.marker_comment_lock(operation.ref):
@@ -442,12 +444,12 @@ class KanboardBoardHost:
                         return
                     raise
                 if not _comment_saved(reply):
-                    raise BoardProtocolError("Kanboard rejected the Card marker comment")
+                    raise BoardProtocolError("board store rejected the Card marker comment")
 
             def confirm() -> Card:
                 task = TaskReader(self.client).show(operation.ref)
                 if not self._marker_is_proven(event, task):
-                    raise BoardProtocolError("Card marker comment is not proven on the Kanboard board")
+                    raise BoardProtocolError("Card marker comment is not proven on the board store")
                 entity = self.read(EntityKind.CARD, operation.ref)
                 if not isinstance(entity, Card):
                     raise BoardProtocolError("Card marker comment resolved a non-Card entity")
@@ -476,7 +478,7 @@ class KanboardBoardHost:
             content = self.render_marker(event)
             task = TaskReader(self.client).show(event.ref)
             if not self._marker_is_proven(event, task):
-                raise BoardProtocolError("pending Card marker comment is not proven on the Kanboard board")
+                raise BoardProtocolError("pending Card marker comment is not proven on the board store")
             entity = self.read(EntityKind.CARD, event.ref)
             if not isinstance(entity, Card):
                 raise BoardProtocolError("pending Card marker comment resolved a non-Card entity")
@@ -548,7 +550,7 @@ class KanboardBoardHost:
                     )
                     is not True
                 ):
-                    raise BoardProtocolError("Kanboard rejected Sprint transition")
+                    raise BoardProtocolError("board store rejected Sprint transition")
                 if not self._sprint_metadata_matches(task_id, {"sprint_observer": supplement.observer}):
                     raise BoardProtocolError("Sprint transition observer remains incomplete")
             values = {"sprint_status": operation.target.value}
@@ -557,18 +559,14 @@ class KanboardBoardHost:
                     {"by_type": dict(supplement.budget_by_type)},
                     separators=(",", ":"),
                 )
-            try:
-                reply = self.client.call("saveTaskMetadata", task_id=task_id, values=values)
-            except Exception:
-                # Post-effect transport failure is uncertain; confirm or retain for recovery.
-                return
+            reply = self.client.call("saveTaskMetadata", task_id=task_id, values=values)
             if reply is not True:
-                raise BoardProtocolError("Kanboard rejected Sprint transition")
+                raise BoardProtocolError("board store rejected Sprint transition")
 
         def confirm() -> Sprint:
             entity = self.read(EntityKind.SPRINT, operation.ref)
             if not isinstance(entity, Sprint) or entity.state is not operation.target:
-                raise BoardProtocolError("Sprint transition is not proven on the Kanboard board")
+                raise BoardProtocolError("Sprint transition is not proven on the board store")
             return entity
 
         entity = MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
@@ -592,7 +590,7 @@ class KanboardBoardHost:
             raise BoardProtocolError("pending Sprint event has an invalid target") from exc
         entity = self.read(EntityKind.SPRINT, event.ref)
         if not isinstance(entity, Sprint) or entity.state is not target:
-            raise BoardProtocolError("pending Sprint transition is not proven on the Kanboard board")
+            raise BoardProtocolError("pending Sprint transition is not proven on the board store")
         if not self._declared_sprint_event(event):
             raise BoardProtocolError("pending Sprint event has an unsupported lifecycle edge")
         self.canon.commit(request_id, event)
@@ -617,7 +615,7 @@ class KanboardBoardHost:
             raise BoardProtocolError("pending Card transition has an invalid target") from exc
         entity = self.read(EntityKind.CARD, event.ref)
         if not isinstance(entity, Card) or entity.state is not target:
-            raise BoardProtocolError("pending Card transition is not proven on the Kanboard board")
+            raise BoardProtocolError("pending Card transition is not proven on the board store")
         self.canon.commit(request_id, event)
         return MutationResult(entity, event)
 
@@ -728,7 +726,7 @@ class KanboardBoardHost:
             ):
                 saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 if not _comment_saved(saved):
-                    raise BoardProtocolError("Kanboard rejected issue close comment")
+                    raise BoardProtocolError("board store rejected issue close comment")
 
         def confirm() -> BoardEntity:
             row = self._raw_by_ref(current.ref)
@@ -752,12 +750,12 @@ class KanboardBoardHost:
                 )
                 is not True
             ):
-                raise BoardProtocolError("Kanboard rejected issue close reason")
+                raise BoardProtocolError("board store rejected issue close reason")
             row = self._raw_by_ref(current.ref)
             if row is None:
                 raise BoardProtocolError("Issue was not found")
             if int(row.get("is_active", 1) or 0) != 0 and not self.client.call("closeTask", task_id=task_id):
-                raise BoardProtocolError("Kanboard rejected issue closure")
+                raise BoardProtocolError("board store rejected issue closure")
             row = self._raw_by_ref(current.ref)
             if row is None or self._normalized_row(row) != successor:
                 raise BoardProtocolError("Issue closure remains incomplete")
@@ -799,13 +797,13 @@ class KanboardBoardHost:
         record = SprintReader(self.client, data_dir=self.data_dir).show(ref, include_cards=False)
         task_id = entity_number("sprint", record.get("id"))
         if task_id is None:
-            raise BoardProtocolError("Kanboard returned an invalid Sprint")
+            raise BoardProtocolError("board store returned an invalid Sprint")
         return task_id
 
     def _sprint_metadata_matches(self, task_id: int, values: dict[str, str]) -> bool:
         actual = self.client.call("getTaskMetadata", task_id=task_id)
         if not isinstance(actual, dict):
-            raise BoardProtocolError("Kanboard returned invalid Sprint metadata")
+            raise BoardProtocolError("board store returned invalid Sprint metadata")
         return all(str(actual.get(key) or "") == value for key, value in values.items())
 
     @staticmethod
@@ -1028,14 +1026,14 @@ class KanboardBoardHost:
     def _row_id(row: dict[str, Any]) -> int:
         task_id = _positive_int(row.get("id"))
         if task_id is None:
-            raise BoardProtocolError("Kanboard returned an invalid Product/Issue row")
+            raise BoardProtocolError("board store returned an invalid Product/Issue row")
         return task_id
 
     def _normalized_row(self, row: dict[str, Any], *, allow_incomplete: bool = False) -> Product | Issue:
         task_id = self._row_id(row)
         metadata = self.client.call("getTaskMetadata", task_id=task_id) or {}
         if not isinstance(metadata, dict):
-            raise BoardProtocolError("Kanboard returned invalid Product/Issue metadata")
+            raise BoardProtocolError("board store returned invalid Product/Issue metadata")
         record_type = metadata.get("record_type")
         if record_type == "product":
             projects = json.loads(str(metadata.get("product_projects") or "[]"))
@@ -1107,14 +1105,14 @@ class KanboardBoardHost:
         board_id, columns, _ = reader._board()
         column_id = _target_column_id(columns, target.value)
         if column_id is None:
-            raise BoardProtocolError("Kanboard board schema is invalid")
+            raise BoardProtocolError("board schema is invalid")
         raw = project_card_by_reference(self.client, board_id, card.ref)
         if not isinstance(raw, dict):
             raise BoardProtocolError("Card was not found")
         swimlane_id = _positive_int(raw.get("swimlane_id")) or 0
         task_id = _positive_int(raw.get("id"))
         if task_id is None:
-            raise BoardProtocolError("Kanboard returned an invalid Card")
+            raise BoardProtocolError("board store returned an invalid Card")
         if not self.client.call(
             "moveTaskPosition",
             project_id=board_id,
@@ -1123,19 +1121,19 @@ class KanboardBoardHost:
             position=1,
             swimlane_id=swimlane_id,
         ):
-            raise BoardProtocolError("Kanboard rejected the Card transition")
+            raise BoardProtocolError("board store rejected the Card transition")
 
     def _card_task_id(self, ref: str) -> int:
         """The card's number, read through the one identity parser rather than one prefix.
 
-        A literal `task_kanboard_` here answered `None` for every card the PostgreSQL backend
-        normalizes, so `report`, `verdict` and `decide` refused on that backend while the
-        reader that produced the identity worked (`board/backend.py`).
+        A literal identity prefix here once answered `None` for every card another store word
+        normalized, so `report`, `verdict` and `decide` refused while the reader that produced
+        the identity worked (`board/backend.py`).
         """
         task = TaskReader(self.client).show(ref)
         task_id = entity_number("task", task.get("id"))
         if task_id is None:
-            raise BoardProtocolError("Kanboard returned an invalid Card")
+            raise BoardProtocolError("board store returned an invalid Card")
         return task_id
 
     @staticmethod
@@ -1145,7 +1143,7 @@ class KanboardBoardHost:
         Earlier protocol events did not retain an occurrence witness; they stay readable as historical
         records, while every new occurrence requires its staged matching-row ordinal.
         """
-        content = KanboardBoardHost.render_marker(event)
+        content = SqlBoardHost.render_marker(event)
         matching = sum(
             str(comment.get("body") or "") == content
             for comment in task.get("comments", [])
@@ -1240,7 +1238,7 @@ class KanboardBoardHost:
             expected_data.pop("assessment_visit", None)
         if expected_data != data:
             raise ValueError("request id belongs to another operation or payload")
-        KanboardBoardHost.render_marker(existing)
+        SqlBoardHost.render_marker(existing)
 
     @staticmethod
     def _event(
@@ -1294,7 +1292,7 @@ class KanboardBoardHost:
     @staticmethod
     def _migration_pending(operation: str, kind: EntityKind) -> None:
         raise BoardProtocolError(
-            f"KanboardBoardHost {operation} for {kind.value} is not migrated; "
+            f"SqlBoardHost {operation} for {kind.value} is not migrated; "
             "use the established writer until its migration card preserves its audit semantics"
         )
 

@@ -1303,14 +1303,8 @@ def _fake_exports(data_dir: Path, *, include_done: bool = False) -> dict[str, Da
 
 class PostgresBackupPolicyTests(unittest.TestCase):
     def setUp(self):
-        self.env_patch = mock.patch.dict(
-            os.environ, {"BOARD_ROLE": "", "SECRETARY_CARD_BACKEND": "postgres"}
-        )
+        self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
-        from secretary.board.backend import reset_card_backend
-
-        reset_card_backend()
-        self.addCleanup(reset_card_backend)
         self.addCleanup(self.env_patch.stop)
 
     def test_full_archive_carries_the_engine_dump_and_excludes_store_credentials(self):
@@ -1375,26 +1369,6 @@ class PostgresBackupPolicyTests(unittest.TestCase):
             self.assertNotIn(secret.encode(), body)
             self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
             self.assertEqual([name for name in names if "memory/fastembed-cache" in name], [])
-
-    def test_create_refuses_a_board_not_served_by_postgres_before_pause_or_archive(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            instance = root / "instance"
-            data_dir = root / "secretary-data"
-            _write_instance(instance, data_dir)
-            with (
-                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-                mock.patch("secretary.backup.card_backend", return_value="json-rpc"),
-                mock.patch("secretary.board.postgres_recovery.inspect_source") as inspect,
-                mock.patch("secretary.backup._pipeline_action") as pipeline,
-                self.assertRaisesRegex(
-                    RuntimeError, "backup create requires SECRETARY_CARD_BACKEND=postgres, not json-rpc"
-                ),
-            ):
-                create_backup(instance)
-            inspect.assert_not_called()
-            pipeline.assert_not_called()
-            self.assertFalse((data_dir / "backups").exists())
 
     def test_unusable_postgres_fails_before_pause_or_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:

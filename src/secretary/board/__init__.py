@@ -68,10 +68,10 @@ from secretary.board.transitions import (
 
 def __getattr__(name: str):
     """Keep legacy adapters out of imports of board's protocol leaves."""
-    if name == "KanboardBoardHost":
-        from secretary.board.kanboard import KanboardBoardHost
+    if name == "SqlBoardHost":
+        from secretary.board.sql_host import SqlBoardHost
 
-        return KanboardBoardHost
+        return SqlBoardHost
     raise AttributeError(name)
 
 
@@ -104,7 +104,6 @@ __all__ = [
     "IssueKind",
     "IssuePriority",
     "IssueState",
-    "KanboardBoardHost",
     "MarkerComment",
     "MutationEventTransaction",
     "MutationResult",
@@ -117,6 +116,7 @@ __all__ = [
     "Sprint",
     "SprintState",
     "SprintSupplement",
+    "SqlBoardHost",
     "TaskComplexity",
     "TaskDecision",
     "TaskMetadata",

@@ -35,7 +35,7 @@ from secretary.backup_retention import (
 from secretary.backup_verify import (
     verify_backup,  # noqa: F401  # Public compatibility re-export.
 )
-from secretary.board.backend import CARD_BACKEND_ENV, POSTGRES, BoardBackendError, card_backend
+from secretary.board.backend import BOARD_STORE_KIND
 from secretary.board.store import STORE_FILE
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.data import (
@@ -85,14 +85,6 @@ def create_backups(
         exclude_workspace = caller_workspace.expanduser().resolve()
     instance_file = _instance_file(instance_path)
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
-    try:
-        backend = card_backend()
-    except BoardBackendError as exc:
-        raise RuntimeError(str(exc)) from None
-    # An archive is the PostgreSQL format only; a board served by anything else has no engine dump.
-    if backend != POSTGRES:
-        raise RuntimeError(f"backup create requires {CARD_BACKEND_ENV}={POSTGRES}, not {backend}")
-
     from secretary.board.postgres_recovery import PostgresRecoveryError, inspect_source
 
     try:
@@ -254,7 +246,7 @@ def _build_versions_manifest(
     return {
         "version": POSTGRES_BACKUP_VERSION,
         "backup_kind": backup_kind,
-        "board_backend": POSTGRES.value,
+        "board_backend": BOARD_STORE_KIND,
         "restore_capability": policy.restore_capability,
         "created_at": created_at,
         "tool": "secretary",

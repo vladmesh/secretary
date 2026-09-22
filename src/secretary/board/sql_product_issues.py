@@ -12,10 +12,10 @@ Three things are decided here and each is a fact about the *schema*, not a prefe
 * **`record_type` is the table.**  §8.1 says the three record types become three tables, so a
   Product is a row of `products` and an Issue a row of `issues`, and nothing carries a
   `record_type` column.  The client answers the key from whichever table it read.
-* **A create is spread over three calls and a row is not.**  `KanboardBoardHost.create` issues
+* **A create is spread over three calls and a row is not.**  `SqlBoardHost.create` issues
   `createTask` with the title, the reference and a marker description, and supplies
   `record_type`, the product and, for an Issue, its kind and priority only afterwards through
-  `saveTaskMetadata`.  On Kanboard the intermediate row is a legal card; here it is not a legal
+  `saveTaskMetadata`.  As a card the intermediate row would be legal; here it is not a legal
   anything — `issues.product_id`, `issues.issue_kind` and `issues.priority` are `NOT NULL` with
   closed vocabularies (§3.2, §3.12).  So `createTask` **stages** the row inside the mutation's
   transaction and `saveTaskMetadata` inserts it, and the two reads in between —

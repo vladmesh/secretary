@@ -1,10 +1,9 @@
 """Bootstrap the host-owned PostgreSQL board store and Orca prerequisites.
 
 The checkpoint deliberately does not carry these services or their credentials. They are
-reproducible host state: this module installs the pinned Docker and Orca runtimes, records
-`SECRETARY_CARD_BACKEND=postgres` in `runtime.env`, provisions the PostgreSQL board store
-(`board/provision.py`), migrates it to this build's schema (`board/migrate.py`) and verifies its
-role contract. That empty, migrated store is the whole board a fresh installation starts from:
+reproducible host state: this module installs the pinned Docker and Orca runtimes, provisions the
+PostgreSQL board store (`board/provision.py`), migrates it to this build's schema
+(`board/migrate.py`) and verifies its role contract. That empty, migrated store is the whole board a fresh installation starts from:
 cards come later from `task create` or from install recovery restoring a checkpoint into it.
 """
 
@@ -20,7 +19,6 @@ from pathlib import Path
 
 from secretary import _proc
 from secretary._fsutil import write_text_atomic
-from secretary.board.backend import POSTGRES
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
@@ -32,7 +30,6 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
-from secretary.runtime_env import select_card_backend
 
 ORCA_VERSION = "v1.4.152"
 ORCA_APPIMAGE_URL = f"https://github.com/stablyai/orca/releases/download/{ORCA_VERSION}/orca-linux.AppImage"
@@ -200,7 +197,6 @@ def bootstrap(args: argparse.Namespace) -> int:
         )
         if not args.dry_run:
             _mark_bootstrap_checkout(target)
-            select_card_backend(target / "runtime.env", POSTGRES)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
             provision_board_store(target, allow_create=True)
             migrate_instance(target)
