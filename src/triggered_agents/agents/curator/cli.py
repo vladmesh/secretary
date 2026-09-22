@@ -32,8 +32,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from secretary.runtime.redact import looks_like_credential, scrub_secrets
+from secretary.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState, publish_state_atomic
 
-from ...runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState, publish_state_atomic
 from . import discover, harvest
 from .memory_protocol import (
     MemoryProtocolError,

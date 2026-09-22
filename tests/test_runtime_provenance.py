@@ -19,7 +19,7 @@ from secretary.dispatch.runtime_provenance import ProductionRuntime
 from secretary.runtime.role_env import runtime_env
 from triggered_agents.agents.steward import signals as steward_signals
 from triggered_agents.runtime import health, production_telemetry
-from triggered_agents.runtime.state import AgentState
+from secretary.runtime.state import AgentState
 
 PREFLIGHT = Path(__file__).parents[1] / "src" / "secretary" / "dispatch" / "runtime_preflight.py"
 

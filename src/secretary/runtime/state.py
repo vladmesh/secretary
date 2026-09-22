@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,8 +68,8 @@ def publish_state_atomic(
                 handle.flush()
                 os.fsync(handle.fileno())
             staged.append((path, Path(temporary)))
-        for path, temporary in staged:
-            os.replace(temporary, path)
+        for path, staged_file in staged:
+            os.replace(staged_file, path)
         for path in removals:
             path.unlink(missing_ok=True)
     except OSError:
@@ -76,8 +77,8 @@ def publish_state_atomic(
             _restore_state_file(path, before[path])
         raise
     finally:
-        for _, temporary in staged:
-            temporary.unlink(missing_ok=True)
+        for _, staged_file in staged:
+            staged_file.unlink(missing_ok=True)
 
 
 def _restore_state_file(path: Path, before: bytes | None) -> None:
@@ -240,7 +241,7 @@ class AgentState:
             except FileNotFoundError:
                 pass
             return
-        payload = {"handle": handle}
+        payload: dict[str, object] = {"handle": handle}
         if created_at is not None:
             payload["created_at"] = created_at
         if generation is not None:
@@ -319,7 +320,7 @@ class AgentState:
         except FileNotFoundError:
             pass
 
-    def log_run(self, event: str, **fields) -> None:
+    def log_run(self, event: str, **fields: object) -> None:
         """Append a run-telemetry line to runs.jsonl. Best-effort: a logging failure
         must never break the run itself, so any error is swallowed."""
         try:
@@ -331,7 +332,7 @@ class AgentState:
             pass
 
     @contextmanager
-    def lock(self):
+    def lock(self) -> Iterator[None]:
         """Exclusive run lock. Raises if another run of this agent holds it."""
         self.ensure_dir()
         try:
