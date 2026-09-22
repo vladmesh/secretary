@@ -13,7 +13,7 @@ same lane, as the writers.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary.product_issues import (
     ISSUE_TYPE,
@@ -25,18 +25,20 @@ from secretary.product_issues import (
     product_swimlane_id,
 )
 from secretary.tasks import (
-    KanboardClient,
     TaskError,
     _nonnegative_int,
     _positive_int,
     all_project_cards,
 )
 
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
-def _active_lanes(client: KanboardClient, board_id: int) -> dict[int, str]:
+
+def _active_lanes(client: SqlCardClient, board_id: int) -> dict[int, str]:
     lanes = client.call("getActiveSwimlanes", project_id=board_id) or []
     if not isinstance(lanes, list):
-        raise TaskError("backend_error", "Kanboard returned invalid swimlanes", 1)
+        raise TaskError("backend_error", "board store returned invalid swimlanes", 1)
     result: dict[int, str] = {}
     for lane in lanes:
         identifier = _positive_int(lane.get("id")) if isinstance(lane, dict) else None
@@ -203,7 +205,7 @@ def reconcile_product_lanes(store: Any, *, apply: bool = False) -> dict[str, Any
             position=position,
             swimlane_id=swimlane_id,
         ):
-            raise TaskError("backend_error", "Kanboard rejected the Product/Issue lane move", 1)
+            raise TaskError("backend_error", "board store rejected the Product/Issue lane move", 1)
         occupancy[(column_id, swimlane_id)] = position
         source = (column_id, int(move["from"]["swimlane_id"]))
         occupancy[source] = max(0, occupancy.get(source, 0) - 1)

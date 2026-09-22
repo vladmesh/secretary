@@ -39,8 +39,8 @@ def runtime_from_args(
     # the switch rather than by naming one backend here.
     client = board_client(instance_path, serves=(CARD, SPRINT))
     catalog = InstanceCatalog(instance_path)
-    # The audit follows the client: the same requests/board_events tables the writer commits to on
-    # PostgreSQL, the file journal on Kanboard. The command host reads the same one, so TASK.md
+    # The audit follows the client: the same requests/board_events tables the writer commits to.
+    # The command host reads the same one, so TASK.md
     # feedback selection and report/verdict waits never disagree about what happened.
     audit = task_audit_for(client, data)
     return DispatcherRuntime(

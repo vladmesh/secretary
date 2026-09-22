@@ -1,129 +1,29 @@
-"""Which implementation serves the card reader and writer, decided in one named place.
+"""The board client and the identity vocabulary every normalized record shares.
 
-`TaskReader` and `TaskWriter` have two implementations since `secretary-1587`: today's Kanboard
-JSON-RPC one, and one over the PostgreSQL board store (`docs/BOARD_STORE.md` §2.2, §6).  Which one
-a process uses is **not** inferred from whether `board-store.env` happens to exist — an
-installation may hold a fully migrated store and still be served by Kanboard.  The choice is read
-from one environment name, `SECRETARY_CARD_BACKEND`, and that name must explicitly select a backend.
-
-Three properties the card asks for and this module is where each of them is true:
-
-* **one named place** — `CARD_BACKEND_ENV`, nothing else, and no filesystem probe;
-* **decided once per process** — `card_backend()` caches the first answer, so a mid-run change of
-  the environment cannot make one command read one backend and write the other;
-* **missing or unknown values refuse** — `BoardBackendError`, naming the allowed values, rather
-  than a silent fall back to Kanboard, which would turn configuration loss or a typo into a
-  live-board write.
-
-Reversibility is the point of keeping the switch this thin.  Nothing here migrates, copies or
-converts anything, so setting the name back to `kanboard` is the whole of the rollback.
+There is one board backend, the PostgreSQL board store (`docs/BOARD_STORE.md`), and nothing selects
+it: `board_client` always builds the store's client for an installation.  What stays here is the
+vocabulary every caller shares with that client -- the capabilities a call site asks for, the
+integer key ranges of the transport, and the `<kind>_<store>_<n>` identities a row carries.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from secretary.board_transport import BoardTransport
-
-#: The one named place.  A card backend is chosen explicitly here or the process refuses.
-CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
+#: What a row's identity and `audit.backend.kind` name as the store that answered.
+BOARD_STORE_KIND = "postgres"
 
 
-class BoardBackend(StrEnum):
-    """The closed set of implementations that may serve normalized board records."""
-
-    KANBOARD = "kanboard"
-    POSTGRES = "postgres"
-
-
-# Compatibility exports keep the existing import surface while making each value typed.
-KANBOARD = BoardBackend.KANBOARD
-POSTGRES = BoardBackend.POSTGRES
-
-#: The closed vocabulary, in the order diagnostics list it.
-CARD_BACKENDS: tuple[BoardBackend, ...] = tuple(BoardBackend)
-
-
-class BoardBackendError(RuntimeError):
-    """The configured card backend is not one this build knows how to serve."""
-
-
-_decided: BoardBackend | None = None
-
-
-def parse_card_backend(value: str | None) -> BoardBackend:
-    """Validate one explicit backend selector without the per-process memory.
-
-    Missing and empty values refuse.  Whitespace is stripped because an environment file is edited
-    by hand, and case is not folded because the two names are literals of the design, not user prose.
-    """
-    if value is None or not value.strip():
-        raise BoardBackendError(
-            f"{CARD_BACKEND_ENV} must be set to one of {', '.join(CARD_BACKENDS)}"
-        )
-    name = value.strip()
-    try:
-        return BoardBackend(name)
-    except ValueError:
-        raise BoardBackendError(
-            f"{CARD_BACKEND_ENV} must be one of {', '.join(CARD_BACKENDS)}, not {name!r}"
-        ) from None
-
-
-def card_backend() -> BoardBackend:
-    """The backend this process serves cards from, decided once and remembered.
-
-    The first call reads the environment; every later call in the same process returns that same
-    answer.  A command that read cards from Kanboard cannot therefore write them to PostgreSQL
-    because something re-exported the variable between the two halves of its work.
-    """
-    global _decided
-    if _decided is None:
-        _decided = parse_card_backend(os.environ.get(CARD_BACKEND_ENV))
-    return _decided
-
-
-def reset_card_backend() -> None:
-    """Forget the per-process decision, for the one caller that legitimately revises it.
-
-    Ordinary product code never revises the decision — that is what keeps "decided once per
-    process" true where it matters.  `secretary.cli.main` is not an ordinary reader of the switch,
-    and says so by calling this rather than by re-exporting the name behind `card_backend()`'s
-    back: it binds an operator command to the selector its instance units consume before the
-    handler runs, and unbinds it afterwards when it did the binding.  A test harness that runs
-    both backends in one interpreter calls it for the same reason: the decision it forgets was
-    made for a different case.
-    """
-    global _decided
-    _decided = None
-
-
-def card_backend_status() -> dict[str, object]:
-    """What `secretary status` reports about the explicit backend selector."""
-    try:
-        backend = card_backend()
-    except BoardBackendError as exc:
-        return {
-            "backend": None,
-            "source": CARD_BACKEND_ENV,
-            "default": None,
-            "findings": [str(exc)],
-        }
-    return {
-        "backend": backend,
-        "source": CARD_BACKEND_ENV,
-        "default": None,
-        "findings": [],
-    }
+class BoardIdentityError(RuntimeError):
+    """A board identity or key is outside the vocabulary this build knows how to read."""
 
 
 class BoardCapability(StrEnum):
-    """A normalized board surface a caller requires from the selected backend."""
+    """A normalized board surface a caller requires from the board client."""
 
     CARD = "card"
     SPRINT = "sprint"
@@ -161,7 +61,7 @@ def sprint_reference_number(identifier: object) -> int | None:
         return None
     number = int(match.group(1))
     if text != f"sprint:{number}":
-        raise BoardBackendError(
+        raise BoardIdentityError(
             f"a numbered Sprint reference must be canonical, not {text!r}"
         )
     return number
@@ -170,14 +70,14 @@ def sprint_reference_number(identifier: object) -> int | None:
 def record_key(kind: str, identifier: str) -> int:
     """Return the stable SQL transport key for one normalized non-Card identity."""
     if kind not in RECORD_KINDS:
-        raise BoardBackendError(f"a board record names one of {', '.join(RECORD_KINDS)}, not {kind!r}")
+        raise BoardIdentityError(f"a board record names one of {', '.join(RECORD_KINDS)}, not {kind!r}")
     text = str(identifier).strip()
     if not text:
-        raise BoardBackendError(f"a {kind} key needs an identifier")
+        raise BoardIdentityError(f"a {kind} key needs an identifier")
     number = sprint_reference_number(text) if kind == "sprint" else None
     if number is not None:
         if number >= SPRINT_NUMBER_KEY_SPAN:
-            raise BoardBackendError(
+            raise BoardIdentityError(
                 f"a numbered Sprint must be below {SPRINT_NUMBER_KEY_SPAN}, not {number}"
             )
         return RECORD_KEY_BASES[kind] + number
@@ -214,42 +114,23 @@ def board_client(
     *,
     serves: tuple[BoardCapability, ...] = (CARD,),
     role: str = "app",
-    transport: BoardTransport | None = None,
 ) -> Any:
-    """The board client this process's switch names, built for one installation.
+    """The board client for one installation: the PostgreSQL board store's.
 
-    This is the single construction path the two implementations share, and the only place the
-    switch is *acted on*: `card_backend()` decides, and everything downstream — reader, writer,
-    audit owner, host adapter — follows the client that comes back.  Nothing here probes for
-    `board-store.env`; a `postgres` switch with no store configuration refuses with the store's
-    own reason, which is the diagnosis an operator needs rather than a silent Kanboard fallback.
+    This is the single construction path: reader, writer, audit owner and host adapter all follow
+    the client that comes back.  Nothing here probes for `board-store.env`; a store with no
+    configuration refuses with the store's own reason, which is the diagnosis an operator needs.
 
-    `serves` is what the call site needs from the client it is asking for, and it is the whole of
-    why this function takes an argument at all.  A site that reads sprints, or Product/Issue, or —
-    like `restore.py` — cards *and* sprints through one client cannot be served by a backend that
-    holds only cards, so under `postgres` it is refused by name here instead of being handed a
-    Kanboard client that contradicts the switch.  `transport` is for the one caller that has
-    already built the Kanboard transport it wants probed; every other caller leaves it unset.
+    `serves` is what the call site needs from the client it is asking for.  Every surface is served
+    by the store today, so a surface outside `POSTGRES_SERVES` is a programming error refused by name.
     """
-    from secretary.tasks import KanboardClient, TaskError
+    from secretary.tasks import TaskError
 
-    # The refusals leave here as `TaskError`, the one vocabulary every command above this
-    # function already renders as a named failure with an exit status.  `parse_card_backend`
-    # keeps `BoardBackendError` for `card_backend_status`, which reports rather than refuses.
-    try:
-        backend = card_backend()
-    except BoardBackendError as exc:
-        raise TaskError("backend_error", str(exc), 1) from None
-    if backend == KANBOARD:
-        if transport is not None:
-            return KanboardClient(transport, Path(instance_dir))
-        return KanboardClient.for_instance(instance_dir)
     unknown = tuple(entity for entity in serves if entity not in POSTGRES_SERVES)
     if unknown:
         raise TaskError(
             "backend_error",
-            f"{CARD_BACKEND_ENV}={backend} serves {', '.join(sorted(POSTGRES_SERVES))} only; "
-            f"{', '.join(unknown)} is a Kanboard board on this build",
+            f"the board store serves {', '.join(sorted(POSTGRES_SERVES))} only, not {', '.join(unknown)}",
             1,
         )
     from secretary.board.sql_cards import SqlCardClient
@@ -263,7 +144,7 @@ def board_client(
 
 
 def card_client(instance_dir: str | Path, *, role: str = "app") -> Any:
-    """`board_client` for the one entity the PostgreSQL implementation serves."""
+    """`board_client` for a call site that needs cards only."""
     return board_client(instance_dir, serves=(CARD,), role=role)
 
 
@@ -282,43 +163,39 @@ def _store_refusal(exc: Exception) -> Exception:
 
 ENTITY_KINDS = ("task", "sprint")
 
+#: `<kind>_<store word>_<n>`.  The store word is any lowercase word, so identities an earlier store
+#: minted before the cutover (`docs/BOARD_STORE.md` §9) still read back to their number.
+_ENTITY_IDENTITY = re.compile(r"^(?P<kind>[a-z]+)_[a-z]+_(?P<number>[0-9]+)$")
 
-def entity_id(kind: str, backend: str, number: int) -> str:
-    """Mint `<kind>_<backend>_<n>`: the one identity a normalized row carries.
 
-    The convention has three parts and each is load-bearing.  `kind` says whether the row is a
-    card or a sprint, `backend` says which of the two implementations answered, and `number` is
-    that backend's own number for the row — Kanboard's task id, or `tasks.task_number` in the
-    store.  It is minted here and nowhere else, which is what makes `entity_number` able to read
-    every value the product can produce: the two functions are one convention, not two.
+def entity_id(kind: str, number: int) -> str:
+    """Mint `<kind>_postgres_<n>`: the one identity a normalized row carries.
+
+    `kind` says whether the row is a card or a sprint and `number` is the store's own number for it,
+    `tasks.task_number`.  It is minted here and nowhere else, and `entity_number` reads it back.
     """
     if kind not in ENTITY_KINDS:
-        raise BoardBackendError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
-    if backend not in CARD_BACKENDS:
-        raise BoardBackendError(
-            f"an entity identity names one of {', '.join(CARD_BACKENDS)}, not {backend!r}"
-        )
-    return f"{kind}_{backend}_{int(number)}"
+        raise BoardIdentityError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
+    return f"{kind}_{BOARD_STORE_KIND}_{int(number)}"
 
 
 def entity_number(kind: str, value: object) -> int | None:
-    """Read the number back out of an identity `entity_id` minted, for **either** backend.
+    """Read the number back out of a `<kind>_<store word>_<n>` identity, or out of a bare number.
 
     `None` means the value is not an identity of this kind, and every caller turns that into its
-    own refusal.  The whole vocabulary is tried rather than one literal prefix: a parser that
-    knew only `task_kanboard_` answered `None` for every card the PostgreSQL backend produced,
-    which is how `report`, `verdict` and `decide` failed there while the reader worked.  A bare
-    number is still accepted, because the file journal holds records written before the identity
-    carried a backend at all.
+    own refusal.  The store word is not checked against today's: history recorded before the
+    cutover carries another one, and those identities must keep resolving to the same number.  A
+    bare number is still accepted, because the file journal holds records written before the
+    identity carried a store at all.
     """
     if kind not in ENTITY_KINDS:
-        raise BoardBackendError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
+        raise BoardIdentityError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
     text = "" if value is None else str(value).strip()
-    for backend in CARD_BACKENDS:
-        prefix = f"{kind}_{backend}_"
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
-            break
+    match = _ENTITY_IDENTITY.fullmatch(text)
+    if match is not None:
+        if match.group("kind") != kind:
+            return None
+        text = match.group("number")
     if not text.isdigit():
         return None
     number = int(text)
@@ -326,32 +203,24 @@ def entity_number(kind: str, value: object) -> int | None:
 
 
 __all__ = [
+    "BOARD_STORE_KIND",
     "CARD",
-    "CARD_BACKENDS",
-    "CARD_BACKEND_ENV",
     "CARD_KEY_BASE",
     "CARD_KEY_LIMIT",
     "ENTITY_KINDS",
-    "KANBOARD",
-    "POSTGRES",
     "PRODUCT_ISSUE",
     "RECORD_KEY_BASES",
     "RECORD_KEY_SPAN",
     "RECORD_KINDS",
     "SPRINT",
-    "BoardBackend",
-    "BoardBackendError",
     "BoardCapability",
+    "BoardIdentityError",
     "board_client",
-    "card_backend",
-    "card_backend_status",
     "card_client",
     "card_transport_key",
     "entity_id",
     "entity_number",
-    "parse_card_backend",
     "record_key",
     "record_key_kind",
-    "reset_card_backend",
     "sprint_reference_number",
 ]

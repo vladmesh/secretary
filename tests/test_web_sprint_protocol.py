@@ -654,8 +654,8 @@ class LayerPropertyTests(SprintProtocolFixture):
         """The promise as it is meant: this layer speaks no transport to its caller.
 
         Direct imports, deliberately. A transitive scan would be a different and false claim: the
-        layer's access to the board is `KanboardClient`, the board is an HTTP service, and
-        `secretary.tasks` has imported `urllib` since long before this card -- as `reads.py`,
+        layer's access to the board is a database client, and `secretary.tasks` has imported a
+        driver since long before this card -- as `reads.py`,
         `admission.py`, `ops.py` and `run_events.py` all show. What the promise means, and what is
         checked here and in the refusal tests above, is that nothing of the transport reaches the
         caller: no HTTP, socket, framework or rendering in this layer's own surface, and failures

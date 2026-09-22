@@ -5,7 +5,7 @@ The same category as ``board_transport.py``, and deliberately the same mechanism
 git-ignored, refused rather than repaired when it is partial.  It is not a secret-store value:
 a database password is regenerable by recreating the role, is meaningless without the volume it
 guards, and is needed by ``docker compose up`` before the instance repository is necessarily in
-a state where the store can be opened — exactly the argument that kept Kanboard's API token out
+a state where the store can be opened — exactly the argument that kept the old board API token out
 of the store.
 
 It carries one credential **per role**, not one credential, because §5.5's three-role boundary is
@@ -253,6 +253,11 @@ def resolve_with_lifecycle(instance_dir: Path | str) -> tuple[BoardStoreConfig, 
     held = _HELD.get(_held_key(instance_dir))
     if isinstance(held, BoardStoreError):
         raise BoardStoreError(str(held))
+    path = store_path(instance_dir)
+    if not path.exists() and not path.is_symlink():
+        # Nothing to exclude, so nothing is written: a read of an installation with no store --
+        # `status` and `doctor` among them -- must leave its repository as it found it.
+        raise BoardStoreError(f"board store configuration is missing: {path}")
     outcome = enforce_exclusion(instance_dir) if held is None else StoreOutcome()
     return parse(store_path(instance_dir)), outcome
 

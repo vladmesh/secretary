@@ -683,6 +683,17 @@ class ExclusionEnforcementTests(InstanceRepository):
         self.assertTrue(self.ignored(), "resolve must make the exclusion durable, not report it")
         self.assertEqual(config.owner_user, "secretary_owner")
 
+    def test_an_absent_store_refuses_without_writing_the_repository(self) -> None:
+        """A read of an installation that has no store -- `status`, `doctor` -- leaves it as it was."""
+        head = self.git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(BoardStoreError, "configuration is missing"):
+            resolve_role(self.instance, "app")
+
+        self.assertFalse(self.ignored())
+        self.assertFalse((self.instance / ".gitignore").exists())
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+
     def test_the_lifecycle_outcome_is_visible_to_a_caller(self) -> None:
         write_store(self.instance)
 

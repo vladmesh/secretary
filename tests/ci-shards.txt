@@ -3,7 +3,7 @@
 # test process.
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
-unit tests/test_card_backend_switch.py
+unit tests/test_board_identity.py
 integration-board tests/test_audit_backend_canon.py
 integration-board tests/test_attempt_usage.py
 unit tests/test_attempt_usage_payload.py
@@ -18,7 +18,6 @@ integration-recovery tests/test_bulk_comment_restore.py
 integration-board tests/test_board.py
 unit tests/test_board_roles.py
 unit tests/test_marker_payload.py
-integration-board tests/test_board_batch_transport.py
 integration-board tests/test_board_boot_race.py
 integration-board tests/test_board_transport.py
 unit tests/test_board_store.py
@@ -70,7 +69,6 @@ integration-board tests/test_head_vitality_policy_execution.py
 unit tests/test_head_vitality_regression.py
 integration-board tests/test_head_vitality_wait_decisions.py
 unit tests/test_health_suite_command.py
-unit tests/test_hermetic_card_backend.py
 component tests/test_hermetic_codex.py
 integration-board tests/test_hermetic_kanboard.py
 component tests/test_hermetic_orca.py

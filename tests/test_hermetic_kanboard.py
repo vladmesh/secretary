@@ -46,7 +46,7 @@ class HermeticKanboardTests(unittest.TestCase):
                     },
                 ),
                 mock.patch(
-                    "secretary.tasks.urllib.request.urlopen",
+                    "urllib.request.urlopen",
                     side_effect=AssertionError("unit test reached a real Kanboard network call"),
                 ),
             ):

@@ -26,9 +26,9 @@ none of them takes an actor.
 **It does not know about transports.** No HTTP, no sockets, no framework, no rendering and no
 templates in this layer's own surface: nothing here answers a caller in the language of a
 transport. That is deliberately a promise about the surface and not about the import graph, which
-could not carry it -- the layer reaches the board through `KanboardClient`, a Kanboard is an HTTP
-service, and `secretary.tasks` has therefore imported `urllib` under `reads`, `admission`, `ops`
-and `run_events` since this package existed. Failures are typed exceptions
+could not carry it -- the layer reaches the board through a database client, and
+`secretary.tasks` has therefore imported a driver under `reads`, `admission`, `ops` and
+`run_events` since this package existed. Failures are typed exceptions
 (:mod:`secretary.webproto.errors`) and availability fields (:mod:`secretary.webproto.sources`),
 never status codes, so the transport is what decides that "not_found" is a 404 or a "no such
 card" message. That is a promise about *every* operation, and it is kept in one place rather than
@@ -37,7 +37,7 @@ layers, so an implementation failure -- the run store's, the filesystem's, a doc
 parse -- becomes `backend_unavailable` on its way out whether or not the operation remembered.
 
 **Sources fail apart.** Each section of each snapshot carries its own availability record with a
-reason and the age of what is being shown instead. A dead Kanboard blanks the card list, not the
+reason and the age of what is being shown instead. A dead board store blanks the card list, not the
 page.
 
 **Liveness is process state.** A pane, terminal or window is not evidence that an agent is

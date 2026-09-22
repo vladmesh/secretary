@@ -1,4 +1,4 @@
-"""Read-only Phase 5 task protocol backed by the Pipeline Kanboard."""
+"""The task protocol over the Pipeline board of the PostgreSQL board store."""
 
 from __future__ import annotations
 
@@ -11,16 +11,14 @@ import re
 import subprocess
 import tempfile
 import threading
-import urllib.error
-import urllib.request
 import uuid
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary.board import budget_candidates
-from secretary.board.backend import POSTGRES, entity_id, entity_number
+from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
@@ -81,19 +79,13 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.board.transitions import BoardProtocolError
-from secretary.board_transport import (
-    BoardTransport,
-    BoardTransportError,
-    resolve,
-    transport_path,
-)
+from secretary.board_transport import transport_path
 from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
 )
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
-from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
 from triggered_agents.runtime.references import (
     BoardRowsUnavailable,
@@ -101,6 +93,9 @@ from triggered_agents.runtime.references import (
     next_reference,
     reference_allocation_lock,
 )
+
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
 
 class TaskError(Exception):
@@ -111,14 +106,6 @@ class TaskError(Exception):
         self.message = message
         self.exit_code = exit_code
         super().__init__(message)
-
-
-class _BatchCallRejected(TaskError):
-    """A structurally valid aggregate reply with definite rejected member ids."""
-
-    def __init__(self, failed_ids: set[int]) -> None:
-        self.failed_ids = frozenset(failed_ids)
-        super().__init__("backend_error", "Kanboard rejected one or more batch calls", 1)
 
 
 class ArtifactOwnershipTaskError(TaskError):
@@ -139,7 +126,7 @@ class SprintReservationUnverifiable(Exception):
 
 
 class _CommittedWriteError(Exception):
-    """A later step failed after a Kanboard mutation was committed."""
+    """A later step failed after a board mutation was committed."""
 
 
 RUNTIME_TAILS = ("secretary-data",)
@@ -193,6 +180,7 @@ def _artifact_ownership_refusal_request_id(request_id: str) -> str:
 
 def _done_retention_request_id(task_id: int, date_moved: int) -> str:
     """One durable retry key for one card's one Done dwell episode."""
+    # The prefix is part of every stored retry key: renaming it would orphan a pending episode.
     identity = f"kanboard:{task_id}:done:{date_moved}"
     return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
@@ -422,181 +410,25 @@ def is_significant_observer_event(
 
 
 _BATCH_CHUNK = 200
-_BATCH_COMMENT_CHUNK = 50
-_BATCH_WRITE_CHUNK = 50
-# Bound both dimensions of one JSON-RPC document.  Count protects Kanboard's
-# dispatcher; bytes protect the web server and make a pathological comment fail
-# before an unbounded request is allocated on the wire.
-_BATCH_BYTES = 1_048_576
 
 
-#: The one card backend: every card is a PostgreSQL row, and its identity and `audit.backend` say
-#: so (docs/BOARD_STORE.md §9).  Identities an older board minted (`task_kanboard_<n>`) still read
-#: back through `entity_number`, so history written before the cutover resolves.
-CARD_BACKEND = POSTGRES.value
-
-
-def _rpc_request(identifier: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    request: dict[str, Any] = {"jsonrpc": "2.0", "id": identifier, "method": method}
-    if params:
-        request["params"] = params
-    return request
-
-
-class KanboardClient:
-    """Small JSON-RPC client using local board transport configuration."""
-
-    #: Which of the two card backends this client is (board/backend.py).  It is a property of the
-    #: client rather than a per-call lookup so a reader and the writer above it can never disagree
-    #: about which store the card in their hands came from.
-    backend_kind = "kanboard"
-
-    def __init__(self, transport: BoardTransport, instance_dir: Path) -> None:
-        self.instance_dir = normalize_instance_dir(instance_dir).resolve()
-        self.url = transport.url
-        self._transport = transport
-
-    @classmethod
-    def for_instance(cls, instance: str | Path) -> KanboardClient:
-        try:
-            root = normalize_instance_dir(instance).resolve()
-            return cls(resolve(root), root)
-        except BoardTransportError:
-            raise TaskError(
-                "backend_unavailable", "Kanboard runtime configuration is unavailable", 1
-            ) from None
-
-    def call(self, method: str, **params: Any) -> Any:
-        document = self._post(_rpc_request(1, method, params))
-        if not isinstance(document, dict) or "error" in document:
-            raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-        return document.get("result")
-
-    @staticmethod
-    def preflight_call(method: str, params: dict[str, Any], *, identifier: int = 0) -> int:
-        """Validate and size one call without posting it."""
-        try:
-            size = len(
-                json.dumps(_rpc_request(identifier, method, params), separators=(",", ":")).encode("utf-8")
-            )
-        except (TypeError, ValueError):
-            raise TaskError("validation", "Kanboard batch call is not JSON serializable", 2) from None
-        if size + 2 > _BATCH_BYTES:
-            raise TaskError("validation", "one Kanboard batch call exceeds the byte limit", 2)
-        return size
-
-    def _preflight_batch(
-        self, calls: Iterable[tuple[str, dict[str, Any]]]
-    ) -> tuple[list[tuple[str, dict[str, Any]]], list[int]]:
-        prepared = list(calls)
-        return prepared, [
-            self.preflight_call(method, params, identifier=index)
-            for index, (method, params) in enumerate(prepared)
-        ]
-
-    def preflight_batch(
-        self, calls: Iterable[tuple[str, dict[str, Any]]]
-    ) -> list[tuple[str, dict[str, Any]]]:
-        """Prove every member fits the wire contract before a caller stages or mutates."""
-        return self._preflight_batch(calls)[0]
-
-    def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
-        """Run `[(method, params), ...]` in one request each chunk; return results in call order.
-
-        Kanboard has no bulk read for per-task metadata or comments, so a view of many tasks
-        otherwise pays one round trip per task. Requests go out in bounded chunks so a large board
-        does not become one oversized request.
-        """
-        calls, encoded_sizes = self._preflight_batch(calls)
-        results: list[Any] = [None] * len(calls)
-        start = 0
-        while start < len(calls):
-            requests: list[dict[str, Any]] = []
-            request_bytes = 2  # JSON array brackets; commas are added below.
-            comment_reads = 0
-            comment_writes = 0
-            while start + len(requests) < len(calls) and len(requests) < _BATCH_CHUNK:
-                index = start + len(requests)
-                method, params = calls[index]
-                next_reads = comment_reads + (method == "getAllComments")
-                next_writes = comment_writes + (method == "createComment")
-                if next_reads > _BATCH_COMMENT_CHUNK or next_writes > _BATCH_WRITE_CHUNK:
-                    break
-                request = _rpc_request(index, method, params)
-                encoded_size = encoded_sizes[index]
-                next_bytes = request_bytes + encoded_size + bool(requests)
-                if next_bytes > _BATCH_BYTES:
-                    if not requests:
-                        raise TaskError("validation", "one Kanboard batch call exceeds the byte limit", 2)
-                    break
-                requests.append(request)
-                request_bytes = next_bytes
-                comment_reads = next_reads
-                comment_writes = next_writes
-            document = self._post(requests)
-            if not isinstance(document, list):
-                raise TaskError("backend_error", "Kanboard rejected the batch request", 1)
-            answers: dict[int, Any] = {}
-            rejected: set[int] = set()
-            expected = set(range(start, start + len(requests)))
-            for entry in document:
-                if (
-                    not isinstance(entry, dict)
-                    or entry.get("jsonrpc") != "2.0"
-                    or not isinstance(entry.get("id"), int)
-                    or isinstance(entry.get("id"), bool)
-                    or entry.get("id") not in expected
-                    or entry.get("id") in answers
-                    or ("result" in entry) == ("error" in entry)
-                ):
-                    raise TaskError("backend_error", "Kanboard returned an invalid batch answer", 1)
-                identifier = entry["id"]
-                answers[identifier] = entry.get("result")
-                if "error" in entry:
-                    rejected.add(identifier)
-            if set(answers) != expected:
-                raise TaskError("backend_error", "Kanboard returned an incomplete batch answer", 1)
-            if rejected:
-                raise _BatchCallRejected(rejected)
-            for index in expected:
-                results[index] = answers[index]
-            start += len(requests)
-        return results
-
-    def _post(self, payload: Any) -> Any:
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": self._transport.authorization_header(),
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
-            raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1) from None
-
-
-def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str, Any]]:
-    """Return every Kanboard card of one board, open and archived alike."""
+def all_project_cards(client: SqlCardClient, project_id: int) -> list[dict[str, Any]]:
+    """Return every card of one board, open and archived alike."""
     try:
         return board_rows(client.call, project_id)
     except BoardRowsUnavailable:
-        raise TaskError("backend_error", "Kanboard returned an invalid task list", 1) from None
+        raise TaskError("backend_error", "board store returned an invalid task list", 1) from None
 
 
 def _task_metadata(answer: Any) -> dict[str, str]:
     """One task's metadata as the flat str->str map every reader works with."""
     if answer is not None and not isinstance(answer, dict):
-        raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
+        raise TaskError("backend_error", "board store returned invalid task metadata", 1)
     return {str(key): _text(value) for key, value in (answer or {}).items()}
 
 
 def project_card_by_reference(
-    client: KanboardClient, project_id: int, reference: str
+    client: SqlCardClient, project_id: int, reference: str
 ) -> dict[str, Any] | None:
     """Return the live card for a reference when an archived duplicate exists."""
     card = client.call("getTaskByReference", project_id=project_id, reference=reference)
@@ -604,22 +436,22 @@ def project_card_by_reference(
         return card if isinstance(card, dict) else None
     active_cards = client.call("getAllTasks", project_id=project_id, status_id=1)
     if not isinstance(active_cards, list):
-        raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        raise TaskError("backend_error", "board store returned an invalid task list", 1)
     for candidate in active_cards:
         if isinstance(candidate, dict) and candidate.get("reference") == reference:
             return candidate
     return card
 
 
-def project_card_by_id(client: KanboardClient, project_id: int, task_id: int) -> dict[str, Any] | None:
-    """Return the exact board row named by a recorded Kanboard task id."""
+def project_card_by_id(client: SqlCardClient, project_id: int, task_id: int) -> dict[str, Any] | None:
+    """Return the exact board row named by a recorded board task id."""
     for card in all_project_cards(client, project_id):
         if _positive_int(card.get("id")) == task_id:
             return card
     return None
 
 
-def next_project_reference(client: KanboardClient, project_id: int, project: str) -> str:
+def next_project_reference(client: SqlCardClient, project_id: int, project: str) -> str:
     """Allocate the reference immediately after this project's board-wide high-water mark."""
     return next_reference(all_project_cards(client, project_id), f"{project}-")
 
@@ -639,7 +471,7 @@ def assessment_decision_lock(data_dir: Path, reference: str) -> Iterator[None]:
 
 
 class TaskReader:
-    def __init__(self, client: KanboardClient, board_name: str = "Pipeline") -> None:
+    def __init__(self, client: SqlCardClient, board_name: str = "Pipeline") -> None:
         self.client = client
         self.board_name = board_name
 
@@ -649,10 +481,10 @@ class TaskReader:
         project_id, columns, swimlanes = self._board()
         cards = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
         if not isinstance(cards, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         rows = [card for card in cards if isinstance(card, dict)]
-        # One batched read for the whole listing: metadata is per task and Kanboard has no bulk
-        # read for it, so asking row by row is what made a board-wide listing a per-row round trip.
+        # One batched read for the whole listing: metadata is per task in the board vocabulary, so
+        # asking row by row is what made a board-wide listing a per-row round trip.
         metadata = self._metadata_of(rows)
         result = []
         for card in rows:
@@ -673,18 +505,18 @@ class TaskReader:
 
         This intentionally is not a second public Card list: callers get only the
         identity, freshness timestamp and report marker needed to decide whether a
-        steward sweep is already running.  Kanboard exposes metadata per task, so
-        all candidate metadata is fetched in one batch rather than one RPC per row.
+        steward sweep is already running.  The board vocabulary exposes metadata per task,
+        so all candidate metadata is fetched in one batch rather than one call per row.
         """
         project_id, columns, _ = self._board()
         in_progress_id = next(
             (identifier for identifier, title in columns.items() if title == "In progress"), None
         )
         if in_progress_id is None:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raise TaskError("backend_error", "board schema is invalid", 1)
         raw = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
         if not isinstance(raw, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         cards = [
             card
             for card in raw
@@ -712,7 +544,7 @@ class TaskReader:
         """Return the bounded operational card view used by steward anomaly reads.
 
         This is deliberately narrower than :meth:`list`: it exposes only the
-        active-card fields a watchdog needs and keeps Kanboard rows private.
+        active-card fields a watchdog needs and keeps raw board rows private.
         Metadata is fetched once for the active board snapshot, never per card.
         """
         if states is not None and (unknown := states - set(_STATE_BY_COLUMN.values())):
@@ -720,7 +552,7 @@ class TaskReader:
         project_id, columns, _ = self._board()
         raw = self.client.call("getAllTasks", project_id=project_id, status_id=1)
         if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         metadata = self._metadata_of(raw)
         cards: list[dict[str, Any]] = []
         for card in raw:
@@ -728,7 +560,7 @@ class TaskReader:
             column = columns.get(_positive_int(card.get("column_id")) or -1)
             state = _STATE_BY_COLUMN.get(column or "")
             if state is None:
-                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+                raise TaskError("backend_error", "board schema is invalid", 1)
             meta = metadata[task_id]
             card_project = _text(meta.get("project"))
             if states is not None and state not in states:
@@ -751,16 +583,16 @@ class TaskReader:
         """Return the deliberately small view used by Done-retention cleanup.
 
         The cleanup is allowed one active-board snapshot and one metadata batch.
-        It must not infer an age for incomplete Kanboard rows, so an unusable
+        It must not infer an age for incomplete board rows, so an unusable
         ``date_moved`` is represented as ``None`` for the caller to skip.
         """
         project_id, columns, _ = self._board()
         done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
         if done_id is None:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raise TaskError("backend_error", "board schema is invalid", 1)
         raw = self.client.call("getAllTasks", project_id=project_id, status_id=1)
         if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         done = [
             card for card in raw if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
         ]
@@ -784,9 +616,9 @@ class TaskReader:
         """Return the complete legacy checkpoint projection in bounded board reads.
 
         Checkpoints retain the established board schema while reading it through the
-        canonical Secretary transport.  Metadata and comments have no Kanboard bulk
-        endpoint, so both are requested in one bounded JSON-RPC batch for the whole
-        board rather than once per card.
+        canonical Secretary transport.  Metadata and comments are per task in the board
+        vocabulary, so both are requested in one batch for the whole board rather than
+        once per card.
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
@@ -806,7 +638,7 @@ class TaskReader:
             meta = _task_metadata(answers[index * 2])
             raw_comments = answers[index * 2 + 1] or []
             if not isinstance(raw_comments, list):
-                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+                raise TaskError("backend_error", "board store returned invalid task comments", 1)
             task_id = task_ids[index]
             head = _text(meta.get("head"))
             review = _text(meta.get("review_head"))
@@ -867,7 +699,7 @@ class TaskReader:
         for index, row in enumerate(rows):
             raw_comments = answers[index * 2 + 1] or []
             if not isinstance(raw_comments, list):
-                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+                raise TaskError("backend_error", "board store returned invalid task comments", 1)
             card = self._normalize(
                 row,
                 columns,
@@ -886,7 +718,7 @@ class TaskReader:
         return self._show_card(card, columns, swimlanes)
 
     def show_id(self, task_id: int) -> dict[str, Any]:
-        """Return one row by Kanboard id, without resolving a duplicate reference."""
+        """Return one row by board id, without resolving a duplicate reference."""
         project_id, columns, swimlanes = self._board()
         card = project_card_by_id(self.client, project_id, task_id)
         return self._show_card(card, columns, swimlanes)
@@ -901,7 +733,7 @@ class TaskReader:
             raise TaskError("not_found", "task was not found", 2)
         task_id = _positive_int(card.get("id"))
         if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raise TaskError("backend_error", "board store returned an invalid task", 1)
         raw_comments = self.client.call("getAllComments", task_id=task_id) or []
         comments = [_normalize_comment(comment) for comment in raw_comments if isinstance(comment, dict)]
         return self._normalize(
@@ -913,7 +745,7 @@ class TaskReader:
         )
 
     def _metadata_of(self, cards: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
-        """The task metadata of every given row, keyed by Kanboard task id, in one batched read."""
+        """The task metadata of every given row, keyed by board task id, in one batched read."""
         task_ids = [_task_number(card) for card in cards]
         answers = self.client.call_batch(("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids)
         return {task_id: _task_metadata(answer) for task_id, answer in zip(task_ids, answers, strict=True)}
@@ -946,11 +778,11 @@ class TaskReader:
         task_id = _positive_int(card.get("id"))
         column = columns.get(_positive_int(card.get("column_id")) or -1)
         if task_id is None or column not in _STATE_BY_COLUMN:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raise TaskError("backend_error", "board schema is invalid", 1)
         ref = _text(card.get("reference"))
-        kind = CARD_BACKEND
+        kind = BOARD_STORE_KIND
         result: dict[str, Any] = {
-            "id": entity_id("task", kind, task_id),
+            "id": entity_id("task", task_id),
             "ref": ref,
             "title": _text(card.get("title")),
             "description": _text(card.get("description")),
@@ -1064,7 +896,7 @@ class TaskAudit:
         """Return a different pending owner of an indistinguishable marker.
 
         Runs under the audit lock while callers hold the per-Card marker lock, so no writer can put a
-        matching row on Kanboard between the reservation check and its own effect.
+        matching row on the board between the reservation check and its own effect.
         """
         from secretary.board.events import render_marker_comment
 
@@ -1657,7 +1489,7 @@ class TaskWriter:
 
     def __init__(
         self,
-        client: KanboardClient,
+        client: SqlCardClient,
         *,
         data_dir: str | os.PathLike[str],
         workspace: str | os.PathLike[str] | None = None,
@@ -1670,9 +1502,9 @@ class TaskWriter:
         # Importing the concrete adapter here keeps the protocol leaves usable
         # by the legacy task reader while giving migrated writes the same audit
         # owner as generic control-plane operations.
-        from secretary.board.kanboard import KanboardBoardHost
+        from secretary.board.sql_host import SqlBoardHost
 
-        self.board_host = KanboardBoardHost(
+        self.board_host = SqlBoardHost(
             client,
             data_dir=os.fspath(data_dir),
             audit=self.audit,
@@ -2054,7 +1886,7 @@ class TaskWriter:
             "task_id": "",
             "ref": reference,
             "backend": {
-                "kind": CARD_BACKEND,
+                "kind": BOARD_STORE_KIND,
                 "task_id": None,
                 "revision": "pending",
                 "reference_assignment": "atomic",
@@ -2068,8 +1900,8 @@ class TaskWriter:
         # named by a *later* transaction than the one that claimed the request id: on
         # PostgreSQL `requests.ref` stayed NULL for the whole life of the row.  Under one
         # transaction the claim, the card effect and the event stand or fall together, which is
-        # what `docs/BOARD_STORE.md` §7.3 already says this backend does.  On Kanboard
-        # `_mutation` is nothing at all, so the behaviour there is unchanged.
+        # what `docs/BOARD_STORE.md` §7.3 already says this backend does.  For a client without
+        # transactions `_mutation` is nothing at all, so the behaviour there is unchanged.
         with self._mutation():
             self.audit.stage(request_id, event)
             try:
@@ -2185,7 +2017,7 @@ class TaskWriter:
                 raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
             column_id = _target_column_id(columns, target)
             if column_id is None:
-                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+                raise TaskError("backend_error", "board schema is invalid", 1)
             swimlane_id = _matching_swimlane(swimlanes, project)
             # Persist the allocation before the atomic backend write. A process that dies
             # after createTask still leaves a recoverable, already-reserved reference.
@@ -2203,8 +2035,8 @@ class TaskWriter:
                 )
             )
             if task_id is None:
-                raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            event["task_id"] = entity_id("task", CARD_BACKEND, task_id)
+                raise TaskError("backend_error", "board store rejected the write", 1)
+            event["task_id"] = entity_id("task", task_id)
             event["backend"]["task_id"] = task_id
             try:
                 self.audit.stage(request_id, event)
@@ -3278,7 +3110,7 @@ class TaskWriter:
         `_mutation()` is that transaction, and this is the single place both edges cross it: `move`
         and `claim` reach the adapter only through here, so the staged request row, the column
         effect, the caller's `finish` work and the committed event are one transaction wherever the
-        backend has transactions (§7.1).  On Kanboard `_mutation()` is nothing at all and every
+        backend has transactions (§7.1).  Without transactions `_mutation()` is nothing at all and every
         half-applied state below stays exactly as it is, with its `recover_*` entry point; on
         PostgreSQL a failure after the move rolls the move back with the claim, which is why §7.3
         lists that class of state as one this backend does not have.
@@ -3478,7 +3310,7 @@ class TaskWriter:
             committed = False
             if update:
                 if not self.client.call("updateTask", id=number, **update):
-                    raise TaskError("backend_error", "Kanboard rejected the write", 1)
+                    raise TaskError("backend_error", "board store rejected the write", 1)
                 committed = True
             values = {}
             if head is not None:
@@ -3823,7 +3655,7 @@ class TaskWriter:
             "outcome": "granted",
             "task_id": "",
             "ref": reference,
-            "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
+            "backend": {"kind": BOARD_STORE_KIND, "task_id": None, "revision": "not_written"},
             "request_id": override_request_id,
             "payload": {
                 "project": project,
@@ -3867,7 +3699,7 @@ class TaskWriter:
                 "outcome": "denied",
                 "task_id": "",
                 "ref": reference,
-                "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
+                "backend": {"kind": BOARD_STORE_KIND, "task_id": None, "revision": "not_written"},
                 "request_id": denial_request_id,
                 "payload": {
                     "code": code,
@@ -3963,7 +3795,7 @@ class TaskWriter:
                     content=f"[archive]\n{reason}",
                 )
                 if not self.client.call("closeTask", task_id=_task_number(task)):
-                    raise TaskError("backend_error", "Kanboard rejected the archive", 1)
+                    raise TaskError("backend_error", "board store rejected the archive", 1)
             except Exception as exc:
                 raise _CommittedWriteError() from exc
 
@@ -4046,9 +3878,9 @@ class TaskWriter:
             "actor": {"role": "retro", "id": actor},
             "kind": "retired",
             "outcome": "success",
-            "task_id": entity_id("task", CARD_BACKEND, task_id),
+            "task_id": entity_id("task", task_id),
             "ref": reference,
-            "backend": {"kind": CARD_BACKEND, "task_id": task_id, "revision": "pending"},
+            "backend": {"kind": BOARD_STORE_KIND, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
             "payload": identity,
         }
@@ -4056,8 +3888,8 @@ class TaskWriter:
         # guard, the destructive close, its proof and the record are one transaction where the
         # backend has one.  Retention is a Card protocol mutation with a board effect, not an
         # effect outside the board, so leaving it at `_depth == 0` left exactly the half-applied
-        # state §7.3 says this backend does not have: a closed card beside a staged request.  On
-        # Kanboard `_mutation()` is nothing at all, so the ambiguity below — and the pending
+        # state §7.3 says this backend does not have: a closed card beside a staged request.  For a
+        # client without transactions `_mutation()` is nothing at all, so the ambiguity below — and the pending
         # record `reconcile` settles from it — is untouched.
         with self._mutation():
             self.audit.stage(request_id, event)
@@ -4075,7 +3907,7 @@ class TaskWriter:
                     self.audit.discard(request_id, event)
                     return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
                 if not self.client.call("closeTask", task_id=task_id):
-                    raise TaskError("backend_error", "Kanboard rejected Done retention", 1)
+                    raise TaskError("backend_error", "board store rejected Done retention", 1)
             except _CommittedWriteError:
                 raise self._post_effect_refusal("the Done retention close") from None
             except TaskError as exc:
@@ -4091,7 +3923,7 @@ class TaskWriter:
                         pass
                 raise
             except Exception:  # noqa: BLE001 - an unknown close reply is deliberately ambiguous.
-                # JSON-RPC transport failures can occur after Kanboard applied the
+                # A lost reply can arrive after the board applied the
                 # close, so reconciliation must prove or safely retry this episode.
                 raise self._post_effect_refusal("the Done retention close") from None
             try:
@@ -4139,7 +3971,7 @@ class TaskWriter:
         board_id, columns, _ = self.reader._board()
         column_id = _target_column_id(columns, target)
         if column_id is None:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raise TaskError("backend_error", "board schema is invalid", 1)
         ok = self.client.call(
             "moveTaskPosition",
             project_id=board_id,
@@ -4149,7 +3981,7 @@ class TaskWriter:
             swimlane_id=swimlane_id,
         )
         if not ok:
-            raise TaskError("backend_error", "Kanboard rejected the write", 1)
+            raise TaskError("backend_error", "board store rejected the write", 1)
 
     def _current_swimlane_id(self, task: dict[str, Any]) -> int:
         board_id, _, _ = self.reader._board()
@@ -4286,7 +4118,7 @@ class TaskWriter:
     def _mutation(self) -> Iterator[None]:
         """One transaction per protocol mutation, where the backend has transactions (§7.1).
 
-        On Kanboard this is nothing at all and the behaviour is exactly today's: stage a record,
+        For a client without transactions this is nothing at all: stage a record,
         apply one effect, confirm it, commit the record.  On PostgreSQL the claim, the card effect
         and the event are statements of one transaction, which is why `BoardEventPending` and the
         `recover_*` entry points have nothing to do there (§7.3).
@@ -4302,7 +4134,7 @@ class TaskWriter:
         """The refusal a mutation inside `_mutation()` owes when it fails after its board effect.
 
         One sentence used to carry two different facts, and only one of them can be true at a time.
-        Where `_mutation()` is nothing — Kanboard — the effect may well have landed while its
+        Where `_mutation()` is nothing — a client without transactions — the effect may well have landed while its
         record did not, and *"backend write committed; audit repair is required"* with exit status
         4 is exactly that fact: it is what `BoardEventPending`, the pending record and the
         `recover_*` entry points exist for, and none of it changes.
@@ -4348,7 +4180,7 @@ class TaskWriter:
             "task_id": task["id"],
             "ref": reference,
             "backend": {
-                "kind": CARD_BACKEND,
+                "kind": BOARD_STORE_KIND,
                 "task_id": _task_number(task),
                 "revision": _revision(task),
             },
@@ -4582,7 +4414,7 @@ class TaskWriter:
         board_id, columns, _swimlanes = self.reader._board()
         done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
         if done_id is None:
-            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            raise TaskError("backend_error", "board schema is invalid", 1)
         rows = all_project_cards(self.client, board_id)
         matches = [
             row
@@ -4787,7 +4619,7 @@ class TaskWriter:
         elif expected_digest:
             task_id = _positive_int(raw.get("id"))
             if task_id is None:
-                raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+                raise TaskError("backend_error", "board store returned an invalid task", 1)
             raw_comments = self.client.call("getAllComments", task_id=task_id) or []
             comments = [_normalize_comment(comment) for comment in raw_comments if isinstance(comment, dict)]
             if not _has_archive_reason({"comments": comments}, expected_digest):
@@ -4930,7 +4762,7 @@ def _task_number(task: dict[str, Any]) -> int:
     """The backend's own number for a normalized card, read through the one identity parser."""
     value = entity_number("task", task.get("id"))
     if value is None:
-        raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+        raise TaskError("backend_error", "board store returned an invalid task", 1)
     return value
 
 

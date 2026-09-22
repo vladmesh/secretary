@@ -398,28 +398,19 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)
 
 
-# Every place in `secretary` that builds a board client, other than the switch itself, and the
-# reason each one is allowed to name Kanboard directly (`docs/BOARD_STORE.md` §2, §6).  A new
-# entry here is a new consumer that decided its backend by default instead of by the switch, so
-# it is added deliberately with its reason or it is a defect.
-KANBOARD_ONLY_CONSTRUCTIONS = {
-    "board/backend.py": "the switch itself, which is where the choice is made",
-}
-
-
 # Every place in `secretary` that builds the *file* audit (`TaskAudit(<data dir>)`) rather than
 # asking `secretary.tasks.task_audit_for` for the audit owner of a card client, and the reason each
-# one may. The file journal is the Kanboard backend's canon and `requests`/`board_events` is the
-# PostgreSQL one (`docs/BOARD_STORE.md` §7.3), so a live reader built from a data directory alone
-# answers from a store the installation may not write: on 2026-09-10 that made a committed
+# one may. `requests`/`board_events` is the card audit (`docs/BOARD_STORE.md` §7.3), so a live
+# reader built from the file journal of a data directory alone answers from a store the
+# installation does not write: on 2026-09-10 that made a committed
 # `report:done` invisible to the dispatcher (sprint:1437, secretary-1614), and it is the same shape
 # as an empty command history or a false `not_found`. A new entry here is a new reader that decided
 # its audit by default instead of by its client, so it is added deliberately with its reason or it
 # is a defect.
 FILE_AUDIT_CONSTRUCTIONS = {
     "board/events.py": (
-        "the typed canon's own storage internal, for a caller that has no client at all -- offline "
-        "or Kanboard-only; every caller that has one passes the audit its client named, and with "
+        "the typed canon's own storage internal, for a caller that has no client at all -- the fake "
+        "host and storage fixtures; every caller that has one passes the audit its client named, and with "
         "neither an audit nor a data directory the construction refuses"
     ),
 }
@@ -433,16 +424,12 @@ LIVE_AUDIT_SELECTORS = {
     "webproto/ops.py": "task_audit_for(",
     "webproto/reads.py": "task_audit_for(",
     "webproto/sprint_reads.py": "task_audit_for(",
-    "board/kanboard.py": "task_audit_for(",
+    "board/sql_host.py": "task_audit_for(",
     "sprints.py": "task_audit_for(",
     "data.py": "task_audit_for(",
     "dispatch/bootstrap.py": "task_audit_for(",
     "product_issues.py": "task_audit_for(",
 }
-
-#: The modules allowed to name the retired Kanboard backend: the backend vocabulary itself, which
-#: defines the name and reads historical `task_kanboard_<n>` / `sprint_kanboard_<n>` identities.
-RETIRED_IDENTITY_OWNERS = frozenset({"board/backend.py"})
 
 
 def _source_modules() -> list[Path]:
@@ -504,11 +491,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
         self.assertNotIn("TaskAudit(", source.replace("SqlTaskAudit(", ""))
 
     def test_no_source_module_has_a_backend_branch(self) -> None:
-        """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds.
-
-        `KanboardClient.backend_kind` and `SqlCardClient.backend_kind` are class attributes the
-        clients declare; a declaration is a name binding, not a read, so it is not reported.
-        """
+        """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds."""
         for path in _source_modules():
             module = str(path.relative_to(ROOT / "src"))
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -530,18 +513,16 @@ class FileAuditOwnershipTests(unittest.TestCase):
                 self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
-        """A new write names the PostgreSQL backend; `task_kanboard_<n>`/`sprint_kanboard_<n>` are only read.
+        """A new write names the PostgreSQL store; `task_kanboard_<n>`/`sprint_kanboard_<n>` are only read.
 
         The literal can hide in data rather than in a branch: an `entity_id(..., KANBOARD, ...)`
         or a `"kind": "kanboard"` minted into a fresh audit event is not a `backend_kind` read, and
-        secretary-1669's first submission restored cards under the retired identity that way. Cards,
-        Sprints and Products/Issues all write the PostgreSQL identity (secretary-1670); only the
-        backend vocabulary names the retired one.
+        secretary-1669's first submission restored cards under the retired identity that way. Since
+        secretary-1671 `entity_id` mints only the store's identity and `entity_number` reads any
+        store word, so no module names the retired one at all.
         """
         for path in _source_modules():
             module = str(path.relative_to(ROOT / "src")).removeprefix("secretary/")
-            if module in RETIRED_IDENTITY_OWNERS:
-                continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             found: list[int] = []
             for node in ast.walk(tree):
@@ -627,39 +608,26 @@ class IndirectFileAuditReaderTests(unittest.TestCase):
                 self.assertNotIn(forbidden, source)
 
 
-class CardBackendSwitchTests(unittest.TestCase):
-    """The switch is acted on in one place, and every consumer goes through it."""
+class OneBoardClientTests(unittest.TestCase):
+    """There is one board client, built in one place, and nothing in the environment selects it."""
 
-    def _constructions(self) -> dict[str, list[int]]:
-        """Every `KanboardClient(...)` call in `src/secretary`, by module and line."""
-        found: dict[str, list[int]] = {}
-        for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                target = node.func
-                if isinstance(target, ast.Attribute) and target.attr == "for_instance":
-                    target = target.value
-                if isinstance(target, ast.Name) and target.id == "KanboardClient":
-                    key = str(path.relative_to(ROOT / "src" / "secretary"))
-                    found.setdefault(key, []).append(node.lineno)
-        return found
+    def test_the_client_is_built_from_the_instance_and_never_from_the_environment(self) -> None:
+        from secretary.board import backend
 
-    def test_only_the_named_kanboard_only_modules_build_a_kanboard_client(self) -> None:
-        """Anything else names one backend where the installation names two."""
-        offenders = sorted(set(self._constructions()) - set(KANBOARD_ONLY_CONSTRUCTIONS))
-        self.assertEqual(
-            offenders,
-            [],
-            "these modules build a Kanboard client directly instead of asking "
-            "secretary.board.backend.board_client for the installation's own backend",
-        )
+        parameters = inspect.signature(backend.board_client).parameters
+        self.assertEqual([name for name in parameters], ["instance_dir", "serves", "role"])
+        tree = ast.parse((ROOT / "src" / "secretary" / "board" / "backend.py").read_text(encoding="utf-8"))
+        environment = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
+        ]
+        self.assertEqual(environment, [], "board/backend.py reads the process environment")
 
-    def test_every_named_kanboard_only_module_still_builds_one(self) -> None:
-        """The allowance is a statement about live code, not a list that outlives its reasons."""
-        built = self._constructions()
-        self.assertEqual(sorted(built), sorted(KANBOARD_ONLY_CONSTRUCTIONS))
+    def test_the_legacy_host_module_is_gone(self) -> None:
+        """The host `SqlCardClient` runs on has a neutral name, and the old module is not an alias."""
+        self.assertFalse((ROOT / "src" / "secretary" / "board" / "kanboard.py").exists())
+        self.assertTrue((ROOT / "src" / "secretary" / "board" / "sql_host.py").exists())
 
 
 if __name__ == "__main__":

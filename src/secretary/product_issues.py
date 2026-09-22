@@ -11,14 +11,13 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from secretary.board.backend import entity_id
 from secretary.tasks import (
-    CARD_BACKEND,
-    KanboardClient,
+    BOARD_STORE_KIND,
     TaskError,
     _digest,
     _now,
@@ -26,6 +25,9 @@ from secretary.tasks import (
     all_project_cards,
     task_audit_for,
 )
+
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
 ISSUES_COLUMN = "Issues"
 PRODUCT_TYPE = "product"
@@ -121,7 +123,7 @@ def _validated_product_projects(raw: str | None) -> list[str]:
 
 
 def _comment_was_saved(result: Any) -> bool:
-    """Kanboard returns a positive comment id, unlike its boolean metadata API."""
+    """board store returns a positive comment id, unlike its boolean metadata API."""
     return result is True or (isinstance(result, int) and not isinstance(result, bool) and result > 0)
 
 
@@ -398,10 +400,10 @@ class ProductIssueTransaction:
         return document
 
 
-def ensure_swimlane(client: KanboardClient, board_id: int, name: str) -> int:
+def ensure_swimlane(client: SqlCardClient, board_id: int, name: str) -> int:
     """The id of the board's active swimlane called ``name``, created when the board has none.
 
-    The name is matched exactly. Kanboard answers an ``addSwimlane`` for a name the board already
+    The name is matched exactly. The board answers an ``addSwimlane`` for a name the board already
     carries with a false-ish reply rather than the existing id, so a refused create is read back
     once: a lane another writer added between the two calls is that answer, and only a board that
     still has no such lane is an error.
@@ -417,14 +419,14 @@ def ensure_swimlane(client: KanboardClient, board_id: int, name: str) -> int:
         return created
     identifier = _named_swimlane(client, board_id, wanted)
     if identifier is None:
-        raise TaskError("backend_error", f"Kanboard refused the {wanted!r} swimlane", 1)
+        raise TaskError("backend_error", f"board store refused the {wanted!r} swimlane", 1)
     return identifier
 
 
-def _named_swimlane(client: KanboardClient, board_id: int, name: str) -> int | None:
+def _named_swimlane(client: SqlCardClient, board_id: int, name: str) -> int | None:
     lanes = client.call("getActiveSwimlanes", project_id=board_id) or []
     if not isinstance(lanes, list):
-        raise TaskError("backend_error", "Kanboard returned invalid swimlanes", 1)
+        raise TaskError("backend_error", "board store returned invalid swimlanes", 1)
     for lane in lanes:
         if not isinstance(lane, dict) or str(lane.get("name") or "") != name:
             continue
@@ -442,7 +444,7 @@ def product_lane_name(product: str) -> str:
     return identifier
 
 
-def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> int:
+def product_swimlane_id(client: SqlCardClient, board_id: int, product: str) -> int:
     """The lane a Product or Issue row belongs in: the one named after its product.
 
     Nothing about the board takes part in the choice — not the order of the lanes, not which lane
@@ -467,7 +469,7 @@ def appended_description(current: str, body: str, *, actor: str, at: str) -> str
 
 
 class ProductIssueStore:
-    def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
+    def __init__(self, client: SqlCardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
         self.data_dir = Path(data_dir)
         self.audit = task_audit_for(client)
@@ -498,7 +500,7 @@ class ProductIssueStore:
     def _card_number(card: dict[str, Any]) -> int:
         number = card.get("id")
         if not isinstance(number, int):
-            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raise TaskError("backend_error", "board store returned an invalid task", 1)
         return number
 
     @staticmethod
@@ -506,7 +508,7 @@ class ProductIssueStore:
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):
-            raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
+            raise TaskError("backend_error", "board store returned invalid task metadata", 1)
         return {str(key): str(value) for key, value in raw.items()}
 
     def _metadata(self, card: dict[str, Any]) -> dict[str, str]:
@@ -516,7 +518,7 @@ class ProductIssueStore:
     def _metadata_of(self, cards: list[dict[str, Any]]) -> list[dict[str, str]]:
         """The metadata of every given card, in card order, read in batches rather than one by one.
 
-        Kanboard has no bulk metadata read, so a whole-board view otherwise pays one round trip per
+        The board vocabulary has no bulk metadata read, so a whole-board view otherwise pays one round trip per
         card. A rejected member of a batch raises instead of dropping a card, so a partial answer
         cannot be reported as a complete catalogue.
         """
@@ -583,9 +585,9 @@ class ProductIssueStore:
             "actor": {"role": role, "id": actor},
             "kind": kind,
             "outcome": "success",
-            "task_id": entity_id("task", CARD_BACKEND, task_id) if task_id is not None else "",
+            "task_id": entity_id("task", task_id) if task_id is not None else "",
             "ref": reference,
-            "backend": {"kind": CARD_BACKEND, "task_id": task_id, "revision": "product-issue"},
+            "backend": {"kind": BOARD_STORE_KIND, "task_id": task_id, "revision": "product-issue"},
             "request_id": request_id,
             "payload": payload,
         }
@@ -653,7 +655,7 @@ class ProductIssueStore:
         task_id = int(card["id"])
         comments = self.client.call("getAllComments", task_id=task_id) or []
         if not isinstance(comments, list):
-            raise TaskError("backend_error", "Kanboard returned invalid issue comments", 1)
+            raise TaskError("backend_error", "board store returned invalid issue comments", 1)
         history = [
             {
                 "created_at": str(comment.get("date_creation") or ""),
@@ -715,15 +717,15 @@ class ProductIssueStore:
     @staticmethod
     def _remember_task_id(document: dict[str, Any], task_id: int) -> int:
         event = document["event"]
-        event["task_id"] = entity_id("task", CARD_BACKEND, task_id)
-        event["backend"] = {"kind": CARD_BACKEND, "task_id": task_id, "revision": "product-issue"}
+        event["task_id"] = entity_id("task", task_id)
+        event["backend"] = {"kind": BOARD_STORE_KIND, "task_id": task_id, "revision": "product-issue"}
         document.setdefault("progress", {})["task_id"] = task_id
         return task_id
 
     def _remember_card(self, document: dict[str, Any], card: dict[str, Any]) -> int:
         task_id = card.get("id")
         if not isinstance(task_id, int):
-            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raise TaskError("backend_error", "board store returned an invalid task", 1)
         self._remember_task_id(document, task_id)
         self.transactions.save(document)
         return task_id
@@ -766,17 +768,17 @@ class ProductIssueStore:
                 )
             )
             if task_id is None:
-                # Kanboard answers a refused create with `false`, and that refusal is
+                # The board answers a refused create with `false`, and that refusal is
                 # deterministic: the same call is refused again, so a retry can never finish this
                 # transaction.  Once the board shows no row of this request, the attempt wrote
                 # nothing, its progress marker is taken back and the failure is terminal, which
                 # lets the caller drop the transaction instead of blocking checkpoint with it.
                 marker = self._create_marker(document)
                 if any(row.get("description") == marker for row in self._cards()):
-                    raise TaskError("backend_error", "Kanboard rejected the Product/Issue row", 1)
+                    raise TaskError("backend_error", "board store rejected the Product/Issue row", 1)
                 document["progress"].pop("create_started", None)
                 self.transactions.save(document)
-                raise TaskError("backend_rejected", "Kanboard refused the Product/Issue row", 1)
+                raise TaskError("backend_rejected", "board store refused the Product/Issue row", 1)
             self._remember_task_id(document, task_id)
             self.transactions.save(document)
             card = next((row for row in self._cards() if row.get("id") == task_id), None)
@@ -789,7 +791,7 @@ class ProductIssueStore:
             if not self.client.call(
                 "updateTask", id=int(card["id"]), reference=reference, description=description
             ):
-                raise TaskError("backend_error", "Kanboard rejected Product/Issue reference", 1)
+                raise TaskError("backend_error", "board store rejected Product/Issue reference", 1)
             card = self._transaction_card(document)
             if (
                 not isinstance(card, dict)
@@ -806,7 +808,7 @@ class ProductIssueStore:
         document.setdefault("progress", {})["metadata_started"] = True
         self.transactions.save(document)
         if self.client.call("saveTaskMetadata", task_id=task_id, values=values) is not True:
-            raise TaskError("backend_error", "Kanboard rejected Product/Issue metadata", 1)
+            raise TaskError("backend_error", "board store rejected Product/Issue metadata", 1)
         actual = self._metadata(self._transaction_card(document))
         if any(actual.get(key) != value for key, value in values.items()):
             raise TaskError("backend_error", "Product/Issue metadata remains incomplete", 1)
@@ -822,7 +824,7 @@ class ProductIssueStore:
         if not _comment_was_saved(
             self.client.call("createComment", task_id=task_id, user_id=0, content=content)
         ):
-            raise TaskError("backend_error", f"Kanboard rejected issue {label} comment", 1)
+            raise TaskError("backend_error", f"board store rejected issue {label} comment", 1)
         comments = self.client.call("getAllComments", task_id=task_id) or []
         if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
             raise TaskError("backend_error", f"issue {label} comment remains incomplete", 1)
@@ -886,7 +888,7 @@ class ProductIssueStore:
             document.setdefault("progress", {})["close_started"] = True
             self.transactions.save(document)
             if not self.client.call("closeTask", task_id=task_id):
-                raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
+                raise TaskError("backend_error", "board store rejected issue closure", 1)
         closed, closed_metadata = self._find(str(intent["reference"]), ISSUE_TYPE)
         if (
             int(closed.get("is_active", 1) or 0) != 0
@@ -1085,11 +1087,11 @@ class ProductIssueStore:
         return {"request_id": request_id, "discarded": True}
 
     def _host(self):
-        # Deliberately local: the Kanboard adapter retains the compatibility
-        # reader above, while new writer calls enter it through BoardHost.
-        from secretary.board.kanboard import KanboardBoardHost
+        # Deliberately local: the host module imports this one, while new writer
+        # calls enter it through BoardHost.
+        from secretary.board.sql_host import SqlBoardHost
 
-        return KanboardBoardHost(
+        return SqlBoardHost(
             self.client, data_dir=self.data_dir, instance=self.instance, audit=self.audit
         )
 
@@ -1105,7 +1107,7 @@ class ProductIssueStore:
         if isinstance(exc, TaskError):
             return exc
         if isinstance(exc, BoardProtocolError) and (
-            "Kanboard refused" in str(exc) or "Kanboard rejected" in str(exc)
+            "board store refused" in str(exc) or "board store rejected" in str(exc)
         ):
             return TaskError("backend_rejected", str(exc), 1)
         return TaskError("validation", str(exc), 2)

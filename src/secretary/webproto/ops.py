@@ -276,9 +276,8 @@ class OperationLayer(ProtocolBoundary):
         """The audit owner of this installation's card backend, for the run events published below.
 
         `run_events.publish_*` appends a generic audit record, so it has to be appended where the
-        installation's readers look for one: the `requests` rows of the PostgreSQL backend, whose
-        generic records live in that one table, and `board/events.ndjson` under Kanboard
-        (`docs/BOARD_STORE.md` §7.3). Built from the data dir alone this published a product run
+        installation's readers look for one: the `requests` rows of the PostgreSQL board store,
+        whose generic records live in that one table (`docs/BOARD_STORE.md` §7.3). Built from the data dir alone this published a product run
         into a file that backend never reads, which is the same invisible-record defect
         `task_audit_for` exists to close. The run protocol itself is unchanged: the same events, in
         the same order, in the store the client names.

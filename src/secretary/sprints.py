@@ -1,4 +1,4 @@
-"""Sprint entities stored as tasks on a dedicated Kanboard board."""
+"""Sprint entities stored as rows of the dedicated sprint board in the board store."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary.board.backend import (
-    BoardBackendError,
+    BoardIdentityError,
     entity_id,
     entity_number,
     sprint_reference_number,
@@ -71,8 +71,7 @@ from secretary.sprint_observer import (
     stored_executors,
 )
 from secretary.tasks import (
-    CARD_BACKEND,
-    KanboardClient,
+    BOARD_STORE_KIND,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -86,6 +85,9 @@ from secretary.tasks import (
     task_audit_for,
 )
 from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
+
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
 SPRINT_BOARD_NAME = "Secretary sprints"
 SPRINT_REFERENCE_PREFIX = "sprint:"
@@ -423,11 +425,11 @@ def _refuse_shared_resources(candidate: SprintAdmission, others: list[SprintAdmi
                 )
 
 
-def ensure_sprint_board(client: KanboardClient) -> int:
+def ensure_sprint_board(client: SqlCardClient) -> int:
     """Return the dedicated sprint board, creating it once when absent."""
     board_id = _sprint_board(client, create=True)
     if board_id is None:
-        raise TaskError("backend_error", "Kanboard did not create the sprint board", 1)
+        raise TaskError("backend_error", "board store did not create the sprint board", 1)
     return board_id
 
 
@@ -438,7 +440,7 @@ def sprint_client(instance: str | Path):
     return board_client(instance, serves=(SPRINT,))
 
 
-def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
+def _sprint_board(client: SqlCardClient, *, create: bool) -> int | None:
     board = client.call("getProjectByName", name=SPRINT_BOARD_NAME)
     board_id = _positive_int(board.get("id")) if isinstance(board, dict) else None
     if board_id is None and create:
@@ -459,7 +461,7 @@ class _AuditOnce:
     §7.3) -- so there is no such construction to be made here.
 
     With neither given there is nothing to read, and `events()` says so with an empty traversal: a
-    `SprintReader` built with no data directory on the Kanboard backend has no audit at all, and
+    `SprintReader` built with no data directory has no audit at all, and
     that reader's summaries have always been the ones that state no freshness.
     """
 
@@ -500,24 +502,24 @@ def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
 
 
 def _task_id(raw: dict[str, Any]) -> int:
-    """The Kanboard identifier of a sprint row, which every read of it needs."""
+    """The board identifier of a sprint row, which every read of it needs."""
     task_id = _positive_int(raw.get("id"))
     if task_id is None:
-        raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+        raise TaskError("backend_error", "board store returned an invalid sprint", 1)
     return task_id
 
 
 def _sprint_metadata(answer: Any) -> dict[str, str]:
     """One sprint row's metadata, narrowed to the contract fields a sprint is made of."""
     if answer is not None and not isinstance(answer, dict):
-        raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
+        raise TaskError("backend_error", "board store returned invalid sprint metadata", 1)
     return {str(key): _text(value) for key, value in (answer or {}).items() if str(key) in SPRINT_METADATA}
 
 
 class SprintReader:
     def __init__(
         self,
-        client: KanboardClient,
+        client: SqlCardClient,
         *,
         data_dir: str | Path | None = None,
         thresholds: dict[str, int] | None = None,
@@ -533,7 +535,7 @@ class SprintReader:
         """Every row of the sprint board that carries a sprint reference."""
         rows = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
         if not isinstance(rows, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
+            raise TaskError("backend_error", "board store returned an invalid sprint list", 1)
         return [raw for raw in rows if _is_sprint_row(raw)]
 
     def _metadata_of(self, rows: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
@@ -637,7 +639,7 @@ class SprintReader:
         repositories = list(read.repositories)
         budget = read.budget.to_document()
         result: dict[str, Any] = {
-            "id": entity_id("sprint", CARD_BACKEND, task_id),
+            "id": entity_id("sprint", task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
@@ -653,8 +655,8 @@ class SprintReader:
             "audit": {
                 "created_at": _rfc3339(raw.get("date_creation")),
                 "updated_at": _rfc3339(raw.get("date_modification")),
-                "backend": {"kind": CARD_BACKEND, "store_ref": _text(raw.get("reference"))},
-                # A restored sprint sits on a fresh Kanboard row, so its own dates
+                "backend": {"kind": BOARD_STORE_KIND, "store_ref": _text(raw.get("reference"))},
+                # A restored sprint sits on a fresh board row, so its own dates
                 # describe the recovery, not the sprint. The dates it was restored
                 # from stay readable here.
                 "source": read.source_audit.to_document() if read.source_audit is not None else None,
@@ -881,7 +883,7 @@ class SprintWriter:
 
     def __init__(
         self,
-        client: KanboardClient,
+        client: SqlCardClient,
         *,
         data_dir: str | Path,
         thresholds: dict[str, int] | None = None,
@@ -903,9 +905,9 @@ class SprintWriter:
 
     def _host(self):
         """Construct the normalized host lazily to keep reader imports acyclic."""
-        from secretary.board.kanboard import KanboardBoardHost
+        from secretary.board.sql_host import SqlBoardHost
 
-        return KanboardBoardHost(
+        return SqlBoardHost(
             self.client,
             data_dir=str(self.data_dir),
             instance=str(self.instance) if self.instance else None,
@@ -1120,7 +1122,7 @@ class SprintWriter:
         if reference:
             try:
                 sprint_reference_number(reference)
-            except BoardBackendError as exc:
+            except BoardIdentityError as exc:
                 raise TaskError("validation", str(exc), 2) from None
         try:
             state = SprintState(status)
@@ -1342,11 +1344,11 @@ class SprintWriter:
         row = self._create_row(document, board_id, created_ref, admitted=admitted)
         task_id = _positive_int(row.get("id"))
         if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+            raise TaskError("backend_error", "board store returned an invalid sprint", 1)
         event.update(
             {
                 "ref": created_ref,
-                "task_id": entity_id("sprint", CARD_BACKEND, task_id),
+                "task_id": entity_id("sprint", task_id),
             }
         )
         event["backend"]["task_id"] = task_id
@@ -1363,7 +1365,7 @@ class SprintWriter:
                 reference=created_ref,
                 description="",
             ):
-                raise TaskError("backend_error", "Kanboard rejected the sprint reference", 1)
+                raise TaskError("backend_error", "board store rejected the sprint reference", 1)
             row = self._create_row(document, board_id, created_ref, admitted=admitted)
             if str(row.get("reference") or "") != created_ref:
                 raise TaskError("backend_error", "sprint reference remains incomplete", 1)
@@ -1378,7 +1380,7 @@ class SprintWriter:
         writes the one it was already going to write rather than a second one allocated meanwhile.
         A repeat that took its row back holds nothing, including this record, and allocates afresh.
 
-        An automatic reference used to be the row's own Kanboard id, which is not a record of what
+        An automatic reference used to be the row's own board id, which is not a record of what
         the board handed out. Row ids trail the references by hundreds here, so on 2026-08-06 a new
         sprint took `sprint:804` from a sprint closed in July and became unaddressable behind it.
 
@@ -1398,7 +1400,7 @@ class SprintWriter:
             try:
                 rows = board_rows(self.client.call, board_id)
             except BoardRowsUnavailable:
-                raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1) from None
+                raise TaskError("backend_error", "board store returned an invalid sprint list", 1) from None
             # Kept beside the staged intent rather than in `progress`, which records what the
             # request holds on the backend: an allocation holds nothing, and a create discarded
             # before it wrote a row hands the number straight back.
@@ -1461,7 +1463,7 @@ class SprintWriter:
             )
         )
         if created is None:
-            raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
+            raise TaskError("backend_error", "board store rejected the sprint write", 1)
         document["progress"]["task_id"] = created
         self.transactions.save(document)
         rows = [
@@ -1516,7 +1518,7 @@ class SprintWriter:
     ) -> None:
         """Write one step of the sprint's fields once, and prove the backend kept it.
 
-        Kanboard answers its metadata API with a boolean; anything other than `True` is a refusal. The
+        The board answers its metadata call with a boolean; anything other than `True` is a refusal. The
         step is recorded durably, so a repair of a later step never rewrites an earlier one back.
         """
         progress = document.setdefault("progress", {})
@@ -1526,7 +1528,7 @@ class SprintWriter:
             progress[f"{step}_started"] = True
             self.transactions.save(document)
             if self.client.call("saveTaskMetadata", task_id=task_id, values=values) is not True:
-                raise TaskError("backend_error", "Kanboard rejected the sprint metadata", 1)
+                raise TaskError("backend_error", "board store rejected the sprint metadata", 1)
             if not self._metadata_matches(task_id, values):
                 raise TaskError("backend_error", "sprint metadata remains incomplete", 1)
         progress[f"{step}_done"] = True
@@ -1535,7 +1537,7 @@ class SprintWriter:
     def _metadata_matches(self, task_id: int, values: dict[str, str]) -> bool:
         actual = self.client.call("getTaskMetadata", task_id=task_id) or {}
         if not isinstance(actual, dict):
-            raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
+            raise TaskError("backend_error", "board store returned invalid sprint metadata", 1)
         stored = {str(key): _text(value) for key, value in actual.items()}
         if "sprint_budget" in values:
             if _budget(stored.get("sprint_budget"), self.thresholds) != _budget(
@@ -2941,7 +2943,7 @@ class SprintWriter:
 
     def _pending(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
         # The staged event is only retained after a successful backend mutation in the
-        # simple writes. Creation stages its Kanboard id before assigning metadata.
+        # simple writes. Creation stages its board id before assigning metadata.
         sprint_document = self.reader.show(str(event["ref"]))
         sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
         event["task_id"] = sprint.entity_id
@@ -2974,7 +2976,7 @@ class SprintWriter:
             "task_id": task_id,
             "ref": reference,
             "backend": {
-                "kind": CARD_BACKEND,
+                "kind": BOARD_STORE_KIND,
                 "task_id": _sprint_number(sprint) if sprint else None,
                 "revision": "pending",
             },
@@ -2993,7 +2995,7 @@ def _sprint_number(sprint: SprintWriteSnapshot | dict[str, Any] | None) -> int:
     entity = sprint.entity_id if isinstance(sprint, SprintWriteSnapshot) else (sprint or {}).get("id")
     number = entity_number("sprint", entity)
     if number is None:
-        raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+        raise TaskError("backend_error", "board store returned an invalid sprint", 1)
     return number
 
 

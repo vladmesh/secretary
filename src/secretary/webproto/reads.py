@@ -13,7 +13,7 @@ second collector of a fact somebody already collects, and nothing here writes: n
 no repair, no board mutation, not even a cache file.
 
 The sources fail independently, so each section of a snapshot carries its own availability record
-(:mod:`secretary.webproto.sources`) instead of the whole read failing. A dead Kanboard must not
+(:mod:`secretary.webproto.sources`) instead of the whole read failing. A dead board store must not
 blank out the agent list, and an unreadable dispatcher state must not hide the cards.
 """
 
@@ -658,7 +658,6 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "checkpoint.rpo_exceeded": "red",
     "secret_store.key_unusable": "red",
     "board_transport.finding": "red",
-    "card_backend.finding": "red",
     # Minted by the reader of this summary rather than here: health that could not be read at all
     # is not an absence of problems, so it carries a code of its own and the gravest severity.
     "health.unreadable": "red",
@@ -765,10 +764,9 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
         )
     if checkpoint.get("rpo_exceeded"):
         found(CHECKPOINT_RPO_EXCEEDED, rpo_problem(checkpoint))
-    for section in ("board_transport", "card_backend"):
-        reported = _object(status.get(section)).get("findings") or []
-        if reported:
-            found(f"{section}.finding", f"{section} has {len(reported)} finding(s)")
+    reported = _object(status.get("board_transport")).get("findings") or []
+    if reported:
+        found("board_transport.finding", f"board_transport has {len(reported)} finding(s)")
     key = _object(_object(status.get("secret_store")).get("installation_key"))
     if key and not key.get("usable"):
         found("secret_store.key_unusable", "the secret store's installation key is not usable")
@@ -805,7 +803,6 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
         },
         "resources": _object(host.get("resources")),
         "cards": _object(installation.get("cards")),
-        "card_backend": _text(_object(status.get("card_backend")).get("backend")) or None,
         "memory": {
             "fact_count": memory.get("fact_count"),
             "last_reindex_at": _text(memory.get("last_reindex_at")) or None,

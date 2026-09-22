@@ -121,12 +121,11 @@ class BoardEventCanon:
     :meth:`events`; TaskAudit itself remains the compatibility reader for released record versions.
 
     ``audit`` is how a caller that has a card client says which store that is, and every caller that
-    has one passes it: :class:`~secretary.board.kanboard.KanboardBoardHost` resolves it through
-    :func:`secretary.tasks.task_audit_for`, so a PostgreSQL client's canon is
-    ``requests``/``board_events`` and a Kanboard client's is ``board/events.ndjson``
+    has one passes it: :class:`~secretary.board.sql_host.SqlBoardHost` resolves it through
+    :func:`secretary.tasks.task_audit_for`, so a board client's canon is ``requests``/``board_events``
     (``docs/BOARD_STORE.md`` §7.3). Constructed from a data directory alone this is the file journal,
-    which is the right answer for exactly one kind of caller -- one with no client at all, offline or
-    Kanboard-only, such as the fake board host and the storage-level fixtures. With neither an audit
+    which is the right answer for exactly one kind of caller -- one with no client at all, such as
+    the fake board host and the storage-level fixtures. With neither an audit
     nor a data directory there is no backend-safe choice left to make, so construction refuses by
     name rather than guessing one.
     """

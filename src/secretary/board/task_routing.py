@@ -1,7 +1,7 @@
 """Typed task routing vocabulary and legacy metadata boundary.
 
 The board wire formats remain strings.  This module owns the closed task-routing
-vocabularies and converts legacy Kanboard metadata into typed immutable values
+vocabularies and converts legacy flat board metadata into typed immutable values
 before the rest of the product consumes it.
 """
 

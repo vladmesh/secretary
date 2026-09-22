@@ -3,8 +3,8 @@
 The Definition-of-Done evidence for sprint:1449's item. The Dashboard handler is driven twice
 through `WebApp.handle`, over the layers `web-serve` builds for its reads -- the read layer and the
 doctor lamp wired by `health_layers`, the sprint and pause read layers, the provider usage layer --
-against a real `postgres:16` store reached the production way: `SECRETARY_CARD_BACKEND=postgres`
-and the instance's own `board-store.env`, behind the exclusion guard `web-serve` holds at start-up.
+against a real `postgres:16` store reached the production way: the instance's own
+`board-store.env`, behind the exclusion guard `web-serve` holds at start-up.
 The layers that start or recover live work are recording fakes.
 
 The first render is cold and may do anything. The second is counted at the process's own seams:
@@ -30,7 +30,6 @@ from unittest import mock
 import yaml
 
 from secretary.board import store
-from secretary.board.backend import reset_card_backend
 from secretary.board.sql_sprints import sprint_key
 from secretary.web.app import WebApp
 from secretary.web.commands import health_layers
@@ -82,10 +81,8 @@ def tearDownModule() -> None:
 class WarmDashboardRenderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.enterContext(
-            mock.patch.dict(os.environ, {"BOARD_ROLE": "", "SECRETARY_CARD_BACKEND": "postgres"})
+            mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         )
-        reset_card_backend()
-        self.addCleanup(reset_card_backend)
         self.enterContext(mock.patch.dict(store._HELD, clear=True))
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data_dir = self.tmp / "data"

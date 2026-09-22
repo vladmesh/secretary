@@ -5543,7 +5543,6 @@ class ObserverConfigurationTests(unittest.TestCase):
                 "SECRETARY_INSTANCE",
                 "SECRETARY_DATA_DIR",
                 "TA_SECRETARY_REPO",
-                "SECRETARY_CARD_BACKEND",
                 OBSERVER_SPRINT_ENV,
                 OBSERVER_GENERATION_ENV,
                 "SECRETARY_MEMORY_ACCESS_TOKEN",

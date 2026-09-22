@@ -16,7 +16,6 @@ from secretary.board_transport import (
     transport_path,
 )
 from secretary.runtime_env import RuntimeEnvError, read_runtime_env
-from secretary.tasks import KanboardClient, TaskError, TaskWriter
 from triggered_agents.runtime import kanboard
 
 
@@ -32,14 +31,9 @@ class BoardTransportTests(unittest.TestCase):
             one = ensure(Path(first), allow_default=True).transport
             two = ensure(Path(second), allow_default=True).transport
             self.assertEqual(one, two)
-            client = KanboardClient(one, Path(first))
-        self.assertEqual(client.url, one.url)
-        self.assertEqual(
-            one.authorization_header(),
-            one.authorization_header(),
-        )
+        self.assertEqual(one.authorization_header(), two.authorization_header())
 
-    def test_both_clients_send_the_resolved_basic_auth_header(self) -> None:
+    def test_the_runtime_client_sends_the_resolved_basic_auth_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             transport = ensure(instance, allow_default=True).transport
@@ -60,16 +54,14 @@ class BoardTransportTests(unittest.TestCase):
                 return Response()
 
             with (
-                mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=open_request),
                 mock.patch(
                     "triggered_agents.runtime.kanboard.urllib.request.urlopen", side_effect=open_request
                 ),
                 mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True),
             ):
-                KanboardClient.for_instance(instance).call("getVersion")
                 kanboard.call("getVersion")
 
-        self.assertEqual(observed, [transport.authorization_header(), transport.authorization_header()])
+        self.assertEqual(observed, [transport.authorization_header()])
 
     def test_legacy_runtime_is_imported_once_then_retired(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,23 +171,6 @@ class BoardTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeEnvError, "ambiguous"):
                 self.migrate(Path(tmp), runtime)
 
-    def test_normal_client_does_not_use_ambient_legacy_values(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(
-                os.environ,
-                {
-                    "SECRETARY_INSTANCE": str(Path(tmp) / "missing-instance"),
-                    "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                    "KANBOARD_API_USER": "jsonrpc",
-                    "KANBOARD_API_TOKEN": "legacy-token",
-                },
-                clear=True,
-            ),
-            self.assertRaisesRegex(TaskError, "configuration is unavailable"),
-        ):
-            KanboardClient.for_instance(Path(tmp))
-
     def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -227,9 +202,7 @@ class BoardTransportTests(unittest.TestCase):
             try:
                 os.chdir(cwd)
                 with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": ""}, clear=True):
-                    self.assertEqual(
-                        KanboardClient.for_instance(instance).url, "http://127.0.0.1:8080/jsonrpc.php"
-                    )
+                    self.assertEqual(resolve(instance).url, "http://127.0.0.1:8080/jsonrpc.php")
             finally:
                 os.chdir(previous)
 
@@ -251,21 +224,6 @@ class BoardTransportTests(unittest.TestCase):
             path.symlink_to(linked)
             with self.assertRaisesRegex(BoardTransportError, "regular file"):
                 resolve(instance)
-
-    def test_real_client_binds_task_redaction_to_dir_and_instance_yaml(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            ensure(instance, allow_default=True)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-            for spelling in (instance, instance / "instance.yaml"):
-                with self.subTest(spelling=spelling):
-                    writer = TaskWriter(KanboardClient.for_instance(spelling), data_dir=instance / "data")
-                    secret = "MIGRATED-LIVE-TOKEN-0123456789"
-                    with mock.patch(
-                        "secretary.secret_store.redaction_values", return_value=(secret,)
-                    ) as values:
-                        self.assertNotIn(secret, writer._redact_for_board(f"token {secret}"))
-                    values.assert_called_once_with(instance)
 
     def test_dry_run_reports_a_planned_durable_ignore_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,17 +320,8 @@ class BoardTransportTests(unittest.TestCase):
         )
 
 
-class BackendAwareFindingsTests(unittest.TestCase):
-    """Transport health is evidence about the board this installation actually serves."""
-
-    def setUp(self) -> None:
-        from secretary.board import backend
-
-        backend.reset_card_backend()
-        self.addCleanup(backend.reset_card_backend)
-
-    def _selector(self, value: str):
-        return mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": value}, clear=False)
+class BoardStoreFindingsTests(unittest.TestCase):
+    """Transport health is evidence about the board the installation serves: the PostgreSQL store."""
 
     @staticmethod
     def _instance(tmp: str) -> Path:
@@ -385,22 +334,14 @@ class BackendAwareFindingsTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(instance), *args], check=True)
         return instance
 
-    def test_an_absent_tuple_is_a_finding_on_kanboard_and_silence_on_postgres(self) -> None:
+    def test_an_absent_tuple_is_not_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = self._instance(tmp)
             (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
             self.assertFalse(transport_path(instance).exists())
-            with self._selector("kanboard"):
-                reported = findings(instance)
-            self.assertEqual(len(reported), 1)
-            self.assertIn("missing", reported[0])
-            from secretary.board import backend
+            self.assertEqual(findings(instance), [])
 
-            backend.reset_card_backend()
-            with self._selector("postgres"):
-                self.assertEqual(findings(instance), [])
-
-    def test_a_tracked_tuple_stays_a_finding_on_every_backend(self) -> None:
+    def test_a_tracked_tuple_stays_a_finding(self) -> None:
         """Tracking configuration in the instance repository is a repository defect, not a board one."""
         with tempfile.TemporaryDirectory() as tmp:
             instance = self._instance(tmp)
@@ -408,8 +349,7 @@ class BackendAwareFindingsTests(unittest.TestCase):
             path.write_text("not a transport\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(instance), "add", "board-transport.env"], check=True)
             subprocess.run(["git", "-C", str(instance), "commit", "--quiet", "-m", "tracked"], check=True)
-            with self._selector("postgres"):
-                reported = findings(instance)
+            reported = findings(instance)
         self.assertEqual(len(reported), 1)
         self.assertIn("tracked", reported[0])
 

@@ -1,7 +1,7 @@
 """Role-aware Card lifecycle authorization.
 
 This leaf deliberately depends only on normalized board values and lifecycle declarations.
-Legacy writers can therefore ask it for authority without importing a Kanboard adapter.
+Legacy writers can therefore ask it for authority without importing a board adapter.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
     Role.DISPATCHER: frozenset(
         {
             # Claim is a dispatcher-owned Ready-to-In progress lifecycle edge.  It
-            # used to bypass this registry through TaskWriter's raw Kanboard move.
+            # used to bypass this registry through TaskWriter's raw column move.
             (CardState.READY, CardState.IN_PROGRESS),
             (CardState.IN_PROGRESS, CardState.VALIDATE),
             (CardState.IN_PROGRESS, CardState.BLOCKED),

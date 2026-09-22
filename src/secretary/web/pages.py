@@ -998,7 +998,6 @@ def _health_panel(installation: dict[str, Any]) -> str:
         ["cards on the board", _or_dash(cards.get("total"))],
         ["active attempts", _or_dash(dispatcher.get("active_attempts"))],
         ["last tick", _or_dash(dispatcher.get("last_tick_finished_at"))],
-        ["card backend", _or_dash(status.get("card_backend"))],
     ]
     parts.append(_rows(["", ""], rows))
     units = [

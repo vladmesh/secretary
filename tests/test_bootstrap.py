@@ -15,7 +15,6 @@ from secretary.bootstrap import (
     _install_platform,
     bootstrap,
 )
-from secretary.runtime_env import read_runtime_env
 
 
 class BootstrapTests(unittest.TestCase):
@@ -128,8 +127,6 @@ class BootstrapTests(unittest.TestCase):
             mock.patch("secretary.bootstrap.migrate_instance", steps.migrate),
             mock.patch("secretary.bootstrap.verify_board_store_roles", steps.verify),
             mock.patch("secretary.bootstrap._run", side_effect=refuse_kanboard),
-            mock.patch("secretary.tasks.KanboardClient.for_instance", side_effect=refuse_kanboard),
-            mock.patch("secretary.tasks.KanboardClient.call", side_effect=refuse_kanboard),
             mock.patch("builtins.print"),
         ):
             code = bootstrap(args)
@@ -172,34 +169,27 @@ class BootstrapTests(unittest.TestCase):
             ):
                 self.assertFalse(hasattr(bootstrap_module, removed), removed)
 
-    def test_a_fresh_bootstrap_leaves_the_installation_selecting_postgres(self) -> None:
+    def test_a_fresh_bootstrap_writes_no_runtime_file(self) -> None:
+        """There is one board backend, so bootstrap has nothing to record in `runtime.env`."""
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
 
             code, _steps = self._bootstrap(target)
 
             self.assertEqual(code, 0)
-            runtime = target / "runtime.env"
-            self.assertEqual(runtime.read_text(encoding="utf-8"), "SECRETARY_CARD_BACKEND=postgres\n")
-            self.assertEqual(runtime.stat().st_mode & 0o777, 0o600)
-            # The same validated reader the instance-bound CLI and the units' environment go through.
-            self.assertEqual(read_runtime_env(target)["SECRETARY_CARD_BACKEND"], "postgres")
+            self.assertFalse((target / "runtime.env").exists())
 
-    def test_a_rerun_keeps_runtime_lines_and_names_the_backend_once(self) -> None:
+    def test_a_rerun_leaves_an_existing_runtime_file_exactly_as_it_is(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             self.assertEqual(self._bootstrap(target)[0], 0)
             runtime = target / "runtime.env"
-            runtime.write_text(
-                "# operator note\nEXAMPLE_TOKEN=kept\nSECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8"
-            )
+            body = "# operator note\nEXAMPLE_TOKEN=kept\n"
+            runtime.write_text(body, encoding="utf-8")
 
             self.assertEqual(self._bootstrap(target)[0], 0)
 
-            self.assertEqual(
-                runtime.read_text(encoding="utf-8"),
-                "# operator note\nEXAMPLE_TOKEN=kept\nSECRETARY_CARD_BACKEND=postgres\n",
-            )
+            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
 
     def test_a_preview_writes_no_runtime_file_and_touches_no_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -274,7 +264,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(handed, [("chown", store_file, 4242, 4343)])
             # In order: the store steps first, then the handoff of the file they needed.
             self.assertLess(names.index("verify"), events.index(handed[0]))
-            for other in ("runtime.env", ".gitignore", BOOTSTRAP_STAMP):
+            for other in (".gitignore", BOOTSTRAP_STAMP):
                 self.assertIn(("chown", target / other, 4242, 4343), events, other)
             # The Compose definition is root's, outside the instance, and is never handed over.
             self.assertTrue(compose.is_file())

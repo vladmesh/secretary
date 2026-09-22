@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
-from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -176,9 +175,6 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, env, clear=True):
                         self.assertEqual(kanboard._creds(), transport)
 
-    def test_pipeline_is_explicitly_subject_to_the_transport_gate(self) -> None:
-        self.assertIn("pipeline", role_env.BOARD_TRANSPORT_ROLES)
-
     def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -191,58 +187,34 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
 
 
-class BoardTransportGateTests(unittest.TestCase):
-    """The Kanboard tuple is a requirement of one backend, not of every launch."""
+class NoBoardTransportGateTests(unittest.TestCase):
+    """The board is the PostgreSQL store, so no role's launch demands the JSON-RPC tuple."""
 
-    def test_only_an_explicit_postgres_selector_lifts_the_requirement(self) -> None:
-        self.assertFalse(role_env.board_transport_required({role_env.CARD_BACKEND_ENV: "postgres"}))
-        self.assertFalse(role_env.board_transport_required({role_env.CARD_BACKEND_ENV: " postgres "}))
-        for value in ("kanboard", "", "Postgres", "postgresql", "nonsense"):
-            with self.subTest(value=value):
-                self.assertTrue(role_env.board_transport_required({role_env.CARD_BACKEND_ENV: value}))
-        self.assertTrue(role_env.board_transport_required({}))
-
-    def _exec(self, instance: Path, backend: str) -> tuple[int, list[str]]:
-        """Run the exec boundary for a transport role without letting it replace the process."""
-        env_file = instance / "runtime.env"
-        env_file.write_text(f"{role_env.CARD_BACKEND_ENV}={backend}\n", encoding="utf-8")
-        launched: list[str] = []
-        with (
-            mock.patch.dict(
-                os.environ,
-                {"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
-                clear=True,
-            ),
-            mock.patch.object(role_env.os, "execvpe", side_effect=lambda file, *_: launched.append(file)),
-        ):
-            code = role_env.main(
-                ["exec", "--role", "pipeline", "--env-file", str(env_file), "--", "/bin/true"]
-            )
-        return code, launched
-
-    def test_a_postgres_installation_execs_without_a_kanboard_tuple(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            code, launched = self._exec(Path(tmp), "postgres")
-        self.assertEqual(launched, ["/bin/true"])
-        self.assertIsNone(code)
-
-    def test_a_kanboard_installation_still_refuses_without_a_tuple(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            mock.patch("sys.stderr", new_callable=StringIO) as stderr,
-        ):
-            code, launched = self._exec(Path(tmp), "kanboard")
-        self.assertEqual(code, 125)
-        self.assertEqual(launched, [])
-        self.assertIn("board transport configuration is unavailable", stderr.getvalue())
-
-    def test_a_kanboard_installation_with_a_tuple_execs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            ensure_board_transport(instance, allow_default=True)
-            code, launched = self._exec(instance, "kanboard")
-        self.assertEqual(launched, ["/bin/true"])
-        self.assertIsNone(code)
+    def test_every_board_role_execs_without_a_tuple(self) -> None:
+        for role in ("pipeline", "observer", "steward", "retro"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:
+                instance = Path(tmp)
+                env_file = instance / "runtime.env"
+                env_file.write_text("OTHER=value\n", encoding="utf-8")
+                launched: list[str] = []
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                        clear=True,
+                    ),
+                    mock.patch.object(
+                        role_env.os, "execvpe", side_effect=lambda file, *_, sink=launched: sink.append(file)
+                    ),
+                    mock.patch(
+                        "triggered_agents.runtime.board_transport.resolve", side_effect=AssertionError
+                    ),
+                ):
+                    code = role_env.main(
+                        ["exec", "--role", role, "--env-file", str(env_file), "--", "/bin/true"]
+                    )
+                self.assertIsNone(code)
+                self.assertEqual(launched, ["/bin/true"])
 
 
 if __name__ == "__main__":

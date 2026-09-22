@@ -28,7 +28,7 @@ from secretary.board import (
     InvalidTransition,
     Issue,
     IssueState,
-    KanboardBoardHost,
+    SqlBoardHost,
     MutationEventTransaction,
     Product,
     RelatedRefs,
@@ -271,7 +271,7 @@ class BoardHostContractTests(unittest.TestCase):
                 sys.executable,
                 "-P",
                 "-c",
-                "import secretary.tasks, sys; assert 'secretary.board.kanboard' not in sys.modules",
+                "import secretary.tasks, sys; assert 'secretary.board.sql_host' not in sys.modules",
             ],
             cwd=source_root,
             env=env,
@@ -1047,7 +1047,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
         self.assertEqual(self.canon.events(), (self.event,))
 
 
-class KanboardBoardHostTests(unittest.TestCase):
+class SqlBoardHostTests(unittest.TestCase):
     def test_cards_exclude_typed_rows_and_read_refuses_them(self) -> None:
         execution = {
             "ref": "secretary-1417",
@@ -1067,11 +1067,11 @@ class KanboardBoardHostTests(unittest.TestCase):
             "state": "issues",
             "record_type": "product",
         }
-        with mock.patch("secretary.board.kanboard.TaskReader") as reader_class:
+        with mock.patch("secretary.board.sql_host.TaskReader") as reader_class:
             reader = reader_class.return_value
             reader.list.return_value = [execution, issue, product]
             reader.show.return_value = issue
-            host = KanboardBoardHost(mock.sentinel.client)
+            host = SqlBoardHost(mock.sentinel.client)
 
             cards = host.list(EntityKind.CARD)
             self.assertEqual([card.ref for card in cards], ["secretary-1417"])
@@ -1080,7 +1080,7 @@ class KanboardBoardHostTests(unittest.TestCase):
 
     def test_sprint_lifecycle_edges_are_declared_for_host_migration(self) -> None:
         """Sprint close, reopen and hard-stop have explicit typed declarations."""
-        host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
+        host = SqlBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
         card = Card("secretary-1420", "Card host transitions", CardState.READY)
 
         with self.assertRaisesRegex(BoardProtocolError, "create for card is not migrated"):
@@ -1105,7 +1105,7 @@ class KanboardBoardHostTests(unittest.TestCase):
         )
 
     def test_sprint_transition_rejects_a_raw_metadata_escape_before_any_backend_read(self) -> None:
-        host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
+        host = SqlBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
         with self.assertRaisesRegex(BoardProtocolError, "supplement must be normalized"):
             host.transition(
                 TransitionRequest(
@@ -1135,12 +1135,12 @@ class KanboardBoardHostTests(unittest.TestCase):
             "projects": ["secretary"],
         }
         with (
-            mock.patch("secretary.board.kanboard.SprintReader") as sprint_reader_class,
-            mock.patch("secretary.board.kanboard.ProductIssueStore") as store_class,
+            mock.patch("secretary.board.sql_host.SprintReader") as sprint_reader_class,
+            mock.patch("secretary.board.sql_host.ProductIssueStore") as store_class,
         ):
             sprint_reader_class.return_value.show.return_value = sprint
             store_class.return_value.show_product.return_value = product
-            host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
+            host = SqlBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
 
             normalized_sprint = host.read(EntityKind.SPRINT, "sprint:943")
             self.assertEqual(normalized_sprint.product_ref, "product:secretary")

@@ -8,10 +8,10 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary import _proc, head_registry
-from secretary.board.backend import SPRINT, board_client, card_backend_status
+from secretary.board.backend import SPRINT, board_client
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
@@ -30,7 +30,10 @@ from secretary.host_apply import resolve_installed_packaged
 from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import TaskError
+
+if TYPE_CHECKING:
+    from secretary.board.sql_cards import SqlCardClient
 
 STATUS_SCHEMA_VERSION = 1
 
@@ -40,7 +43,7 @@ def collect_status(
     *,
     host_fixture: str | None = None,
     offline: bool = False,
-    sprint_client: KanboardClient | None = None,
+    sprint_client: SqlCardClient | None = None,
     recovery: dict[str, Any] | None = None,
     sprints: bool = True,
     probe_panels: bool | None = None,
@@ -120,9 +123,6 @@ def collect_status(
         "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
         "board_transport": {"findings": board_transport_findings(instance_dir)},
-        # Which implementation serves cards, so the switch is diagnosable without reading the
-        # process environment of whichever agent happens to be running (board/backend.py).
-        "card_backend": card_backend_status(),
         "secret_store": store_health(report.instance_path.parent),
         "recovery": recovery,
     }
@@ -191,7 +191,7 @@ def _sprints(
     instance: dict[str, Any],
     production: dict[str, Any],
     *,
-    client: KanboardClient | None = None,
+    client: SqlCardClient | None = None,
 ) -> dict[str, Any]:
     """Read the sprint entity and live board without consulting observer context."""
     try:

@@ -1,11 +1,11 @@
 """The dispatcher's audit follows its card client's backend.
 
-On 2026-09-10 the production dispatcher ran on `SECRETARY_CARD_BACKEND=postgres` with
+On 2026-09-10 the production dispatcher ran on the PostgreSQL card store with
 `TaskAudit(data_dir)`: the file journal, which the PostgreSQL writer never touches. A worker's
 `report:done` committed in `requests`/`board_events` was therefore invisible to the report wait, the
 worker was declared stalled twice, and the observer got no wake for the Blocked move
 (sprint:1437, secretary-1614). One helper now names the audit for every reader and writer: the SQL audit of
-the card client the switch built, and the command host reads the same object.
+the card client `board_client` built, and the command host reads the same object.
 """
 
 from __future__ import annotations

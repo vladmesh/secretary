@@ -11,8 +11,8 @@ linked cards, and the cards themselves. A card with no sprint at all is nobody's
 `{kind: none}` passes: a sprint that declares no observer is not a sprint whose observer is
 missing.
 
-A sprint board that cannot be read is not a healthy sprint. The two boards are separate Kanboard
-projects and fail separately, so the fence keeps a durable snapshot of each open sprint's
+A sprint board that cannot be read is not a healthy sprint. The two boards are separate board
+reads and fail separately, so the fence keeps a durable snapshot of each open sprint's
 reservations and falls back to it rather than letting a blind tick advance those cards.
 
 The fence clears on confirmed adoption, and confirmed means a record for that sprint naming
@@ -156,7 +156,7 @@ def _blind_fence(
         "refs": refs | set(linked),
         # Not a fence the durable log carries a reason for: it is one tick's read failure, it
         # clears by itself as soon as the board answers, and writing an event per tick of a
-        # Kanboard outage would bury the fences that are about an actual observer.
+        # board outage would bury the fences that are about an actual observer.
         "outcomes": [
             {
                 "status": "critical",

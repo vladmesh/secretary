@@ -811,7 +811,7 @@ class HealthSummaryTests(unittest.TestCase):
                     "checkpoint_last_failure_reason": "push refused",
                     "blocked_reason": "no remote",
                 },
-                "card_backend": {"backend": "postgres", "findings": ["x"]},
+                "board_transport": {"findings": ["x"]},
                 "secret_store": {"installation_key": {"present": True, "usable": False}},
                 "memory": {"index_present": False},
             }
@@ -827,12 +827,11 @@ class HealthSummaryTests(unittest.TestCase):
                 "2 dispatcher divergence(s) are open",
                 "the checkpoint is blocked: no remote",
                 "the last checkpoint failed: push refused",
-                "card_backend has 1 finding(s)",
+                "board_transport has 1 finding(s)",
                 "the secret store's installation key is not usable",
                 "the memory index is missing",
             ],
         )
-        self.assertEqual(summary["card_backend"], "postgres")
         self.assertTrue(summary["dispatcher"]["paused"])
 
     def test_an_inactive_oneshot_service_is_not_a_problem(self) -> None:

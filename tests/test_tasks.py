@@ -20,12 +20,11 @@ from secretary import tasks
 from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
-from secretary.board.kanboard import KanboardBoardHost
+from secretary.board.sql_host import SqlBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.steward_reports import StewardReportBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
-from secretary.board_transport import BoardTransport
 from secretary.cli import main
 from secretary.data import export_board, init_layout
 from secretary.dispatch.state import claim_mismatch
@@ -41,7 +40,6 @@ from secretary.sprints import refresh_active_sprint_projects
 from secretary.tasks import (
     _STATE_BY_COLUMN,
     ArtifactOwnershipTaskError,
-    KanboardClient,
     TaskAudit,
     TaskError,
     TaskReader,
@@ -514,7 +512,7 @@ class TaskCliTests(CardStoreCase):
                     },
                     clear=False,
                 ),
-                mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=OSError("super-secret")),
+                mock.patch("urllib.request.urlopen", side_effect=OSError("super-secret")),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(errors),
             ):
@@ -731,22 +729,6 @@ class TaskCliTests(CardStoreCase):
         self.assertEqual(errors.getvalue(), "")
         self.assertEqual(json.loads(output.getvalue())["action"], "archived")
         self.assertEqual(client.row(12)["is_active"], 0)
-
-
-class KanboardClientTests(unittest.TestCase):
-    def test_rpc_error_is_sanitized(self) -> None:
-        response = mock.MagicMock()
-        response.read.return_value = b'{"error":{"message":"super-secret"}}'
-        response.__enter__.return_value = response
-        with mock.patch("secretary.tasks.urllib.request.urlopen", return_value=response):
-            client = KanboardClient(
-                BoardTransport("https://board.invalid", "user", "super-secret"),
-                Path.cwd(),
-            )
-            with self.assertRaises(TaskError) as raised:
-                client.call("getAllTasks", project_id=1)
-        self.assertEqual(raised.exception.code, "backend_error")
-        self.assertNotIn("super-secret", raised.exception.message)
 
 
 class TaskWriterTests(BoardFixture, CardStoreCase):
@@ -4624,7 +4606,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 self.assertEqual(event["data"]["marker_occurrence"], 1)
                 self.assertEqual(
                     self.client.comments(12)[-1]["comment"],
-                    KanboardBoardHost.render_marker(Event.from_record(event)),
+                    SqlBoardHost.render_marker(Event.from_record(event)),
                 )
                 self.assertEqual(result["event_id"], event["event_id"])
 

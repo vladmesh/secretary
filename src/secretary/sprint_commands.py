@@ -46,7 +46,7 @@ from secretary.webproto.sprint_reads import SprintReadLayer
 
 
 def add_sprint_subcommands(subparsers) -> None:
-    sprint = subparsers.add_parser("sprint", help="manage sprint entities on the dedicated Kanboard board")
+    sprint = subparsers.add_parser("sprint", help="manage sprint entities on the dedicated sprint board")
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
     listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))

@@ -1,7 +1,7 @@
 """Immutable, backend-neutral values used by the board protocol.
 
 The classes in this module are deliberately values rather than views of a
-Kanboard task.  Adapters are responsible for translating their backend rows
+board row.  Adapters are responsible for translating their backend rows
 before one of these objects crosses the protocol boundary.
 """
 
@@ -49,7 +49,7 @@ class EventKind(StrEnum):
     CARD_UNBLOCKED = "card.unblocked"
     CARD_RETURNED = "card.returned"
     CARD_MOVED = "card.moved"
-    # Control-plane marker occurrences are Card facts too.  Their Kanboard
+    # Control-plane marker occurrences are Card facts too.  Their marker
     # comments are a rendering of the data carried here, not a second source
     # of the report, verdict, or observer decision.
     CARD_REPORTED = "card.reported"
@@ -203,7 +203,7 @@ class Issue:
         description: str = "",
         close_reason: IssueCloseReason | str | None = None,
     ) -> None:
-        # A staged Kanboard create historically exposes ``pending/pending`` before its metadata
+        # A staged board create historically exposes ``pending/pending`` before its metadata
         # finish step.  Keep accepting that recovery-only wire shape, but normalize it to absence
         # rather than polluting either closed vocabulary with a value that can never be persisted.
         if priority == "pending" or issue_kind == "pending":

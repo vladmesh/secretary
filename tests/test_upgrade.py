@@ -558,14 +558,6 @@ class AutomationSpecTests(unittest.TestCase):
             self.assertIn("--disabled", create_argv(specs[role]))
 
 
-# The board-transport step materializes the Kanboard JSON-RPC tuple, which only the Kanboard
-# backend reads; the suite runs on PostgreSQL (`tests/__init__.py`), where the step is a recorded
-# no-op.  These cases are about the Kanboard migration itself, so they select that backend for
-# their own duration.  The step reads the selector straight from the environment, so no process
-# cache needs resetting.  They go away with the Kanboard transport.
-_ON_KANBOARD = mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": "kanboard"})
-
-
 class UpgradeStepTests(unittest.TestCase):
     def setUp(self) -> None:
         self.memory_probe = mock.patch("secretary.upgrade.probe_memory").start()
@@ -677,60 +669,8 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "unchanged")
         self.assertIn("1 unavailable project registrations deferred", result.detail)
 
-    @_ON_KANBOARD
-    def test_board_transport_step_imports_retires_and_reports_every_action(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
-            subprocess.run(["git", "-C", str(instance), "config", "user.name", "Test"], check=True)
-            subprocess.run(
-                ["git", "-C", str(instance), "config", "user.email", "test@example.invalid"], check=True
-            )
-            runtime = instance / "runtime.env"
-            runtime.write_text(
-                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=legacy-token\n",
-                encoding="utf-8",
-            )
-            runtime.chmod(0o600)
-            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-            retired = runtime.read_text(encoding="utf-8")
-        self.assertEqual(result.status, "changed")
-        self.assertIn("imported legacy transport", result.detail)
-        self.assertIn("retired legacy runtime values", result.detail)
-        self.assertEqual(retired, "")
-
-    @_ON_KANBOARD
-    def test_board_transport_step_fails_closed_without_writing_on_mismatch_or_missing_tuple(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
-            runtime = instance / "runtime.env"
-            runtime.write_text(
-                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=legacy-token\n",
-                encoding="utf-8",
-            )
-            runtime.chmod(0o600)
-            (instance / "board-transport.env").write_text(
-                "KANBOARD_URL=http://other/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=other-token\n",
-                encoding="utf-8",
-            )
-            (instance / "board-transport.env").chmod(0o600)
-            mismatch = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-            self.assertEqual(mismatch.status, "failed")
-            self.assertIn("mismatch", mismatch.detail)
-            self.assertIn("legacy-token", runtime.read_text(encoding="utf-8"))
-            (instance / "board-transport.env").unlink()
-            runtime.write_text("OTHER=value\n", encoding="utf-8")
-            runtime.chmod(0o600)
-            missing = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-        self.assertEqual(missing.status, "failed")
-        self.assertIn("refuse to guess", missing.detail)
-
-    def test_board_transport_step_is_a_recorded_no_op_on_the_postgres_backend(self):
-        """The JSON-RPC tuple is one backend's transport, so the other one is not missing it."""
+    def test_board_transport_step_is_a_recorded_no_op(self):
+        """The JSON-RPC tuple is no transport of the board store, so nothing is materialized or retired."""
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
@@ -741,88 +681,22 @@ class UpgradeStepTests(unittest.TestCase):
             )
             runtime.write_text(body, encoding="utf-8")
             runtime.chmod(0o600)
-            with mock.patch.dict(os.environ, {"SECRETARY_CARD_BACKEND": "postgres"}, clear=False):
-                result = upgrade.step_board_transport(
-                    self.context(FakeUnitInstaller(), instance_path=instance)
-                )
+            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
             self.assertEqual(result.status, "skipped")
-            self.assertIn("SECRETARY_CARD_BACKEND=postgres", result.detail)
-            # Nothing was materialized and nothing was retired out of runtime.env.
+            self.assertIn("PostgreSQL board store", result.detail)
             self.assertFalse((instance / "board-transport.env").exists())
             self.assertEqual(runtime.read_text(encoding="utf-8"), body)
 
-    def test_board_transport_step_reads_the_selector_the_instance_declares(self):
+    def test_board_transport_step_still_fails_on_an_unsafe_runtime_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
             runtime = instance / "runtime.env"
-            runtime.write_text("SECRETARY_CARD_BACKEND=postgres\n", encoding="utf-8")
-            runtime.chmod(0o600)
-            environment = {k: v for k, v in os.environ.items() if k != "SECRETARY_CARD_BACKEND"}
-            with mock.patch.dict(os.environ, environment, clear=True):
-                result = upgrade.step_board_transport(
-                    self.context(FakeUnitInstaller(), instance_path=instance)
-                )
-            self.assertEqual(result.status, "skipped")
-            self.assertFalse((instance / "board-transport.env").exists())
-
-    @_ON_KANBOARD
-    def test_board_transport_step_dry_run_and_insecure_runtime_do_not_write(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
-            runtime = instance / "runtime.env"
-            body = "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n"
-            runtime.write_text(body, encoding="utf-8")
-            runtime.chmod(0o600)
-            preview = upgrade.step_board_transport(
-                self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True)
-            )
-            self.assertEqual(preview.status, "would-change")
-            self.assertIn("would import legacy transport", preview.detail)
-            self.assertIn("would retire legacy runtime values", preview.detail)
-            self.assertEqual(runtime.read_text(encoding="utf-8"), body)
-            self.assertFalse((instance / "board-transport.env").exists())
+            runtime.write_text("OTHER=value\n", encoding="utf-8")
             runtime.chmod(0o644)
             insecure = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
         self.assertEqual(insecure.status, "failed")
         self.assertIn("permissions are too broad", insecure.detail)
-
-    @_ON_KANBOARD
-    def test_board_transport_step_reports_an_already_configured_transport_as_unchanged(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
-            (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
-            transport = instance / "board-transport.env"
-            transport.write_text(
-                "KANBOARD_URL=http://127.0.0.1:8080/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=local-token\n",
-                encoding="utf-8",
-            )
-            transport.chmod(0o600)
-            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-        self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
-
-    @_ON_KANBOARD
-    def test_board_transport_step_ignores_unrelated_padded_runtime_lines_after_migration(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
-            (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
-            transport = instance / "board-transport.env"
-            transport.write_text(
-                "KANBOARD_URL=http://127.0.0.1:8080/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=local-token\n",
-                encoding="utf-8",
-            )
-            transport.chmod(0o600)
-            runtime = instance / "runtime.env"
-            runtime.write_text("# host settings\n  GITHUB_TOKEN=abc\nOTHER=xyz \n", encoding="utf-8")
-            runtime.chmod(0o600)
-            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
-        self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
 
     def test_memory_restarts_when_its_unit_file_changed(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})

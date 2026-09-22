@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.board.backend import POSTGRES, entity_id, entity_number
+from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 
 
 @dataclass(frozen=True)
@@ -74,23 +74,6 @@ def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception
     return TaskError("validation", f"restored-card {phase} payload for {reference}: {message}", 2)
 
 
-def _preflight_restore_entries(
-    client: Any, entries: list[tuple[Any, str, dict[str, Any]]], phase: str
-) -> None:
-    preflight = getattr(client, "preflight_call", None)
-    if not callable(preflight):
-        return
-    for index, (item, method, payload) in enumerate(entries):
-        try:
-            preflight(method, payload, identifier=index)
-        except Exception as exc:
-            from secretary.tasks import TaskError
-
-            if isinstance(exc, TaskError):
-                raise _restore_payload_error(item, phase, exc) from None
-            raise
-
-
 def _discard_pending_obligation(writer: Any, item: RestoreCardObligation) -> None:
     event = writer.audit.pending_event(item.request_id)
     if event is not None:
@@ -109,7 +92,7 @@ def restore_cards_batched(
 ) -> None:
     """Create and initialize normalized cards without the interactive read cycle."""
     from secretary.restore import _restore_board_metadata
-    from secretary.tasks import TaskError, _BatchCallRejected, _matching_swimlane, _now, _positive_int
+    from secretary.tasks import TaskError, _matching_swimlane, _now, _positive_int
 
     column_ids = {title: identifier for identifier, title in columns.items()}
     obligations: list[RestoreCardObligation] = []
@@ -131,31 +114,6 @@ def restore_cards_batched(
     _validate_restore_inventory(existing, obligations)
     missing = [item for item in obligations if str(item.card["reference"]) not in existing]
     create_entries = [(item, "createTask", _restore_create_payload(item, board_id)) for item in missing]
-    # Use the largest possible signed backend id when sizing calls whose real id is not known yet.
-    # The exact calls are preflighted again by KanboardClient immediately before their first post.
-    placeholder_id = 9_223_372_036_854_775_807
-    initialization_entries: list[tuple[RestoreCardObligation, str, dict[str, Any]]] = []
-    for item in obligations:
-        if writer.audit.committed_event(item.request_id) is not None:
-            continue
-        initialization_entries.extend(
-            [
-                (item, "saveTaskMetadata", {"task_id": placeholder_id, "values": item.metadata}),
-                (
-                    item,
-                    "moveTaskPosition",
-                    {
-                        "project_id": board_id,
-                        "task_id": placeholder_id,
-                        "column_id": item.column_id,
-                        "position": max(1, int(item.card.get("position") or 1)),
-                        "swimlane_id": item.swimlane_id,
-                    },
-                ),
-            ]
-        )
-    _preflight_restore_entries(writer.client, create_entries, "create")
-    _preflight_restore_entries(writer.client, initialization_entries, "metadata/state")
 
     _set_restore_phase(writer.client, "audit")
     for item in obligations:
@@ -189,7 +147,7 @@ def restore_cards_batched(
                         "task_id": "",
                         "ref": reference,
                         "backend": {
-                            "kind": POSTGRES.value,
+                            "kind": BOARD_STORE_KIND,
                             "task_id": None,
                             "revision": "pending",
                         },
@@ -205,8 +163,6 @@ def restore_cards_batched(
             answers = writer.client.call_batch(calls)
             if any(_positive_int(answer) is None for answer in answers):
                 definite_create_failure = True
-        except _BatchCallRejected:
-            definite_create_failure = True
         except TaskError as exc:
             if exc.code == "validation":
                 raise _restore_payload_error(missing[0], "create", exc) from None
@@ -228,12 +184,12 @@ def restore_cards_batched(
                     raise TaskError(
                         "backend_error",
                         "could not create restored Product or Issue record: "
-                        f"Kanboard rejected create for {absent[0]}",
+                        f"board store rejected create for {absent[0]}",
                         1,
                     )
                 raise TaskError(
                     "backend_error",
-                    f"Kanboard rejected restored-card create for {absent[0]}",
+                    f"board store rejected restored-card create for {absent[0]}",
                     1,
                 )
             raise TaskError(
@@ -267,7 +223,7 @@ def restore_cards_batched(
         )
         if metadata != item.metadata:
             write_entries.append((item, "saveTaskMetadata", {"task_id": task_id, "values": item.metadata}))
-        # Kanboard cannot accept an initial position in createTask.  Run the exported placement
+        # createTask does not accept an initial position.  Run the exported placement
         # once for every fresh obligation.  Overlapping archived positions are intentionally
         # reconciled after closure, when the active-only order is knowable.
         if not initialized or not _restore_placement_matches(row, item):
@@ -286,14 +242,11 @@ def restore_cards_batched(
             )
     definite_initialization_failure = False
     if write_entries:
-        _preflight_restore_entries(writer.client, write_entries, "metadata/state")
         writes = [(method, payload) for _item, method, payload in write_entries]
         try:
             answers = writer.client.call_batch(writes)
             if any(answer is not True for answer in answers):
                 definite_initialization_failure = True
-        except _BatchCallRejected:
-            definite_initialization_failure = True
         except TaskError as exc:
             if exc.code == "validation":
                 raise _restore_payload_error(write_entries[0][0], "metadata/state", exc) from None
@@ -313,7 +266,7 @@ def restore_cards_batched(
             if definite_initialization_failure:
                 raise TaskError(
                     "backend_error",
-                    f"Kanboard rejected restored-card metadata/state for {item.card['reference']}",
+                    f"board store rejected restored-card metadata/state for {item.card['reference']}",
                     1,
                 )
             raise TaskError(
@@ -323,8 +276,8 @@ def restore_cards_batched(
             )
         event = writer.audit.pending_event(item.request_id)
         if event is not None:
-            backend = POSTGRES.value
-            event["task_id"] = entity_id("task", backend, task_id)
+            backend = BOARD_STORE_KIND
+            event["task_id"] = entity_id("task", task_id)
             event["backend"]["kind"] = backend
             event["backend"]["task_id"] = task_id
             event["backend"]["revision"] = "initialized"
@@ -339,7 +292,7 @@ def close_restored_cards_batched(
     board_id: int,
 ) -> None:
     """Close archived normalized rows in bounded calls after their comments are proved."""
-    from secretary.tasks import TaskError, _BatchCallRejected, _task_is_active
+    from secretary.tasks import TaskError, _task_is_active
 
     entries: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
     for card in cards:
@@ -350,15 +303,12 @@ def close_restored_cards_batched(
     if not entries:
         return
     owed = [int(payload["task_id"]) for _card, _method, payload in entries]
-    _preflight_restore_entries(client, entries, "closure")
     definite_failure = False
     _set_restore_phase(client, "closure")
     try:
         answers = client.call_batch((method, payload) for _card, method, payload in entries)
         if any(answer is not True for answer in answers):
             definite_failure = True
-    except _BatchCallRejected:
-        definite_failure = True
     except TaskError as exc:
         if exc.code == "validation":
             raise _restore_payload_error(entries[0][0], "closure", exc) from None
@@ -376,7 +326,7 @@ def close_restored_cards_batched(
             if _entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
         )
         if definite_failure:
-            raise TaskError("backend_error", f"Kanboard rejected restored-card closure for {reference}", 1)
+            raise TaskError("backend_error", f"board store rejected restored-card closure for {reference}", 1)
         raise TaskError("audit_pending", "restored-card closure is uncertain; retry is required", 4)
 
 
@@ -398,8 +348,8 @@ def commit_restored_cards(
         if event is None or event.get("kind") != "restored_bulk":
             raise RuntimeError(f"restored card has no durable obligation: {reference}")
         task_id = _entity_number("task", live[reference]["id"])
-        backend = POSTGRES.value
-        event["task_id"] = entity_id("task", backend, task_id)
+        backend = BOARD_STORE_KIND
+        event["task_id"] = entity_id("task", task_id)
         event["backend"]["kind"] = backend
         event["backend"]["task_id"] = task_id
         event["backend"]["revision"] = "initialized:" + str(event["payload"]["content_sha256"])
@@ -496,7 +446,7 @@ def _metadata_map(answer: Any) -> dict[str, str]:
     from secretary.tasks import TaskError
 
     if answer is not None and not isinstance(answer, dict):
-        raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
+        raise TaskError("backend_error", "board store returned invalid task metadata", 1)
     return {str(key): str(value) for key, value in (answer or {}).items()}
 
 
@@ -595,7 +545,7 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                         not isinstance(answer, int) or isinstance(answer, bool) or answer <= 0
                         for answer in answers
                     ):
-                        raise TaskError("backend_error", "Kanboard rejected a batched comment write", 1)
+                        raise TaskError("backend_error", "board store rejected a batched comment write", 1)
                 except Exception:  # noqa: BLE001 - any aggregate failure makes every answer uncertain.
                     _reconcile_uncertain_chunk(writer, grouped, positions, staged)
                     raise TaskError(
@@ -609,10 +559,9 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
 
 
 def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dict[str, list[str]]:
-    """Read histories in Kanboard's stable creation order.
+    """Read histories in the board's stable creation order.
 
-    Pinned Kanboard v1.2.46 orders CommentModel.getAll by
-    ``date_creation ASC, id ASC``.  The id tie-break is the durable creation
+    ``getAllComments`` answers in ``date_creation ASC, id ASC`` order.  The id tie-break is the durable creation
     order when several restores share the same one-second timestamp; the
     disposable backend contract canary is recorded in the recovery docs.
     """
@@ -622,7 +571,7 @@ def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dic
     result: dict[str, list[str]] = {}
     for (reference, _task_id), answer in zip(subjects, answers, strict=True):
         if not isinstance(answer, list) or any(not isinstance(value, dict) for value in answer):
-            raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+            raise TaskError("backend_error", "board store returned invalid task comments", 1)
         result[reference] = [str(value.get("comment") or "") for value in answer]
     return result
 
@@ -647,7 +596,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
         return pending
     kind = "sprint" if item.entity == "sprint" else "task"
-    backend = POSTGRES.value
+    backend = BOARD_STORE_KIND
     return {
         "event_id": "evt_" + uuid.uuid4().hex,
         "schema_version": 1,
@@ -655,7 +604,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
         "actor": {"role": "steward", "id": "restore"},
         "kind": "restored_comment",
         "outcome": "success",
-        "task_id": entity_id(kind, backend, item.task_id),
+        "task_id": entity_id(kind, item.task_id),
         "ref": item.reference,
         "backend": {"kind": backend, "task_id": item.task_id, "revision": "pending"},
         "request_id": item.request_id,
@@ -799,7 +748,7 @@ def reconcile_restore_order(
             raise TaskError("backend_error", "restore order group does not match normalized records", 1)
         task_id = _positive_int(rows[references[0]].get("id"))
         if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raise TaskError("backend_error", "board store returned an invalid task", 1)
         event = {
             "event_id": "evt_" + uuid.uuid4().hex,
             "schema_version": 1,
@@ -807,9 +756,9 @@ def reconcile_restore_order(
             "actor": {"role": "steward", "id": "restore"},
             "kind": "restored_order",
             "outcome": "success",
-            "task_id": entity_id("task", POSTGRES.value, task_id),
+            "task_id": entity_id("task", task_id),
             "ref": references[0],
-            "backend": {"kind": POSTGRES.value, "task_id": task_id, "revision": "pending"},
+            "backend": {"kind": BOARD_STORE_KIND, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
             "payload": {**identity, "references": references},
         }
@@ -854,7 +803,7 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
         reference = references[mismatch]
         task_id = _positive_int(rows[reference].get("id"))
         if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+            raise TaskError("backend_error", "board store returned an invalid task", 1)
         board_id, columns, swimlanes = writer.reader._board()
         column_id = next((identifier for identifier, title in columns.items() if title == column), None)
         swimlane_id = next(
@@ -880,7 +829,7 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
             continue
         live, rows = _live_restore_group(writer, column, swimlane)
         if live[: mismatch + 1] != references[: mismatch + 1]:
-            raise TaskError("backend_error", "Kanboard move result is uncertain", 1)
+            raise TaskError("backend_error", "board store move result is uncertain", 1)
     proven, _ = _live_restore_group(writer, column, swimlane)
     if proven != references:
         raise TaskError("backend_error", "restored order repair could not be verified", 1)
@@ -1063,7 +1012,7 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
             answers = writer.client.call_batch([("getAllComments", {"task_id": task_id})])
             comments = answers[0]
             if not isinstance(comments, list) or any(not isinstance(comment, dict) for comment in comments):
-                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+                raise TaskError("backend_error", "board store returned invalid task comments", 1)
             return sum(_digest(str(comment.get("comment") or "")) == digest for comment in comments)
 
         matches = matching_count()
@@ -1076,7 +1025,7 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
                 )
             answer = writer.client.call("createComment", task_id=task_id, user_id=0, content=body)
             if not isinstance(answer, int) or isinstance(answer, bool) or answer <= 0:
-                raise TaskError("backend_error", "Kanboard rejected the restored comment", 1)
+                raise TaskError("backend_error", "board store rejected the restored comment", 1)
             matches = matching_count()
         if matches <= occurrence:
             raise TaskError("backend_error", "pending restore comment remains incomplete", 1)

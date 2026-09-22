@@ -80,7 +80,7 @@ class Replace:
 class SprintSupplement:
     """The only non-state values a migrated Sprint edge may persist.
 
-    These are domain values, not a Kanboard metadata bag.  The adapter owns
+    These are domain values, not a board metadata bag.  The adapter owns
     their storage spelling and rejects combinations that do not belong to an
     edge, so callers cannot tunnel unrelated sprint fields through a lifecycle
     transition.
