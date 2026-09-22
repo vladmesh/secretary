@@ -14,14 +14,15 @@ from unittest import mock
 
 from secretary.runtime.claude_sessions import claude_project_dir_name
 from tests.fakes.triggered_dispatch import FakeSessionHost
-from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
+from secretary.runtime import tui_delivery
+from triggered_agents.runtime import codex_preflight, dispatch
 from triggered_agents.runtime import state as runtime_state
-from triggered_agents.runtime.agent_prompt_transport import (
+from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
 from triggered_agents.runtime.head import HeadSpec
-from triggered_agents.runtime.pane_host import Pane, PaneHostError
+from secretary.runtime.pane_host import Pane, PaneHostError
 
 
 class RecordingReports:
@@ -410,7 +411,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
             mock.patch.object(dispatch, "_ensure_claude_ready"),
             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
             mock.patch.object(dispatch, "_codex_turn_after", return_value=True),
-            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"),
+            mock.patch("secretary.runtime.tui_delivery.time.sleep"),
         ):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
 
@@ -429,7 +430,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
             mock.patch.object(dispatch, "_codex_turn_after", return_value=True),
             mock.patch.object(dispatch, "_claude_user_turn_after", return_value=False),
-            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"),
+            mock.patch("secretary.runtime.tui_delivery.time.sleep"),
         ):
             dispatch._send_reuse_dispatch(
                 "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch", host=host
@@ -448,9 +449,9 @@ class TriggeredCodexHeadTests(unittest.TestCase):
             mock.patch.object(dispatch, "_ensure_claude_ready"),
             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
             mock.patch.object(dispatch, "_codex_turn_after", return_value=False),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
         ):
             with self.assertRaises(tui_delivery.TuiDeliveryError):
                 dispatch._spawn_fresh_terminal(

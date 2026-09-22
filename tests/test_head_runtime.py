@@ -66,7 +66,7 @@ from triggered_agents.runtime.orca_legacy_head import (
     STOP_TURN_IN_FLIGHT,
     OrcaLegacyHeadRuntime,
 )
-from triggered_agents.runtime.pane_host import Pane, PaneHostError
+from secretary.runtime.pane_host import Pane, PaneHostError
 
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
 WORKSPACE = "/tmp/does-not-need-to-exist/secretary-1461"
@@ -103,7 +103,7 @@ class StartupHeldTransport(head_operations.HostTransport):
         super().__init__(confirm=confirmed)
 
     def deliver(self, run, pointer, *, host, subject):
-        from triggered_agents.runtime.tui_delivery import TuiDeliveryError
+        from secretary.runtime.tui_delivery import TuiDeliveryError
 
         raise TuiDeliveryError(
             "the pane never confirmed the prompt",

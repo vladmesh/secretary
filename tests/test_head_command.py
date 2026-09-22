@@ -414,7 +414,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 def _module_paths() -> list[Path]:
     """Every module of both packages, minus the two files the seam is allowed to live in."""
     allowed = {
-        REPO_ROOT / "src" / "triggered_agents" / "runtime" / "pane_host.py",
+        REPO_ROOT / "src" / "secretary" / "runtime" / "pane_host.py",
     }
     head_package = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "head"
     paths = []
@@ -628,7 +628,7 @@ class SeamGrepTests(unittest.TestCase):
         that module is the seam. A copy of it left in the dispatcher would have needed one, and an
         invariant with a silent exception in it is not an invariant.
         """
-        from triggered_agents.runtime import pane_host
+        from secretary.runtime import pane_host
 
         self.assertEqual(
             pane_host.safe_command_label(
@@ -657,7 +657,7 @@ class SeamGrepTests(unittest.TestCase):
         and only the legacy and headless cases reach this verb.
         """
         from triggered_agents.runtime import orca_legacy_head
-        from triggered_agents.runtime.pane_host import SessionHost
+        from secretary.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))
         source = (REPO_ROOT / "src" / "secretary" / "dispatch" / "host.py").read_text(encoding="utf-8")

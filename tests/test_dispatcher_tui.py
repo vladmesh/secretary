@@ -54,7 +54,7 @@ from tests.fakes.observer import (
 from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from triggered_agents.runtime.tui_delivery import DeliveryEvidence, composer_holds_payload
+from secretary.runtime.tui_delivery import DeliveryEvidence, composer_holds_payload
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -574,8 +574,8 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             )
 
             with (
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
             ):
                 host._launch(
                     str(workspace),
@@ -604,10 +604,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
 
             with (
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1),
                 self.assertRaises(HostError),
             ):
                 host._launch(
@@ -665,7 +665,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}),
-                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
             ):
                 handle = host._launch(
                     str(workspace),
@@ -1157,13 +1157,13 @@ class TuiDeliveryStageTests(unittest.TestCase):
             clock[0] += seconds
 
         with (
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
-            mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]),
-            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
-            mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+            mock.patch("secretary.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]),
+            mock.patch("secretary.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
+            mock.patch("secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
         ):
             return deliver_interactive_prompt("term-observer", prompt, run_json=pane.run_json, **kwargs)
 
@@ -1515,7 +1515,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
             raise AssertionError(args)
 
         with mock.patch(  # noqa: SIM117
-            "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0
+            "secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0
         ):
             with self.assertRaises(TuiDeliveryError) as raised:
                 deliver_interactive_prompt(
@@ -1967,7 +1967,7 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         pane = ScriptedPane({0: UPDATE_MODAL_SCREEN})
 
         with mock.patch(  # noqa: SIM117
-            "triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0
+            "secretary.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0
         ):
             with self.assertRaises(TuiDeliveryError) as raised:
                 self.deliver(pane, ack_out_of_band=True)

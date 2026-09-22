@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from triggered_agents.runtime.pane_host import Pane, PaneSplitSourceMissing
+from secretary.runtime.pane_host import Pane, PaneSplitSourceMissing
 
 
 class FakeSessionHost:

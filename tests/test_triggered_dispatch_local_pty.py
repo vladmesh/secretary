@@ -42,7 +42,7 @@ from triggered_agents.runtime.head import HeadCommand
 from triggered_agents.runtime.head.local_pty import protocol
 from triggered_agents.runtime.head.local_pty.client import SupervisorClient
 from triggered_agents.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from triggered_agents.runtime.pane_host import Pane
+from secretary.runtime.pane_host import Pane
 
 REPO = Path(__file__).resolve().parents[1]
 #: A head that never exits and says what its own terminal handed it. Both properties are the point:

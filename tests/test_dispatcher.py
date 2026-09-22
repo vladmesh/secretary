@@ -6775,9 +6775,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             mock.patch.object(
                 real_host, "_signal_head", side_effect=AssertionError("unexpected head signal")
             ),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
         ):
             held = self.tick()
 

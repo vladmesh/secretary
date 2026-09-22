@@ -28,8 +28,8 @@ from typing import Any, Protocol
 
 from secretary.runtime.prompt_document import nudge_for
 
-from ..pane_host import Pane, PaneSplitSourceMissing, SessionHost
-from ..tui_delivery import (
+from secretary.runtime.pane_host import Pane, PaneSplitSourceMissing, SessionHost
+from secretary.runtime.tui_delivery import (
     READINESS_BLOCKED,
     READINESS_BUSY,
     DeliveryOutcome,

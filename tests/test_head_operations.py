@@ -53,7 +53,7 @@ from triggered_agents.runtime.head import (
     stop,
 )
 from triggered_agents.runtime.head import operations as head_operations
-from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
+from secretary.runtime.pane_host import PaneSplitSourceMissing
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
 

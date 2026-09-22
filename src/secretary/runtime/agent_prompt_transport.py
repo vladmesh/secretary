@@ -14,6 +14,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -186,7 +187,7 @@ def _record_write(receipt: PromptTransportReceipt, kind: str, answer: Any) -> No
 
 
 @contextmanager
-def terminal_prompt_lock(handle: str):
+def terminal_prompt_lock(handle: str) -> Iterator[None]:
     """Serialise one terminal's prompt pairs across threads and local processes."""
     key = hashlib.sha256(str(handle).encode("utf-8", "replace")).hexdigest()
     with _thread_locks_guard:

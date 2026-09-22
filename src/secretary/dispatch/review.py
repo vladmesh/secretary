@@ -77,7 +77,7 @@ from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatch.worker_lifecycle import head_run_binding
-from triggered_agents.runtime.pane_host import (
+from secretary.runtime.pane_host import (
     OrcaSessionHost,
     PaneHostError,
     WorkspaceInventory,

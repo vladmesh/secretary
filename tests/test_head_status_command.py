@@ -565,7 +565,7 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
     workspace = "/home/dev/orca/workspaces/secretary/ws"
 
     def _host(self, payloads):
-        from triggered_agents.runtime.pane_host import OrcaSessionHost
+        from secretary.runtime.pane_host import OrcaSessionHost
 
         calls: list[list[str]] = []
 
@@ -612,7 +612,7 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
     def test_a_build_that_refuses_the_option_keeps_its_ptys_and_says_the_tree_is_unread(
         self,
     ) -> None:
-        from triggered_agents.runtime.pane_host import PaneHostError
+        from secretary.runtime.pane_host import PaneHostError
 
         def payloads(args):
             if "--include-visual-layouts" in args:
@@ -682,7 +682,7 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
 
     def test_a_supplementary_runtime_pane_id_is_carried_where_a_host_names_one(self) -> None:
         """Kept as supporting evidence only: this call's real answer has no such field."""
-        from triggered_agents.runtime.pane_host import OrcaSessionHost
+        from secretary.runtime.pane_host import OrcaSessionHost
 
         host = OrcaSessionHost(
             lambda _args: {

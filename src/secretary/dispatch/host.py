@@ -273,13 +273,13 @@ from triggered_agents.runtime.head_runtime_backends import (
 )
 from triggered_agents.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 from secretary.runtime.launch_prefix import pythonpath_prefix
-from triggered_agents.runtime.pane_host import (
+from secretary.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
     PaneHostError,
     SessionHost,
 )
-from triggered_agents.runtime.pane_host import (
+from secretary.runtime.pane_host import (
     safe_command_label as _safe_command_label,
 )
 from secretary.runtime.paths import configured_product_root
