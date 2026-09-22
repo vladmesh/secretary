@@ -25,17 +25,18 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 from secretary import dispatcher as dispatcher_module
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.state import DispatcherRecord, now_rfc3339
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
-    FakeKanboard,
     FakeSprints,
+    dispatcher_seed,
 )
 from tests.observer_identity import bind_observer
+from tests.sql_backend_fixtures import card_store
 
-CARD_REF = "secretary-510-pilot"
+CARD_REF = "secretary-510"
 
 
 class LegacyPathTests(unittest.TestCase):
@@ -48,16 +49,17 @@ class LegacyPathTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
         env.start()
         self.addCleanup(env.stop)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         self.sprints = FakeSprints()
         self.runtime = dispatcher_module.DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,
             self.host,
@@ -69,22 +71,14 @@ class LegacyPathTests(unittest.TestCase):
 
     def observed_sprint(self) -> None:
         """Bind the pilot card to an open sprint with a declared observer head."""
-        self.board.metadata[12]["sprint_ref"] = "sprint:1031"
+        self.board.save_metadata(12, sprint_ref="sprint:1031")
         bind_observer(self, "sprint:1031")
         self.sprints.rows["sprint:1031"] = {
             "ref": "sprint:1031",
             "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
-        row = next((r for r in self.board.sprints if r["reference"] == "sprint:1031"), None)
-        if row is None:
-            self.board.add_sprint(
-                "sprint:1031",
-                status="open",
-                sprint_reservations='["secretary"]',
-            )
-        else:
-            self.board.metadata[int(row["id"])]["sprint_status"] = "open"
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
 
     def start_dispatcher(self) -> None:
         self.observed_sprint()
@@ -479,10 +473,10 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         A reviewer spawn refusing deterministically behind a pending gate must not sit out
         the six-hour rollup ceiling either; three sightings are enough for the policy.
         """
+        from secretary.dispatch.gate import GateResult
         from secretary.dispatch.head_vitality_policy import (
             DEFAULT_DETERMINISTIC_REFUSAL_LIMIT,
         )
-        from secretary.dispatch.gate import GateResult
 
         self.start_dispatcher()
         self.host.gate_results = [GateResult("pending", "CI still running")] * 8

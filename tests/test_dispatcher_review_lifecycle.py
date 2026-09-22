@@ -13,6 +13,13 @@ from unittest import mock
 
 from secretary.checkpoint import CheckpointResult
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.review import (
+    recover_review_launch,
+)
+from secretary.dispatch.state import (
+    DispatcherRecord,
+)
 from secretary.dispatcher import (
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
@@ -24,13 +31,6 @@ from secretary.dispatcher import (
     DispatcherError,
     DispatcherRuntime,
     HostError,
-)
-from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatch.review import (
-    recover_review_launch,
-)
-from secretary.dispatch.state import (
-    DispatcherRecord,
 )
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
@@ -51,7 +51,7 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuationStage,
     head_run_binding,
 )
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
@@ -64,11 +64,12 @@ from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeCheckpoint,
     FakeHost,
-    FakeKanboard,
     FakePusher,
+    dispatcher_seed,
 )
 from tests.fanout_fixtures import accepted_transport_run
 from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard, card_store
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
@@ -88,7 +89,7 @@ from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 def setUpModule() -> None:
     """Confirm this CI shard can build its disposable board seam before tests run."""
-    require_disposable_board_fixture(FakeKanboard)
+    require_disposable_board_fixture(PostgresBoard.shared)
 
 
 class PidHeartbeatTests(unittest.TestCase):
@@ -597,6 +598,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.card_audit = task_audit_for(card_store(self, dispatcher_seed()))
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
@@ -647,6 +649,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
         identity, with the cleanup recorded as the initiator.
         """
         host = NudgingReviewHost(self.root, screen="idle\n› ")
+        host.audit = self.card_audit
 
         with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted) as caught:
             host.restart_worker(self.task, self._record())
@@ -670,6 +673,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
         the same path next tick. Nothing about the round depends on the pane having answered.
         """
         host = NudgingReviewHost(self.root, screen="idle\n› ")
+        host.audit = self.card_audit
 
         with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted):
             host.restart_worker(self.task, self._record())
@@ -682,6 +686,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
 
     def test_a_confirmed_worker_nudge_reports_the_document_it_pointed_at(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.audit = self.card_audit
 
         with self._bounded_delivery():
             launched = host.restart_worker(self.task, self._record())
@@ -703,6 +708,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.card_audit = task_audit_for(card_store(self, dispatcher_seed()))
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
@@ -748,6 +754,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def test_a_worker_bring_up_hands_back_the_run_that_head_is(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.audit = self.card_audit
 
         with self._bounded_delivery():
             launched = host.restart_worker(self.task, self._record())
@@ -769,6 +776,7 @@ class WorkerLifecycleTests(unittest.TestCase):
     def test_the_worker_report_prompt_goes_to_the_pane_the_leaf_names_now(self) -> None:
         """The reincarnation case, on the production nudge: the handle moved, the head did not."""
         host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.audit = self.card_audit
         host.terminals = [{"handle": "term-alias", "leafId": "leaf-worker", "connected": True}]
         record = self._record(
             worker_leaf="leaf-worker",
@@ -806,6 +814,7 @@ class WorkerLifecycleTests(unittest.TestCase):
     def test_a_busy_continuation_wait_does_not_signal_the_retained_worker(self) -> None:
         """The signal is inside the shared delivery path, after its readiness wait."""
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         host.wait_answer = HostError(
             'orca terminal wait --for tui-idle --timeout-ms 60000 failed: {"error":{"code":"timeout"}}'
         )
@@ -858,6 +867,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def test_a_stopped_worker_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         record = self._record(worker_leaf="leaf-worker")
 
         host.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
@@ -870,6 +880,7 @@ class WorkerLifecycleTests(unittest.TestCase):
     def test_a_stop_that_is_refused_still_names_its_initiator(self) -> None:
         """The dispatcher may die between the two; the record must not lose who was ending this."""
         host = NudgingReviewHost(self.root, fail_ops={"close"})
+        host.audit = self.card_audit
         record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(self.root / "w.pid"))
         Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
@@ -885,6 +896,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def test_a_live_foreign_worker_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
         host = RecordingReviewHost(self.root)
+        host.audit = self.card_audit
         pid_file = self.root / "foreign-worker.pid"
         record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(pid_file))
         record.worker_head_run = head_ops.HeadRun(
@@ -930,6 +942,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.audit = self.card_audit
         record = self._record()
 
         with self._bounded_delivery():
@@ -957,6 +970,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.card_audit = task_audit_for(card_store(self, dispatcher_seed()))
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
@@ -1017,6 +1031,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def test_a_reviewer_bring_up_hands_back_the_run_that_head_is(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.audit = self.card_audit
 
         with self._bounded_delivery():
             launch = host.start_review(self.task, self._record())
@@ -1063,6 +1078,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def test_a_stopped_reviewer_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
         host = RecordingReviewHost(self.root)
+        host.audit = self.card_audit
         record = self._record(review_handle="term-review", review_head_run=self._stored_run(leaf=""))
 
         host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
@@ -1076,6 +1092,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
         """The stop the dispatcher could not finish: `commit` runs before the pane is touched, so
         the record is in `finishing` with its initiator, and the next tick continues that stop."""
         host = RecordingReviewHost(self.root, fail_ops={"close"})
+        host.audit = self.card_audit
         record = self._record(
             handle="",
             review_handle="term-review",
@@ -1109,6 +1126,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def test_a_live_foreign_reviewer_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
         host = RecordingReviewHost(self.root)
+        host.audit = self.card_audit
         pid_file = self.root / "foreign-reviewer.pid"
         record = self._record(
             review_handle="term-review",
@@ -2045,21 +2063,22 @@ class ProductionPauseTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.legacy_mirror = self.data_dir / "legacy-pause.json"
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
         )
-        self.ref = "secretary-510-pilot"
+        self.ref = "secretary-510"
 
     def pause(self, mode: str, **kwargs) -> dict:
         return self.runtime.pause_pipeline(mode=mode, actor="operator", reason="host maintenance", **kwargs)
@@ -2115,7 +2134,7 @@ class ProductionPauseTests(unittest.TestCase):
                 self.pause(mode)
                 self.runtime.production_tick()
                 self.assertEqual(self.reader.show(self.ref)["state"], "ready")
-                self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+                self.assertEqual(self.reader.show("secretary-511")["state"], "ready")
                 self.runtime.resume_pipeline(actor="operator")
 
     def test_drain_keeps_driving_the_card_already_in_flight(self) -> None:
@@ -2128,7 +2147,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["to"], "validate")
         self.assertEqual(self.reader.show(self.ref)["state"], "validate")
         # ...and the Ready neighbour is still not claimed while the drain holds.
-        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
+        self.assertEqual(self.reader.show("secretary-511")["state"], "ready")
 
     def test_freeze_stops_the_worker_head_without_touching_the_workspace(self) -> None:
         self.runtime.production_tick()

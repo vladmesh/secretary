@@ -63,7 +63,6 @@ from secretary.infra.github_credential import (
     RemoteExecution,
 )
 from secretary.product_issues import (
-    ProductIssueTransaction,
     ProductIssueValidationError,
     registered_projects,
 )
@@ -426,11 +425,10 @@ class CheckpointWriter:
         """The card client of this installation and the audit owner that client names.
 
         The gate below decides whether a snapshot may be published, so it may not be answered by a
-        store nobody writes. `task_audit_for` reads the answer off the client the switch built, so
-        a PostgreSQL installation is gated on staged `requests` rows and a Kanboard one on its
-        pending files (`docs/BOARD_STORE.md` §7.3). A client that cannot be established blocks the
-        checkpoint by name instead of falling back to the file journal, whose absence or staleness
-        would otherwise report a clean board that was never read.
+        store nobody writes: the installation is gated on its staged `requests` rows
+        (`docs/BOARD_STORE.md` §7.3). A client that cannot be established blocks the checkpoint by
+        name instead of falling back to a file journal, whose absence or staleness would otherwise
+        report a clean board that was never read.
         """
         try:
             client = self._client if self._client is not None else board_client(
@@ -460,29 +458,19 @@ class CheckpointWriter:
 
     def _write(self) -> CheckpointResult:
         self._collect_abandoned_staging()
-        client, audit_owner = self._audit_owner()
-        backend = getattr(client, "backend_kind", "kanboard")
+        _, audit_owner = self._audit_owner()
         try:
             self._settle_stale_staged(audit_owner)
             audit = audit_owner.status()
         except TaskError as exc:
             raise CheckpointBlocked(
-                f"the {backend} task audit could not be read: {exc.message}"
+                f"the postgres task audit could not be read: {exc.message}"
             ) from None
         if not audit["ok"]:
             raise CheckpointBlocked(
-                f"the {backend} task audit has {audit['pending']} unresolved pending record(s)"
+                f"the postgres task audit has {audit['pending']} unresolved pending record(s)"
                 + _oldest_pending_text(audit_owner)
             )
-        if backend != "postgres":
-            # The private staged Product/Issue journal is the Kanboard implementation's; on the
-            # PostgreSQL backend the record and the effect are one transaction (§7.1), which is
-            # the same reason `export_board` states for asking only there.
-            product_issue = ProductIssueTransaction(self.data_dir, audit_owner).status()
-            if not product_issue["ok"]:
-                raise CheckpointBlocked(
-                    f"Product/Issue transactions have {product_issue['pending']} unresolved pending record(s)"
-                )
 
         board, runs = self._regenerate()
         self._prevent_run_history_loss()
@@ -513,8 +501,7 @@ class CheckpointWriter:
     def _settle_stale_staged(self, audit_owner: Any) -> None:
         """Let this tick settle what a dead writer left staged, before the gate counts it.
 
-        Only an audit owner that can prove an effect from its store offers this (`SqlTaskAudit`);
-        the file journal keeps its operator repair, `secretary task reconcile-audit`. A row younger
+        The audit owner proves an effect from its store (`SqlTaskAudit.settle_stale_staged`). A row younger
         than the owner's grace is left alone and still blocks this checkpoint, as it always has.
         """
         settle = getattr(audit_owner, "settle_stale_staged", None)

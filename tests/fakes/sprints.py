@@ -24,6 +24,7 @@ from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import bind_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON
+from tests.sprint_contract import CARD_STORE_ONLY as SPRINT_CARD_STORE_ONLY
 from tests.sprint_contract import KANBOARD_ONLY as SPRINT_KANBOARD_ONLY
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
@@ -173,6 +174,49 @@ class SprintKanboard(BatchedCalls):
             task["is_active"] = 0
             return True
         raise AssertionError(method)
+
+
+class SprintBoard(SprintKanboard):
+    """The Sprint Kanboard fixture with a sprint board already on it, and `secretary-510` as its card.
+
+    What a status read of sprints needs and nothing else: the projection is Sprint code, which keeps
+    its Kanboard implementation until sprint:1452 retires it, so these reads need no card store.
+    """
+
+    SPRINT_BOARD = 8
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.projects[SPRINT_BOARD_NAME] = self.SPRINT_BOARD
+        self.columns[self.SPRINT_BOARD] = [{"id": 80, "title": "Backlog"}]
+        self.swimlanes[self.SPRINT_BOARD] = []
+        self.tasks[0]["reference"] = "secretary-510"
+
+    def add_sprint(self, reference: str, *, status: str = "open", **metadata: object) -> None:
+        task_id = 100 + len([task for task in self.tasks if task["project_id"] == self.SPRINT_BOARD])
+        self.tasks.append(
+            {
+                "id": task_id,
+                "project_id": self.SPRINT_BOARD,
+                "reference": reference,
+                "title": "sprint",
+                "description": "",
+                "column_id": 80,
+                "position": task_id,
+                "swimlane_id": 0,
+                "date_creation": "1720000000",
+                "date_modification": "1720000000",
+            }
+        )
+        self.metadata[task_id] = {
+            "sprint_goal": "ship the thing",
+            "sprint_definition_of_done": "the thing ships",
+            "sprint_repositories": '["secretary"]',
+            "sprint_status": status,
+            "sprint_current_task": "",
+            **{key: str(value) for key, value in metadata.items()},
+        }
+        self.comments[task_id] = []
 
 
 class ProductSprintKanboard(SprintKanboard):
@@ -327,6 +371,11 @@ class SprintBackendFixture:
         reason = self.KANBOARD_ONLY.get(qualified)
         if reason and self.BACKEND != "kanboard":
             self.skipTest(f"Kanboard-only: {reason}")  # type: ignore[attr-defined]
+        if qualified in SPRINT_CARD_STORE_ONLY and self.BACKEND == "kanboard":
+            self.skipTest(  # type: ignore[attr-defined]
+                "writes a card, and cards have one implementation: runs on the store in "
+                "tests/test_sprints_sql_backend.py"
+            )
 
 
 class SprintFixture(SprintBackendFixture, unittest.TestCase):

@@ -35,9 +35,9 @@ from secretary.tasks import TaskError, TaskReader, task_audit_for
 from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.cursor import POSITION_OFFSET, POSITION_ORDINAL, Cursor, decode
+from secretary.webproto.cursor import POSITION_ORDINAL, Cursor, decode
 from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, ReadError, TaskNotFound
-from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventJournal, EventPage
+from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
 
 SCHEMA_VERSION = 1
 
@@ -157,11 +157,9 @@ class ReadLayer(ProtocolBoundary):
 
         The one place this layer decides where a card's events come from, and it decides it the way
         every other live audit reader of this installation does: resolve the card client, ask
-        :func:`secretary.tasks.task_audit_for` for that client's audit owner, read that owner. On
-        Kanboard the owner is the file journal and the reader seeks in it by byte offset, unchanged;
-        on `SECRETARY_CARD_BACKEND=postgres` the owner is `requests`/`board_events` and the reader
-        pages its ordered traversal, with the file projection under `<data>/board` not consulted at
-        all (`docs/BOARD_STORE.md` §7.3).
+        :func:`secretary.tasks.task_audit_for` for that client's audit owner, and page that owner's
+        ordered traversal (`requests`/`board_events`, `docs/BOARD_STORE.md` §7.3). The file
+        projection under `<data>/board` is not consulted at all.
 
         Until this existed, `task_snapshot` and `task_events` opened `board/events.ndjson` whatever
         the installation was, so a migrated one answered a card's history from a file its writers do
@@ -169,11 +167,7 @@ class ReadLayer(ProtocolBoundary):
         where an old one was left behind -- with every committed record, a product run's included,
         invisible.
         """
-        client = self._client()
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            audit = task_audit_for(client, data_dir)
-            return CommittedAudit(audit, backend="postgres"), POSITION_ORDINAL
-        return EventJournal(data_dir), POSITION_OFFSET
+        return CommittedAudit(task_audit_for(self._client(), data_dir)), POSITION_ORDINAL
 
     def _unselected(
         self, ref: str, cursor: str | None, exc: Exception, data_dir: Path, *, now: float
@@ -290,11 +284,10 @@ class ReadLayer(ProtocolBoundary):
         Both hold because the position is a place in an append-only history rather than a time or a
         recomputed index -- see :mod:`secretary.webproto.cursor`.
 
-        Which store that history is in is the card client's answer (:meth:`_events`): a byte in
-        `board/events.ndjson` on Kanboard, an ordinal in the committed `requests` traversal on
-        PostgreSQL. A cursor says which of the two it measures, so one issued in the other store --
-        a byte offset kept by a client across an installation's migration, say -- is refused by
-        name instead of read as a position here, and the caller gets its continuation from a fresh
+        The history is the card audit's (:meth:`_events`): an ordinal in the committed `requests`
+        traversal. A cursor says what it measures, so a byte offset into the retired file journal --
+        kept by a client across an installation's migration, say -- is refused by name instead of
+        read as a position here, and the caller gets its continuation from a fresh
         :meth:`task_snapshot`.
         """
         now = self._clock()

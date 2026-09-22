@@ -10,7 +10,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatcher import DispatcherRuntime
 from secretary.dispatch.observer import (
     ObserverRecord,
     load_observers,
@@ -26,6 +25,7 @@ from secretary.dispatch.observer_fence import (
     observer_fence,
 )
 from secretary.dispatch.production import _reconcile_production
+from secretary.dispatcher import DispatcherRuntime
 from secretary.sprint_observer import (
     REASON_HISTORICAL,
     REASON_MALFORMED,
@@ -41,16 +41,17 @@ from secretary.sprint_observer import (
     observer_choice,
     parse_observer,
 )
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_audit_for
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
-    FakeKanboard,
     TwoOpenSprintAdmission,
+    dispatcher_seed,
 )
 from tests.fakes.observer import DEAD_PID, install_skill_registry
 from tests.fakes.sprints import SprintFixture
 from tests.sprint_close_fixtures import close_decisions
+from tests.sql_backend_fixtures import card_store
 
 
 def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
@@ -65,6 +66,11 @@ def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
     )
     path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
+
+
+#: A persisted declaration that names no observer. `sprints.observer` is `jsonb`, so text that is not
+#: JSON at all cannot be stored; the corruption a store can hold is JSON of no observer shape.
+CORRUPT_DECLARATION = '{"kind": "not-an-observer"}'
 
 class ObserverValueTests(unittest.TestCase):
     """Four tagged forms, and nothing that resembles one."""
@@ -325,7 +331,7 @@ class ObserverFenceFixture(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.catalog.profiles["claude-observer"] = {
             "adapter": "claude",
@@ -333,10 +339,11 @@ class ObserverFenceFixture(unittest.TestCase):
             "resource": "claude-sub",
         }
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             TaskReader(self.board),  # type: ignore[arg-type]
             TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -374,16 +381,15 @@ class ObserverFenceTests(ObserverFenceFixture):
         declaration has an adopted head and a broken one still has none.
         """
         self.declare(declaration)
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.board.tasks[0]["column_id"] = 3
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.board.move(12, "in_progress")
         self.runtime.production_tick()
         return self.runtime.production_tick()["actions"]
 
     def test_a_sprint_redeclared_as_none_gives_its_head_back(self) -> None:
         self.declare(encode_observer(head_choice("claude-observer")))
         self.runtime.production_tick()
-        row = next(item for item in self.board.sprints if item["reference"] == "sprint:1")
-        self.board.metadata[int(row["id"])]["sprint_observer"] = encode_observer(none_choice())
+        self.board.save_sprint_metadata("sprint:1", sprint_observer=encode_observer(none_choice()))
 
         result = self.runtime.production_tick()
 
@@ -397,7 +403,7 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_a_corrupt_declaration_fences_before_any_card_moves(self) -> None:
 
-        actions = self._tick_twice_with_an_active_card("{not json")
+        actions = self._tick_twice_with_an_active_card(CORRUPT_DECLARATION)
 
         fenced = [action for action in actions if action["step"] == "observer-fence"]
         self.assertEqual([action["observer_reason"] for action in fenced], [REASON_MALFORMED])
@@ -415,12 +421,12 @@ class ObserverFenceTests(ObserverFenceFixture):
         reserved, and it has left the active cycle. Reconciliation reads such a record as orphaned
         and settles its heads, which is exactly the mutation the fence exists to prevent.
         """
-        self.declare("{not json")
+        self.declare(CORRUPT_DECLARATION)
         # An unlinked card of the reserved project, out of the cycle, with a live record.
-        self.board.tasks[1]["column_id"] = 5
+        self.board.move(13, "blocked")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-510-neighbor": {
+            "secretary-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -442,7 +448,7 @@ class ObserverFenceTests(ObserverFenceFixture):
             ["observer-fenced"],
         )
         self.assertEqual([action for action in result["actions"] if action["step"] == "advance"], [])
-        self.assertIn("secretary-510-neighbor", self.runtime.production_state.load()["records"])
+        self.assertIn("secretary-511", self.runtime.production_state.load()["records"])
 
     def test_the_same_card_advances_once_the_declared_observer_is_adopted(self) -> None:
         """The control for the fence: without it the pass above proves nothing."""
@@ -510,14 +516,14 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_fencing_is_project_local(self) -> None:
         self.declare(encode_observer(head_choice("claude-observer")))
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.board.metadata[13]["project"] = "other"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.board.save_metadata(13, project="other")
 
         fence = self.fence()
 
         self.assertEqual(fence["projects"], {"secretary"})
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
 
     def test_a_fence_that_cannot_stage_its_outcome_stops_the_whole_tick(self) -> None:
         """An empty fence is not "nothing may be decided", it is "everything may move".
@@ -526,9 +532,9 @@ class ObserverFenceTests(ObserverFenceFixture):
         a permissions change can take the audit while the state stays writable. The tick has to end
         there rather than fall back to a fence that permits every card.
         """
-        self.declare("{not json")
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.board.tasks[0]["column_id"] = 3
+        self.declare(CORRUPT_DECLARATION)
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.board.move(12, "in_progress")
 
         with mock.patch(
             "secretary.dispatch.observer_fence.stage_event",
@@ -553,13 +559,13 @@ class ObserverFenceTests(ObserverFenceFixture):
         An empty ref set there would hand reconciliation a fenced project's record as an orphan and
         it would stop its heads and remove it — the exact mutation the fence exists to prevent.
         """
-        self.declare("{not json")
+        self.declare(CORRUPT_DECLARATION)
         # An unlinked card of the reserved project, out of the active cycle, with a live record:
         # what reconciliation settles when nothing tells it the card is fenced.
-        self.board.tasks[1]["column_id"] = 5
+        self.board.move(13, "blocked")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-510-neighbor": {
+            "secretary-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -586,7 +592,7 @@ class ObserverFenceTests(ObserverFenceFixture):
 
         self.assertEqual(result["status"], "critical")
         self.assertEqual(result["action"], "observer-fence-unavailable")
-        self.assertIn("secretary-510-neighbor", self.runtime.production_state.load()["records"])
+        self.assertIn("secretary-511", self.runtime.production_state.load()["records"])
         self.assertEqual(
             [action for action in result["actions"] if action.get("step") == "production-reconcile"],
             [],
@@ -594,12 +600,12 @@ class ObserverFenceTests(ObserverFenceFixture):
 
     def test_reconciliation_classifies_the_card_it_reads_against_the_fence(self) -> None:
         """The second line: a card absent from the fence's inventory is still fenced by its sprint."""
-        self.declare("{not json")
-        self.board.tasks[1]["column_id"] = 5
-        self.board.metadata[13]["sprint_ref"] = "sprint:1"
+        self.declare(CORRUPT_DECLARATION)
+        self.board.move(13, "blocked")
+        self.board.save_metadata(13, sprint_ref="sprint:1")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-510-neighbor": {
+            "secretary-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -724,7 +730,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         payload = self.runtime.production_state.load()
         observer_fence(self.runtime, payload)  # one sighted pass, to take the snapshot
         self.runtime.production_state.save(payload)
-        self.board.metadata[13]["project"] = "other"
+        self.board.save_metadata(13, project="other")
 
         with mock.patch.object(
             self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
@@ -736,22 +742,22 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["outcomes"][0]["action"], "sprint_board_unavailable")
         self.assertEqual(fence["outcomes"][0]["status"], "critical")
         # Project-local even when blind: the reserved project stops, another project does not.
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
 
     def test_a_blind_tick_still_fences_a_sprint_it_never_saw(self) -> None:
         """A sprint opened since the last snapshot is caught through its cards' own link."""
         self.declare(encode_observer(head_choice("claude-observer")))
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
 
         with mock.patch.object(
             self.runtime.sprints, "list", side_effect=TaskError("backend_error", "down", 1)
         ):
             fence = self.fence()
 
-        self.assertIn("secretary-510-pilot", fence["refs"])
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510-pilot", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
+        self.assertIn("secretary-510", fence["refs"])
+        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
+        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
 
     def test_an_unreadable_sprint_board_does_not_advance_the_sprints_cards(self) -> None:
         actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
@@ -788,7 +794,7 @@ class ObserverRecordFenceStateTests(ObserverFenceFixture):
         payload = self.runtime.production_state.load()
         observer_fence(self.runtime, payload)
         self.assertIn("sprint:1", payload["observer_fence"])
-        self.board.metadata[100]["sprint_status"] = "closed"
+        self.board.save_sprint_metadata("sprint:1", sprint_status="closed")
 
         outcomes = observer_fence(self.runtime, payload)["outcomes"]
 
@@ -843,8 +849,8 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         the other sprint's; the second tick, with the head adopted, claims `sprint:1`'s own.
         """
         self.open_pair()
-        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-510-neighbor")
-        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-510-pilot")
+        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-511")
+        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-510")
 
     def _fence_steps(self, result: dict) -> list[dict]:
         return [action for action in result["actions"] if action["step"] == "observer-fence"]
@@ -867,13 +873,13 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         )
         self.assertEqual(
             [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"],
-            ["secretary-510-neighbor"],
+            ["secretary-511"],
         )
         self.assertEqual(self._claim(result), "third-1")
         self.assertEqual(self._skipped(result), [{"ref": "fourth-1", "reason": self.HELD}])
         self.assertEqual(self.runtime.reader.show("fourth-1")["state"], "ready")
         self.assertEqual(self.runtime.reader.show("third-1")["state"], "in_progress")
-        self.assertEqual(self.runtime.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.runtime.reader.show("secretary-510")["state"], "in_progress")
 
     def test_a_dead_declared_head_holds_its_own_sprint_and_leaves_the_other_running(self) -> None:
         self.in_flight_pair()
@@ -888,17 +894,17 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         self.assert_only_the_first_sprint_is_held(result, REASON_DEAD)
         self.assertEqual(fence["sprints"], {self.FIRST})
         self.assertEqual(fence["projects"], {"secretary", "fourth"})
-        self.assertEqual(fence["refs"], {"secretary-510-pilot", "fourth-1"})
+        self.assertEqual(fence["refs"], {"secretary-510", "fourth-1"})
         self.assertTrue(
             fenced_task(
                 fence,
-                {"ref": "secretary-510-pilot", "sprint": self.FIRST, "project": "secretary"},
+                {"ref": "secretary-510", "sprint": self.FIRST, "project": "secretary"},
             )
         )
         self.assertFalse(
             fenced_task(
                 fence,
-                {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
+                {"ref": "secretary-511", "sprint": self.SECOND, "project": "other"},
             )
         )
 
@@ -921,7 +927,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
     def test_a_corrupt_declaration_holds_its_own_sprint_only(self) -> None:
         self.in_flight_pair()
-        self.rewrite_observer(self.FIRST, "{not json")
+        self.rewrite_observer(self.FIRST, CORRUPT_DECLARATION)
 
         result = self.runtime.production_tick()
 
@@ -929,7 +935,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
     def test_the_fence_state_and_its_durable_events_name_the_fenced_sprint_only(self) -> None:
         self.in_flight_pair()
-        self.rewrite_observer(self.FIRST, "{not json")
+        self.rewrite_observer(self.FIRST, CORRUPT_DECLARATION)
 
         self.runtime.production_tick()
 
@@ -950,7 +956,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         fences all of them. What names the fenced sprint alone is the fence state above.
         """
         self.open_pair()
-        self.rewrite_observer(self.FIRST, "{not json")
+        self.rewrite_observer(self.FIRST, CORRUPT_DECLARATION)
 
         self.runtime.production_tick()
 
@@ -981,8 +987,8 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
     def _orphan_records(self) -> None:
         """Both cards out of the active cycle with a live record behind them."""
-        self.board.tasks[0]["column_id"] = 5
-        self.board.tasks[1]["column_id"] = 5
+        self.board.move(12, "blocked")
+        self.board.move(13, "blocked")
         payload = self.runtime.production_state.load()
         payload["records"] = {
             reference: {
@@ -997,14 +1003,14 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
                 "state": "adopted",
                 "claimed_at": time.time(),
             }
-            for reference in ("secretary-510-pilot", "secretary-510-neighbor")
+            for reference in ("secretary-510", "secretary-511")
         }
         self.runtime.production_state.save(payload)
 
     def test_reconciliation_settles_the_unfenced_sprints_record_and_holds_the_fenced_one(self) -> None:
         """Both records are orphaned by the same tick; only the fenced sprint's survives it."""
         self.open_pair()
-        self.rewrite_observer(self.FIRST, "{not json")
+        self.rewrite_observer(self.FIRST, CORRUPT_DECLARATION)
         self._orphan_records()
 
         result = self.runtime.production_tick()
@@ -1012,11 +1018,11 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         reconciled = [action for action in result["actions"] if action["step"] == "production-reconcile"]
         self.assertEqual(
             [(action["ref"], action["action"]) for action in reconciled],
-            [("secretary-510-neighbor", "record-removed")],
+            [("secretary-511", "record-removed")],
         )
         records = set(self.runtime.production_state.load()["records"])
-        self.assertIn("secretary-510-pilot", records)
-        self.assertNotIn("secretary-510-neighbor", records)
+        self.assertIn("secretary-510", records)
+        self.assertNotIn("secretary-511", records)
 
     def test_the_same_pair_with_no_fence_settles_both_records(self) -> None:
         """The control: without the fence the pass above would have removed both."""
@@ -1027,11 +1033,11 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
         self.assertEqual(
             sorted(action["ref"] for action in result["actions"] if action["step"] == "production-reconcile"),
-            ["secretary-510-neighbor", "secretary-510-pilot"],
+            ["secretary-510", "secretary-511"],
         )
         records = set(self.runtime.production_state.load()["records"])
-        self.assertNotIn("secretary-510-pilot", records)
-        self.assertNotIn("secretary-510-neighbor", records)
+        self.assertNotIn("secretary-510", records)
+        self.assertNotIn("secretary-511", records)
 
     def test_one_sprints_broken_head_does_not_fence_the_other_sprints_head(self) -> None:
         """Both sprints declaring a head: the fence is still one sprint's, not the pair's.
@@ -1041,18 +1047,18 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         """
         self.open_pair(second_observer=head_choice("codex-observer"))
         self.runtime.production_tick()  # both heads launched and adopted
-        self.rewrite_observer(self.FIRST, "{not json")
+        self.rewrite_observer(self.FIRST, CORRUPT_DECLARATION)
 
         fence = self.fence()
 
         self.assertEqual(fence["sprints"], {self.FIRST})
         self.assertEqual(fence["projects"], {"secretary", "fourth"})
-        self.assertEqual(fence["refs"], {"secretary-510-pilot", "fourth-1"})
+        self.assertEqual(fence["refs"], {"secretary-510", "fourth-1"})
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_MALFORMED)
         self.assertFalse(
             fenced_task(
                 fence,
-                {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
+                {"ref": "secretary-511", "sprint": self.SECOND, "project": "other"},
             )
         )
         self.assertFalse(

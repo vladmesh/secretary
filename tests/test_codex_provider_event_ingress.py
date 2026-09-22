@@ -14,14 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.dispatch import launch as dispatcher_launch
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch.worker_launch import bring_up_worker_head
-from secretary.dispatch import observer as dispatcher_observer
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
+from secretary.dispatch import launch as dispatcher_launch
+from secretary.dispatch import observer as dispatcher_observer
+from secretary.dispatch import review as dispatcher_review
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -43,7 +41,9 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.tui import provider_progress_for_run
 from secretary.dispatch.types import HostError
+from secretary.dispatch.worker_launch import bring_up_worker_head
 from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
+from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
 from secretary.head_health import HeadReadiness
 from secretary.projects.contract import (
     ContractVerdict,
@@ -1328,6 +1328,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             self.root / "data",
             mode="real",
             production_runtime=registered_production_runtime(self.root),
+            # The card has no history yet: what its TASK.md is rendered against is an audit that
+            # holds none. The audit itself is not what this contract is about.
+            audit=SimpleNamespace(events=lambda *_args, **_kwargs: []),
         )
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
         self.host._run = self._run  # type: ignore[method-assign]

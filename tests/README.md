@@ -141,8 +141,15 @@ A CLI test that needs a board injects it where the backend is chosen for both im
 at `KanboardClient.for_instance`, which the PostgreSQL pin never reaches.
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
-`collect_status(report, offline=True, sprint_client=FakeKanboard())` is the seam, and
+`collect_status(report, offline=True, sprint_client=SprintBoard())` is the seam, and
 `tests/test_hermetic_kanboard.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
 is the worked example. Do not build a client against a real endpoint in a `test_*` module the
 default `python -m unittest` run discovers; a live canary belongs in an operator runbook or an
 explicit, separately opted-in integration test against a disposable endpoint instead.
+
+Cards have one implementation, PostgreSQL, and there is no in-memory card board. A test that
+needs cards gets a real store of its own: `card_store(self, seed)` (or `CardStoreCase`) from
+`tests/sql_backend_fixtures.py`, seeded from a `CardSeed` of `tests/fakes/tasks.py` and dropped
+when the test ends; `tests/fakes/dispatcher.py:dispatcher_seed()` is the dispatcher's board. The
+server is one throwaway `postgres:16` per test process, so such a module belongs to a Docker shard
+(`integration-board`), never to `unit`.

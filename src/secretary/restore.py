@@ -49,9 +49,9 @@ from secretary.sprint_observer import (
     is_executable,
     parse_observer,
 )
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import (
     KanboardClient,
-    TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -119,7 +119,7 @@ def import_normalized_board(
         if instance is None:
             raise RestoreError("restore requires the target instance to bind its board")
         client = board_client(instance, serves=(CARD, SPRINT))
-    if getattr(client, "backend_kind", "kanboard") == "postgres" and not client._depth:
+    if not client._depth:
         with client.transaction():
             return _import_normalized_board(data_dir, client=client, instance=instance)
     return _import_normalized_board(data_dir, client=client, instance=instance)
@@ -140,8 +140,7 @@ def _import_normalized_board(
             )
             sprints = _normalized_sprints(data_dir)
             # Validate both sets before the first backend write.
-            if getattr(client, "backend_kind", "kanboard") == "postgres":
-                _check_sql_sprint_current_tasks(cards, sprints)
+            _check_sql_sprint_current_tasks(cards, sprints)
             _check_restored_observers(sprints, instance)
             _check_restored_executors(sprints)
             _check_restored_admission(sprints, instance)
@@ -360,7 +359,7 @@ def _require_card_snapshot(
 
 
 def _validate_deferred_restore_comments(
-    audit: TaskAudit,
+    audit: SqlTaskAudit,
     cards: list[dict[str, Any]],
     sprints: list[dict[str, Any]],
     prefix: str,
@@ -913,7 +912,7 @@ def _check_sql_sprint_current_tasks(
             )
 
 
-def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str]) -> str:
+def _restore_request_prefix(data_dir: Path, audit: SqlTaskAudit, live_refs: set[str]) -> str:
     """Return the request-id namespace this recovery writes its audit under.
 
     Restore events are durable, so a second recovery from a recovered checkpoint meets its own
@@ -924,14 +923,51 @@ def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str
     """
     state = restore_state(data_dir)
     token = state.get("restore_namespace")
-    if not isinstance(token, str) or not token or not _namespace_is_local(audit, token, live_refs):
+    if (
+        not isinstance(token, str)
+        or not token
+        or not _namespace_is_local(audit, token, live_refs)
+        or _namespace_is_exported(data_dir, token)
+    ):
         token = uuid.uuid4().hex
         # Missing `sprints` means this recovery never tracked that step.
         _update_restore_state(data_dir, restore_namespace=token, sprints=state.get("sprints", "pending"))
     return f"restore:{token}:"
 
 
-def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bool:
+def _namespace_is_exported(data_dir: Path, token: str) -> bool:
+    """Whether the history this recovery is about to restore already holds this namespace.
+
+    The store starts a recovery empty and gets its history back from the export afterwards
+    (`_restore_board_history`), so an earlier recovery's events are not in the audit yet when the
+    namespace is chosen -- they are in the export, beside the `restore-state.json` that names the
+    same token. Reusing it would have this recovery write its own events under request ids the
+    restored history is about to claim with another payload. An export that cannot be read answers
+    no here; `_restore_board_history` refuses it by name later.
+    """
+    prefix = f"restore:{token}:"
+    board = data_dir / "board"
+    try:
+        path = board / "audit.json"
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            events = payload.get("events") if isinstance(payload, dict) else None
+        else:
+            ndjson = board / "audit.ndjson"
+            if not ndjson.is_file():
+                return False
+            events = [
+                json.loads(line) for line in ndjson.read_text(encoding="utf-8").splitlines() if line
+            ]
+    except (OSError, ValueError):
+        return False
+    return isinstance(events, list) and any(
+        isinstance(event, dict) and str(event.get("request_id") or "").startswith(prefix)
+        for event in events
+    )
+
+
+def _namespace_is_local(audit: SqlTaskAudit, token: str, live_refs: set[str]) -> bool:
     prefix = f"restore:{token}:"
     events = [
         event
@@ -1334,7 +1370,7 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
     except (OSError, ValueError) as exc:
         raise RestoreError(f"portable PostgreSQL verification data is invalid: {exc}") from None
     finally:
-        if client is not None and getattr(client, "backend_kind", None) == "postgres":
+        if client is not None:
             client.connection.close()
     by_ref = lambda rows: sorted(rows, key=lambda row: str(row.get("reference") or ""))
     if (

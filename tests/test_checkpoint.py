@@ -43,14 +43,15 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
     verify_analytics_checkpoint,
 )
-from secretary.data import DataExport
+from secretary.data import DataExport, export_board
 from secretary.dispatch.production import _coordinate_checkpoint
 from secretary.routing_journal import attempts
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
-from secretary.tasks import TaskAudit
+from secretary.tasks import TaskReader, task_audit_for
 from tests.fakes.installation import split_board
-from tests.fakes.tasks import FakeKanboard
+from tests.fakes.tasks import writer_seed
+from tests.sql_backend_fixtures import card_store
 
 
 def git(repo: Path, *args: str) -> str:
@@ -96,6 +97,15 @@ SPRINT = {
 
 
 class CheckpointWriterTests(unittest.TestCase):
+    _client = None
+
+    @property
+    def client(self):
+        """This installation's card store, made the first time a case needs it."""
+        if self._client is None:
+            self._client = card_store(self, writer_seed(), instance_dir=self.instance_dir)
+        return self._client
+
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
@@ -170,18 +180,24 @@ class CheckpointWriterTests(unittest.TestCase):
     def writer(self, client: object | None = None) -> CheckpointWriter:
         """The writer, over this installation's card client.
 
-        The gate the writer opens with is the audit of the backend that client names, so the client
-        is what a case picks when it wants the other backend's canon. Given none, this installation
-        is a Kanboard one and its canon is the file journal these cases seed.
+        The gate the writer opens with is the card audit of that client (`requests`). Given none,
+        it is this installation's own store.
         """
         return CheckpointWriter(
-            self.data_dir, self.instance_dir, client=client if client is not None else FakeKanboard()
+            self.data_dir, self.instance_dir, client=client if client is not None else self.client
         )
 
-    def write(self, client: object | None = None):
-        """Run the writer with the export step stubbed by the seeded snapshot."""
+    def write(self, client: object | None = None, *, export: bool = False):
+        """Run the writer with the export step stubbed by the seeded snapshot, or with the real one."""
 
         def board_export(data_dir, **_kwargs):
+            if export:
+                return export_board(
+                    Path(data_dir),
+                    instance_dir=self.instance_dir,
+                    reader=TaskReader(self.client),
+                    sprint_client=self.client,
+                )
             lines = (Path(data_dir) / "board" / "cards.ndjson").read_text(encoding="utf-8")
             return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
 
@@ -367,7 +383,7 @@ class CheckpointWriterTests(unittest.TestCase):
             return real_cleanup(path)
 
         # A run the audit gate blocks before staging anything still collects.
-        TaskAudit(self.data_dir).stage("request-1", {"event_id": "e1"})
+        task_audit_for(self.client).stage("request-1", {"event_id": "e1", "request_id": "request-1"})
         with (
             mock.patch("secretary.checkpoint.state_repo.state_repo_lock", side_effect=lock),
             mock.patch("secretary.checkpoint._cleanup_staging_dir", side_effect=cleanup),
@@ -592,8 +608,11 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_routing_attempts_reach_the_committed_checkpoint(self):
         """secretary-716: attempt telemetry is journal-only, so a restore that replays the
-        checkpoint has to hand back the worker/reviewer pair of every attempt."""
-        audit = TaskAudit(self.data_dir)
+        checkpoint has to hand back the worker/reviewer pair of every attempt.
+
+        The attempt telemetry is the card audit's, so it reaches the checkpoint through the board
+        export's history (`audit.ndjson`), which is what a restore replays."""
+        audit = task_audit_for(self.client)
         worker = {
             "role": "worker",
             "head": "codex",
@@ -630,9 +649,9 @@ class CheckpointWriterTests(unittest.TestCase):
                     "occurred_at": "2026-07-24T00:00:00Z",
                     "outcome": "success",
                     "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
-                    "task_id": "task_kanboard_1",
+                    "task_id": "task_postgres_1",
                     "ref": "secretary-637",
-                    "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
+                    "backend": {"kind": "postgres", "task_id": 1, "revision": "updated_at:x"},
                     "request_id": f"routing-{phase}",
                     "payload": {
                         "attempt": 1,
@@ -644,10 +663,10 @@ class CheckpointWriterTests(unittest.TestCase):
                 },
             )
 
-        result = self.write()
+        result = self.write(export=True)
 
-        self.assertEqual(result.status, "committed")
-        committed = self.committed_text("events.ndjson")
+        self.assertEqual(result.status, "committed", result.reason)
+        committed = self.committed_text("audit.ndjson")
         history = attempts([json.loads(line) for line in committed.splitlines() if line.strip()])
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].worker.head, "codex")
@@ -673,23 +692,13 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertNotEqual(second.commit, first.commit)
 
     def test_pending_audit_blocks_the_commit(self):
-        TaskAudit(self.data_dir).stage("request-1", {"event_id": "e1"})
+        task_audit_for(self.client).stage("request-1", {"event_id": "e1", "request_id": "request-1"})
 
         result = self.write()
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("pending", result.reason)
         self.assertIsNone(self.committed_board())
-
-    def test_product_issue_transaction_blocks_the_commit(self):
-        journal = self.data_dir / "board" / "product-issue-transactions"
-        journal.mkdir(parents=True)
-        (journal / "v1-pending.json").write_text("{}", encoding="utf-8")
-
-        result = self.write()
-
-        self.assertEqual(result.status, "blocked")
-        self.assertIn("Product/Issue", result.reason)
 
     def test_count_mismatch_blocks_the_commit(self):
         self.seed_board([CARD], card_count=4)
@@ -954,6 +963,8 @@ class CheckpointGitCostTests(unittest.TestCase):
     seed_board = CheckpointWriterTests.seed_board
     seed_runs = CheckpointWriterTests.seed_runs
     writer = CheckpointWriterTests.writer
+    client = CheckpointWriterTests.client
+    _client = None
     write = CheckpointWriterTests.write
     head_files = CheckpointWriterTests.head_files
     committed_board = CheckpointWriterTests.committed_board

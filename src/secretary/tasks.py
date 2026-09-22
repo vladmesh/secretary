@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board import budget_candidates
-from secretary.board.backend import entity_id, entity_number
+from secretary.board.backend import POSTGRES, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
@@ -428,6 +428,12 @@ _BATCH_WRITE_CHUNK = 50
 # dispatcher; bytes protect the web server and make a pathological comment fail
 # before an unbounded request is allocated on the wire.
 _BATCH_BYTES = 1_048_576
+
+
+#: The one card backend: every card is a PostgreSQL row, and its identity and `audit.backend` say
+#: so (docs/BOARD_STORE.md §9).  Identities an older board minted (`task_kanboard_<n>`) still read
+#: back through `entity_number`, so history written before the cutover resolves.
+CARD_BACKEND = POSTGRES.value
 
 
 def _rpc_request(identifier: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -942,7 +948,7 @@ class TaskReader:
         if task_id is None or column not in _STATE_BY_COLUMN:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         ref = _text(card.get("reference"))
-        kind = getattr(self.client, "backend_kind", "kanboard")
+        kind = CARD_BACKEND
         result: dict[str, Any] = {
             "id": entity_id("task", kind, task_id),
             "ref": ref,
@@ -1632,23 +1638,18 @@ class TaskAudit:
                 os.unlink(temp)
 
 
-def task_audit_for(client: Any, data_dir: str | os.PathLike[str]) -> Any:
-    """The audit owner that belongs to this card client, decided by the client's own backend.
+def task_audit_for(client: Any, data_dir: str | os.PathLike[str] | None = None) -> Any:
+    """The audit owner of a card client: `requests`/`board_events` (docs/BOARD_STORE.md §7.3).
 
-    The switch is read once where the client is built (`board/backend.py`); every audit reader and
-    writer in the process must follow the client it produced rather than look the backend up again.
-    A file journal (`<data>/board/events.ndjson`) belongs to the Kanboard backend and the
-    `requests`/`board_events` tables to the PostgreSQL one (docs/BOARD_STORE.md §7.3).  Building
-    `TaskAudit(data_dir)` beside a PostgreSQL client reads a journal nobody writes any more: on
-    2026-09-10 the production dispatcher did exactly that, so a worker's `report:done` committed in
-    SQL was never seen, the worker was declared stalled, and the observer got no wake for the
-    Blocked move (sprint:1437, secretary-1614).
+    Cards have one implementation, so their audit has one owner.  The file journal under
+    `<data>/board` is not a card audit owner any more: building one beside a card client read a
+    journal nobody writes, which is how on 2026-09-10 a worker's `report:done` committed in SQL was
+    never seen and the worker was declared stalled (sprint:1437, secretary-1614).  `data_dir` is
+    accepted and ignored so the callers that still hand one in need not know that.
     """
-    if getattr(client, "backend_kind", "kanboard") == "postgres":
-        from secretary.board.sql_audit import SqlTaskAudit
+    from secretary.board.sql_audit import SqlTaskAudit
 
-        return SqlTaskAudit(client)
-    return TaskAudit(data_dir)
+    return SqlTaskAudit(client)
 
 
 class TaskWriter:
@@ -1665,11 +1666,6 @@ class TaskWriter:
         self.reader = TaskReader(client)
         self.data_dir = Path(data_dir)
         self.instance_dir = Path(client.instance_dir).expanduser().resolve()
-        # Which backend serves this writer is the client's own answer, not a second lookup: the
-        # switch is read once where the client is built (board/backend.py), and everything below
-        # follows the client it produced.  A file journal belongs to the Kanboard backend and the
-        # `requests`/`board_events` tables to the PostgreSQL one (docs/BOARD_STORE.md §7.3).
-        self.backend_kind = getattr(client, "backend_kind", "kanboard")
         self.audit = task_audit_for(client, data_dir)
         # Importing the concrete adapter here keeps the protocol leaves usable
         # by the legacy task reader while giving migrated writes the same audit
@@ -2058,7 +2054,7 @@ class TaskWriter:
             "task_id": "",
             "ref": reference,
             "backend": {
-                "kind": self.backend_kind,
+                "kind": CARD_BACKEND,
                 "task_id": None,
                 "revision": "pending",
                 "reference_assignment": "atomic",
@@ -2208,7 +2204,7 @@ class TaskWriter:
             )
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            event["task_id"] = entity_id("task", self.backend_kind, task_id)
+            event["task_id"] = entity_id("task", CARD_BACKEND, task_id)
             event["backend"]["task_id"] = task_id
             try:
                 self.audit.stage(request_id, event)
@@ -3827,7 +3823,7 @@ class TaskWriter:
             "outcome": "granted",
             "task_id": "",
             "ref": reference,
-            "backend": {"kind": self.backend_kind, "task_id": None, "revision": "not_written"},
+            "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
             "request_id": override_request_id,
             "payload": {
                 "project": project,
@@ -3871,7 +3867,7 @@ class TaskWriter:
                 "outcome": "denied",
                 "task_id": "",
                 "ref": reference,
-                "backend": {"kind": self.backend_kind, "task_id": None, "revision": "not_written"},
+                "backend": {"kind": CARD_BACKEND, "task_id": None, "revision": "not_written"},
                 "request_id": denial_request_id,
                 "payload": {
                     "code": code,
@@ -4050,9 +4046,9 @@ class TaskWriter:
             "actor": {"role": "retro", "id": actor},
             "kind": "retired",
             "outcome": "success",
-            "task_id": entity_id("task", self.backend_kind, task_id),
+            "task_id": entity_id("task", CARD_BACKEND, task_id),
             "ref": reference,
-            "backend": {"kind": self.backend_kind, "task_id": task_id, "revision": "pending"},
+            "backend": {"kind": CARD_BACKEND, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
             "payload": identity,
         }
@@ -4352,7 +4348,7 @@ class TaskWriter:
             "task_id": task["id"],
             "ref": reference,
             "backend": {
-                "kind": self.backend_kind,
+                "kind": CARD_BACKEND,
                 "task_id": _task_number(task),
                 "revision": _revision(task),
             },

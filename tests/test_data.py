@@ -39,14 +39,20 @@ from secretary.memory_write import (
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
 from tests.fakes.sprints import SprintKanboard
+from tests.fakes.tasks import empty_seed
+from tests.sql_backend_fixtures import card_store
 
 
 class TaskExportReader:
-    """Small seam for the canonical task export; it never starts a subprocess."""
+    """Small seam for the canonical task export; it never starts a subprocess.
 
-    def __init__(self, cards: list[dict] | None = None) -> None:
+    Its `client` is a real card store: the export's publication gate is that client's card audit.
+    """
+
+    def __init__(self, cards: list[dict] | None = None, *, client: object = None) -> None:
         self.cards = cards if cards is not None else [{"id": 1, "reference": "secretary-1", "title": "One"}]
         self.calls = 0
+        self.client = client
 
     def export(self) -> list[dict]:
         self.calls += 1
@@ -135,6 +141,9 @@ class DataLayoutTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = card_store(self, empty_seed())
+
     def test_normalize_board_card_keeps_required_surface(self):
         card = {
             "id": "7",
@@ -167,7 +176,8 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_writes_normalized_cards_and_is_idempotent(self):
         reader = TaskExportReader(
-            [
+            client=self.store,
+            cards=[
                 {
                     "id": 1,
                     "reference": "secretary-353",
@@ -199,7 +209,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(reader.calls, 2)
 
     def test_export_board_uses_the_reader_not_a_subprocess_or_pipeline_path(self):
-        reader = TaskExportReader()
+        reader = TaskExportReader(client=self.store)
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
                 result = export_board(
@@ -213,7 +223,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(reader.calls, 1)
 
     def test_task_reader_failure_preserves_the_previous_board_snapshot(self):
-        reader = TaskExportReader()
+        reader = TaskExportReader(client=self.store)
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             export_board(
@@ -223,7 +233,7 @@ class ExportTests(unittest.TestCase):
                 sprint_client=SprintKanboard(),
             )
             previous = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
-            failed_reader = mock.Mock()
+            failed_reader = mock.Mock(client=self.store)
             failed_reader.export.side_effect = TaskError("backend_error", "backend refused export", 1)
 
             with self.assertRaisesRegex(RuntimeError, "secretary task export failed: backend refused export"):
@@ -242,7 +252,7 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             export_board(
-                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(), sprint_client=SprintKanboard()
+                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(client=self.store), sprint_client=SprintKanboard()
             )
             board = data_dir / "board"
             sprints = json.loads((board / "sprints.json").read_text(encoding="utf-8"))
@@ -268,7 +278,7 @@ class ExportTests(unittest.TestCase):
                 export_board(
                     data_dir,
                     instance_dir=Path(tmpdir),
-                    reader=TaskExportReader(),
+                    reader=TaskExportReader(client=self.store),
                     sprint_client=BrokenSprintKanboard(),
                 )
             published = sorted(path.name for path in (data_dir / "board").iterdir())
@@ -284,7 +294,7 @@ class ExportTests(unittest.TestCase):
                 {"id": 2, "reference": "secretary-2", "title": "Two"},
             ],
         ]
-        reader = TaskExportReader(cards_by_run[0])
+        reader = TaskExportReader(cards_by_run[0], client=self.store)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"

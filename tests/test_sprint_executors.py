@@ -349,6 +349,9 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
     chooses" — the substitution the whole contract is written against.
     """
 
+    def setUp(self) -> None:
+        self.skip_kanboard_only()
+
     def make_empty_sprint_client(self) -> _EmptyBoardsKanboard:
         return _EmptyBoardsKanboard()
 
@@ -410,7 +413,8 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
         export_board(
             source_data,
             instance_dir=instance,
-            reader=mock.Mock(export=mock.Mock(return_value=[])),
+            # The export's publication gate is the card audit of the board it reads.
+            reader=mock.Mock(export=mock.Mock(return_value=[]), client=source),
             sprint_client=source,
         )
         for name in ("cards.json", "sprints.json"):

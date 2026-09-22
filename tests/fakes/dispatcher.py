@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import sys
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -14,15 +13,6 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from secretary.checkpoint import PUSH_INTERVAL_SECONDS, CheckpointResult, is_push_due
-from secretary.dispatcher import (
-    STOPPED_BY_DISPATCHER,
-    STOPPED_BY_REVIEW_FREEZE,
-    CommandHostRuntime,
-    HostError,
-    LaunchedHead,
-    _continuation_note,
-    _report_nudge_prompt,
-)
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.heartbeat import run_heartbeat_identity
 from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
@@ -32,6 +22,15 @@ from secretary.dispatch.types import HeadLaunchAborted, ReviewLaunch
 from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status
 from secretary.dispatch.watchdog import pid_file_path
 from secretary.dispatch.worker_lifecycle import head_run_binding
+from secretary.dispatcher import (
+    STOPPED_BY_DISPATCHER,
+    STOPPED_BY_REVIEW_FREEZE,
+    CommandHostRuntime,
+    HostError,
+    LaunchedHead,
+    _continuation_note,
+    _report_nudge_prompt,
+)
 from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
     ContractVerdict,
@@ -43,9 +42,8 @@ from secretary.projects.integration_base import (
     seed_ref_refusal,
 )
 from secretary.routing_journal import HeadRun, head_run_from_profile
-from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskAudit, TaskError
-from tests.fakes.board import BatchedCalls
+from secretary.tasks import TaskError
+from tests.fakes.tasks import CardSeed
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
 
@@ -143,187 +141,37 @@ def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> Non
     host.restart_worker = restart
 
 
-class FakeKanboard(BatchedCalls):
-    def __init__(self) -> None:
-        self.instance_dir = Path(tempfile.gettempdir())
-        self.calls: list[tuple[str, dict]] = []
-        self.columns = [
-            {"id": 1, "title": "Issues"},
-            {"id": 2, "title": "Ready"},
-            {"id": 3, "title": "In progress"},
-            {"id": 4, "title": "Validate"},
-            {"id": 7, "title": "Assessment"},
-            {"id": 5, "title": "Blocked"},
-            {"id": 6, "title": "Done"},
-        ]
-        self.tasks = [
-            {
-                "id": 12,
-                "reference": "secretary-510-pilot",
-                "title": "Pilot",
-                "description": "pilot spec",
-                "column_id": 2,
-                "position": 1,
-                "swimlane_id": 4,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            },
-            {
-                "id": 13,
-                "reference": "secretary-510-neighbor",
-                "title": "Neighbor",
-                "description": "do not claim",
-                "column_id": 2,
-                "position": 2,
-                "swimlane_id": 4,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            },
-        ]
-        self.metadata = {
-            12: {"project": "secretary", "task_type": "code", "slug": "pilot"},
-            13: {"project": "secretary", "task_type": "code", "slug": "neighbor"},
-        }
-        self.comments: dict[int, list[dict]] = {12: [], 13: []}
-        # The sprint entities live on their own Kanboard board (`Secretary sprints`, project id 8),
-        # so a card is never readable as a sprint and an empty sprint board is the default.
-        self.sprints: list[dict] = []
-        self.now = 1720000000
-
-    def add_sprint(self, reference: str, *, status: str = "open", **metadata: object) -> dict:
-        task_id = 100 + len(self.sprints)
-        sprint = {
-            "id": task_id,
-            "reference": reference,
-            "title": metadata.get("sprint_goal", "sprint"),
-            "description": "",
-            "column_id": 1,
-            "position": len(self.sprints) + 1,
+def dispatcher_seed() -> CardSeed:
+    """The dispatcher's board: the pilot card and a Ready neighbor it must not claim."""
+    tasks = [
+        {
+            "id": 12,
+            "reference": "secretary-510",
+            "title": "Pilot",
+            "description": "pilot spec",
+            "column_id": 2,
+            "position": 1,
+            "swimlane_id": 4,
             "date_creation": 1720000000,
             "date_modification": 1720000000,
-        }
-        self.sprints.append(sprint)
-        self.metadata[task_id] = {
-            "sprint_goal": "ship the thing",
-            "sprint_definition_of_done": "the thing ships",
-            "sprint_repositories": '["secretary"]',
-            "sprint_status": status,
-            "sprint_current_task": "",
-            **{key: str(value) for key, value in metadata.items()},
-        }
-        self.comments.setdefault(task_id, [])
-        return sprint
-
-    def add_record(
-        self,
-        task_id: int,
-        reference: str,
-        title: str,
-        metadata: dict,
-        *,
-        closed: bool = False,
-    ) -> None:
-        """A Product or Issue row in the Pipeline's Issues column, as the real board carries it."""
-        self.tasks.append(
-            {
-                "id": task_id,
-                "reference": reference,
-                "title": title,
-                "description": "",
-                "column_id": 1,
-                "position": task_id,
-                "swimlane_id": 4,
-                "is_active": 0 if closed else 1,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            }
-        )
-        self.metadata[task_id] = dict(metadata)
-        self.comments[task_id] = []
-
-    def _pool(self, project_id: object) -> list[dict]:
-        return self.sprints if int(project_id or 0) == 8 else self.tasks
-
-    def call(self, method: str, **params: object) -> object:
-        self.calls.append((method, params))
-        if method == "getProjectByName":
-            return {"id": 8} if params.get("name") == SPRINT_BOARD_NAME else {"id": 7}
-        if method == "getColumns":
-            return self.columns
-        if method == "getActiveSwimlanes":
-            return [{"id": 4, "name": "Secretary"}]
-        if method == "getAllTasks":
-            status = params.get("status_id")
-            if status not in {0, 1}:
-                return []
-            pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
-            return [
-                task
-                for task in pool
-                if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
-            ]
-        if method == "getTaskByReference":
-            pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
-            return next((task for task in pool if task["reference"] == params["reference"]), None)
-        if method == "getTaskMetadata":
-            return self.metadata[int(params["task_id"])]
-        if method == "saveTaskMetadata":
-            self.metadata[int(params["task_id"])].update(params["values"])
-            return True
-        if method == "moveTaskPosition":
-            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
-            task["column_id"] = params["column_id"]
-            self.now += 1
-            task["date_modification"] = self.now
-            return True
-        if method == "createComment":
-            self.now += 1
-            self.comments[int(params["task_id"])].append(
-                {"date_creation": self.now, "comment": params["content"]}
-            )
-            return len(self.comments[int(params["task_id"])])
-        if method == "getAllComments":
-            return self.comments[int(params["task_id"])]
-        if method == "createTask":
-            # Sprint rows are written this way by `SprintWriter.create`: a row first, its
-            # reference last, which is the order the create's recovery depends on.
-            pool = self._pool(params.get("project_id"))
-            task_id = max([int(task["id"]) for task in self.tasks + self.sprints] + [11]) + 1
-            pool.append(
-                {
-                    "id": task_id,
-                    "reference": "",
-                    "title": params.get("title", ""),
-                    "description": params.get("description", ""),
-                    "column_id": params.get("column_id", 1),
-                    "position": len(pool) + 1,
-                    "swimlane_id": params.get("swimlane_id", 0),
-                    "date_creation": self.now,
-                    "date_modification": self.now,
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        if method == "closeTask":
-            # A sprint close archives the cards its dispositions take off the contract, so
-            # this fake answers the archival write the same way the board does.
-            task = next(
-                task for task in self.tasks + self.sprints if int(task["id"]) == int(params["task_id"])
-            )
-            task["is_active"] = 0
-            self.now += 1
-            task["date_modification"] = self.now
-            return True
-        if method == "updateTask":
-            task = next(task for task in self.tasks + self.sprints if int(task["id"]) == int(params["id"]))
-            for field in ("reference", "title", "description"):
-                if field in params:
-                    task[field] = params[field]
-            self.now += 1
-            task["date_modification"] = self.now
-            return True
-        raise AssertionError(method)
+        },
+        {
+            "id": 13,
+            "reference": "secretary-511",
+            "title": "Neighbor",
+            "description": "do not claim",
+            "column_id": 2,
+            "position": 2,
+            "swimlane_id": 4,
+            "date_creation": 1720000000,
+            "date_modification": 1720000000,
+        },
+    ]
+    metadata = {
+        12: {"project": "secretary", "task_type": "code", "slug": "pilot"},
+        13: {"project": "secretary", "task_type": "code", "slug": "neighbor"},
+    }
+    return CardSeed(tasks, metadata)
 
 
 # The head snapshot the sprint entity resolves a declared observer against. It is the
@@ -363,7 +211,8 @@ class TwoOpenSprintAdmission:
     that only need one head.  A scenario that needs a broken declaration corrupts the persisted
     value afterwards, which is the only way a live installation reaches one.
 
-    Mixed into a fixture that owns `self.board` (a `FakeKanboard`) and `self.data_dir`.
+    Mixed into a fixture that owns `self.board` (a card store, `tests.sql_backend_fixtures`) and
+    `self.data_dir`.
     """
 
     FIRST = "sprint:1"
@@ -397,7 +246,6 @@ class TwoOpenSprintAdmission:
         (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
         self.assertEqual(instance_open_sprint_limit(instance), 2)
         self.board.add_record(
-            20,
             "product:secretary",
             "Secretary",
             {
@@ -407,7 +255,6 @@ class TwoOpenSprintAdmission:
             },
         )
         self.board.add_record(
-            21,
             "product:other",
             "Other",
             {
@@ -417,7 +264,6 @@ class TwoOpenSprintAdmission:
             },
         )
         self.board.add_record(
-            22,
             "issue:secretary",
             "Secretary issue",
             {
@@ -428,7 +274,6 @@ class TwoOpenSprintAdmission:
             },
         )
         self.board.add_record(
-            23,
             "issue:other",
             "Other issue",
             {
@@ -467,44 +312,28 @@ class TwoOpenSprintAdmission:
         )
         return writer
 
-    def sprint_row_id(self, reference: str) -> int:
-        return int(next(row for row in self.board.sprints if row["reference"] == reference)["id"])
-
     def rewrite_observer(self, reference: str, value: str) -> None:
         """Break the persisted declaration of an already-open sprint, as decay does."""
-        self.board.metadata[self.sprint_row_id(reference)]["sprint_observer"] = value
+        self.board.save_sprint_metadata(reference, sprint_observer=value)
 
     def link_pair_cards(self) -> None:
         """One card of each sprint's two reserved projects, all Ready."""
-        self.board.metadata[12]["sprint_ref"] = self.FIRST
-        self.board.metadata[13]["project"] = "other"
-        self.board.metadata[13]["sprint_ref"] = self.SECOND
+        self.board.save_metadata(12, sprint_ref=self.FIRST)
+        self.board.save_metadata(13, project="other", sprint_ref=self.SECOND)
         # `fourth-1` sits ahead of `third-1` in the claim order, so a tick that holds the first
         # sprint back records the skip and the other sprint's claim in the same pass.
         self.add_pair_card(14, "fourth-1", project="fourth", sprint=self.FIRST)
         self.add_pair_card(15, "third-1", project="third", sprint=self.SECOND)
 
     def add_pair_card(self, task_id: int, reference: str, *, project: str, sprint: str) -> None:
-        self.board.tasks.append(
-            {
-                "id": task_id,
-                "reference": reference,
-                "title": reference,
-                "description": "spec",
-                "column_id": 2,
-                "position": task_id,
-                "swimlane_id": 4,
-                "date_creation": 1720000000,
-                "date_modification": 1720000000,
-            }
+        self.board.add_card(
+            task_id,
+            reference,
+            project=project,
+            state="ready",
+            description="spec",
+            metadata={"task_type": "code", "slug": reference, "sprint_ref": sprint},
         )
-        self.board.metadata[task_id] = {
-            "project": project,
-            "task_type": "code",
-            "slug": reference,
-            "sprint_ref": sprint,
-        }
-        self.board.comments[task_id] = []
 
 
 class FakeCatalog:
@@ -746,9 +575,9 @@ class FakeCatalog:
 class FakeHost:
     def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
-        # The real task-document selector reads the dispatcher audit. Fixture roots are the
-        # workspaces directory below that audit owner.
-        self.audit = TaskAudit(root.parent)
+        # The real task-document selector reads the dispatcher's card audit; the fixture that
+        # builds the dispatcher hands its writer's audit in (`tests/dispatcher_fixtures.py`).
+        self.audit: Any = None
         # The real host snapshots the head at bring-up and hands the record back; the fake goes
         # through the same catalog so the routing journal sees real configurations here too.
         self.catalog = catalog or FakeCatalog()
@@ -885,6 +714,7 @@ class FakeHost:
         # recovers runs the same path for real.
         self.crash_after_task_doc: BaseException | None = None
 
+    _card_audit = CommandHostRuntime._card_audit
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
@@ -1830,10 +1660,10 @@ __all__ = [
     "FakeCatalog",
     "FakeCheckpoint",
     "FakeHost",
-    "FakeKanboard",
     "FakePusher",
     "FakeSprints",
     "TwoOpenSprintAdmission",
     "_configure_production_shaped_codex_relaunch",
     "_legacy_unbound_v1_run",
+    "dispatcher_seed",
 ]

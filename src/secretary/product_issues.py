@@ -144,6 +144,18 @@ def registered_projects(instance: str | Path) -> set[str]:
     return result
 
 
+def entity_audit_for(client: Any, data_dir: str | os.PathLike[str] | None) -> Any:
+    """The audit owner of a Sprint or Product/Issue client, decided by the client's own backend.
+
+    Cards have one audit owner (`secretary.tasks.task_audit_for`), but the Sprint and Product/Issue
+    Kanboard implementations still exist until sprint:1452 retires them, and theirs is the file
+    journal under `<data>/board` (docs/BOARD_STORE.md §7.3).
+    """
+    if getattr(client, "backend_kind", "kanboard") == "postgres":
+        return task_audit_for(client)
+    return TaskAudit(data_dir or "")
+
+
 class ProductIssueTransaction:
     """The private staged journal for Product/Issue writes.
 
@@ -470,7 +482,7 @@ class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
         self.data_dir = Path(data_dir)
-        self.audit = task_audit_for(client, data_dir)
+        self.audit = entity_audit_for(client, data_dir)
         # Not a second audit owner: `legacy_audit` is the *file layout* itself, kept because two
         # guards are statements about that layout rather than reads of the canon — the released
         # pre-v2 pending-upgrade gate, and `_require_sql_legacy_namespace_free`, which refuses a SQL

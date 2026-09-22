@@ -13,20 +13,11 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary.board_transport import BoardTransport
-from secretary.data import init_layout
-from secretary.restore import (
-    _core_from_export,
-    _core_from_live,
-    _reconcile_restored_order,
-    _restored_order_mismatch,
-    import_normalized_board,
-)
 from secretary.task_restore import (
     commit_restored_cards,
-    reconcile_restore_order,
     restore_cards_batched,
 )
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import KanboardClient, TaskAudit, TaskError
 from tests.restore_fixtures import _restore_card
 
 
@@ -317,19 +308,6 @@ def _production_cards() -> list[dict[str, object]]:
     return cards
 
 
-def _phase_metrics(board: _WireRestoreBoard) -> dict[str, dict[str, float | int]]:
-    board.finish_phases()
-    result: dict[str, dict[str, float | int]] = {}
-    for phase, methods in board.records:
-        bucket = result.setdefault(phase, {"rpc": 0, "posts": 0, "seconds": 0.0})
-        bucket["rpc"] = int(bucket["rpc"]) + len(methods)
-        bucket["posts"] = int(bucket["posts"]) + 1
-    for phase, seconds in board.phase_seconds.items():
-        bucket = result.setdefault(phase, {"rpc": 0, "posts": 0, "seconds": 0.0})
-        bucket["seconds"] = float(bucket["seconds"]) + seconds
-    return result
-
-
 def _metrics_line(label: str, metrics: dict[str, dict[str, float | int]]) -> str:
     parts = [label]
     for phase in (
@@ -348,94 +326,6 @@ def _metrics_line(label: str, metrics: dict[str, dict[str, float | int]]) -> str
             f"{phase}_seconds={float(values['seconds']):.3f}"
         )
     return " ".join(parts)
-
-
-def _legacy_restore(board: _WireRestoreBoard, cards: list[dict[str, object]]) -> _MemoryAudit:
-    """Execute the released per-card call shape on the same wire peer and canon."""
-    client = _client(board)
-    audit = _MemoryAudit()
-    lanes = sorted({str(card.get("swimlane") or "") for card in cards if card.get("swimlane")})
-    board.set_phase("inventory")
-    client.call("getProjectByName", name="Pipeline")
-    client.call("getColumns", project_id=7)
-    client.call("getActiveSwimlanes", project_id=7)
-    for lane in lanes:
-        client.call("addSwimlane", project_id=7, name=lane)
-    column_ids = {value: key for key, value in board.columns.items()}
-    lane_ids = {value: key for key, value in board.swimlanes.items()}
-    for card in sorted(
-        cards, key=lambda value: (value["column"], value["swimlane"], value["position"], value["reference"])
-    ):
-        board.set_phase("create")
-        # The removed path entered board schema and full active/archive identity reads per card.
-        client.call("getProjectByName", name="Pipeline")
-        client.call("getColumns", project_id=7)
-        client.call("getActiveSwimlanes", project_id=7)
-        client.call("getAllTasks", project_id=7, status_id=1)
-        client.call("getAllTasks", project_id=7, status_id=0)
-        task_id = client.call(
-            "createTask",
-            project_id=7,
-            title=card["title"],
-            description=card["description"],
-            column_id=column_ids[str(card["column"])],
-            swimlane_id=lane_ids.get(str(card["swimlane"]), 0),
-            reference=card["reference"],
-        )
-        board.set_phase("metadata_state")
-        client.call("getTaskMetadata", task_id=task_id)
-        from secretary.restore import _restore_board_metadata
-
-        client.call("saveTaskMetadata", task_id=task_id, values=_restore_board_metadata(card))
-        client.call(
-            "moveTaskPosition",
-            project_id=7,
-            task_id=task_id,
-            column_id=column_ids[str(card["column"])],
-            position=int(card["position"]),
-            swimlane_id=lane_ids.get(str(card["swimlane"]), 0),
-        )
-        board.set_phase("proof")
-        client.call("getProjectByName", name="Pipeline")
-        client.call("getColumns", project_id=7)
-        client.call("getActiveSwimlanes", project_id=7)
-        client.call("getAllTasks", project_id=7, status_id=1)
-        client.call("getAllTasks", project_id=7, status_id=0)
-        client.call("getTaskMetadata", task_id=task_id)
-        client.call("getAllComments", task_id=task_id)
-        board.set_phase("audit")
-        for kind in ("created", "restored"):
-            request_id = f"legacy:{kind}:{card['reference']}"
-            event = {
-                "event_id": request_id,
-                "kind": kind,
-                "ref": card["reference"],
-                "request_id": request_id,
-                "payload": {},
-            }
-            audit.stage(request_id, event)
-            audit.append(request_id, event)
-    reader = TaskReader(client)
-    board.set_phase("closure")
-    live = reader.restore_snapshot()
-    for card in cards:
-        if card.get("closed"):
-            client.call(
-                "closeTask",
-                task_id=int(str(live[str(card["reference"])]["id"]).removeprefix("task_kanboard_")),
-            )
-    board.set_phase("order")
-    post_close = reader.restore_snapshot()
-    writer = SimpleNamespace(client=client, audit=audit, reader=reader)
-    writer.reconcile_restore_order = lambda **values: reconcile_restore_order(writer, **values)
-    _reconcile_restored_order(writer, cards, post_close, "legacy:benchmark:")
-    board.set_phase("final_parity")
-    actual = reader.restore_snapshot()
-    if any(_core_from_live(actual[str(card["reference"])]) != _core_from_export(card) for card in cards):
-        raise AssertionError("legacy benchmark content parity failed")
-    if _restored_order_mismatch(cards, actual):
-        raise AssertionError("legacy benchmark order parity failed")
-    return audit
 
 
 class _MemoryAudit:
@@ -503,36 +393,6 @@ class BulkCardRestoreTests(unittest.TestCase):
         live = {str(row["reference"]): {"id": f"task_kanboard_{row['id']}"} for row in board.tasks}
         commit_restored_cards(writer, cards, live, request_prefix="restore:test:")
         return writer
-
-    def test_lost_create_prefixes_resume_one_row_and_occurrence_per_card(self) -> None:
-        for applied in (0, 1, 2):
-            with self.subTest(applied=applied), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                board = _WireRestoreBoard()
-                board.lose_phase = "create"
-                board.apply_prefix = applied
-                cards = _mixed_cards()
-                if applied < len(cards):
-                    with self.assertRaisesRegex(TaskError, "absent reference"):
-                        self._restore(root, board, cards)
-                    self.assertEqual(TaskWriter(_client(board), data_dir=root).reconcile(), (0, 3))
-                writer = self._restore(root, board, cards)
-                self.assertEqual(len(board.tasks), len(cards))
-                self.assertEqual(len({row["reference"] for row in board.tasks}), len(cards))
-                self.assertEqual(len(writer.audit.events(kind="restored_bulk")), len(cards))
-
-                mutations = sum(
-                    method in {"createTask", "saveTaskMetadata", "moveTaskPosition"}
-                    for method in board.logical
-                )
-                self._restore(root, board, cards)
-                self.assertEqual(
-                    mutations,
-                    sum(
-                        method in {"createTask", "saveTaskMetadata", "moveTaskPosition"}
-                        for method in board.logical
-                    ),
-                )
 
     def test_lost_and_malformed_initialization_are_proved_then_retried(self) -> None:
         for mode in ("lost", "malformed"):
@@ -701,83 +561,6 @@ class BulkCardRestoreTests(unittest.TestCase):
 
 
 class ProductionShapeCardBenchmark(unittest.TestCase):
-    def test_real_1440_shape_full_restore_outperforms_released_call_shape(self) -> None:
-        cards = _production_cards()
-        counts = {
-            record_type: sum(card["metadata"]["record_type"] == record_type for card in cards)
-            for record_type in ("task", "issue", "product")
-        }
-        self.assertEqual(counts, {"task": 894, "issue": 538, "product": 8})
-        self.assertEqual(sum(bool(card["closed"]) for card in cards), 1_099)
-        self.assertGreater(len({card["column"] for card in cards}), 4)
-        self.assertGreater(len({card["swimlane"] for card in cards}), 10)
-        positions = [int(card["position"]) for card in cards]
-        self.assertLess(len(set(positions)), 200)
-        self.assertGreater(max(positions), 100)
-
-        legacy = _WireRestoreBoard()
-        legacy.post_delay = 0.00005
-        legacy.scramble_closed_groups = True
-        legacy.expected_closures = sum(bool(card["closed"]) for card in cards)
-        _legacy_restore(legacy, cards)
-        legacy_metrics = _phase_metrics(legacy)
-
-        bulk = _WireRestoreBoard()
-        bulk.post_delay = legacy.post_delay
-        bulk.scramble_closed_groups = True
-        bulk.expected_closures = legacy.expected_closures
-        audit = _MemoryAudit()
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "secretary-data"
-            init_layout(data_dir)
-            (data_dir / "board" / "cards.json").write_text(
-                json.dumps({"version": 1, "cards": cards}), encoding="utf-8"
-            )
-            client = _client(bulk)
-            with mock.patch("secretary.tasks.TaskAudit", return_value=audit):
-                self.assertEqual(import_normalized_board(data_dir, client=client), 1_440)
-                bulk_metrics = _phase_metrics(bulk)
-                mutation_count = sum(
-                    method in {"createTask", "saveTaskMetadata", "moveTaskPosition", "closeTask"}
-                    for method in bulk.logical
-                )
-                first_record_count = len(bulk.records)
-                self.assertEqual(import_normalized_board(data_dir, client=client), 1_440)
-            repeated_methods = [
-                method
-                for _phase, methods in bulk.records[first_record_count:]
-                for method in methods
-                if method in {"createTask", "saveTaskMetadata", "moveTaskPosition", "closeTask"}
-            ]
-            self.assertEqual(repeated_methods, [])
-            self.assertEqual(
-                mutation_count,
-                sum(
-                    method in {"createTask", "saveTaskMetadata", "moveTaskPosition", "closeTask"}
-                    for method in bulk.logical
-                ),
-            )
-        first_run_records = bulk.records[:first_record_count]
-        first_run_posts = len(first_run_records)
-        first_run_rpc = sum(len(methods) for _phase, methods in first_run_records)
-        legacy_posts = sum(int(values["posts"]) for values in legacy_metrics.values())
-        legacy_rpc = sum(int(values["rpc"]) for values in legacy_metrics.values())
-        self.assertLess(first_run_posts, legacy_posts // 10)
-        self.assertLess(first_run_rpc, legacy_rpc)
-        self.assertGreater(bulk.logical.count("closeTask"), 0)
-        self.assertGreaterEqual(len(audit.events(kind="restored_order")), 4)
-        self.assertEqual(len(bulk.scrambled_groups), 4)
-        self.assertTrue(all(phase in bulk_metrics for phase in ("closure", "order", "final_parity")))
-        print(
-            "BULK_CARD_RESTORE durability=excluded fixture=recovery-card-shape-1440.json "
-            "cards=1440 task=894 issue=538 product=8 active=341 archived=1099 "
-            f"legacy_rpc={legacy_rpc} legacy_posts={legacy_posts} "
-            f"bulk_first_rpc={first_run_rpc} bulk_first_posts={first_run_posts} "
-            "repeat_mutations=0 batch_count=200 batch_bytes=1048576"
-        )
-        print(_metrics_line("BULK_CARD_RESTORE_BEFORE", legacy_metrics))
-        print(_metrics_line("BULK_CARD_RESTORE_AFTER", bulk_metrics))
-
     def test_real_task_audit_durability_sample(self) -> None:
         cards = _production_cards()[:40]
         board = _WireRestoreBoard()

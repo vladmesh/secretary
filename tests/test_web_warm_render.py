@@ -38,7 +38,7 @@ from secretary.web.provider_usage import ProviderUsageLayer
 from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import hold_store_exclusion
 from secretary.webproto.sprint_reads import SprintReadLayer
-from tests.fakes.tasks import FakeKanboard
+from tests.fakes.tasks import reader_seed
 from tests.sql_backend_fixtures import PostgresBoard, seed_client
 from tests.web_fakes import Recording
 
@@ -103,7 +103,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
             "".join(f"{key}={value}\n" for key, value in config.as_environ().items()), encoding="utf-8"
         )
         path.chmod(0o600)
-        client = seed_client(config, FakeKanboard(), self.instance)
+        client = seed_client(config, reader_seed(), self.instance)
         with client.transaction():
             client._execute(
                 "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, status, "

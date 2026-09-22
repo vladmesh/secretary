@@ -85,7 +85,7 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         # The escalation wants to block; the guard refuses and the tick degrades to an
         # explicit wait instead.
         self.assertEqual(outcome["action"], "worker-guard-refused")
-        self.assertNotEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotEqual(self.reader.show("secretary-510")["state"], "blocked")
 
     def test_the_escalation_happens_through_the_real_guard(self) -> None:
         self._open_the_second_round()
@@ -133,12 +133,12 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         proc = subprocess.Popen(["true"])
         proc.wait()
         record = self.runtime.production_state.records(self.runtime.production_state.load())[
-            "secretary-510-pilot"
+            "secretary-510"
         ]
         self.host.head_pid = proc.pid
         self.host._write_head_pid(
             "worker",
-            "secretary-510-pilot",
+            "secretary-510",
             head_run=record.worker_head_run,
             leaf=record.worker_leaf,
         )
@@ -161,7 +161,7 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         ):
             self.tick()  # stamps the fresh waiting window
             payload = self.runtime.production_state.load()
-            record_payload = payload["records"]["secretary-510-pilot"]
+            record_payload = payload["records"]["secretary-510"]
             record_payload["worker_waiting_since"] -= 100_000.0
             self.runtime.production_state.save(payload)
             outcome = self.tick()
@@ -170,7 +170,7 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(outcome["status"], "degraded")
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertNotIn("stop_head:worker", self.host.calls)
-        last = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        last = self.reader.show("secretary-510")["comments"][-1]["body"]
         self.assertIn("NOT stopped or replaced", last)
 
 
@@ -209,7 +209,7 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
     def test_an_operator_stop_runs_without_any_episode(self) -> None:
         self._open_the_second_round()
         payload = self.runtime.production_state.load()
-        record = self.runtime.production_state.records(payload)["secretary-510-pilot"]
+        record = self.runtime.production_state.records(payload)["secretary-510"]
         self.assertIsNone(record.worker_vitality_episode)
 
         # The operator's explicit command path: the host's stop_head with no vitality
@@ -226,7 +226,7 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
         self.start_dispatcher()
         self.tick()
         payload = self.runtime.production_state.load()
-        record = self.runtime.production_state.records(payload)["secretary-510-pilot"]
+        record = self.runtime.production_state.records(payload)["secretary-510"]
         self.assertIsNone(record.worker_vitality_episode)
         # The lifecycle stop goes through its own confirmed-stop path, which the guard
         # never sees; the assertion is that it completes without one.

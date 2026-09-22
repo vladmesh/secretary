@@ -24,8 +24,9 @@ from unittest import mock
 
 from secretary.board.events import BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.config import validate
-from secretary.tasks import TaskAudit
+from secretary.tasks import task_audit_for
 from secretary.webproto import command_reads
 from secretary.webproto.boundary import operations
 from secretary.webproto.command_reads import (
@@ -62,13 +63,17 @@ OPERATION_LAYERS = (OperationLayer, SprintOperationLayer, PauseOperationLayer)
 
 
 class CommandProtocolFixture(SprintProtocolFixture):
-    """One installation, one data plane, and a committed audit with commands on several entities."""
+    """One installation, one data plane, and a committed audit with commands on several entities.
+
+    The history is the card audit (`requests`), so the board is a real store (`CARD_STORE`).
+    """
+
+    CARD_STORE = True
 
     def layer(self, **kwargs: Any) -> CommandReadLayer:
         options: dict[str, Any] = {
             "data_dir": self.data_dir,
-            # The audit follows the card client, so the fixture's own board is what decides it: this
-            # installation is served by Kanboard, and its canon is the file journal below.
+            # The audit is the card client's: `requests` in the fixture's own store.
             "board_client": self.board,
             "clock": lambda: self.clock,
         }
@@ -77,11 +82,11 @@ class CommandProtocolFixture(SprintProtocolFixture):
 
     # -- the history a case wants ---------------------------------------------------------------
 
-    def audit(self) -> TaskAudit:
-        return TaskAudit(self.data_dir)
+    def audit(self) -> SqlTaskAudit:
+        return task_audit_for(self.board)
 
     def canon(self) -> BoardEventCanon:
-        return BoardEventCanon(self.data_dir)
+        return BoardEventCanon(self.data_dir, audit=self.audit())
 
     def journal(self) -> Path:
         return self.data_dir / "board" / "events.ndjson"
@@ -126,19 +131,6 @@ class CommandProtocolFixture(SprintProtocolFixture):
         """
         event = self.event(**kwargs)
         self.canon().stage(request_id, event)
-        return event
-
-    def crashed_between_append_and_clear(self, request_id: str, **kwargs: Any) -> Event:
-        """The exact state a process that died mid-commit leaves: appended, pending not cleared.
-
-        `TaskAudit._append_owned` writes the journal line and then unlinks the staged record, both
-        under its lock. A process that stops between the two leaves a committed event with its
-        staged evidence still on disk -- an owed repair, and the one state in which both lookups
-        answer for one request id.
-        """
-        event = self.stage(request_id, **kwargs)
-        with self.journal().open("a", encoding="utf-8") as journal:
-            journal.write(json.dumps(event.to_record(request_id), sort_keys=True) + "\n")
         return event
 
     def generic(
@@ -335,13 +327,6 @@ class RequestReadTests(CommandProtocolFixture):
         self.assertIsNotNone(self.audit().pending_event("req-staged"))
         self.assertIsNone(self.audit().committed_event("req-staged"))
 
-    def test_a_stale_staged_record_beside_a_committed_one_is_said_and_not_answered_with(self) -> None:
-        """Committed wins, exactly as `TaskAudit.event` decides it, and the owed repair is reported."""
-        self.crashed_between_append_and_clear("req-1", event_id="evt_1")
-        operation = self.layer().command_request("req-1")["operation"]
-        self.assertEqual(operation["state"], STATE_COMMITTED)
-        self.assertTrue(operation["staged"])
-
     def test_the_read_needs_the_identifier_the_operation_was_sent_with(self) -> None:
         with self.assertRaises(ValidationRefused):
             self.layer().command_request("")
@@ -357,10 +342,10 @@ class RequestReadTests(CommandProtocolFixture):
         """Criterion 2, structurally: the reads perform no operation, so none is even called."""
         with (
             mock.patch("secretary.sprints.SprintWriter.create") as created,
-            mock.patch("secretary.tasks.TaskAudit.append") as appended,
-            mock.patch("secretary.tasks.TaskAudit.claim") as claimed,
-            mock.patch("secretary.tasks.TaskAudit.reconcile") as reconciled,
-            mock.patch("secretary.tasks.TaskAudit.discard") as discarded,
+            mock.patch("secretary.board.sql_audit.SqlTaskAudit.append") as appended,
+            mock.patch("secretary.board.sql_audit.SqlTaskAudit.claim") as claimed,
+            mock.patch("secretary.board.sql_audit.SqlTaskAudit.reconcile") as reconciled,
+            mock.patch("secretary.board.sql_audit.SqlTaskAudit.discard") as discarded,
         ):
             self.layer().command_history()
             self.layer().command_request("req-1")
@@ -381,7 +366,6 @@ class ReadsWriteNothingTests(CommandProtocolFixture):
     def test_the_request_read_changes_no_byte_of_the_data_plane(self) -> None:
         self.create()
         self.stage("req-staged", event_id="evt_staged")
-        self.assertTrue(self.journal().exists())
         before = self.data_plane()
         for request in ("req-1", "req-staged", "never-sent"):
             self.layer().command_request(request)
@@ -400,7 +384,7 @@ class HonestyTests(CommandProtocolFixture):
 
     def test_an_unreadable_audit_is_an_unavailable_source_and_not_an_empty_history(self) -> None:
         self.commit("req-1", event_id="evt_1")
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("journal denied")):
+        with mock.patch.object(SqlTaskAudit, "events_page", side_effect=PermissionError("journal denied")):
             document = self.layer().command_history()
         source = self.assert_unavailable(document, "commands")
         self.assertIn("PermissionError", source["reason"])
@@ -409,22 +393,14 @@ class HonestyTests(CommandProtocolFixture):
         # The extent is not read from a source, so it is said even here.
         self.assertEqual(document["extent"]["entities"], "all")
 
-    def test_a_journal_that_is_not_there_is_unavailable_and_not_a_history_of_nothing(self) -> None:
-        """The released traversal answers `[]` for it, and that is the one answer this may not publish."""
-        self.assertFalse(self.journal().exists())
-        document = self.layer().command_history()
-        source = self.assert_unavailable(document, "commands")
-        self.assertIn("not there", source["reason"])
-        self.assertIsNone(document["commands"]["items"])
-
     def test_an_empty_history_and_an_unavailable_one_are_different_answers(self) -> None:
-        self.journal().write_text("", encoding="utf-8")
+        # An empty `requests` table is a read that happened.
         document = self.layer().command_history()
         self.assert_available(document, "commands")
         self.assertEqual(document["commands"]["items"], [])
 
     def test_a_request_id_over_an_unreadable_audit_is_unknown_and_never_not_found(self) -> None:
-        with mock.patch.object(TaskAudit, "committed_event", side_effect=PermissionError("journal denied")):
+        with mock.patch.object(SqlTaskAudit, "committed_event", side_effect=PermissionError("journal denied")):
             document = self.layer().command_request("req-1")
         self.assert_unavailable(document, "operation")
         self.assertEqual(document["operation"]["state"], STATE_UNKNOWN)
@@ -439,21 +415,11 @@ class HonestyTests(CommandProtocolFixture):
         """
         self.commit("req-committed", event_id="evt_committed")
         self.stage("req-staged", event_id="evt_staged", minute=1)
-        with mock.patch.object(TaskAudit, "committed_event", side_effect=PermissionError("denied")):
+        with mock.patch.object(SqlTaskAudit, "committed_event", side_effect=PermissionError("denied")):
             document = self.layer().command_request("req-staged")
         self.assert_unavailable(document, "operation")
         self.assertEqual(document["operation"]["state"], STATE_UNKNOWN)
         self.assertIsNone(document["operation"]["continuation"])
-
-    def test_a_pending_layout_this_release_will_not_guess_at_is_unknown_too(self) -> None:
-        """The second thing the lookup can raise, and it must not become `not_found` either."""
-        self.commit("req-1", event_id="evt_1")
-        legacy = self.data_dir / "board" / "pending-audit"
-        legacy.mkdir(parents=True, exist_ok=True)
-        (legacy / "some-old-record.json").write_text("{}", encoding="utf-8")
-        document = self.layer().command_request("never-sent")
-        self.assert_unavailable(document, "operation")
-        self.assertEqual(document["operation"]["state"], STATE_UNKNOWN)
 
     def test_an_entity_kind_the_record_does_not_carry_is_null_and_never_inferred(self) -> None:
         self.generic("req-generic", ref="secretary-99")
@@ -688,9 +654,9 @@ class LayerPropertyTests(CommandProtocolFixture):
                 json.dumps(document)
 
     def test_a_refused_document_still_validates_against_the_schema(self) -> None:
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("denied")):
+        with mock.patch.object(SqlTaskAudit, "events_page", side_effect=PermissionError("denied")):
             history = self.layer().command_history()
-        with mock.patch.object(TaskAudit, "committed_event", side_effect=PermissionError("denied")):
+        with mock.patch.object(SqlTaskAudit, "committed_event", side_effect=PermissionError("denied")):
             request = self.layer().command_request("req-1")
         for document in (history, request):
             with self.subTest(kind=document["kind"]):

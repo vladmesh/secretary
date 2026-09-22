@@ -17,8 +17,8 @@ from secretary.checkpoint import CheckpointWriter
 from secretary.memory_errors import MemoryProtocolError
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import commit_memory_proposal, propose_memory_fact
-from secretary.tasks import TaskAudit
-from tests.fakes.tasks import FakeKanboard
+from tests.fakes.tasks import empty_seed
+from tests.sql_backend_fixtures import card_store
 
 
 def git(repo: Path, *args: str) -> str:
@@ -214,6 +214,7 @@ class TwoWriterTests(unittest.TestCase):
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "runs").mkdir(parents=True)
         self.instance_dir = init_instance_repo(root / "secretary-instance")
+        self.client = card_store(self, empty_seed(), instance_dir=self.instance_dir)
         self.seed_board_and_runs()
 
     def tearDown(self) -> None:
@@ -239,9 +240,8 @@ class TwoWriterTests(unittest.TestCase):
         (runs / "claims.json").write_text('{"claims": {}}\n', encoding="utf-8")
 
     def writer(self) -> CheckpointWriter:
-        # The gate is the audit of the writer's own card client, so this installation is handed the
-        # Kanboard fake whose canon is the file journal under `self.data_dir`.
-        writer = CheckpointWriter(self.data_dir, self.instance_dir, client=FakeKanboard())
+        # The gate is the audit of the writer's own card client: an empty card store of this case.
+        writer = CheckpointWriter(self.data_dir, self.instance_dir, client=self.client)
         writer._regenerate = lambda: (1, 0)
         return writer
 
@@ -267,8 +267,7 @@ class TwoWriterTests(unittest.TestCase):
         self.write_fact("one")
         memory_head = git(self.instance_dir, "log", "-1", "--format=%H", "--", "state/memory").strip()
 
-        with mock.patch.object(TaskAudit, "status", return_value={"ok": True, "pending": 0}):
-            result = self.writer().write()
+        result = self.writer().write()
 
         self.assertEqual(result.status, "committed")
         # The tick commit touched board and runs only; memory's tip did not move.
@@ -283,8 +282,7 @@ class TwoWriterTests(unittest.TestCase):
         self.assertEqual((facts / "global" / "one.md").read_text(encoding="utf-8").count("fact"), 1)
 
     def test_a_memory_write_lands_in_the_checkpoint_history(self):
-        with mock.patch.object(TaskAudit, "status", return_value={"ok": True, "pending": 0}):
-            self.writer().write()
+        self.writer().write()
 
         self.write_fact("one")
 
@@ -301,8 +299,7 @@ class TwoWriterTests(unittest.TestCase):
         def tick() -> None:
             try:
                 start.wait(timeout=10)
-                with mock.patch.object(TaskAudit, "status", return_value={"ok": True, "pending": 0}):
-                    self.writer().write()
+                self.writer().write()
             except BaseException as exc:  # noqa: BLE001 - reported to the main thread
                 errors.append(exc)
 

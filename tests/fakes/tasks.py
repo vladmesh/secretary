@@ -1,14 +1,18 @@
+"""Starting boards for the card store, and the sprint stand-in the card create path needs.
+
+Cards have one implementation, PostgreSQL, so there is no in-memory card board here. A `CardSeed`
+is only seed input: `tests.sql_backend_fixtures.card_store` writes it into a real store through the
+product's own client. The rows keep the legacy board shape the importer reads (`column_id`,
+`swimlane_id`, `date_creation`), because that is what `seed_client` takes; a card keeps its row id
+as its `board_key`, so `task_postgres_12` is the first card of every seed below.
+"""
+
 from __future__ import annotations
 
 import contextlib
-import tempfile
-from pathlib import Path
+from typing import Any, ClassVar
 from unittest import mock
 
-from secretary.tasks import (
-    TaskError,
-)
-from tests.fakes.board import BatchedCalls
 from tests.observer_identity import as_observer
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
@@ -32,242 +36,97 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
 # The sprint the assessment fixture's card belongs to.
 SPRINT = "sprint:1031"
 
-
-class FakeKanboard(BatchedCalls):
-    def __init__(self) -> None:
-        self.instance_dir = Path(tempfile.gettempdir())
-        self.calls: list[tuple[str, dict]] = []
-        self.batch_calls: list[list[tuple[str, dict]]] = []
-        self.tasks = [
-            {
-                "id": "12",
-                "reference": "secretary-468",
-                "title": "Readonly task protocol",
-                "description": "",
-                "column_id": "2",
-                "position": "3",
-                "swimlane_id": "4",
-                "date_creation": "1720000000",
-                "date_modification": "1720000010",
-            },
-            {"id": 13, "reference": "old-1", "title": "Old", "column_id": 1, "position": "bad"},
-        ]
-        self.metadata = {
-            12: {
-                "project": "secretary",
-                "task_type": "code",
-                "claim": "codex-terra",
-                "head": "codex-terra",
-                "retry_same": "2",
-                "retry_switch": "bad",
-                "retry_heads": "codex-terra,claude-opus",
-                "steward_report": "1",
-                "codex_launch_mode": "tui",
-            },
-            13: {},
-        }
-
-    def call(self, method: str, **params: object) -> object:
-        self.calls.append((method, params))
-        if method == "getProjectByName":
-            return {"id": 7}
-        if method == "getColumns":
-            return [{"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"}]
-        if method == "getActiveSwimlanes":
-            return [{"id": 4, "name": "Secretary"}]
-        if method == "getAllTasks":
-            status = params.get("status_id")
-            if status not in {0, 1}:
-                return []
-            return [
-                task
-                for task in self.tasks
-                if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
-            ]
-        if method == "getTaskByReference":
-            return next((task for task in self.tasks if task["reference"] == params["reference"]), None)
-        if method == "getTaskMetadata":
-            return self.metadata[int(params["task_id"])]
-        if method == "getAllComments":
-            return [{"date_creation": 1720000020, "comment": "[report:done]\nReady for review"}]
-        if method == "closeTask":
-            # Archiving is a board fact, not a writer's privilege: a reader fixture that has to
-            # show an archived card asks the board for one instead of assigning into these rows.
-            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
-            task["is_active"] = 0
-            return True
-        raise AssertionError(method)
-
-    def call_batch(self, calls):
-        batch = list(calls)
-        self.batch_calls.append(batch)
-        return super().call_batch(batch)
+#: The seven columns, in the numbering the seed rows below use.
+SEED_COLUMNS = [
+    {"id": 1, "title": "Issues"},
+    {"id": 2, "title": "Ready"},
+    {"id": 3, "title": "In progress"},
+    {"id": 4, "title": "Validate"},
+    {"id": 7, "title": "Assessment"},
+    {"id": 5, "title": "Blocked"},
+    {"id": 6, "title": "Done"},
+]
+#: The column id of each state in `SEED_COLUMNS`.
+SEED_COLUMN = {
+    "issues": 1,
+    "ready": 2,
+    "in_progress": 3,
+    "validate": 4,
+    "assessment": 7,
+    "blocked": 5,
+    "done": 6,
+}
 
 
-class WriteKanboard(FakeKanboard):
-    fail_comments = False
-    lose_comment_reply = False
-    fail_metadata = False
-    fail_move = False
-    fail_update = False
-    fail_close = False
-    # A fault that can only happen after a column move has already been applied: the transport
-    # dropping the very next round trip.  `tests/test_restore.py` arms it; the card tests reach
-    # the same fault through `BoardFixture.board_drops_the_call_after`, which is written against
-    # the client interface and therefore says the same thing on either backend.
-    fail_read_after_move = False
+class CardSeed:
+    """A starting board: card rows, their metadata and their comments, keyed by row id."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.comments: dict[int, list[dict[str, object]]] = {int(task["id"]): [] for task in self.tasks}
-        # Свимлейны борда, а не константа ответа: их создают по требованию, как живой Kanboard.
-        self.swimlanes: list[dict[str, object]] = [{"id": 4, "name": "Secretary", "position": 1}]
-        self._unavailable_next_call = False
+    columns: ClassVar[list[dict[str, Any]]] = SEED_COLUMNS
+    lanes: list[dict[str, Any]] = [{"id": 4, "name": "Secretary"}]  # noqa: RUF012 - copied per seed
 
-    def call(self, method: str, **params: object) -> object:
-        if self._unavailable_next_call:
-            self._unavailable_next_call = False
-            raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
-        if method == "getActiveSwimlanes":
-            self.calls.append((method, params))
-            return [dict(lane) for lane in self.swimlanes]
-        if method == "addSwimlane":
-            self.calls.append((method, params))
-            # Kanboard отвечает на дубликат имени false, а не идентификатором существующего.
-            if any(lane["name"] == params["name"] for lane in self.swimlanes):
-                return False
-            identifier = max((int(lane["id"]) for lane in self.swimlanes), default=0) + 1
-            self.swimlanes.append(
-                {"id": identifier, "name": params["name"], "position": len(self.swimlanes) + 1}
-            )
-            return identifier
-        if method == "getColumns":
-            return [
-                {"id": 1, "title": "Issues"},
-                {"id": 2, "title": "Ready"},
-                {"id": 3, "title": "In progress"},
-                {"id": 4, "title": "Validate"},
-                {"id": 7, "title": "Assessment"},
-                {"id": 5, "title": "Blocked"},
-                {"id": 6, "title": "Done"},
-            ]
-        if method == "createComment":
-            self.calls.append((method, params))
-            if self.fail_comments:
-                raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            self.comments[int(params["task_id"])].append(
-                {"date_creation": "1720000020", "comment": params["content"]}
-            )
-            if self.lose_comment_reply:
-                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
-            return 1
-        if method == "getAllComments":
-            return self.comments[int(params["task_id"])]
-        if method == "createTask":
-            self.calls.append((method, params))
-            task_id = max(int(task["id"]) for task in self.tasks) + 1
-            self.tasks.append(
-                {
-                    "id": task_id,
-                    "reference": params.get("reference", ""),
-                    "title": params["title"],
-                    "description": params.get("description", ""),
-                    "column_id": params["column_id"],
-                    "position": len(self.tasks) + 1,
-                    "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1720000200",
-                    "date_modification": "1720000200",
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        if method == "updateTask":
-            self.calls.append((method, params))
-            if self.fail_update:
-                raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            task = next(task for task in self.tasks if int(task["id"]) == int(params["id"]))
-            for field in ("reference", "title", "description"):
-                if field in params:
-                    task[field] = params[field]
-            task["date_modification"] = "1720000201"
-            return True
-        if method == "moveTaskPosition":
-            self.calls.append((method, params))
-            if self.fail_move:
-                raise TaskError("backend_error", "Kanboard rejected the move", 1)
-            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
-            task_index = self.tasks.index(task)
-            column_id = params["column_id"]
-            swimlane_id = params["swimlane_id"]
-            self.tasks.remove(task)
-            siblings = sorted(
-                (
-                    candidate
-                    for candidate in self.tasks
-                    # A board row need not carry a swimlane at all, and a fixture that had to
-                    # add one before moving anything was reaching into these rows to do it.
-                    if candidate["column_id"] == column_id
-                    and candidate.get("swimlane_id") == swimlane_id
-                ),
-                key=lambda candidate: int(candidate.get("position") or 0),
-            )
-            position = min(max(1, int(params["position"])), len(siblings) + 1)
-            task["column_id"] = column_id
-            task["swimlane_id"] = swimlane_id
-            siblings.insert(position - 1, task)
-            for index, candidate in enumerate(siblings, start=1):
-                candidate["position"] = index
-            self.tasks.insert(task_index, task)
-            task["date_modification"] = "1720000100"
-            # The move is applied and its reply is on the wire.  Whatever happens next happens
-            # to a card that has already changed column.
-            if self.fail_read_after_move:
-                self._unavailable_next_call = True
-            return True
-        if method == "saveTaskMetadata":
-            self.calls.append((method, params))
-            if self.fail_metadata:
-                raise TaskError("backend_error", "Kanboard rejected the metadata write", 1)
-            self.metadata[int(params["task_id"])].update(params["values"])
-            return True
-        if method == "closeTask":
-            self.calls.append((method, params))
-            if self.fail_close:
-                raise TaskError("backend_error", "Kanboard rejected the archive", 1)
-            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
-            task["is_active"] = 0
-            task["date_modification"] = "1720000300"
-            return True
-        return super().call(method, **params)
+    def __init__(
+        self,
+        tasks: list[dict[str, Any]] | None = None,
+        metadata: dict[int, dict[str, Any]] | None = None,
+        comments: dict[int, list[dict[str, Any]]] | None = None,
+        *,
+        next_key: int | None = None,
+    ) -> None:
+        self.lanes = [dict(lane) for lane in type(self).lanes]
+        self.tasks = list(tasks or [])
+        self.metadata = dict(metadata or {})
+        self.comments = dict(comments or {})
+        #: The `board_key` the store hands the next created card, when the test cares.
+        self.next_key = next_key
 
 
-class _EmptyWriteKanboard(WriteKanboard):
-    def __init__(self) -> None:
-        super().__init__()
-        self.tasks = []
-        self.metadata = {}
-        self.next_task_id = 12
+def _two_cards() -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    tasks: list[dict[str, Any]] = [
+        {
+            "id": 12,
+            "reference": "secretary-468",
+            "title": "Readonly task protocol",
+            "description": "",
+            "column_id": 2,
+            "position": "3",
+            "swimlane_id": 4,
+            "date_creation": "1720000000",
+            "date_modification": "1720000010",
+        },
+        {"id": 13, "reference": "old-1", "title": "Old", "column_id": 1, "position": "bad"},
+    ]
+    metadata: dict[int, dict[str, Any]] = {
+        12: {
+            "project": "secretary",
+            "task_type": "code",
+            "claim": "codex-terra",
+            "head": "codex-terra",
+            "retry_same": "2",
+            "retry_switch": "bad",
+            "retry_heads": "codex-terra,claude-opus",
+            "steward_report": "1",
+            "codex_launch_mode": "tui",
+        },
+        13: {},
+    }
+    return tasks, metadata
 
-    def call(self, method: str, **params: object) -> object:
-        if method == "createTask":
-            self.calls.append((method, params))
-            task_id = self.next_task_id
-            self.next_task_id += 1
-            self.tasks.append(
-                {
-                    "id": task_id,
-                    "reference": params.get("reference", ""),
-                    "title": params["title"],
-                    "description": params.get("description", ""),
-                    "column_id": params["column_id"],
-                    "position": 1,
-                    "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1720000200",
-                    "date_modification": "1720000200",
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        return super().call(method, **params)
+
+def reader_seed() -> CardSeed:
+    """`secretary-468` in Ready and `old-1` in Issues, each carrying one `report:done` comment."""
+    tasks, metadata = _two_cards()
+    done = {"date_creation": 1720000020, "comment": "[report:done]\nReady for review"}
+    return CardSeed(tasks, metadata, {12: [dict(done)], 13: [dict(done)]})
+
+
+def writer_seed() -> CardSeed:
+    """The same two cards with no comments: the board a writer case starts from."""
+    tasks, metadata = _two_cards()
+    return CardSeed(tasks, metadata)
+
+
+def empty_seed() -> CardSeed:
+    """No cards and no lanes at all; the first card created on it is `task_postgres_12`."""
+    seed = CardSeed(next_key=12)
+    seed.lanes = []
+    return seed

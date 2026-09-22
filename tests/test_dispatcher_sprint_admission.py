@@ -11,27 +11,28 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from secretary.board.sql_cards import SPRINT_BOARD_ID
+from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
+from secretary.dispatch.production import _budget_event_type, _reconcile_sprint_budget
+from secretary.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
 from secretary.dispatcher import (
     SPRINT_RESERVATION_BLOCKED_ACTION,
     SPRINT_RESERVATION_RESERVED,
     SPRINT_RESERVATION_UNVERIFIABLE,
 )
-from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
-from secretary.dispatch.production import _budget_event_type, _reconcile_sprint_budget
-from secretary.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
-from secretary.tasks import TaskAudit, TaskError
+from secretary.tasks import TaskError, task_audit_for
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.dispatcher import FakeKanboard
 from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard
 
 SPRINT = "sprint:1031"
-SPRINT_BOARD = 8
+SPRINT_BOARD = SPRINT_BOARD_ID
 
 
 def setUpModule() -> None:
     """Confirm this CI shard can build its disposable board seam before tests run."""
-    require_disposable_board_fixture(FakeKanboard)
+    require_disposable_board_fixture(PostgresBoard.shared)
 
 
 class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
@@ -42,18 +43,17 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def _out_of_sprint(self, kind: str = "code") -> None:
         """The pilot as the PO cuts it outside the sprint: no sprint link, of the given kind."""
-        self.board.metadata[12].pop("sprint_ref", None)
-        self.board.metadata[12]["task_type"] = kind
-        self.board.metadata[12]["review"] = "required" if kind == "code" else "skipped"
+        self.board.save_metadata(12, {"sprint_ref": ""})
+        self.board.save_metadata(12, task_type=kind)
+        self.board.save_metadata(12, review="required" if kind == "code" else "skipped")
 
     def _sprint_metadata(self) -> dict:
-        row = next(row for row in self.board.sprints if row["reference"] == SPRINT)
-        return self.board.metadata[int(row["id"])]
+        return self.board.sprint_metadata(SPRINT)
 
     def _blocked_transitions(self) -> list[dict]:
         return [
             event
-            for event in TaskAudit(self.data_dir).events()
+            for event in task_audit_for(self.board).events()
             if event.get("record_type") == "board.protocol_event"
             and (event.get("transition") or {}).get("target") == "blocked"
             and str(event.get("ref") or "").endswith(CARD_REF)
@@ -151,7 +151,7 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_a_code_card_outside_every_sprint_on_an_unreserved_project_is_claimed(self) -> None:
         self._out_of_sprint("code")
-        self._sprint_metadata()["sprint_reservations"] = '["other"]'
+        self.board.save_sprint_metadata(SPRINT, sprint_reservations='["other"]')
 
         claimed = self.tick()
 
@@ -162,7 +162,7 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._out_of_sprint("code")
         self.assertEqual(self.tick()["step"], "sprint-reservation-refused")
 
-        self._sprint_metadata()["sprint_status"] = "closed"
+        self.board.save_sprint_metadata(SPRINT, sprint_status="closed")
         self.sprints.rows[SPRINT]["status"] = "closed"
         moved = self.writer.move(
             role="po", actor="operator", reference=CARD_REF, target="ready", reason="the sprint closed"

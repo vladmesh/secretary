@@ -230,7 +230,6 @@ from secretary.routing_journal import (
     head_run_from_profile,
 )
 from secretary.tasks import (
-    TaskAudit,
     durability_dirt,
     specification_revision,
 )
@@ -800,14 +799,14 @@ class CommandHostRuntime:
     ) -> None:
         self.catalog = catalog
         self.data_dir = data_dir
-        # TASK.md is a durable projection, so its feedback selector reads the same audit journal
-        # as the dispatcher rather than depending on a live record or wall-clock ordering. The
-        # dispatcher hands its own backend-selected audit in (`dispatch.bootstrap.runtime_from_args`), which
-        # is the only production construction of this host; built here from the data dir alone it
-        # would be the file journal, which on the PostgreSQL backend nobody writes, so the default is
-        # a host standing on its own — what a test builds — and is named as such in
-        # `tests/test_architecture.py::FileAuditOwnershipTests`.
-        self.audit = audit if audit is not None else TaskAudit(data_dir)
+        # TASK.md is a durable projection, so its feedback selector reads the same card audit as
+        # the dispatcher rather than depending on a live record or wall-clock ordering. The
+        # dispatcher hands its own in (`dispatch.bootstrap.runtime_from_args`), which is the only
+        # production construction of this host. There is no default: built from the data dir alone
+        # it would be the file journal, which nobody writes, and its silence would render a TASK.md
+        # without the review the round was bound to. A host standing on its own -- what a test
+        # builds -- refuses the read by name instead (`_card_audit`).
+        self.audit = audit
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
         # than independently guessing an interpreter, checkout or workspace namespace.
@@ -4173,6 +4172,12 @@ class CommandHostRuntime:
         ]
         return "\n".join(sections)
 
+    def _card_audit(self) -> Any:
+        """The card audit this host was handed, or a refusal that names the missing wiring."""
+        if self.audit is None:
+            raise HostError("this dispatcher host was built without the card audit its TASK.md reads")
+        return self.audit
+
     def _select_revision_bound_worker_feedback(
         self, task: dict[str, Any], decision: str
     ) -> tuple[str, str | None]:
@@ -4182,7 +4187,7 @@ class CommandHostRuntime:
         specification it renders. Missing, malformed, or non-unique bindings intentionally
         produce no historical instruction; the current card description remains the work item.
         """
-        events = self.audit.events(str(task.get("ref") or ""))
+        events = self._card_audit().events(str(task.get("ref") or ""))
         description = str(task.get("description") or "")
         revision = specification_revision(events, description)
         if not revision:
@@ -4202,7 +4207,7 @@ class CommandHostRuntime:
         """Read only the structured declaration bound to the decision rendered for this round."""
         if not decision:
             return ()
-        events = self.audit.events(str(task.get("ref") or ""))
+        events = self._card_audit().events(str(task.get("ref") or ""))
         description = str(task.get("description") or "")
         revision = specification_revision(events, description)
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()

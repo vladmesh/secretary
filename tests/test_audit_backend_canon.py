@@ -54,25 +54,16 @@ from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.run_events import STARTED, publish_started, request_id_for
 from secretary.webproto.runs import ProductRun
-from tests.fakes.tasks import FakeKanboard
-from tests.sql_backend_fixtures import PostgresBoard, seed_client
+from tests.fakes.tasks import reader_seed
+from tests.sql_backend_fixtures import CardStoreCase
 
 #: A committed record of a board that is not this one. Whatever a reader answers, none of this may
 #: be in it: it is the stale projection a migrated installation still has lying under `<data>`.
 STALE_JOURNAL_REF = "stale-999"
 
 
-class SqlAuditCase(unittest.TestCase):
-    """One container per module, one migrated store, one instance and one data plane per case."""
-
-    board: PostgresBoard
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        for module in ("psycopg", "sqlalchemy", "alembic"):
-            __import__(module)
-        cls.board = PostgresBoard()
-        cls.addClassCleanup(cls.board.stop)
+class SqlAuditCase(CardStoreCase):
+    """One migrated store, one instance and one data plane per case."""
 
     def setUp(self) -> None:
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -80,8 +71,7 @@ class SqlAuditCase(unittest.TestCase):
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "dispatcher").mkdir(parents=True)
         self.instance_dir = self._instance()
-        self.client = seed_client(self.board.fresh_database(), FakeKanboard(), self.instance_dir)
-        self.addCleanup(self.client.close)
+        self.client = self.card_store(reader_seed(), instance_dir=self.instance_dir)
         self.audit = task_audit_for(self.client, self.data_dir)
         self.assertIsInstance(self.audit, SqlTaskAudit)
 
@@ -261,7 +251,6 @@ STORE_REFUSAL = "the board store could not answer a read: connection refused"
 class _RefusingClient:
     """A PostgreSQL client whose store will not answer, to prove `unknown` is not `not_found`."""
 
-    backend_kind = "postgres"
     _depth = 0
 
     def _refuse(self) -> Any:
@@ -586,37 +575,6 @@ class CardHistoryReadTests(SqlAuditCase):
         self.assertEqual(page["source"]["state"], "unavailable")
         self.assertIn("could not be established", page["source"]["reason"])
         self.assertEqual(page["items"], [])
-
-    def test_a_kanboard_client_still_pages_the_file_journal_by_byte_offset(self) -> None:
-        """The released behavior, unchanged, beside the same data plane: file in, offsets out."""
-        record = {
-            "schema_version": 1,
-            "event_id": "evt_file",
-            "kind": "commented",
-            "ref": self.REF,
-            "occurred_at": "2026-09-07T12:00:00Z",
-            "actor": {"role": "po", "id": "owner"},
-            "outcome": "success",
-            "request_id": "file-request",
-            "payload": {},
-        }
-        self.journal().write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-        kanboard = FakeKanboard()
-        layer = self.layer(board_client=kanboard)
-
-        reader, semantics = layer._events(self.data_dir)
-        page = layer.task_events(self.REF, None, limit=10)
-
-        self.assertEqual(semantics, "offset")
-        self.assertEqual(reader.path, self.journal())
-        self.assertEqual([row["event_id"] for row in page["items"]], ["evt_file"])
-        self.assertEqual(
-            page["next_cursor"], Cursor(ref=self.REF, offset=self.journal().stat().st_size).encode()
-        )
-        with self.assertRaises(InvalidCursor):
-            layer.task_events(
-                self.REF, Cursor(ref=self.REF, offset=1, position=POSITION_ORDINAL).encode()
-            )
 
 
 class TypedCanonAndSprintReadTests(SqlAuditCase):

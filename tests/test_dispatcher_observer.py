@@ -17,13 +17,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import observer_fence as dispatcher_observer_fence
+from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.sql_cards import BOARD_ID
 from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatcher import (
-    CommandHostRuntime,
-    DispatcherRuntime,
-    InstanceCatalog,
-)
+from secretary.dispatch import observer_fence as dispatcher_observer_fence
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.launch import infrastructure_action
 from secretary.dispatch.observer import (
@@ -67,6 +64,11 @@ from secretary.dispatch.tui import (
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
+from secretary.dispatcher import (
+    CommandHostRuntime,
+    DispatcherRuntime,
+    InstanceCatalog,
+)
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import (
@@ -84,12 +86,12 @@ from secretary.sprints import (
     SprintWriter,
 )
 from secretary.status import _observers as status_observers
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
+from secretary.tasks import TaskError, TaskReader, TaskWriter, _now, task_audit_for
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
-    FakeKanboard,
     TwoOpenSprintAdmission,
+    dispatcher_seed,
 )
 from tests.fakes.observer import (
     BLOCKED_PANE_WAIT_BODY,
@@ -101,6 +103,7 @@ from tests.fakes.observer import (
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import as_observer, bind_observer
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.runtime import codex_preflight, tui_delivery
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
@@ -124,7 +127,7 @@ def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
 
     violations: list[str] = []
     patches = []
-    for owner in (TaskAudit, SqlTaskAudit):
+    for owner in (SqlTaskAudit,):
         events = owner.events
         projection = owner._occurrence_projection_records
         candidates = owner.uncharged_budget_candidates
@@ -186,12 +189,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # launches here; a test acting as another sprint's head binds its own.
         bind_observer(self, "sprint:1")
         (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
-        self.audit = TaskAudit(self.data_dir)
+        self.host.audit = task_audit_for(self.board)
+        self.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -240,8 +244,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.add_sprint(reference, status="open", **metadata)
 
     def close_sprint(self, reference: str = "sprint:1") -> None:
-        sprint = next(item for item in self.board.sprints if item["reference"] == reference)
-        self.board.metadata[int(sprint["id"])]["sprint_status"] = "closed"
+        self.board.save_sprint_metadata(reference, sprint_status="closed")
 
     def observers(self) -> dict:
         return load_observers(self.runtime.production_state.load())
@@ -391,12 +394,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_no_tick_caller_reads_the_whole_audit(self) -> None:
         """Claim, advance, budget, usage and outcome recovery, the observer launch and a wake."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         # A budget event, so the budget pass charges under the guard rather than finding nothing.
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body="guarded budget event",
             request_id="guard-red-review",
@@ -407,7 +410,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510-pilot",
+                reference="secretary-510",
                 body="card changed",
                 request_id="guard-event",
             )
@@ -430,7 +433,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         from secretary.dispatch.observer import _observer_event_state
 
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         record = self.observers()["sprint:1"]
         original = self.runtime.sprints.show
@@ -457,7 +460,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         from secretary.dispatch.observer import _observer_event_state
 
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         # A legacy cursor naming telemetry of a card that is not linked to this sprint (any more).
         # The id is found by its request id (the primary key) or by its typed event id.
@@ -477,16 +480,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 observer = self.observers()["sprint:1"]
                 observer.delivery.acknowledged_through = event_id
                 read: list[dict] = []
-                original = TaskAudit.events
+                original = SqlTaskAudit.events
 
                 def recording(
-                    audit: TaskAudit, reference: str = "", *, _read=read, _original=original, **filters: object
+                    audit: SqlTaskAudit, reference: str = "", *, _read=read, _original=original, **filters: object
                 ) -> list[dict]:
                     _read.append(dict(filters))
                     return _original(audit, reference, **filters)
 
                 with unfiltered_audit_reads_raise() as violations, mock.patch.object(
-                    TaskAudit, "events", recording
+                    SqlTaskAudit, "events", recording
                 ):
                     state = _observer_event_state(self.runtime, "sprint:1", observer)
 
@@ -529,12 +532,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.assertTrue(record.generation)
 
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -558,12 +561,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -581,12 +584,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_rotation_stops_the_head_it_replaces_once_it_is_quiet(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -607,12 +610,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="dead-head-event",
         )
@@ -635,12 +638,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         takes none of its prompts.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="stuck-head-event",
         )
@@ -670,7 +673,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         one that refuses a head for looking busy.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
@@ -685,7 +688,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="stalled-busy-head-event",
         )
@@ -713,12 +716,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="late-activity-event",
         )
@@ -1134,7 +1137,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         }
         self.catalog.role_defaults["observer"] = "claude-observer"
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.assertEqual(self.observers()["sprint:1"].head, "claude-observer")
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
@@ -1166,7 +1169,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="claude-observer-event",
         )
@@ -1192,7 +1195,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 "selected_step": "read board",
                 "selected_why": "card changed",
                 "rejected_alternatives": "wait",
-                "current_task": "secretary-510-pilot",
+                "current_task": "secretary-510",
                 "dod_state": "open",
                 "next_safe_step": "resume",
             }
@@ -1212,7 +1215,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_wake_the_pane_never_took_is_an_explicit_refusal(self) -> None:
         """Retry exhaustion reaches the tick and the delivery record instead of being silent."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
@@ -1241,7 +1244,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="swallowed-wake-event",
         )
@@ -1331,12 +1334,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         and the head, because the closing resume is written from them.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="evidence-first-event",
         )
@@ -1373,7 +1376,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1410,12 +1413,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         was exactly the answer that hid these failures.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="closeout-evidence-event",
         )
@@ -1525,12 +1528,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         evidence an earlier failure happened to leave behind.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="transport-refusal-event",
         )
@@ -1579,12 +1582,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_busy_delivery_wait_preserves_the_observer_and_its_pending_ack(self) -> None:
         """A stale status-to-send race does not make the owned observer disposable."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="busy-wake-event",
         )
@@ -1679,7 +1682,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         can happen after the prompt is in: the pane goes unanswerable while the head works on it.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
@@ -1711,7 +1714,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="post-send-refusal-event",
         )
@@ -1731,7 +1734,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 "selected_step": "read board",
                 "selected_why": "card changed",
                 "rejected_alternatives": "wait",
-                "current_task": "secretary-510-pilot",
+                "current_task": "secretary-510",
                 "dod_state": "open",
                 "next_safe_step": "resume",
             }
@@ -1755,7 +1758,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         reaching either the explicit refusal or the replacement.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
@@ -1779,7 +1782,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="unprobeable-pane-event",
         )
@@ -1813,7 +1816,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record can never be asked for.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         with self.failing_state_save(after=1), self.assertRaises(OSError):
             self.runtime.production_tick()
         adopted = self.runtime.production_tick()
@@ -1825,7 +1828,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="unaddressable-head-event",
         )
@@ -1854,7 +1857,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_readiness_probe_timeout_is_an_ordinary_busy_head(self) -> None:
         """The other half of the same distinction: a busy pane must not cost the sprint its head."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
@@ -1878,7 +1881,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="busy-pane-event",
         )
@@ -1899,12 +1902,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_terminal_orca_will_not_answer_for_also_ends_in_a_replacement(self) -> None:
         """The other external failure of a wake: bounded retries, then the same replacement path."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="unreadable-terminal-event",
         )
@@ -1928,12 +1931,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_replacement_that_cannot_come_up_keeps_both_reasons(self) -> None:
         """The escalation does not hide why the wake failed nor why its replacement did not launch."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="failed-replacement-event",
         )
@@ -1967,7 +1970,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         ticks while its live Claude observer sat idle.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         payload = self.runtime.production_state.load()
         record = load_observers(payload)["sprint:1"]
@@ -1984,7 +1987,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="observer-no-source-event",
         )
@@ -1997,7 +2000,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_finished_observer_queue_is_nudged_once_for_a_linked_card_event(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
@@ -2006,7 +2009,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="observer-event",
         )
@@ -2030,13 +2033,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_event_waiting_for_an_active_queue_is_nudged_when_that_queue_finishes(self) -> None:
         """The watchdog is not a delay between a normal turn completing and its event wake."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed while observer was working",
             request_id="event-during-active-turn",
         )
@@ -2058,13 +2061,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_resume_acknowledges_the_event_and_prevents_a_second_wake_after_restart(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="ack-event",
         )
@@ -2075,7 +2078,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "check board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -2095,13 +2098,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_only_the_active_delivery_marker_acknowledges_an_event(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="marker-event",
         )
@@ -2111,7 +2114,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -2160,13 +2163,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_crash_before_nudge_keeps_an_unrelated_resume_unacknowledged(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="crash-before-nudge-event",
         )
@@ -2186,7 +2189,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "wait",
             "selected_why": "the board is quiet",
             "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -2208,7 +2211,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_resume_before_a_same_second_event_does_not_acknowledge_it(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         same_second = _now()
@@ -2216,7 +2219,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "wait",
             "selected_why": "board is quiet",
             "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "wait",
             "recorded_at": same_second,
@@ -2233,7 +2236,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_same_second_card",
                 "request_id": "same-second-card-event",
-                "ref": "secretary-510-pilot",
+                "ref": "secretary-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher"},
@@ -2252,13 +2255,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_new_event_after_woken_turn_is_delivered_after_its_resume(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="first",
             request_id="first-wake-event",
         )
@@ -2267,7 +2270,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "first event",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -2275,7 +2278,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="second",
             request_id="second-wake-event",
         )
@@ -2288,13 +2291,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_nudge_b_resume_a_c_delivers_a_second_batch_through_c(self) -> None:
         """A resume for A cannot absorb B or C appended after A's delivery intent."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="first",
             request_id="burst-first",
         )
@@ -2303,7 +2306,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="coalesced",
             request_id="burst-second",
         )
@@ -2319,7 +2322,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "coalesced burst",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -2327,7 +2330,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="after resume",
             request_id="after-burst-resume",
         )
@@ -2403,13 +2406,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_replacement_launch_delivers_pending_event_without_a_second_nudge(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.kill_observer()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -2438,13 +2441,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         # A declared row is fenced until its head is adopted, so the card joins the sprint
         # once the observer is up, the way a card does in production.
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id in ("burst-one", "burst-two"):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510-pilot",
+                reference="secretary-510",
                 body=request_id,
                 request_id=request_id,
             )
@@ -2458,7 +2461,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # are not what the delivery is cut through.
         batch_events = [
             event["event_id"]
-            for event in self.audit.events("secretary-510-pilot")
+            for event in self.audit.events("secretary-510")
             if event["event_id"].startswith("evt_burst-two")
         ]
         self.assertEqual(
@@ -2469,7 +2472,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "coalesced batch",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -2491,13 +2494,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self,
     ) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="crash boundary",
             request_id="crash-boundary-event",
         )
@@ -2533,13 +2536,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_failed_nudge_retries_with_the_same_delivery_after_restart(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="retry delivery",
             request_id="retry-delivery-event",
         )
@@ -2576,7 +2579,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_an_old_event_alone_does_not_redeliver_a_live_delivery(self) -> None:
         """The acknowledgement deadline is armed by the delivery, never by the age of the event."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.audit.append(
@@ -2584,7 +2587,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_old_event",
                 "request_id": "old-event",
-                "ref": "secretary-510-pilot",
+                "ref": "secretary-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher"},
@@ -2606,13 +2609,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_an_observer_that_becomes_idle_unacknowledged_is_redelivered_at_once(self) -> None:
         """No acknowledgement and a head back at its prompt: the tick that sees it redelivers."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="idle-redelivery-event",
         )
@@ -2644,13 +2647,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         not-idle branch keeps waiting on it. No quiet interval guards this path.
         """
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="mid-sentence-event",
         )
@@ -2672,13 +2675,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_a_head_that_never_returns_to_idle_ends_at_the_turn_ceiling(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed while the observer was working",
             request_id="turn-ceiling-event",
         )
@@ -2709,7 +2712,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_exact_provider_progress_outranks_idle_past_the_legacy_turn_ceiling(self) -> None:
         """A live Codex rollout is authority even when the pane looks ready to wake."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         cursors = iter(("cursor:before", "cursor:after"))
@@ -2720,7 +2723,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="observer-progress-precedence-event",
         )
@@ -2741,7 +2744,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_precontract_unbound_observer_is_fenced_relaunched_and_acknowledges_same_batch(self) -> None:
         """No workspace scan may upgrade an old source into progress for a live observer."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source(precontract=True)
         old = self.observers()["sprint:1"]
@@ -2749,7 +2752,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="rollout complete",
             request_id="observer-precontract-unbound-event",
         )
@@ -2794,7 +2797,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "rollout complete",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -2807,7 +2810,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_stalled_residual_composer_reaches_bounded_replacement_without_terminal_input(self) -> None:
         """A stale composer is evidence on a bounded exact-cursor episode, never a 3h wait."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
@@ -2821,7 +2824,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="observer-stalled-composer-event",
         )
@@ -2850,7 +2853,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_unadmitted_observer_progress_never_refreshes_a_current_episode(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
@@ -2860,7 +2863,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="observer-foreign-provider-event",
         )
@@ -2881,7 +2884,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_unavailable_observer_liveness_survives_reload_without_rebaseline(self) -> None:
         """A lost exact source remains bound evidence, never a new workspace-wide baseline."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
@@ -2891,7 +2894,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="provider journal disappeared",
             request_id="observer-unavailable-reload-event",
         )
@@ -2938,7 +2941,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_launch_unbound_codex_source_ends_at_the_unproven_ceiling(self) -> None:
         """sprint:1407: an unbound source and a falsely busy pane held a live sprint for hours."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         # The real read of a complete preflight descriptor which never bound, against a pane which
@@ -2950,7 +2953,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed while the observer looked busy",
             request_id="unbound-source-ceiling-event",
         )
@@ -2987,7 +2990,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             self.open_sprint()
-            self.board.metadata[12]["sprint_ref"] = "sprint:1"
+            self.board.save_metadata(12, sprint_ref="sprint:1")
             self.runtime.production_tick()
             root = self.install_observer_claude_provider_source()
             project = root / claude_project_dir_name(self.observers()["sprint:1"].workspace)
@@ -3000,7 +3003,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510-pilot",
+                reference="secretary-510",
                 body="two Claude transcripts appeared after observer launch",
                 request_id="ambiguous-claude-source-event",
             )
@@ -3028,7 +3031,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_an_admitted_observer_cursor_is_never_judged_by_the_unproven_ceiling(self) -> None:
         """The negative case: a head with provable progress is judged on progress, not the clock."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.install_observer_provider_source()
         cursor = iter(f"cursor:{index}" for index in range(1, 9))
@@ -3040,7 +3043,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed while the observer was really working",
             request_id="admitted-cursor-ceiling-event",
         )
@@ -3057,13 +3060,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_long_card_mid_turn_is_not_torn_down_by_the_turn_ceiling(self) -> None:
         """The negative case: a busy head past its acknowledgement deadline is still working."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="a long card to work through",
             request_id="long-turn-event",
         )
@@ -3091,13 +3094,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_redelivered_batch_is_still_acknowledged_only_by_its_own_marker(self) -> None:
         """An idle-triggered redelivery does not loosen the causal acknowledgement."""
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card changed",
             request_id="redelivery-ack-event",
         )
@@ -3114,7 +3117,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot",
+            "current_task": "secretary-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -3152,7 +3155,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         # A declared row is fenced until its head is adopted, so the card joins the sprint
         # once the observer is up, the way a card does in production.
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         # The dispatcher claim is routine machinery progress, and the later routing-only audit
         # line also starts no observer turn.
@@ -3164,7 +3167,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_routing_only",
                 "request_id": "routing-only",
-                "ref": "secretary-510-pilot",
+                "ref": "secretary-510",
                 "kind": "routing",
                 "outcome": "success",
                 "occurred_at": "2026-07-29T12:00:00Z",
@@ -3183,8 +3186,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """Only a human move that removes parked work makes the idle observer choose again."""
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.board.tasks[0]["column_id"] = 7  # Assessment: retained worker, no machine decision pending.
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.board.move(12, "assessment")
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.assertEqual(
             [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
@@ -3193,7 +3196,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         moved = self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="issues",
             reason="return this cut to triage",
             sprint_override=True,
@@ -3211,7 +3214,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_dispatcher_routine_routing",
                 "request_id": "dispatcher-routine-routing",
-                "ref": "secretary-510-pilot",
+                "ref": "secretary-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher", "id": "dispatcher"},
@@ -3227,9 +3230,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_denied_and_failed_card_events_do_not_wake_an_observer(self) -> None:
         self.open_sprint()
-        self.board.tasks[0]["column_id"] = 6
+        self.board.move(12, "done")
         self.runtime.production_tick()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id, kind, outcome in (
             ("denied-card-event", "sprint_guard_denied", "denied"),
@@ -3242,7 +3245,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 {
                     "event_id": "evt_" + request_id,
                     "request_id": request_id,
-                    "ref": "secretary-510-pilot",
+                    "ref": "secretary-510",
                     "kind": kind,
                     "outcome": outcome,
                     "occurred_at": "2099-01-01T00:00:00Z",
@@ -3256,7 +3259,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_legacy_noise_batch_preserves_semantic_events_after_prior_cursor(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         for request, kind, payload in (
             ("legacy-ack", "routing", {}),
@@ -3268,7 +3271,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 {
                     "event_id": "evt_" + request,
                     "request_id": request,
-                    "ref": "secretary-510-pilot",
+                    "ref": "secretary-510",
                     "kind": kind,
                     "outcome": "success",
                     "actor": {"role": "dispatcher"},
@@ -3366,14 +3369,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_sprint()
         self.runtime.production_tick()
         record = self.observers()["sprint:1"]
-        real_events = TaskAudit.events
-        calls: list[TaskAudit] = []
+        real_events = SqlTaskAudit.events
+        calls: list[SqlTaskAudit] = []
 
-        def counted(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
+        def counted(audit: SqlTaskAudit, *args: object, **kwargs: object) -> list[dict]:
             calls.append(audit)
             return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
 
-        with mock.patch.object(TaskAudit, "events", new=counted):
+        with mock.patch.object(SqlTaskAudit, "events", new=counted):
             state = _observer_event_state(self.runtime, "sprint:1", record)
 
         self.assertTrue(state["known"])
@@ -3385,11 +3388,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         record = self.observers()["sprint:1"]
         sprint_writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
-        real_events = TaskAudit.events
+        real_events = SqlTaskAudit.events
         inserted = [False]
         cutoff = "Close after secretary-1591 and create no more cards."
 
-        def events_after_owner_comment(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
+        def events_after_owner_comment(audit: SqlTaskAudit, *args: object, **kwargs: object) -> list[dict]:
             if not inserted[0]:
                 inserted[0] = True
                 sprint_writer.comment(
@@ -3401,7 +3404,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 )
             return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
 
-        with mock.patch.object(TaskAudit, "events", new=events_after_owner_comment):
+        with mock.patch.object(SqlTaskAudit, "events", new=events_after_owner_comment):
             state = _observer_event_state(self.runtime, "sprint:1", record)
 
         self.assertTrue(state["pending"])
@@ -3409,13 +3412,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_wake_carries_the_event_states_single_live_sprint_snapshot(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="assessment changed",
             request_id="single-sprint-snapshot-event",
         )
@@ -3437,12 +3440,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_unloaded_live_comments_fail_closed_before_delivery_intent(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="assessment changed",
             request_id="missing-live-comments-event",
         )
@@ -3460,22 +3463,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_ready_terminal_nudge_does_not_poll_audit_for_confirmation(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
-        for task in self.board.tasks:
-            task["column_id"] = 6
+        for key in (12, 13):
+            self.board.move(key, "done")
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="card entered assessment",
             request_id="single-audit-snapshot-event",
         )
-        real_events = TaskAudit.events
-        calls: list[TaskAudit] = []
+        real_events = SqlTaskAudit.events
+        calls: list[SqlTaskAudit] = []
 
-        def counted(audit: TaskAudit, *args: object, **kwargs: object) -> list[dict]:
+        def counted(audit: SqlTaskAudit, *args: object, **kwargs: object) -> list[dict]:
             calls.append(audit)
             return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -3484,7 +3487,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             return "accepted"
 
         with (
-            mock.patch.object(TaskAudit, "events", new=counted),
+            mock.patch.object(SqlTaskAudit, "events", new=counted),
             mock.patch.object(
                 self.host,
                 "nudge_observer",
@@ -3545,8 +3548,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         # A declared row is fenced until its head is adopted, so the card joins the sprint
         # once the observer is up, the way a card does in production.
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.board.metadata[100]["sprint_current_task"] = "secretary-510-pilot"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.board.save_sprint_metadata("sprint:1", sprint_current_task="secretary-510")
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
             "idle": True,
@@ -3580,7 +3583,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_vanished_sprint_stops_the_head(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
 
         result = self.runtime.production_tick()
 
@@ -3590,12 +3593,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_reappeared_sprint_reference_is_a_second_audited_lifecycle(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
         self.runtime.production_tick()
 
         self.open_sprint()
         result = self.runtime.production_tick()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
         self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
@@ -3638,11 +3641,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
         )  # type: ignore[arg-type]
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body="fix it",
             request_id="red-review",
@@ -3657,7 +3660,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="blocked",
             reason="operator stop",
             sprint_override=True,
@@ -3682,11 +3685,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
         )  # type: ignore[arg-type]
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="blocked",
             reason="the worker head never came up",
             sprint_override=True,
@@ -3713,7 +3716,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertFalse(sprint["budget"]["signal_reached"])
         self.assertEqual(sprint["status"], "open")
         # The card itself is untouched by the budget decision: it stays Blocked for the observer.
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510")["state"], "blocked")
 
     def test_budget_event_classification_excludes_green_card_cycle(self) -> None:
         cases = {
@@ -3779,11 +3782,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_forward_reslice_charges_and_malformed_history_does_not_stop_later_budget_events(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="blocked",
             reason="reslice",
             sprint_override=True,
@@ -3803,7 +3806,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_malformed_taxonomy",
                 "request_id": "malformed-taxonomy",
-                "ref": "secretary-510-pilot",
+                "ref": "secretary-510",
                 "record_type": "board.protocol_event",
                 "kind": "card.blocked",
                 "transition": {"target": "blocked"},
@@ -3813,7 +3816,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body="later budget event",
             request_id="later-red-review",
@@ -3829,19 +3832,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
         self.open_sprint()
-        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.board.save_metadata(12, sprint_ref="sprint:1")
 
         self.writer.claim(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             worker="worker",
             request_id="green-claim",
         )
         self.writer.move(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="validate",
             reason="worker completed",
             request_id="green-validate",
@@ -3849,7 +3852,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="green",
             body="looks good",
             request_id="green-verdict",
@@ -3857,7 +3860,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             target="done",
             reason="review passed",
             request_id="green-done",
@@ -3872,21 +3875,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         for index in range(20):
             task_id = 1000 + index
             reference = f"secretary-historical-{index}"
-            self.board.tasks.append(
-                {
-                    "id": task_id,
-                    "reference": reference,
-                    "title": reference,
-                    "description": "",
-                    "column_id": 2,
-                    "position": task_id,
-                    "swimlane_id": 4,
-                    "date_creation": 1720000000,
-                    "date_modification": 1720000000,
-                }
+            self.board.add_card(
+                task_id,
+                reference,
+                state="ready",
+                title=reference,
+                description="",
+                position=task_id,
+                created=1720000000,
+                project=None,
+                metadata={"project": "secretary", "task_type": "code"},
             )
-            self.board.metadata[task_id] = {"project": "secretary", "task_type": "code"}
-            self.board.comments[task_id] = []
             self.audit.append(
                 f"historical-red-{index}",
                 {
@@ -3904,7 +3903,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         first_reads = [
             params
             for method, params in self.board.calls
-            if method == "getTaskByReference" and params.get("project_id") == 7
+            if method == "getTaskByReference" and params.get("project_id") == BOARD_ID
         ]
         self.assertEqual(len(first_reads), 20)
         self.assertEqual(
@@ -3917,7 +3916,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         repeated_reads = [
             params
             for method, params in self.board.calls
-            if method == "getTaskByReference" and params.get("project_id") == 7
+            if method == "getTaskByReference" and params.get("project_id") == BOARD_ID
         ]
         self.assertEqual(repeated_reads, [])
 
@@ -3996,9 +3995,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.fail_stop_observer_reason = "orca refused to close the pane"
         self.runtime.production_tick()
 
-        self.board.metadata[
-            int(next(item for item in self.board.sprints if item["reference"] == "sprint:1")["id"])
-        ]["sprint_status"] = "open"
+        self.board.save_sprint_metadata("sprint:1", sprint_status="open")
         self.host.fail_stop_observer_reason = ""
         result = self.runtime.production_tick()
 
@@ -4299,11 +4296,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(sorted(event["kind"] for event in pending), sorted([EVENT_FENCED, EVENT_LAUNCHED]))
         launched = next(event for event in pending if event["kind"] == EVENT_LAUNCHED)
         self.assertEqual(launched["payload"]["workspace"], record.workspace)
-        self.audit.reconcile()
-        self.assertEqual(
-            sorted(event["kind"] for event in self.audit.events("sprint:1")),
-            sorted([EVENT_FENCED, EVENT_LAUNCHED]),
-        )
+        # Settling it is the checkpoint's stale-staged pass on this store (`SqlTaskAudit.
+        # settle_stale_staged`, tests/test_stale_staged_settlement.py); `reconcile` owes nothing.
+        self.assertEqual(self.audit.events("sprint:1"), [])
 
     def test_a_refused_audit_append_does_not_yield_a_second_head(self) -> None:
         self.open_sprint()
@@ -4647,10 +4642,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             sorted(event["kind"] for event in self.audit.pending_events()),
             sorted([EVENT_CLEARED, EVENT_STOPPED]),
         )
-        self.audit.reconcile()
+        # Settled by the checkpoint's stale-staged pass on this store, not by `reconcile`.
         self.assertEqual(
             sorted(event["kind"] for event in self.audit.events("sprint:1")),
-            sorted([EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED]),
+            sorted([EVENT_FENCED, EVENT_LAUNCHED]),
         )
 
     def test_an_unwritable_audit_parks_the_stop_instead_of_performing_it(self) -> None:
@@ -4681,7 +4676,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # The declared row's fence raises on the first tick and clears on the second, so the stop
         # below is the one event this repair pass has to commit.
         self.runtime.production_tick()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
         with self.broken_append():
             self.runtime.production_tick()
 
@@ -4892,11 +4887,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         result = self.runtime.production_tick()
 
         claim = [action for action in result["actions"] if action.get("step") == "claim"]
-        self.assertEqual(claim[0]["pilot_ref"], "secretary-510-pilot")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(claim[0]["pilot_ref"], "secretary-510")
+        self.assertEqual(self.reader.show("secretary-510")["state"], "in_progress")
         # The observer holds no card record and does not occupy the per-project claim gate.
         records = self.runtime.production_state.records(self.runtime.production_state.load())
-        self.assertEqual(sorted(records), ["secretary-510-pilot"])
+        self.assertEqual(sorted(records), ["secretary-510"])
         self.assertNotIn("sprint:1", records)
 
     def test_the_observer_workspace_is_not_a_card_workspace(self) -> None:
@@ -4905,8 +4900,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         record = self.observers()["sprint:1"]
         card = self.runtime.production_state.records(self.runtime.production_state.load())
-        self.assertNotEqual(record.workspace, card["secretary-510-pilot"].workspace)
-        self.assertNotEqual(record.handle, card["secretary-510-pilot"].handle)
+        self.assertNotEqual(record.workspace, card["secretary-510"].workspace)
+        self.assertNotEqual(record.handle, card["secretary-510"].handle)
 
     # observability -----------------------------------------------------------
 
@@ -4967,7 +4962,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.observed_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-510-neighbor",
+            "secretary-511",
         )
 
     def budget_of(self, reference: str) -> dict:
@@ -5015,11 +5010,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_disjoint_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-510-neighbor",
+            "secretary-511",
         )
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-510-pilot",
+            "secretary-510",
         )
 
     def test_a_card_event_charges_the_sprint_it_is_linked_to_and_no_other(self) -> None:
@@ -5028,7 +5023,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body="fix it",
             request_id="red-review-first-sprint",
@@ -5054,17 +5049,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_disjoint_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-510-neighbor",
+            "secretary-511",
         )
         # Through the command in the checkout: that id is what attributes the report to the round
         # the dispatcher is waiting for (secretary-1063).
-        workspace = self.runtime.production_state.load()["records"]["secretary-510-neighbor"]["workspace"]
+        workspace = self.runtime.production_state.load()["records"]["secretary-511"]["workspace"]
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
         done_command = next(line for line in document.splitlines() if "--kind done" in line)
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-510-neighbor",
+            reference="secretary-511",
             kind="done",
             body="ready for validation",
             request_id=done_command.split("--request-id ", 1)[1].split()[0],
@@ -5081,7 +5076,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-neighbor",
+            reference="secretary-511",
             kind="red",
             body="needs work",
             request_id="rework-red-verdict",
@@ -5111,12 +5106,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             kind="red",
             body="fix it",
             request_id="red-first-sprint",
         )
-        self.charge("secretary-510-pilot", "blocked-first-sprint")
+        self.charge("secretary-510", "blocked-first-sprint")
 
         result = self.runtime.production_tick()
 
@@ -5165,7 +5160,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.skipped(result), [])
         self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]], [])
         # The open sprint's card in flight keeps riding its cycle.
-        self.assertIn("secretary-510-neighbor", self.advanced(result))
+        self.assertIn("secretary-511", self.advanced(result))
 
     def test_a_po_comment_after_the_close_wakes_nothing_and_the_tick_still_ends_the_head(self) -> None:
         """Criteria 4 and 5 of secretary-1578, against the production tick itself.
@@ -5236,7 +5231,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(observer_alive(self.observers()[self.FIRST])["alive"])
         self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "fourth-1")
-        self.assertIn("secretary-510-pilot", self.advanced(result))
+        self.assertIn("secretary-510", self.advanced(result))
         # The closed sprint's own Ready card is not left alone on the board any more: its
         # disposition archived it with the close, so no later pass reaches it at all.
         self.assertEqual(self.skipped(self.runtime.production_tick()), [])
@@ -5281,7 +5276,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-pilot",
+            reference="secretary-510",
             body="the first sprint's card changed",
             request_id="event-of-first-sprint",
         )
@@ -5303,7 +5298,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510-neighbor",
+            reference="secretary-511",
             body="the second sprint's card changed",
             request_id="event-of-second-sprint",
         )
@@ -5331,8 +5326,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """Each cursor is closed by its own sprint's resume, and by no other."""
         self.observed_pair()
         for reference, body, request in (
-            ("secretary-510-pilot", "first changed", "cursor-event-first"),
-            ("secretary-510-neighbor", "second changed", "cursor-event-second"),
+            ("secretary-510", "first changed", "cursor-event-first"),
+            ("secretary-511", "second changed", "cursor-event-second"),
         ):
             self.writer.comment(
                 role="dispatcher",
@@ -5350,7 +5345,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 "selected_step": "read the board",
                 "selected_why": "a card changed",
                 "rejected_alternatives": "wait",
-                "current_task": "secretary-510-pilot",
+                "current_task": "secretary-510",
                 "dod_state": "open",
                 "next_safe_step": "resume",
             },
@@ -5388,7 +5383,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # The second sprint reconciles and claims inside the same tick the first is held in.
         self.assertEqual(
             [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"],
-            ["secretary-510-neighbor"],
+            ["secretary-511"],
         )
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
         self.assertEqual(
@@ -5419,8 +5414,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.observed_pair_in_flight()
         for reference, request in (
-            ("secretary-510-pilot", "hung-event-first"),
-            ("secretary-510-neighbor", "hung-event-second"),
+            ("secretary-510", "hung-event-first"),
+            ("secretary-511", "hung-event-second"),
         ):
             self.writer.comment(
                 role="dispatcher",
@@ -5455,7 +5450,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.assertEqual(
             sorted(action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"),
-            ["secretary-510-neighbor", "secretary-510-pilot"],
+            ["secretary-510", "secretary-511"],
         )
 
 
@@ -6556,11 +6551,11 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.catalog = _ObserverCatalog(instance_dir=self.data_dir)
         self.host = CommandHostRuntime(self.catalog, self.data_dir / "host", mode="real")  # type: ignore[arg-type]
         self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
-        self.audit = TaskAudit(self.data_dir)
+        self.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             TaskReader(self.board),  # type: ignore[arg-type]
             TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir),  # type: ignore[arg-type]
@@ -6634,8 +6629,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         ]
 
     def close_sprint(self) -> None:
-        sprint = next(item for item in self.board.sprints if item["reference"] == "sprint:1")
-        self.board.metadata[int(sprint["id"])]["sprint_status"] = "closed"
+        self.board.save_sprint_metadata("sprint:1", sprint_status="closed")
 
     def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
         self.board.add_sprint(

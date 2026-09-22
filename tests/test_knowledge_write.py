@@ -18,7 +18,8 @@ from secretary.knowledge_write import (
     write_knowledge_document,
 )
 from secretary.state_repo import StateRepoError
-from tests.fakes.tasks import FakeKanboard
+from tests.fakes.tasks import empty_seed
+from tests.sql_backend_fixtures import card_store
 
 
 def git(repo: Path, *args: str) -> str:
@@ -94,9 +95,9 @@ class KnowledgeRepoCase(unittest.TestCase):
         """Run the checkpoint writer with the export step stubbed by the seed.
 
         The writer's gate is the audit of the card client it is given (`tasks.task_audit_for`), so
-        this installation is handed the Kanboard fake whose canon is the file journal the seed
-        writes. Without one the writer would ask the switch for a client this temporary instance has
-        no transport for, and block before the race these cases are about could even start.
+        the case hands it a real card store of its own (`checkpoint_client`). Without one the writer would ask the switch for a
+        client this temporary instance has no store for, and block before the race these cases are
+        about could even start.
         """
 
         def board_export(data_dir, **_kwargs):
@@ -110,7 +111,7 @@ class KnowledgeRepoCase(unittest.TestCase):
         with mock.patch("secretary.checkpoint.export_board", side_effect=board_export):
             with mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export):
                 return CheckpointWriter(
-                    self.data_dir, self.instance_dir, client=FakeKanboard()
+                    self.data_dir, self.instance_dir, client=self.checkpoint_client
                 ).write()
 
     def write(self, *, document: str = DOCUMENT, text: str = BODY, actor: str = "po"):
@@ -220,6 +221,10 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
 
 
 class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.checkpoint_client = card_store(self, empty_seed(), instance_dir=self.instance_dir)
+
     def test_concurrent_knowledge_write_and_checkpoint_keep_both_sides(self):
         errors: list[BaseException] = []
         results: dict[str, object] = {}

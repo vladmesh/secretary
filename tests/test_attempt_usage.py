@@ -1195,9 +1195,9 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def unobserved_card(self) -> None:
         """Take the observer away, so a green verdict retires the card in its own tick."""
-        self.board.metadata[12].pop("sprint_ref", None)
+        self.board.save_metadata(12, {"sprint_ref": ""})
         self.sprints.rows.clear()
-        self.board.sprints.clear()
+        self.board.clear_sprints()
 
     def _report_blocked(self) -> None:
         self.writer.report(

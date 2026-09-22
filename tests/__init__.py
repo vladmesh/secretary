@@ -67,7 +67,7 @@ locally, the same way the rest of the suite already overrides other
 host-facing seams: wrap the call in its own
 ``mock.patch("secretary.host_apply.find_orca_executable", ...)`` (or
 ``...pinned_orca_executable``), or pass an explicit board through
-``collect_status(..., sprint_client=FakeKanboard())``. A local patch simply
+``collect_status(..., sprint_client=SprintBoard())``. A local patch simply
 shadows the process-wide default for the duration of the ``with`` block;
 nothing needs to be undone.
 

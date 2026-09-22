@@ -22,8 +22,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.gate import GateResult, _impossible_trigger_reason, gate_check
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
 from secretary.dispatch.types import HostError
 from secretary.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
@@ -36,8 +36,9 @@ from secretary.projects.integration_base import (
 from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeCatalog
-from tests.fakes.tasks import WriteKanboard
+from tests.fakes.tasks import writer_seed
 from tests.production_runtime_fixtures import registered_production_runtime
+from tests.sql_backend_fixtures import card_store
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -180,8 +181,12 @@ class CardAdmissionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        self.client = WriteKanboard()
-        self.client.instance_dir = Path(self.tmpdir.name)
+        self.client = card_store(self, writer_seed(), instance_dir=self.tmpdir.name)
+        # The predecessor a successor names is a card of the board: the store links a supersession
+        # only to a card it holds (§3.5).
+        self.client.add_card(
+            99, "codegen-orchestrator-1235", project="codegen-orchestrator", state="done"
+        )
         self.reader = TaskReader(self.client)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)  # type: ignore[arg-type]
 
@@ -823,7 +828,7 @@ class TopologyRedRoutingTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [
             GateResult(
                 "red",
-                "CI cannot run for `pipeline/secretary-510-pilot`",
+                "CI cannot run for `pipeline/secretary-510`",
                 failure_class="topology",
                 failure_reason="ci-trigger-impossible",
             )

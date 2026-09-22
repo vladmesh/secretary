@@ -931,18 +931,20 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
 class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
     """Reusable ProductIssueStore contract plus explicitly named Kanboard recovery cases."""
 
+    CARD_STORE_ONLY: ClassVar[frozenset[str]] = frozenset(
+        {
+            "test_issue_and_task_column_guards_are_fail_closed",
+            "test_issue_needs_all_required_values_and_archive_cannot_bypass_close",
+        }
+    )
+
     KANBOARD_ONLY: ClassVar[dict[str, str]] = {
-        "test_claim_rejects_a_product_or_issue_record_without_any_write": "constructs legacy Kanboard card rows and asserts RPC absence",
-        "test_pending_claim_replay_and_reconcile_refuse_a_product_or_issue": "constructs a legacy Kanboard partial claim and exercises audit repair",
-        "test_a_card_in_issues_reaches_ready_only_through_the_po": "constructs a generic Kanboard task in a transport column",
-        "test_rejected_product_metadata_stays_pending_until_same_request_repairs_it": "models Kanboard false metadata reply and audit-pending repair",
         "test_typed_pending_is_listed_with_its_repair_identity": "models Kanboard false metadata reply and typed repair identity",
         "test_rejected_issue_metadata_stays_pending_until_same_request_repairs_it": "models Kanboard false metadata reply and audit-pending repair",
         "test_rejected_issue_metadata_does_not_claim_a_priority_or_close_change": "models Kanboard false metadata reply during mutations",
         "test_refused_close_comment_leaves_no_typed_occurrence": "models Kanboard nonpositive createComment reply",
         "test_refused_priority_comment_leaves_no_typed_occurrence": "models Kanboard nonpositive createComment reply",
         "test_all_operations_restart_without_duplicate_backend_writes": "models lost Kanboard write replies and counts transport effects",
-        "test_generic_reconcile_leaves_product_issue_transaction_for_its_owner": "exercises Kanboard audit-pending ownership repair",
         "test_existing_product_retry_uses_its_staged_projects_before_the_registry": "models Kanboard metadata failure during staged create recovery",
         "test_create_reply_loss_is_correlated_and_repaired_without_a_duplicate_row": "models a lost Kanboard createTask reply",
         "test_new_issue_operation_rejects_until_an_older_pending_priority_is_repaired": "models Kanboard metadata refusal and ordered audit repair",
@@ -1161,115 +1163,6 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
 
-    def test_claim_rejects_a_product_or_issue_record_without_any_write(self) -> None:
-        # A record dragged into Ready by hand still is not an execution task: claim has to reject
-        # it the way move does, before the claim metadata, the move and the audit row.
-        writer = TaskWriter(self.client, data_dir=self.root / "data")
-        for record_type in ("product", "issue"):
-            with self.subTest(record_type=record_type):
-                self.client.tasks[0]["column_id"] = 2
-                self.client.metadata[12] = {
-                    "record_type": record_type,
-                    "project": "secretary",
-                    "task_type": "code",
-                    "claim": "",
-                }
-                self.client.calls.clear()
-
-                with self.assertRaises(TaskError) as raised:
-                    writer.claim(
-                        role="dispatcher",
-                        actor="d",
-                        reference="secretary-468",
-                        worker="secretary-468-runtime",
-                        request_id=f"claim-{record_type}",
-                    )
-
-                self.assertEqual(raised.exception.code, "transition_forbidden")
-                self.assertIn("cannot enter execution task columns", str(raised.exception))
-                self.assertEqual(self.client.metadata[12]["claim"], "")
-                self.assertFalse(
-                    any(method in {"saveTaskMetadata", "moveTaskPosition"} for method, _ in self.client.calls)
-                )
-                self.assertEqual(writer.audit.status(), {"ok": True, "pending": 0})
-                self.assertFalse(Path(writer.audit.events_path).exists())
-
-    def test_pending_claim_replay_and_reconcile_refuse_a_product_or_issue(self) -> None:
-        # The supported partial-write state of a pre-migration generic claim: the claim metadata
-        # committed and the column move was lost. New claims use a typed event and discard it on a
-        # failed move, so build the released generic pending row explicitly. Neither the retry
-        # nor reconcile may finish that old move once the card is a Product or an Issue.
-        for record_type in ("product", "issue"):
-            with self.subTest(record_type=record_type):
-                writer = TaskWriter(self.client, data_dir=self.root / f"data-{record_type}")
-                self.client.tasks[0]["column_id"] = 2
-                self.client.metadata[12] = {"project": "secretary", "task_type": "code", "claim": ""}
-                request_id = f"pending-claim-{record_type}"
-                claim = {
-                    "role": "dispatcher",
-                    "actor": "d",
-                    "reference": "secretary-468",
-                    "worker": "replayed-worker",
-                    "request_id": request_id,
-                }
-                writer.audit.stage(
-                    request_id,
-                    {
-                        "request_id": request_id,
-                        "event_id": f"legacy-{request_id}",
-                        "kind": "claimed",
-                        "ref": "secretary-468",
-                        "payload": {
-                            "worker": "replayed-worker",
-                            "resolved_head": None,
-                            "resolved_review_head": None,
-                            "slug": None,
-                            "base_branch": None,
-                            "cap": 3,
-                        },
-                    },
-                )
-                self.client.metadata[12]["claim"] = "replayed-worker"
-                self.client.fail_move = True
-                with self.assertRaisesRegex(TaskError, "audit repair"):
-                    writer.claim(**claim)
-                self.assertEqual(writer.audit.status(), {"ok": False, "pending": 1})
-
-                self.client.fail_move = False
-                self.client.metadata[12]["record_type"] = record_type
-                self.client.calls.clear()
-
-                with self.assertRaises(TaskError) as raised:
-                    writer.claim(**claim)
-
-                self.assertEqual(raised.exception.code, "transition_forbidden")
-                self.assertEqual(writer.reader.show("secretary-468")["state"], "ready")
-                self.assertFalse(any(method == "moveTaskPosition" for method, _ in self.client.calls))
-                self.assertEqual(writer.reconcile(), (0, 1))
-                self.assertEqual(writer.reader.show("secretary-468")["state"], "ready")
-                self.assertEqual(writer.audit.status(), {"ok": False, "pending": 1})
-        self.client.fail_move = False
-
-    def test_a_card_in_issues_reaches_ready_only_through_the_po(self) -> None:
-        """Issues is the untriaged backlog: the steward matrix has no exit from it."""
-        self.client.tasks[0]["column_id"] = 1
-        self.client.metadata[12] = {"record_type": "task"}
-        writer = TaskWriter(self.client, data_dir=self.root / "data")
-
-        with self.assertRaises(TaskError) as raised:
-            writer.move(
-                role="steward",
-                actor="steward",
-                reference="secretary-468",
-                target="ready",
-                reason="",
-            )
-        self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertEqual(writer.reader.show("secretary-468")["state"], "issues")
-
-        writer.move(role="po", actor="po", reference="secretary-468", target="ready", reason="")
-        self.assertEqual(writer.reader.show("secretary-468")["state"], "ready")
-
     def test_missing_issue_arguments_are_structured(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -1277,44 +1170,6 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
-
-    def test_rejected_product_metadata_stays_pending_until_same_request_repairs_it(self) -> None:
-        class RejectMetadataOnce(ProductBoard):
-            rejected = False
-
-            def call(self, method: str, **params: object) -> object:
-                if method == "saveTaskMetadata" and not self.rejected:
-                    self.rejected = True
-                    self.calls.append((method, params))
-                    return False
-                return super().call(method, **params)
-
-        store = ProductIssueStore(RejectMetadataOnce(), data_dir=self.root / "data", instance=self.root)
-        with self.assertRaises(TaskError) as raised:
-            store.create_product(
-                product_id="secretary",
-                projects=["secretary"],
-                title="Secretary",
-                description="",
-                actor="po",
-                request_id="product",
-            )
-        self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(store.audit.events(), [])
-        self.assertEqual(store.audit.status(), {"ok": False, "pending": 1})
-        # Generic reconciliation sees but cannot publish a typed owner.
-        self.assertEqual(TaskWriter(store.client, data_dir=self.root / "data").reconcile(), (0, 1))
-        product = store.create_product(
-            product_id="secretary",
-            projects=["secretary"],
-            title="Secretary",
-            description="",
-            actor="po",
-            request_id="product",
-        )
-        self.assertEqual(product["id"], "secretary")
-        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
-        self.assertEqual([event["kind"] for event in store.audit.events()], ["entity.created"])
 
     def test_typed_pending_is_listed_with_its_repair_identity(self) -> None:
         original_call = self.client.call
@@ -1695,32 +1550,6 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "closed")
         self.assertEqual(raised.exception.exit_code, 3)
-
-    def test_generic_reconcile_leaves_product_issue_transaction_for_its_owner(self) -> None:
-        original_call = self.client.call
-        failed = False
-
-        def fail_once(method: str, **params: object) -> object:
-            nonlocal failed
-            if method == "saveTaskMetadata" and not failed:
-                failed = True
-                return False
-            return original_call(method, **params)
-
-        self.client.call = fail_once  # type: ignore[method-assign]
-        with self.assertRaises(TaskError):
-            self.store.create_product(
-                product_id="secretary",
-                projects=["secretary"],
-                title="Secretary",
-                description="",
-                actor="po",
-                request_id="isolated",
-            )
-        self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 1))
-        self.assertEqual(self.store.audit.events(), [])
-        self.assertEqual(self.store.transactions.status(), {"ok": True, "pending": 0})
-        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
 
     def test_existing_product_retry_uses_its_staged_projects_before_the_registry(self) -> None:
         original_call = self.client.call

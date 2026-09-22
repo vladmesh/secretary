@@ -28,7 +28,6 @@ from secretary import host
 from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
 from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
-from secretary.dispatcher import DispatcherRuntime
 from secretary.dispatch.observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
@@ -41,10 +40,12 @@ from secretary.dispatch.production import (
     record_tick_telemetry,
 )
 from secretary.dispatch.watchdog import idle_stall_seconds
+from secretary.dispatcher import DispatcherRuntime
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
+from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
 from triggered_agents.runtime import health, production_telemetry, role_env
@@ -121,15 +122,16 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        self.board = FakeKanboard()
+        self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.reader = TaskReader(self.board)  # type: ignore[arg-type]
         self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)  # type: ignore[arg-type]
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
+        self.host.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
-            TaskAudit(self.data_dir),
+            task_audit_for(self.board),
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
@@ -355,7 +357,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         S1-4: the idle fence is gone; the same story is told by the verdict ladder -- a
         confirmed stall prompts first (degraded), then reclaims (degraded)."""
-        ref = "secretary-510-pilot"
+        ref = "secretary-510"
         self.runtime.production_tick()  # claims the card and launches its worker
         self.host.worker_status_result = {
             "known": True,
@@ -399,11 +401,11 @@ class ProductionTickTelemetryTests(unittest.TestCase):
     def _age_worker_episode(self, seconds: float) -> None:
         """Move the persisted episode's quiet reference back, as operator clock-rewind."""
         payload = self.runtime.production_state.load()
-        episode = dict(payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] or {})
+        episode = dict(payload["records"]["secretary-510"]["worker_vitality_episode"] or {})
         for name in ("started_at", "updated_at"):
             if episode.get(name):
                 episode[name] -= seconds
-        payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] = episode
+        payload["records"]["secretary-510"]["worker_vitality_episode"] = episode
         self.runtime.production_state.save(payload)
 
     def test_a_blocked_card_is_the_dispatcher_working_not_a_degraded_tick(self) -> None:

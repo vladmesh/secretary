@@ -14,7 +14,7 @@ from unittest import mock
 
 from secretary.config import validate_instance
 from secretary.status import collect_status
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.sprints import SprintBoard
 
 
 def _report(root: Path):
@@ -60,7 +60,7 @@ class HermeticKanboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
-            board = FakeKanboard()
+            board = SprintBoard()
             board.add_sprint("sprint:1")
             snapshot = collect_status(report, offline=True, sprint_client=board)
 

@@ -13,7 +13,7 @@ from unittest import mock
 
 from secretary.board_transport import BoardTransport
 from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskWriter
+from secretary.tasks import KanboardClient, TaskAudit, TaskError
 
 
 class _WireBoard:
@@ -135,26 +135,6 @@ class BulkCommentRestoreTests(unittest.TestCase):
             self.assertEqual([row["comment"] for row in board.comments[2]], ["b"])
             self.assertEqual(board.logical.count("createComment"), 3)
 
-    def test_append_failure_keeps_a_proven_body_free_pending_event(self) -> None:
-        target = {"sprint:1": ["record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            board = _WireBoard([1])
-            writer = self._writer(Path(tmp), board)
-            original = writer.audit.append
-            with (
-                mock.patch.object(writer.audit, "append", side_effect=OSError("full")),
-                self.assertRaisesRegex(TaskError, "audit repair"),
-            ):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            pending = writer.audit.pending_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", pending["payload"])
-            writer.audit.append = original
-            self.assertEqual(TaskWriter(writer.client, data_dir=tmp).reconcile(), (1, 0))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
-            self.assertEqual(len(writer.audit.events("sprint:1", kind="restored_comment")), 1)
-            restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
-
     def test_staging_failure_precedes_every_backend_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             board = _WireBoard([1])
@@ -175,48 +155,6 @@ class BulkCommentRestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskError, "normalized prefix"):
                 restore_comments_batched(writer, _items({"secretary-1": ["expected"]}))
             self.assertEqual(board.logical.count("createComment"), 0)
-
-    def test_task_reconcile_proves_absent_sprint_comment_before_commit_and_retry(self) -> None:
-        target = {"sprint:1": ["private sprint record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            board = _WireBoard([1])
-            board.reject_write = (1, 0)
-            writer = self._writer(root, board)
-            with self.assertRaisesRegex(TaskError, "uncertain"):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual(board.comments[1], [])
-            self.assertIn("restore_body", writer.audit.pending_event("restore:sprint:sprint:1:0")["payload"])
-
-            board.reject_write = None
-            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
-            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
-            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", event["payload"])
-            self.assertNotIn("private sprint record", (root / "board" / "events.ndjson").read_text())
-
-            writes = board.logical.count("createComment")
-            restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual(board.logical.count("createComment"), writes)
-
-    def test_task_reconcile_scrubs_already_applied_sprint_comment_after_lost_reply(self) -> None:
-        target = {"sprint:1": ["private applied record"]}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            board = _WireBoard([1])
-            board.lose_write = 1
-            board.lose_reconcile_read = True
-            writer = self._writer(root, board)
-            with self.assertRaisesRegex(TaskError, "uncertain"):
-                restore_comments_batched(writer, _items(target, entity="sprint"))
-            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
-
-            writes = board.logical.count("createComment")
-            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
-            self.assertEqual(board.logical.count("createComment"), writes)
-            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
-            self.assertNotIn("restore_body", event["payload"])
-            self.assertNotIn("private applied record", (root / "board" / "events.ndjson").read_text())
 
 
 class _MemoryAudit:
