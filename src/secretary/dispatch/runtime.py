@@ -355,8 +355,8 @@ class DispatcherRuntime:
                     "Codex provider fan-out policy blocked this head: "
                     f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
                 ),
-                request_id=_attempt_request_id(  # type: ignore[call-arg]  # pre-existing 5-arg call; fixed by the follow-up provider-block card of sprint:1455
-                    record.attempt_id, "codex-provider-event-blocked", reference, role, run.run_id
+                request_id=_attempt_request_id(
+                    record.attempt_id, "codex-provider-event-blocked", reference, f"{role}-{run.run_id}"
                 ),
                 terminal_state="blocked",
                 disposition="blocked",
