@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
+from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.models import Event, EventKind
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomyValidationError,
@@ -1110,7 +1111,7 @@ def production_adopt_attempt_id(reference: str) -> str:
 
 
 def is_steward_report(task: dict[str, Any]) -> bool:
-    return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
+    return task.get("extensions", {}).get(EXTENSION_BAG, {}).get("steward_report") == "1"
 
 
 def _advance_active(

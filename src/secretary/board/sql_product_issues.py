@@ -43,6 +43,7 @@ import re
 from typing import Any
 
 from secretary.board.backend import record_key, record_key_kind
+from secretary.board.extension_bag import EXTENSION_BAG
 
 #: §8.1's Product keys, and the column or table each one is.
 PRODUCT_KEYS = ("record_type", "product_id", "product_projects")
@@ -372,7 +373,7 @@ class ProductIssueRecords:
                     ),
                 }
                 bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
-                for name, value in (bag.get("kanboard") or {}).items():
+                for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                     if name not in PRODUCT_KEYS:
                         meta[name] = _text(value)
                 result[key] = meta
@@ -391,7 +392,7 @@ class ProductIssueRecords:
                 if close_reason:
                     meta["issue_closed_reason"] = _text(close_reason)
                 bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
-                for name, value in (bag.get("kanboard") or {}).items():
+                for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                     if name not in ISSUE_KEYS:
                         meta[name] = _text(value)
                 result[key] = meta
@@ -431,7 +432,7 @@ class ProductIssueRecords:
                 "INSERT INTO products (product_id, board_key, title, description, state, extensions, "
                 "created_at, updated_at) VALUES (%s, %s, %s, %s, 'active', %s::jsonb, %s, %s)",
                 (product_id, key, staged["title"], staged["description"],
-                 json.dumps({"kanboard": self._extension_bag(values, PRODUCT_KEYS)}),
+                 json.dumps({EXTENSION_BAG: self._extension_bag(values, PRODUCT_KEYS)}),
                  staged["created_at"], now),
             )
             self._write_projects(product_id, values.get("product_projects"))
@@ -452,7 +453,7 @@ class ProductIssueRecords:
                     staged["description"],
                     _text(values.get("issue_kind")),
                     _text(values.get("issue_priority")),
-                    json.dumps({"kanboard": self._extension_bag(values, ISSUE_KEYS)}),
+                    json.dumps({EXTENSION_BAG: self._extension_bag(values, ISSUE_KEYS)}),
                     staged["created_at"],
                     now,
                 ),
@@ -498,8 +499,8 @@ class ProductIssueRecords:
         params: list[Any] = []
         if bag:
             assignments.append(
-                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
+                f"extensions = jsonb_set(coalesce(extensions, '{{}}'::jsonb), '{{{EXTENSION_BAG}}}', "
+                f"coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag))
         assignments.append("updated_at = %s")
@@ -524,8 +525,8 @@ class ProductIssueRecords:
         bag = self._extension_bag(values, ISSUE_KEYS)
         if bag:
             assignments.append(
-                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
+                f"extensions = jsonb_set(coalesce(extensions, '{{}}'::jsonb), '{{{EXTENSION_BAG}}}', "
+                f"coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag))
         if assignments:

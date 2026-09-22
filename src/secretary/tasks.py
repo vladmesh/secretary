@@ -20,6 +20,7 @@ from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
+from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
@@ -177,8 +178,9 @@ def _artifact_ownership_refusal_request_id(request_id: str) -> str:
 
 def _done_retention_request_id(task_id: int, date_moved: int) -> str:
     """One durable retry key for one card's one Done dwell episode."""
-    # The prefix is part of every stored retry key: renaming it would orphan a pending episode.
-    identity = f"kanboard:{task_id}:done:{date_moved}"
+    # The identity is part of every stored retry key: changing it would orphan a pending episode,
+    # which is why revision 0014 refuses a store holding a non-committed `done-retention-` request.
+    identity = f"card:{task_id}:done:{date_moved}"
     return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -798,7 +800,7 @@ class TaskReader:
         if lane:
             extensions["swimlane"] = lane
         if extensions:
-            result["extensions"] = {"kanboard": extensions}
+            result["extensions"] = {EXTENSION_BAG: extensions}
         if comments is not None:
             result["comments"] = comments
         return result
@@ -4137,7 +4139,7 @@ def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:
 
 
 def _is_steward_report(task: dict[str, Any]) -> bool:
-    return task.get("extensions", {}).get("kanboard", {}).get("steward_report") == "1"
+    return task.get("extensions", {}).get(EXTENSION_BAG, {}).get("steward_report") == "1"
 
 
 def _matches_optional(expected: Any, actual: Any) -> bool:

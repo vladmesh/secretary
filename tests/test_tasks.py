@@ -210,7 +210,7 @@ class BoardFixture:
         return [str(comment["body"]) for comment in self.card(reference)["comments"]]
 
     def card_extension(self, reference: str, key: str) -> object:
-        return (self.card(reference).get("extensions") or {}).get("kanboard", {}).get(key)
+        return (self.card(reference).get("extensions") or {}).get("extra", {}).get(key)
 
     def assertCardCarriesNoMetadata(self, reference: str) -> None:
         """Nothing was stamped on the card: the model's own metadata fields are all unset."""
@@ -222,7 +222,7 @@ class BoardFixture:
         self.assertIsNone(card["sprint"])
         # The swimlane is the board's own placement, not a metadata key anybody stamped.
         self.assertEqual(
-            set((card.get("extensions") or {}).get("kanboard", {})) - {"swimlane"}, set()
+            set((card.get("extensions") or {}).get("extra", {})) - {"swimlane"}, set()
         )
 
     def card_exists(self, reference: str) -> bool:
@@ -449,7 +449,7 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
         self.assertEqual(task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]})
         self.assertEqual(task["routing"]["complexity"], "standard")
         self.assertEqual(task["routing"]["codex_launch_mode"], "tui")
-        self.assertEqual(task["extensions"]["kanboard"], {"steward_report": "1", "swimlane": "Secretary"})
+        self.assertEqual(task["extensions"]["extra"], {"steward_report": "1", "swimlane": "Secretary"})
         self.assertNotIn("comments", task)
 
     def test_list_names_the_card_identity_of_its_backend(self) -> None:
@@ -589,7 +589,7 @@ class TaskCliTests(CardStoreCase):
         self.assertEqual(code, 0)
         card = json.loads(output.getvalue())
         self.assertEqual((card["type"], card["review"], card["live_impact"]), ("research", "skipped", True))
-        self.assertNotIn("review", card.get("extensions", {}).get("kanboard", {}))
+        self.assertNotIn("review", card.get("extensions", {}).get("extra", {}))
 
     def test_create_rejects_codex_mode_for_non_codex_head_before_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -781,7 +781,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         # The whole card, compared exactly, and not a list of fields that happen to match: the
         # released case compared the complete metadata map, so an extra key the create starts
         # writing has to fail here.  Every metadata key reaches the reader — the model's own keys
-        # as named fields, everything else in `extensions.kanboard` — so the exhaustive claim
+        # as named fields, everything else in `extensions.extra` — so the exhaustive claim
         # survives the move intact.  Three keys are dropped by name because they are the board's
         # identity and placement rather than anything the create stamped.
         report = self.card("secretary-701")
@@ -825,7 +825,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 "review": "skipped",
                 "live_impact": False,
                 "extensions": {
-                    "kanboard": {
+                    "extra": {
                         "record_type": "task",
                         "steward_report": "1",
                         "swimlane": "Secretary",

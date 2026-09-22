@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
+from secretary.board.extension_bag import EXTENSION_BAG
 
 
 @dataclass(frozen=True)
@@ -970,8 +971,8 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
     if (
         normalized["state"] != target
         or (position is not None and normalized["position"] != position)
-        or (not swimlane and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") is not None)
-        or (swimlane and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") != swimlane)
+        or (not swimlane and normalized.get("extensions", {}).get(EXTENSION_BAG, {}).get("swimlane") is not None)
+        or (swimlane and normalized.get("extensions", {}).get(EXTENSION_BAG, {}).get("swimlane") != swimlane)
     ):
         raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
 

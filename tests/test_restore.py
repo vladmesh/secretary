@@ -495,7 +495,7 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.metadata(12).get("resolved_review_head", ""), "")
             self.assertEqual(client.row(12)["position"], 1)
             self.assertEqual(
-                TaskReader(client).show("secretary-1")["extensions"]["kanboard"]["swimlane"], "Secretary"
+                TaskReader(client).show("secretary-1")["extensions"]["extra"]["swimlane"], "Secretary"
             )
             self.assertEqual(
                 [call[1]["content"] for call in client.calls if call[0] == "createComment"],
@@ -859,6 +859,111 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
             self.assertEqual(restore_findings(data_dir), ["restore is incomplete"])
+
+
+class PreUpgradeCheckpointBagTests(unittest.TestCase):
+    """A checkpoint written before revision 0014 keeps its extension bag through recovery.
+
+    Such a record carries the bag's fields in `metadata`, and a record may carry the bag itself
+    under the retired board's key in `extensions`.  The rule reads any top-level key that is not the
+    current one, so the fixture names it `retired_board`, which stands for that key.
+    """
+
+    def _pre_upgrade_cards(self) -> list[dict[str, object]]:
+        shown = {
+            "id": 12,
+            "reference": "secretary-1",
+            "title": "Steward sweep",
+            "description": "body",
+            "column": "Ready",
+            "task_type": "research",
+            "project": "secretary",
+            "metadata": {"record_type": "task", "steward_report": "1"},
+        }
+        first = normalize_board_card(
+            {"id": 12, "reference": "secretary-1", "column": "Ready", "swimlane": "Secretary", "position": 1},
+            shown,
+        )
+        second = normalize_board_card(
+            {"id": 13, "reference": "secretary-2", "column": "Ready", "position": 2},
+            {
+                **shown,
+                "id": 13,
+                "reference": "secretary-2",
+                "metadata": {"record_type": "task", "note": "from metadata"},
+            },
+        )
+        second["extensions"] = {
+            "retired_board": {"steward_report": "1", "note": "shadowed", "swimlane": "Secretary"},
+        }
+        return [first, second]
+
+    def assertBagKept(self, data_dir: Path) -> None:
+        client = card_store(self, empty_seed())
+
+        self.assertEqual(import_normalized_board(data_dir, client=client), 2)
+
+        reader = TaskReader(client)
+        self.assertEqual(
+            reader.show("secretary-1")["extensions"],
+            {"extra": {"record_type": "task", "steward_report": "1", "swimlane": "Secretary"}},
+        )
+        # `metadata` names `note` itself, so it wins; the bag's other fields and its lane arrive.
+        self.assertEqual(
+            reader.show("secretary-2")["extensions"],
+            {
+                "extra": {
+                    "record_type": "task",
+                    "note": "from metadata",
+                    "steward_report": "1",
+                    "swimlane": "Secretary",
+                }
+            },
+        )
+
+    def test_a_pre_upgrade_checkpoint_restores_its_bag_under_the_current_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            cards = self._pre_upgrade_cards()
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": cards}), encoding="utf-8"
+            )
+            (data_dir / "board" / "cards.ndjson").write_text(
+                "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
+            )
+
+            self.assertBagKept(data_dir)
+
+    def test_a_pre_upgrade_archive_restores_its_bag_under_the_current_key(self) -> None:
+        import tarfile
+
+        from secretary.backup_policy import ARCHIVE_ROOT
+        from secretary.restore import restore_backup
+        from tests.restore_fixtures import _core_archive, _write_checksums, _write_instance
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _core_archive(root, "test")
+            payload = root / ARCHIVE_ROOT
+            board = payload / "secretary-data" / "board"
+            cards = self._pre_upgrade_cards()
+            (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
+            (board / "cards.ndjson").write_text(
+                "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
+            )
+            manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
+            manifest["components"]["board"]["count"] = len(cards)
+            _write_checksums(payload, manifest)
+            (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
+            archive.unlink()
+            with tarfile.open(archive, "w") as bundle:
+                bundle.add(payload, arcname=ARCHIVE_ROOT)
+
+            restore_backup(archive, instance)
+
+            self.assertBagKept(root / "secretary-data")
 
 
 class RestoredNonTaskSwimlaneTests(unittest.TestCase):
