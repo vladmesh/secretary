@@ -35,6 +35,17 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from secretary.config import ConfigError, load_schema
+from secretary.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
+from secretary.runtime.head.run import HeadRun
+from secretary.runtime.head.runtime import (
+    HEAD_OK,
+    DeliverReceipt,
+    ObserveReceipt,
+    StartReceipt,
+    StopReceipt,
+)
+from secretary.runtime.heads import Registry
 from secretary.tasks import task_audit_for
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
@@ -67,17 +78,6 @@ from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.fakes.tasks import SEED_COLUMN, empty_seed
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.agents.pipeline.heads import Registry
-from triggered_agents.runtime.head.identity import publish_heartbeat
-from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
-from triggered_agents.runtime.head.run import HeadRun
-from triggered_agents.runtime.head.runtime import (
-    HEAD_OK,
-    DeliverReceipt,
-    ObserveReceipt,
-    StartReceipt,
-    StopReceipt,
-)
 
 SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 

@@ -76,6 +76,9 @@ from secretary.projects.contract import (
 from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import RoutingHeadSnapshot
 from secretary.routing_journal import attempts as routing_attempts
+from secretary.runtime.head import HeadCommand
+from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head.command import with_pid_heartbeat
 from secretary.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import card_audit, ensure_attempt
@@ -91,9 +94,6 @@ from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.runtime.head import HeadCommand
-from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.head.command import with_pid_heartbeat
 
 REF = "secretary-510"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.

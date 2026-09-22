@@ -27,10 +27,12 @@ from secretary.config import validate_instance
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
     PRODUCT_ORIGIN,
+    canonical_heads,
     canonical_path,
     read_source,
     snapshot_path,
 )
+from secretary.runtime import heads as shipped_heads
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from tests.retired_board import (
     LEGACY_ENV,
@@ -219,7 +221,7 @@ class PortableFixture(unittest.TestCase):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# portable-skill\n", encoding="utf-8")
         (skill / "portable-skill.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        canon = self.product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
+        canon = self.product / "src" / "secretary" / "runtime" / "heads.toml"
         canon.parent.mkdir(parents=True)
         canon.write_text(PRODUCT_CANON, encoding="utf-8")
         packaging = self.product / "packaging" / "systemd"
@@ -468,7 +470,7 @@ class PortableInstallationTests(PortableFixture):
         pin = read_source(self.instance)
         self.assertEqual(
             canonical,
-            self.product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml",
+            self.product / "src" / "secretary" / "runtime" / "heads.toml",
         )
         self.assertEqual(origin, PRODUCT_ORIGIN)
         self.assertTrue(result.ok, result.render())
@@ -964,6 +966,28 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         canon.mkdir(parents=True)
 
         self.assert_refused(self.run_upgrade(), canon)
+
+
+class ShippedRegistryHomeTests(unittest.TestCase):
+    """The product's portable registry ships beside `secretary.runtime.heads`, and both canons load."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_the_product_fallback_is_the_registry_the_runtime_ships(self) -> None:
+        path, owner = canonical_path(self.ROOT)
+        self.assertEqual((path, owner), (self.ROOT / "src" / "secretary" / "runtime" / "heads.toml", PRODUCT_ORIGIN))
+        self.assertEqual(path.resolve(), shipped_heads.HEADS_TOML.resolve())
+        self.assertTrue(canonical_heads(self.ROOT)["profiles"])
+
+    def test_an_instance_owned_canon_still_wins_and_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            owned = instance / "heads" / "heads.toml"
+            owned.parent.mkdir()
+            owned.write_text(shipped_heads.HEADS_TOML.read_text(encoding="utf-8"), encoding="utf-8")
+
+            self.assertEqual(canonical_path(self.ROOT, instance), (owned, INSTANCE_ORIGIN))
+            self.assertEqual(canonical_heads(self.ROOT, instance), canonical_heads(self.ROOT))
 
 
 if __name__ == "__main__":

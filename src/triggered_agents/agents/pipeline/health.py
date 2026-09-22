@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.runtime.redact import redact
-from . import heads as heads_mod
+from secretary.runtime import heads as heads_mod
 from .state import STATE
 
 HEALTH_FILE = STATE.dir / "resource_health.json"

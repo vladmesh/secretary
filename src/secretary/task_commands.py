@@ -22,6 +22,7 @@ from secretary.board.task_routing import (
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
+from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.tasks import (
     BOARD_STORE_KIND,
     TaskError,
@@ -29,7 +30,6 @@ from secretary.tasks import (
     TaskWriter,
     task_audit_for,
 )
-from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 
 
 def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:

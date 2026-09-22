@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from triggered_agents.runtime.head import HeadRun, HeadRunError, TaskRefError
-from triggered_agents.runtime.head.identity import head_process_status
+from secretary.runtime.head import HeadRun, HeadRunError, TaskRefError
+from secretary.runtime.head.identity import head_process_status
 
 MEMORY_ACCESS_BINDINGS_ENV = "MEMORY_ACCESS_BINDINGS"
 MEMORY_ACCESS_TOKEN_ENV = "SECRETARY_MEMORY_ACCESS_TOKEN"

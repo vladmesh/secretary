@@ -45,10 +45,10 @@ from secretary.projects.integration_base import (
     seed_ref_refusal,
 )
 from secretary.routing_journal import HeadRun, head_run_from_profile
+from secretary.runtime.head import operations as head_ops
 from secretary.tasks import TaskError
 from tests.fakes.tasks import CardSeed
 from tests.head_registry import write_installed_pair
-from triggered_agents.runtime.head import operations as head_ops
 
 #: The `command_terminal_status` answers that carry a pid heartbeat and no provider channel at
 #: all, because no readable connected pane was matched to probe one from: the two live shapes

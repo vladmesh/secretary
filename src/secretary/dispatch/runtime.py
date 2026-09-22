@@ -218,14 +218,14 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
 )
-from triggered_agents.runtime import head as head_ops
-from triggered_agents.runtime.codex_preflight import (
+from secretary.runtime import head as head_ops
+from secretary.runtime.codex_preflight import (
     CodexFanoutRecordingError,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
 )
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     HeadSpec,
 )
 from secretary.runtime.launch_prefix import pythonpath_prefix

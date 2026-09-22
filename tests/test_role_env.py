@@ -11,8 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.runtime import role_env
+from secretary.runtime.head.command import wrap_role_command
 from tests.retired_board import LEGACY_ENV, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from triggered_agents.runtime.head.command import wrap_role_command
 
 
 class RuntimeEnvPathTests(unittest.TestCase):

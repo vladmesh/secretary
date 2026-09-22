@@ -16,7 +16,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from triggered_agents.runtime.head.local_pty.client import spawn_head
+from secretary.runtime.head.local_pty.client import spawn_head
 
 
 def main() -> int:

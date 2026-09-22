@@ -27,7 +27,7 @@ from .command import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - the registry is data this module is handed
-    from ...agents.pipeline.heads import Registry
+    from ..heads import Registry
 
 # The registry is read here and nowhere else in this package, and only when a caller declined to
 # hand one over. The import is deferred to keep that direction one-way at module scope: the
@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover - the registry is data this module is hand
 
 
 def _load_registry() -> Registry:
-    from ...agents.pipeline.heads import load_registry
+    from ..heads import load_registry
 
     return load_registry()
 

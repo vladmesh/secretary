@@ -83,7 +83,7 @@ from secretary.projects.integration_base import (
     seed_ref_refusal,
 )
 from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
-from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.runtime.redact import redact
 from secretary.runtime.references import (
     BoardRowsUnavailable,
@@ -621,7 +621,7 @@ class TaskReader:
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
-        from triggered_agents.agents.pipeline.heads import default_head, reviewer_head
+        from secretary.runtime.heads import default_head, reviewer_head
 
         project_id, columns, swimlanes = self._board()
         cards = all_project_cards(self.client, project_id)

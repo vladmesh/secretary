@@ -43,7 +43,7 @@ import termios
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..command import with_pid_heartbeat
 from . import protocol
@@ -1182,7 +1182,7 @@ def _live_head(pid_file: Path, run_id: str) -> int:
     if not isinstance(record, dict) or str(record.get("run_id") or "") != run_id:
         return 0
     try:
-        pid = int(record.get("pid"))
+        pid = int(cast(Any, record.get("pid")))
     except (TypeError, ValueError):
         return 0
     if pid <= 0:

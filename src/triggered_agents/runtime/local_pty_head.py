@@ -170,9 +170,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .head import local_pty
-from .head.local_pty import protocol
-from .head.operations import (
+from secretary.runtime.head import local_pty
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.operations import (
     HeadNudgeFailed,
     HeadOperationError,
     HeadSpawnAborted,
@@ -180,8 +180,8 @@ from .head.operations import (
     HeadStopFailed,
     NudgePointer,
 )
-from .head.run import HeadRun, StopInitiator, new_run_id
-from .head.runtime import (
+from secretary.runtime.head.run import HeadRun, StopInitiator, new_run_id
+from secretary.runtime.head.runtime import (
     HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_DRAINING,
@@ -198,8 +198,8 @@ from .head.runtime import (
     StopReceipt,
     TurnLease,
 )
-from .head.spec import HeadSpec
-from .head.task_ref import TaskRef
+from secretary.runtime.head.spec import HeadSpec
+from secretary.runtime.head.task_ref import TaskRef
 from secretary.runtime.tui_delivery import (
     DELIVERY_CONFIRMED,
     NUDGE_FILE_MODE,

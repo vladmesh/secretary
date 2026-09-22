@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
 
 
 def accepted_transport_run(

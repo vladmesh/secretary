@@ -2,7 +2,7 @@
 
 A worker/reviewer head is data (`[resources.*]`, `[profiles.*]`, `[role_defaults]`), not a
 hardcoded `claude` invocation. This module owns that data and nothing else: a profile is looked
-up here and handed to `triggered_agents.runtime.head.command`, which is the one place a profile
+up here and handed to `secretary.runtime.head.command`, which is the one place a profile
 becomes a shell command. The dependency runs one way — this module imports the renderer, never
 the reverse — which keeps a head operation runnable with no registry.
 
@@ -23,10 +23,10 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck extra
 
-from ...runtime.codex_preflight import codex_home
-from ...runtime.head.command import (
+from .codex_preflight import codex_home
+from .head.command import (
     CODEX_TUI_MODE,
     HeadCommandError,
     validate_launch_shape,

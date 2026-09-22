@@ -17,9 +17,9 @@ except ImportError:
     memory_service = None
 
 from secretary.memory import access
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head.identity import publish_heartbeat
 from tests.integration_setup import require_integration_setup
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
-from triggered_agents.runtime.head.identity import publish_heartbeat
 
 
 class MemoryScopeAcceptanceTests(unittest.TestCase):

@@ -33,6 +33,20 @@ import yaml
 
 from secretary.cli import main
 from secretary.config import validate
+from secretary.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
+from secretary.runtime.head.run import HeadRun, StopInitiator
+from secretary.runtime.head.runtime import (
+    HEAD_ALIVE,
+    HEAD_BUSY,
+    HEAD_GONE,
+    HEAD_OK,
+    DeliverReceipt,
+    ObserveReceipt,
+    StartReceipt,
+    StopReceipt,
+)
+from secretary.runtime.heads import Registry
 from secretary.webproto import admission as admission_module
 from secretary.webproto import lifecycle as lifecycle_module
 from secretary.webproto import ops as ops_module
@@ -51,20 +65,6 @@ from secretary.webproto.runs import RAISED, UNRESOLVED, ProductRun, RunStore, Ru
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.fakes.tasks import SEED_COLUMN
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.agents.pipeline.heads import Registry
-from triggered_agents.runtime.head.identity import publish_heartbeat
-from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
-from triggered_agents.runtime.head.run import HeadRun, StopInitiator
-from triggered_agents.runtime.head.runtime import (
-    HEAD_ALIVE,
-    HEAD_BUSY,
-    HEAD_GONE,
-    HEAD_OK,
-    DeliverReceipt,
-    ObserveReceipt,
-    StartReceipt,
-    StopReceipt,
-)
 
 SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 
@@ -1417,7 +1417,7 @@ class RealHeadFixture(ProductRuntimeFixture):
         substituted here. Everything the claims are about (the record, the ordering, the backend,
         the result file, the exit status, the stop and its confirmation) is real.
         """
-        from triggered_agents.runtime.head.command import HeadCommand
+        from secretary.runtime.head.command import HeadCommand
 
         pending = list(rendered)
 
@@ -1481,7 +1481,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
             HEARTBEAT_LIVE_MATCH,
             head_process_status,
         )
-        from triggered_agents.runtime.head.command import HeadCommand
+        from secretary.runtime.head.command import HeadCommand
         from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
 
         root = self.data_dir / "webproto" / "heads"

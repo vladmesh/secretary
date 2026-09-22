@@ -17,9 +17,8 @@ import sys
 from pathlib import Path
 
 from secretary.memory import access as memory_access
-from secretary.runtime.role_env import load_env_file
-from triggered_agents.agents.pipeline import heads as head_registry
-from triggered_agents.runtime.head import (
+from secretary.runtime import heads as head_registry
+from secretary.runtime.head import (
     HeadCommandError,
     HeadRun,
     HeadSpec,
@@ -28,6 +27,7 @@ from triggered_agents.runtime.head import (
     render_head_command,
     with_pid_heartbeat,
 )
+from secretary.runtime.role_env import load_env_file
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
 # bare adapter name to a concrete default profile. Any real heads.toml profile id is also accepted

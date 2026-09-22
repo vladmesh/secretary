@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from triggered_agents.runtime.head import HeadRun
+from secretary.runtime.head import HeadRun
 from secretary.runtime.tui_delivery import DeliveryEvidence
 
 from secretary.dispatch.types import DispatcherError

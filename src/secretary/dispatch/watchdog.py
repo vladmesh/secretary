@@ -31,34 +31,34 @@ from secretary.infra.env import positive_int
 # The launch-identity record is written by the head's own shell (`head.command.with_pid_heartbeat`)
 # and classified beside that writer, so this module names the one reader rather than keeping a
 # second one. Re-exported here because every caller in the control plane reaches it by this name.
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_DEAD as HEARTBEAT_DEAD,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_IDENTITY_MISMATCH as HEARTBEAT_IDENTITY_MISMATCH,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_LIVE_MATCH as HEARTBEAT_LIVE_MATCH,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_NOT_YET_WRITTEN as HEARTBEAT_NOT_YET_WRITTEN,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_UNREADABLE as HEARTBEAT_UNREADABLE,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     HEARTBEAT_VERSION as HEARTBEAT_VERSION,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     head_process_status as head_process_status,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     heartbeat_is_dead as heartbeat_is_dead,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     heartbeat_is_live_match as heartbeat_is_live_match,
 )
-from triggered_agents.runtime.head.identity import (
+from secretary.runtime.head.identity import (
     heartbeat_is_mismatch as heartbeat_is_mismatch,
 )
 

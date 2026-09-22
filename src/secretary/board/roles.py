@@ -1,8 +1,8 @@
 """Canonical product-side board role vocabulary.
 
-The product protocol owns these values. Legacy runtime launch roles still live under
-``triggered_agents`` until that namespace is migrated; importing product code back into
-that legacy package would invert the dependency direction guarded by the architecture
+The product protocol owns these values. Runtime launch roles live in ``secretary.runtime``
+and the legacy ``triggered_agents`` package, neither of which imports the board; importing
+board code into them would invert the dependency direction guarded by the architecture
 tests.
 """
 

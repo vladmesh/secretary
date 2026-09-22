@@ -10,8 +10,8 @@ it up: **ensure trust, create the pane, wait for readiness, deliver the prompt, 
 turn.** The first step is here, the last three are `tui_delivery`. A preflight that fails must
 fail here, with no pane created and nothing for a caller to mistake for a head that ran.
 
-It lives in `runtime` beside `tui_delivery` because both callers need it and only one of them may
-import the other. Nothing here knows about boards, roles or sessions.
+It lives in `secretary.runtime` with the head package that renders and launches every head, and
+the dispatcher reaches it from there. Nothing here knows about boards, roles or sessions.
 """
 
 from __future__ import annotations

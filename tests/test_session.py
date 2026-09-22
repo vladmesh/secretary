@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from secretary import session
-from triggered_agents.agents.pipeline import heads as head_registry
+from secretary.runtime import heads as head_registry
 
 
 def _write_env(dir_path: Path, body: str) -> Path:

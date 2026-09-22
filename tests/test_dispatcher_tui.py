@@ -52,8 +52,8 @@ from tests.fakes.observer import (
     TIMEOUT_WAIT_FAILURE,
 )
 from tests.fanout_fixtures import accepted_transport_run
-from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
-from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from secretary.runtime.codex_preflight import codex_provider_source_descriptor
+from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from secretary.runtime.tui_delivery import DeliveryEvidence, composer_holds_payload
 
 

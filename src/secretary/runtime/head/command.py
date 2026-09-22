@@ -7,9 +7,9 @@ What this module owns and what it deliberately does not:
   * **it owns the role-env wrapper**, because a head's command is not the adapter's argv — it is
     that argv under the role environment its launcher binds;
   * **it does not own the registry.** `[profiles.*]`, `heads.yaml`, `load_registry` and the
-    fallback chains stay in `agents.pipeline.heads`; a profile arrives here as a mapping. This
+    fallback chains stay in `secretary.runtime.heads`; a profile arrives here as a mapping. This
     package is imported by the registry, never the reverse, which is what keeps a head operation
-    runnable without the pipeline package;
+    runnable without the registry;
   * **it does not open a pane.** A rendered command is a string; `spawn` is what runs it.
 
 `prompt` is the whole of the launch-shape decision. A prompt given is a prompt on the command
@@ -25,7 +25,7 @@ import os
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from secretary.runtime import role_env
 from secretary.runtime.launch_prefix import pythonpath_prefix
@@ -203,7 +203,7 @@ def wrap_role_command(
     command = role_env.role_shell_command(role, command, workspace=workspace or None)
     workspace_arg = f" --workspace {shlex.quote(workspace)}" if workspace else ""
     return (
-        f"{prefix} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} "
+        f"{prefix} {pythonpath_prefix(cast(dict[str, str], os.environ))} python3 {PYTHON_SAFE_PATH_FLAG} "
         f"-m {role_env.ENTRY_POINT} exec --role {shlex.quote(role)}{workspace_arg} -- /bin/sh -lc "
         f"{shlex.quote(command)}"
     )

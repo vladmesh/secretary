@@ -212,7 +212,7 @@ an explicit instruction to do its turn in the current head without spawning or d
 children. A rare provider-internal child is acceptable. The launch policy is practical suppression,
 not capability isolation.
 
-`triggered_agents.runtime.codex_preflight` is the one pre-pane preparation boundary. Its v1 record
+`secretary.runtime.codex_preflight` is the one pre-pane preparation boundary. Its v1 record
 keeps `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as diagnostics; none of
 these fan-out states permits or refuses a pane. Workspace trust is the hard pre-pane requirement.
 Launches proceed with `schema_absent`, an unbound structured journal source where available, and the

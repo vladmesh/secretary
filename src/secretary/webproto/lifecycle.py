@@ -86,6 +86,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from secretary.runtime.codex_preflight import CodexPreflightError, preflight_codex_launch
+from secretary.runtime.head.command import HeadCommandError, render_head_command
+from secretary.runtime.head.operations import NudgePointer
+from secretary.runtime.head.run import HeadRun, HeadRunError, StopInitiator
+from secretary.runtime.head.runtime import HEAD_BUSY, HEAD_OK
+from secretary.runtime.head.spec import HeadSpec
+from secretary.runtime.head.task_ref import TaskRef
 from secretary.webproto import run_state as run_state_reads
 from secretary.webproto.errors import (
     OwnerConflict,
@@ -103,13 +110,6 @@ from secretary.webproto.runs import (
     RunStore,
     RunStoreError,
 )
-from triggered_agents.runtime.codex_preflight import CodexPreflightError, preflight_codex_launch
-from triggered_agents.runtime.head.command import HeadCommandError, render_head_command
-from triggered_agents.runtime.head.operations import NudgePointer
-from triggered_agents.runtime.head.run import HeadRun, HeadRunError, StopInitiator
-from triggered_agents.runtime.head.runtime import HEAD_BUSY, HEAD_OK
-from triggered_agents.runtime.head.spec import HeadSpec
-from triggered_agents.runtime.head.task_ref import TaskRef
 
 #: Who this product says ended a head it owns. A stop names its initiator, and this is ours.
 INITIATOR = "secretary.webproto"

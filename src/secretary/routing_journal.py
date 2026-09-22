@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from triggered_agents.runtime.head import CODEX_TUI_MODE, HeadRun as LifecycleHeadRun
+from secretary.runtime.head import CODEX_TUI_MODE, HeadRun as LifecycleHeadRun
 
 ROUTING_KIND = "routing"
 WORKER = "worker"
@@ -180,7 +180,7 @@ def routing_head_snapshot_from_profile(
 
 
 # Compatibility spelling retained for the existing dispatcher/host surface. New code should use the
-# snapshot name so it cannot be mistaken for triggered_agents.runtime.head.HeadRun.
+# snapshot name so it cannot be mistaken for secretary.runtime.head.HeadRun.
 head_run_from_profile = routing_head_snapshot_from_profile
 
 

@@ -34,14 +34,14 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatch.watchdog import head_process_status
-from triggered_agents.agents.pipeline import heads as pipeline_heads
+from secretary.runtime import heads as pipeline_heads
 from triggered_agents.agents.pipeline import health as pipeline_health
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
-from triggered_agents.runtime.head import HeadCommand
-from triggered_agents.runtime.head.local_pty import protocol
-from triggered_agents.runtime.head.local_pty.client import SupervisorClient
-from triggered_agents.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from secretary.runtime.head import HeadCommand
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.client import SupervisorClient
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.pane_host import Pane
 
 REPO = Path(__file__).resolve().parents[1]

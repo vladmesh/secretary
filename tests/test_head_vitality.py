@@ -33,7 +33,7 @@ from secretary.dispatch.watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from triggered_agents.runtime.head import identity, with_pid_heartbeat
+from secretary.runtime.head import identity, with_pid_heartbeat
 
 RUN_ID = "run-1"
 

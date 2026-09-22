@@ -36,6 +36,8 @@ from secretary.routing_journal import (
     routing_head_snapshot_from_launch,
     routing_payload,
 )
+from secretary.runtime.head import HeadRun as LifecycleHeadRun
+from secretary.runtime.head import HeadSpec, TaskRef
 from secretary.sprints import refresh_active_sprint_projects
 from secretary.tasks import (
     _STATE_BY_COLUMN,
@@ -51,8 +53,6 @@ from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
 from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
-from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun
-from triggered_agents.runtime.head import HeadSpec, TaskRef
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 

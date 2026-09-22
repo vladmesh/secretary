@@ -79,7 +79,7 @@ from secretary.dispatch.watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
-from triggered_agents.runtime.head import operations as head_ops
+from secretary.runtime.head import operations as head_ops
 
 WORKER_ROLE = "worker"
 REVIEW_ROLE = "review"

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
 
 from ..head_runtimes import DEFAULT_HEAD_RUNTIME
 from .spec import DEFAULT_EFFORT, HeadSpec
@@ -370,20 +370,20 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
                 or not str(source.get("parent_thread_id") or "")
                 or not isinstance(cursor, dict)
                 or not isinstance(cursor.get("line"), int)
-                or cursor.get("line") < 0
+                or cast(int, cursor.get("line")) < 0
                 or not _digest(cursor.get("digest"))
                 or not isinstance(first, dict)
                 or first.get("line") != 1
                 or not _digest(first.get("digest"))
                 or not isinstance(root, dict)
                 or not isinstance(root.get("line"), int)
-                or root.get("line") < first.get("line")
+                or cast(int, root.get("line")) < cast(int, first.get("line"))
                 or not _digest(root.get("digest"))
                 or not isinstance(last, dict)
                 or not isinstance(last.get("line"), int)
-                or last.get("line") < root.get("line")
+                or cast(int, last.get("line")) < cast(int, root.get("line"))
                 or not _digest(last.get("digest"))
-                or not _digest(initial_range.get("digest"))
+                or not _digest(cast(dict[str, Any], initial_range).get("digest"))
                 or not str(source.get("bound_at") or "")
             ):
                 return _unknown_fanout_policy(

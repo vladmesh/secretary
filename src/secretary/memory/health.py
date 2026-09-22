@@ -11,8 +11,8 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
-from triggered_agents.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
+from secretary.runtime.head.identity import publish_heartbeat
 
 from . import access
 

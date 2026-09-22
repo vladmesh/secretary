@@ -2150,7 +2150,7 @@ route observers (`role_defaults.observer` only labels an observer record with no
 This is a deferred, manual operator procedure for an installation whose private
 `INSTANCE/heads/heads.toml` already declares `profiles.codex-curator`. It changes only that instance canon. Do not
 add `codex-curator`, its model, or its account policy to
-`src/triggered_agents/agents/pipeline/heads.toml`: the product file remains the portable fallback for an installation
+`src/secretary/runtime/heads.toml`: the product file remains the portable fallback for an installation
 with no canon of its own.
 
 Before changing the role default, record the current `role_defaults.curator` as `PREVIOUS_PROFILE`. Inspect the

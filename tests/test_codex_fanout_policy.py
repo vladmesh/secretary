@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 from secretary.dispatch.host import CommandHostRuntime
-from triggered_agents.runtime import codex_preflight
-from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, spawn
+from secretary.runtime import codex_preflight
+from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, spawn
 from secretary.runtime.pane_host import Pane
 
 

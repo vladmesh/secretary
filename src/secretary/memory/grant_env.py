@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
-from triggered_agents.runtime.head import HeadRun
+from secretary.runtime.head import HeadRun
 
 from . import access
 

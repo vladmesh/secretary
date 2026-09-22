@@ -103,13 +103,13 @@ from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
 from secretary.runtime import tui_delivery
-from triggered_agents.runtime import codex_preflight
+from secretary.runtime import codex_preflight
 from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
-from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
-from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from secretary.runtime.codex_preflight import ensure_codex_workspace_trusted
+from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 @contextlib.contextmanager

@@ -58,7 +58,7 @@ from secretary.tasks import (
     all_project_cards,
 )
 
-from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+from secretary.runtime.head import CODEX_LAUNCH_MODES
 
 if TYPE_CHECKING:
     from secretary.board.sql_cards import SqlCardClient

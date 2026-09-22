@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.runtime.head import (
+from secretary.runtime.head import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
     HEAD_BINDING,
@@ -375,7 +375,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 
     def test_the_operator_shell_renders_the_same_command_the_registry_would(self) -> None:
         from secretary import session
-        from triggered_agents.agents.pipeline import heads
+        from secretary.runtime import heads
 
         registry = heads.load_registry()
         for pid in registry.known():

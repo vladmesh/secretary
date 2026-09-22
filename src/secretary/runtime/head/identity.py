@@ -27,7 +27,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 #: The record layout `with_pid_heartbeat` writes and this module reads. A record of any other
 #: version is inconclusive rather than dead: it was written by a scheme this reader does not know.
@@ -139,7 +139,7 @@ def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] |
     if record.get("version") != HEARTBEAT_VERSION:
         return None, _unreadable("unknown-version")
     try:
-        pid = int(record.get("pid"))
+        pid = int(cast(Any, record.get("pid")))
     except (TypeError, ValueError):
         return None, _unreadable("invalid-pid")
     required = ("boot_id", "proc_starttime_ticks", "run_id", "role", "task")

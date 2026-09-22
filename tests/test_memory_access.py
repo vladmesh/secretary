@@ -12,7 +12,7 @@ from unittest import mock
 
 from secretary.memory import access as memory_access
 from secretary.memory import grant_env
-from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
 
 
 class MemoryAccessTests(unittest.TestCase):

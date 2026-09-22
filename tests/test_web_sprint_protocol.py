@@ -32,6 +32,7 @@ from secretary.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from secretary.cli import main
 from secretary.config import validate
 from secretary.knowledge_write import list_knowledge_documents
+from secretary.runtime.head.identity import publish_heartbeat
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
@@ -87,7 +88,6 @@ from tests.webproto_sprint_fixtures import (
     WORKER_PROFILE,
     SprintProtocolFixture,
 )
-from triggered_agents.runtime.head.identity import publish_heartbeat
 
 #: What a call to the board writes with. Reads of this layer make none of these, and the sprint
 #: board a fresh installation does not have is one of the things they do not create.
