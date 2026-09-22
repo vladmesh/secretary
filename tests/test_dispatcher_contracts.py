@@ -1422,7 +1422,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         product = Path(tmp.name) / "product"
-        canon = product / "src" / "triggered_agents" / "agents" / "pipeline"
+        canon = product / "src" / "secretary" / "runtime"
         canon.mkdir(parents=True)
         (canon / "heads.toml").write_text(
             '[resources.acct]\naccount = "acct"\n\n'

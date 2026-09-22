@@ -1307,7 +1307,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
     """
 
     def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
@@ -1326,7 +1326,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         verbs = {"start", "deliver", "observe", "request_drain", "attach"}
         for path in sorted(package.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

@@ -416,7 +416,7 @@ def _module_paths() -> list[Path]:
     allowed = {
         REPO_ROOT / "src" / "secretary" / "runtime" / "pane_host.py",
     }
-    head_package = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "head"
+    head_package = REPO_ROOT / "src" / "secretary" / "runtime" / "head"
     paths = []
     for package in ("secretary", "triggered_agents"):
         for path in sorted((REPO_ROOT / "src" / package).rglob("*.py")):

@@ -2179,7 +2179,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """
 
     def test_the_substrate_is_reached_only_through_its_one_backend(self) -> None:
-        package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
