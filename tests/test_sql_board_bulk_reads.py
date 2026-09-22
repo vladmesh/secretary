@@ -271,6 +271,8 @@ class _PerRecordOracle:
         for name, value in (bag.get("extra") or {}).items():
             if name != "swimlane":
                 meta[name] = _text(value)
+        # secretary-1678: a `tasks` row states its record type, as `products` and `issues` rows do.
+        meta["record_type"] = "task"
         return meta
 
     def card_comments(self, key: int) -> list[dict[str, Any]]:

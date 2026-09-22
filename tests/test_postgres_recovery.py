@@ -566,6 +566,149 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             ),
         )
 
+    def _source_comment(self, body: str, request_id: str) -> None:
+        client = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
+        try:
+            TaskWriter(client, data_dir=self.root / "source-data").comment(
+                role="worker", actor="test", reference="secretary-1", body=body, request_id=request_id
+            )
+        finally:
+            client.connection.close()
+
+    def test_writes_inside_the_freeze_and_during_the_dump_keep_counts_equal_to_the_dump(self) -> None:
+        """secretary-1678 D1: the pause writes rows, and counts taken before it described no dump."""
+        self._seed()
+        from secretary.board import postgres_recovery
+
+        run_client = postgres_recovery._run_client
+        dumps: list[list[str]] = []
+
+        def pipeline(action: str, **_kwargs):
+            if action == "pause":
+                # The freeze's own records (observer stops) commit after the pause begins.
+                self._source_comment("written inside the freeze", "freeze-write")
+            return None
+
+        def client(args: list[str], action: str) -> str:
+            if action == "pg_dump":
+                dumps.append(args)
+                # The snapshot is already exported: this commit is in neither the counts nor the dump.
+                self._source_comment("written while the dump runs", "dump-window-write")
+            return run_client(args, action)
+
+        with (
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("secretary.backup._pipeline_action", side_effect=pipeline),
+            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+            mock.patch("secretary.board.postgres_recovery._run_client", side_effect=client),
+        ):
+            (result,) = create_backups(self.source_instance)
+        self.assertEqual(len(dumps), 1)
+        self.assertTrue(any(arg.startswith("--snapshot=") for arg in dumps[0]))
+        counts = result.manifest["components"]["postgres_dump"]["table_counts"]
+        source_probe = SqlCardClient(self.source_config.for_role("read"), self.source_instance)
+        self.addCleanup(source_probe.close)
+        live_comments = source_probe._query("SELECT count(*) FROM task_comments")[0][0]
+        self.assertEqual(counts["task_comments"], live_comments - 1)
+
+        restore_postgres_backup(result.archive, self.target_instance)
+
+        target_probe = SqlCardClient(self.target_config.for_role("read"), self.target_instance)
+        self.addCleanup(target_probe.close)
+        self.assertEqual(postgres_recovery.target_counts(self.target_config), counts)
+        bodies = {row[0] for row in target_probe._query("SELECT body FROM task_comments")}
+        self.assertIn("written inside the freeze", "\n".join(bodies))
+        self.assertNotIn("written while the dump runs", "\n".join(bodies))
+
+    def test_export_states_record_types_and_an_archive_without_them_restores(self) -> None:
+        """secretary-1678 D2: older task rows exported no record type; restore reads absent as task."""
+        self._seed()
+        source = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
+        with source.transaction():
+            # Older rows never repeated their kind in the bag.
+            source._execute(
+                "UPDATE tasks SET extensions = extensions #- '{extra,record_type}' WHERE task_ref = 'secretary-2'"
+            )
+        source.connection.close()
+        exported: list[dict] = []
+
+        def exports(data_dir: Path, instance_dir: Path, **kwargs) -> dict[str, DataExport]:
+            result = self._exports(data_dir, instance_dir, **kwargs)
+            board = data_dir / "board"
+            cards = json.loads((board / "cards.json").read_text(encoding="utf-8"))["cards"]
+            exported.extend(json.loads(json.dumps(cards)))
+            # The archive an older producer wrote: task cards carry no record type.
+            for card in cards:
+                if card["metadata"].get("record_type") == "task":
+                    del card["metadata"]["record_type"]
+            (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
+            (board / "cards.ndjson").write_text(
+                "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
+            )
+            return result
+
+        with (
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("secretary.backup._pipeline_action", return_value=None),
+            mock.patch("secretary.backup.export_all", side_effect=exports),
+        ):
+            (result,) = create_backups(self.source_instance)
+
+        kinds = {card["reference"]: card["metadata"].get("record_type") for card in exported}
+        self.assertEqual(kinds["product:secretary"], "product")
+        self.assertEqual(kinds["issue:recovery"], "issue")
+        self.assertEqual(kinds["secretary-2"], "task")
+        self.assertEqual(
+            {ref: kind for ref, kind in kinds.items() if ":" not in ref},
+            dict.fromkeys(("butler-1", "codegen-product-kit-1", "secretary-1", "secretary-2"), "task"),
+        )
+        with tarfile.open(result.archive) as archive:
+            archived = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+            )["cards"]
+        self.assertFalse(any("record_type" in card["metadata"] for card in archived if ":" not in card["reference"]))
+
+        # Counts, then normalized parity against the restored store; either refusal raises.
+        restore_postgres_backup(result.archive, self.target_instance)
+        self.assertTrue((self.root / "target-data" / "postgres-restore.json").is_file())
+
+    def test_tasks_rows_whose_bag_names_another_kind_export_as_tasks_and_restore(self) -> None:
+        """secretary-1678 D2: the table is the record type, whatever a stale bag value says."""
+        self._seed()
+        source = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
+        with source.transaction():
+            for reference, stale in (("secretary-1", "product"), ("codegen-product-kit-1", "not-a-kind")):
+                source._execute(
+                    "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
+                    "'{extra,record_type}', to_jsonb(%s::text), true) WHERE task_ref = %s",
+                    (stale, reference),
+                )
+        source.connection.close()
+
+        with (
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("secretary.backup._pipeline_action", return_value=None),
+            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+        ):
+            (result,) = create_backups(self.source_instance)
+
+        with tarfile.open(result.archive) as archive:
+            cards = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+            )["cards"]
+        kinds = {card["reference"]: card["metadata"]["record_type"] for card in cards}
+        self.assertEqual(kinds["secretary-1"], "task")
+        self.assertEqual(kinds["codegen-product-kit-1"], "task")
+        self.assertEqual(kinds["product:secretary"], "product")
+        self.assertEqual(kinds["issue:recovery"], "issue")
+
+        # Counts, then normalized parity against the restored store; either refusal raises.
+        restore_postgres_backup(result.archive, self.target_instance)
+        self.assertTrue((self.root / "target-data" / "postgres-restore.json").is_file())
+
     @staticmethod
     def _down(instance: Path, project: str) -> None:
         subprocess.run(

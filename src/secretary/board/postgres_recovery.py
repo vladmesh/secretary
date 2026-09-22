@@ -47,7 +47,6 @@ def inspect_source(instance_dir: Path) -> tuple[BoardStoreConfig, dict[str, Any]
         with psycopg.connect(config.for_role("owner").conninfo(), connect_timeout=5) as connection:
             server_num = int(connection.execute("SHOW server_version_num").fetchone()[0])
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            counts = _table_counts(connection)
     except (psycopg.Error, TypeError, ValueError) as exc:
         raise PostgresRecoveryError(
             "PostgreSQL board store preflight failed: " + str(exc).strip().splitlines()[0]
@@ -74,31 +73,52 @@ def inspect_source(instance_dir: Path) -> tuple[BoardStoreConfig, dict[str, Any]
         "alembic_head": head,
         "restore_purpose": DUMP_PURPOSE,
         "source_endpoint_id": endpoint_identity(config),
-        "table_counts": counts,
     }
 
 
 def create_dump(config: BoardStoreConfig, destination: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Dump the store and count its tables at one instant.
+
+    The counts are what restore compares the restored store with, so they must describe the
+    dump and not the store a moment earlier or later: a writer that commits between the two
+    (the pipeline pause's own freeze records, for one) would make an honest archive
+    unrestorable.  One REPEATABLE READ transaction exports its snapshot, counts inside it, and
+    holds it open while `pg_dump --snapshot` reads the same one.
+    """
+    import psycopg
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.parent.chmod(0o700)
     pgpass = destination.parent / ".pgpass"
     try:
         write_text_atomic(pgpass, _pgpass(config))
         pgpass.chmod(0o600)
-        args = _docker_client_args(destination.parent, pgpass.name) + [
-            "pg_dump",
-            "--host", config.host,
-            "--port", str(config.port),
-            "--username", config.owner_user,
-            "--dbname", config.dbname,
-            "--format=custom",
-            "--data-only",
-            "--no-owner",
-            "--no-privileges",
-            "--exclude-table=alembic_version",
-            f"--file=/backup/{destination.name}",
-        ]
-        _run_client(args, "pg_dump")
+        try:
+            with psycopg.connect(config.for_role("owner").conninfo(), connect_timeout=5) as connection:
+                connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+                connection.read_only = True
+                snapshot = str(connection.execute("SELECT pg_export_snapshot()").fetchone()[0])
+                counts = _table_counts(connection)
+                args = _docker_client_args(destination.parent, pgpass.name) + [
+                    "pg_dump",
+                    "--host", config.host,
+                    "--port", str(config.port),
+                    "--username", config.owner_user,
+                    "--dbname", config.dbname,
+                    f"--snapshot={snapshot}",
+                    "--format=custom",
+                    "--data-only",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--exclude-table=alembic_version",
+                    f"--file=/backup/{destination.name}",
+                ]
+                _run_client(args, "pg_dump")
+                connection.rollback()
+        except psycopg.Error as exc:
+            raise PostgresRecoveryError(
+                "PostgreSQL dump snapshot failed: " + str(exc).strip().splitlines()[0]
+            ) from None
         destination.chmod(0o600)
         _run_client(
             _docker_client_args(destination.parent, pgpass.name)
@@ -106,7 +126,12 @@ def create_dump(config: BoardStoreConfig, destination: Path, metadata: dict[str,
             "pg_restore validation",
         )
         version = _tool_version("pg_dump")
-        return {**metadata, "tool_version": version, "bytes": destination.stat().st_size}
+        return {
+            **metadata,
+            "table_counts": counts,
+            "tool_version": version,
+            "bytes": destination.stat().st_size,
+        }
     finally:
         with contextlib.suppress(FileNotFoundError):
             pgpass.unlink()

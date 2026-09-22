@@ -17,7 +17,7 @@ from secretary.backup_policy import ARCHIVE_ROOT, POSTGRES_BACKUP_VERSION
 from secretary.board.provision import IMAGE, POSTGRES_MAJOR
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
 
-#: What `postgres_recovery.inspect_source` reports about a store, as `backup verify` requires it.
+#: What `postgres_recovery.inspect_source` and `create_dump` report about a store, as `backup verify` requires it.
 ENGINE_DUMP_METADATA: dict[str, Any] = {
     "engine": "postgresql",
     "format": "custom",

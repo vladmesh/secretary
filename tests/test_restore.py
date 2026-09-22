@@ -307,13 +307,31 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(RestoreError, "parity mismatch"):
                 import_normalized_board(data_dir, client=card_store(self, empty_seed()))
 
-    def test_restore_refuses_a_card_without_a_record_type(self):
-        """A card with no kind cannot be placed, so the export is refused by reference."""
+    def test_restore_reads_a_card_without_a_record_type_as_a_task(self):
+        """secretary-1678: archives already taken hold older task rows whose export named no kind."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card(reference="secretary-7")
+            del card["metadata"]["record_type"]
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = card_store(self, empty_seed())
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
+            restored = TaskReader(client).show("secretary-7")
+            self.assertEqual(restored["record_type"], "task")
+            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
+
+    def test_restore_refuses_a_card_with_an_unknown_record_type(self):
+        """A card whose stated kind is none of the three cannot be placed, so it is refused by reference."""
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
             card = _restore_card(column="Issues")
-            card["metadata"] = {}
+            card["metadata"] = {"record_type": "epic"}
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
