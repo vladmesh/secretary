@@ -15,11 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import role_env as secretary_role_env
 from secretary.dispatch import pause as dispatcher_pause
 from secretary.runtime import launch_prefix, paths
+from secretary.runtime import role_env as runtime_role_env
 from triggered_agents.agents.pipeline import health
-from triggered_agents.runtime import role_env as runtime_role_env
 
 
 class PortableDefaultTests(unittest.TestCase):
@@ -44,7 +43,6 @@ class PortableDefaultTests(unittest.TestCase):
         expected = str(paths.default_instance_path() / "runtime.env")
 
         self.assertEqual(runtime_role_env.RUNTIME_ENV_DEFAULT, expected)
-        self.assertEqual(secretary_role_env.RUNTIME_ENV_DEFAULT, expected)
 
     def test_no_shipped_entry_point_pins_a_particular_home(self):
         for script in sorted(self.SCRIPTS.glob("*.sh")):

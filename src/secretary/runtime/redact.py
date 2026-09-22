@@ -16,9 +16,10 @@ card: secret-looking KEY=value assignments and long token-shaped blobs.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
-from triggered_agents.runtime.role_env import is_sensitive_env_name
+from secretary.runtime.role_env import is_sensitive_env_name
 
 # .env files whose VALUES are known secrets on this host. Exact matches get scrubbed.
 DEFAULT_ENV_FILES = [
@@ -76,8 +77,8 @@ def looks_like_credential(value: str) -> bool:
     )
 
 
-def _load_env_values(env_files) -> list[str]:
-    values = []
+def _load_env_values(env_files: Iterable[Path | str]) -> list[str]:
+    values: list[str] = []
     for path in env_files:
         p = Path(path)
         if not p.is_file():
@@ -97,7 +98,11 @@ def _load_env_values(env_files) -> list[str]:
     return sorted(set(values), key=len, reverse=True)
 
 
-def redact(text: str, env_files=None, secret_values=None) -> str:
+def redact(
+    text: str,
+    env_files: Iterable[Path | str] | None = None,
+    secret_values: Iterable[object] | None = None,
+) -> str:
     """Return `text` with known secrets replaced by a labeled placeholder."""
     if not text:
         return text
@@ -136,7 +141,11 @@ def _is_git_sha(blob: str) -> bool:
     return bool(_HEX_RE.match(blob))
 
 
-def scrub_secrets(text: str, env_files=None, secret_values=None) -> str:
+def scrub_secrets(
+    text: str,
+    env_files: Iterable[Path | str] | None = None,
+    secret_values: Iterable[object] | None = None,
+) -> str:
     """Mask secret-looking material in `text` before it reaches a board comment. `_BLOB_RE` casts
     a wide net over long alnum runs, so a git sha or any other hex-shaped identifier is spared —
     only the rest (base64/token-looking blobs) gets masked."""

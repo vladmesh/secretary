@@ -43,13 +43,14 @@ from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
+from secretary.runtime import role_env
 from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
 from tests.retired_board import legacy_runtime_lines
 from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
-from triggered_agents.runtime import health, production_telemetry, role_env
+from triggered_agents.runtime import health, production_telemetry
 from triggered_agents.runtime.state import PRECHECK_SKIP, AgentState
 
 

@@ -77,8 +77,8 @@ from secretary.dispatch.worker_lifecycle import (
     head_run_binding,
 )
 from secretary.infra.env import positive_int
-from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
+from secretary.runtime.role_env import observer_binding
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,

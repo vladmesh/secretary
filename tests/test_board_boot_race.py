@@ -157,6 +157,7 @@ class GateTests(unittest.TestCase):
         for package in (
             source / "triggered_agents" / "runtime",
             source / "secretary" / "dispatch",
+            source / "secretary" / "runtime",
         ):
             package.mkdir(parents=True)
             current = package
@@ -168,7 +169,7 @@ class GateTests(unittest.TestCase):
             "import referencing\nDEPENDENCY = referencing.MARKER\n",
             encoding="utf-8",
         )
-        (source / "triggered_agents" / "runtime" / "role_env.py").write_text(
+        (source / "secretary" / "runtime" / "role_env.py").write_text(
             "from secretary.config import DEPENDENCY\n"
             "import json\n"
             "import os\n"
@@ -357,7 +358,7 @@ class GateTests(unittest.TestCase):
                 "-S",
                 "-P",
                 "-m",
-                "triggered_agents.runtime.role_env",
+                "secretary.runtime.role_env",
                 "exec",
                 "--role",
                 "curator",

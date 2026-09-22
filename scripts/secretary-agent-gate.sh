@@ -101,11 +101,11 @@ case "$agent" in
 esac
 
 run_role_env() {
-    "$managed_python" -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    "$managed_python" -P -m secretary.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 exec_role_env() {
-    exec "$managed_python" -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    exec "$managed_python" -P -m secretary.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 if [ -n "$variant" ]; then

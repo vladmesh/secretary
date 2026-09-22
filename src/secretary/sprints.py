@@ -2839,7 +2839,7 @@ class SprintWriter:
         """
         if role != "observer":
             return
-        from secretary.role_env import declared_observer_sprint
+        from secretary.runtime.role_env import declared_observer_sprint
         from secretary.tasks import _sprint_guard_denial_request_id
 
         declared = declared_observer_sprint()

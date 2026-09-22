@@ -12,9 +12,13 @@ import os
 import re
 import shlex
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from secretary.runtime.paths import PRODUCT_ENV, default_instance_path
+
+# The one module every launcher runs as `python3 -P -m <this> exec --role ...`.
+ENTRY_POINT = "secretary.runtime.role_env"
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
@@ -308,7 +312,7 @@ def wrap_shell_command(
         "python3",
         "-P",
         "-m",
-        "triggered_agents.runtime.role_env",
+        ENTRY_POINT,
         "exec",
         "--role",
         shlex.quote(role),
@@ -353,7 +357,10 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
 
 
 def main(
-    argv=None, *, prog: str = "python3 -m triggered_agents.runtime.role_env", description: str | None = None
+    argv: Sequence[str] | None = None,
+    *,
+    prog: str = f"python3 -m {ENTRY_POINT}",
+    description: str | None = None,
 ) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help", "help"}:

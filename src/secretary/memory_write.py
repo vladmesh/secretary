@@ -40,8 +40,8 @@ from secretary.memory_journal import (
     init_memory_journal,
     reject_legacy_memory_journal,
 )
+from secretary.runtime.redact import redact
 from secretary.state_repo import MEMORY_PATHSPEC
-from triggered_agents.runtime.redact import redact
 
 MEMORY_CANONICAL_WRITER_ROLES = frozenset({"curator", "secretary", "operator"})
 MEMORY_PROPOSAL_ONLY_ROLES = frozenset({"butler"})

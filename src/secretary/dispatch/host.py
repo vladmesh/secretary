@@ -292,7 +292,7 @@ from secretary.runtime.prompt_document import (
 from secretary.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
-from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
+from secretary.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 

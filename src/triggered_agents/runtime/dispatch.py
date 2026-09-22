@@ -142,7 +142,7 @@ from .head import (
     HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_GONE,
-    RUNTIME_ROLE_ENV,
+    STANDING_BINDING,
     HeadRun,
     HeadRunError,
     HeadSpec,
@@ -537,7 +537,7 @@ def _render_launch(
         {"adapter": "claude"},
         prompt=skill,
         role=agent,
-        binding=RUNTIME_ROLE_ENV,
+        binding=STANDING_BINDING,
     ).command
     if resolution.head_profile is None:
         return skill, bare_claude, False, bare
@@ -547,7 +547,7 @@ def _render_launch(
             prompt=skill,
             role=agent,
             workspace=_workspace(agent),
-            binding=RUNTIME_ROLE_ENV,
+            binding=STANDING_BINDING,
         )
     except Exception:
         return skill, bare_claude, False, bare

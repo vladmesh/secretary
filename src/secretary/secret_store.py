@@ -56,12 +56,13 @@ from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from secretary import role_env, state_repo
+from secretary import state_repo
 from secretary._fsutil import publish_state_atomic
 from secretary.config import _safe_yaml_error, validate
+from secretary.runtime import role_env
+from secretary.runtime.redact import looks_like_credential, redact
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
-from triggered_agents.runtime.redact import looks_like_credential, redact
 
 CATALOG_NAME = "catalog.yaml"
 KEY_PARAMS_NAME = "installation-key.json"

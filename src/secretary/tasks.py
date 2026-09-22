@@ -82,9 +82,9 @@ from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
 )
-from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
+from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
-from triggered_agents.runtime.redact import redact
+from secretary.runtime.redact import redact
 from secretary.runtime.references import (
     BoardRowsUnavailable,
     board_rows,
@@ -2932,7 +2932,7 @@ class TaskWriter:
         """
         if role != "observer":
             return
-        from secretary.role_env import declared_observer_sprint
+        from secretary.runtime.role_env import declared_observer_sprint
 
         declared = declared_observer_sprint()
         if not declared:

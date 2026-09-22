@@ -20,12 +20,12 @@ from secretary.infra.github_credential import (
     project_remote_execution,
 )
 from secretary.runtime.paths import configured_product_root
+from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS
 from secretary.secret_store import (
     SecretStoreError,
     store_divergence,
     store_health,
 )
-from triggered_agents.runtime.role_env import RUNTIME_ENV_FILE_ENVS
 
 
 def collect_recovery_inventory(

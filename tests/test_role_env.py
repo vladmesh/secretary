@@ -10,9 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import role_env as secretary_role_env
+from secretary.runtime import role_env
 from tests.retired_board import LEGACY_ENV, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from triggered_agents.runtime import role_env
 from triggered_agents.runtime.head.command import wrap_role_command
 
 
@@ -33,11 +32,6 @@ class RuntimeEnvPathTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(role_env.runtime_env_path(), Path("/tmp/secretary-runtime.env"))
-
-    def test_secretary_reexports_the_shared_runtime_environment(self) -> None:
-        self.assertIs(secretary_role_env.runtime_env, role_env.runtime_env)
-        self.assertIs(secretary_role_env.ROLE_ALLOWLIST, role_env.ROLE_ALLOWLIST)
-        self.assertFalse(hasattr(secretary_role_env, "RUNTIME_ENV_FILE_ENV"))
 
 
 class RuntimeEnvRoleTests(unittest.TestCase):
