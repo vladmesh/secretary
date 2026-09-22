@@ -253,6 +253,11 @@ def resolve_with_lifecycle(instance_dir: Path | str) -> tuple[BoardStoreConfig, 
     held = _HELD.get(_held_key(instance_dir))
     if isinstance(held, BoardStoreError):
         raise BoardStoreError(str(held))
+    path = store_path(instance_dir)
+    if not path.exists() and not path.is_symlink():
+        # Nothing to exclude, so nothing is written: a read of an installation with no store --
+        # `status` and `doctor` among them -- must leave its repository as it found it.
+        raise BoardStoreError(f"board store configuration is missing: {path}")
     outcome = enforce_exclusion(instance_dir) if held is None else StoreOutcome()
     return parse(store_path(instance_dir)), outcome
 
