@@ -31,7 +31,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskReader, TaskWriter
-from tests.fakes.sprints import SprintBackendFixture, _EmptyBoardsKanboard, _write_project_registry
+from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
 
@@ -77,25 +77,6 @@ RESUME = {
 class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     """Reusable export/restore contract with one backend factory boundary."""
 
-    def make_target_client(self) -> _EmptyBoardsKanboard:
-        return _EmptyBoardsKanboard()
-
-    def persisted_record_count(self, client: object) -> int:
-        """Observe all target records through its public client boundary."""
-        projects = ["Pipeline", "Secretary sprints"]
-        total = 0
-        for name in projects:
-            project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
-            if not isinstance(project, dict) or not project.get("id"):
-                continue
-            for status_id in (1, 0):
-                total += len(
-                    client.call(  # type: ignore[attr-defined]
-                        "getAllTasks", project_id=int(project["id"]), status_id=status_id
-                    )
-                )
-        return total
-
     def persisted_reference_count(self, client: object, reference: str) -> int:
         """Count a reference through the backend client without reading fake rows."""
         total = 0
@@ -111,7 +92,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         return total
 
     def setUp(self) -> None:
-        self.skip_kanboard_only()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -722,6 +702,17 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         with self.assertRaisesRegex(RestoreError, "invalid status"):
             import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
+        self.assertEqual(self.persisted_record_count(client), 0)
+
+    def test_sql_restore_refuses_an_unlinked_current_task_before_writes(self) -> None:
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["current_task"] = "secretary:not-in-export"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client = self.make_target_client()
+
+        with self.assertRaisesRegex(RestoreError, "not an included Card already linked"):
+            import_normalized_board(self.target_data, client=client, instance=self.instance)
         self.assertEqual(self.persisted_record_count(client), 0)
 
 

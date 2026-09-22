@@ -121,7 +121,6 @@ class SqlTaskAudit:
     def __init__(self, client: Any) -> None:
         self.client = client
         self._marker_lock_depth = threading.local()
-        self.legacy_audit: Any | None = None
 
     # --- primitives ------------------------------------------------------------------
 
@@ -273,8 +272,6 @@ class SqlTaskAudit:
         ]
 
     def status(self) -> dict[str, int | bool]:
-        if self.legacy_audit is not None:
-            self.legacy_audit.require_pending_layout()
         pending = int(self._query("SELECT count(*) FROM requests WHERE status = 'staged'")[0][0])
         return {"ok": pending == 0, "pending": pending}
 
@@ -285,11 +282,6 @@ class SqlTaskAudit:
             (event_id,),
         )
         return rows[0][0] if rows else None
-
-    def require_pending_layout(self) -> None:
-        """There is no pre-v2 filename layout to upgrade in a table; the gate is a no-op here."""
-        if self.legacy_audit is not None:
-            self.legacy_audit.require_pending_layout()
 
     @staticmethod
     def require_claim(

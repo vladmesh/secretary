@@ -141,7 +141,7 @@ A CLI test that needs a board injects it where the backend is chosen for both im
 at `KanboardClient.for_instance`, which the PostgreSQL pin never reaches.
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
-`collect_status(report, offline=True, sprint_client=SprintBoard())` is the seam, and
+`collect_status(report, offline=True, sprint_client=sprint_store(self, status_seed()))` is the seam, and
 `tests/test_hermetic_kanboard.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
 is the worked example. Do not build a client against a real endpoint in a `test_*` module the
 default `python -m unittest` run discovers; a live canary belongs in an operator runbook or an

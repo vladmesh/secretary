@@ -37,7 +37,7 @@ from secretary.dispatch.production import _write_checkpoint
 from secretary.sprints import SprintWriter
 from secretary.tasks import TaskError
 from tests import test_checkpoint as checkpoint_cases
-from tests.fakes.sprints import ProductSprintKanboard, _write_project_registry
+from tests.fakes.sprints import ProductSprintSeed, _write_project_registry
 from tests.sql_backend_fixtures import PostgresBoard, seed_client
 
 BOARD: PostgresBoard
@@ -64,7 +64,7 @@ class SettlementCase(unittest.TestCase):
         instance = _write_project_registry(self.tmp, "secretary", "secretary-instance", "other")
         config = BOARD.fresh_database()
         self.config = config
-        self.client = seed_client(config, ProductSprintKanboard(), self.tmp)
+        self.client = seed_client(config, ProductSprintSeed(), self.tmp)
         self.addCleanup(BOARD.drop_database, config.dbname)
         self.addCleanup(self.client.close)
         self.audit = SqlTaskAudit(self.client)

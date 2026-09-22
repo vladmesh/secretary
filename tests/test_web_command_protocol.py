@@ -65,10 +65,8 @@ OPERATION_LAYERS = (OperationLayer, SprintOperationLayer, PauseOperationLayer)
 class CommandProtocolFixture(SprintProtocolFixture):
     """One installation, one data plane, and a committed audit with commands on several entities.
 
-    The history is the card audit (`requests`), so the board is a real store (`CARD_STORE`).
+    The history is the card audit (`requests`), so the board is a real store.
     """
-
-    CARD_STORE = True
 
     def layer(self, **kwargs: Any) -> CommandReadLayer:
         options: dict[str, Any] = {

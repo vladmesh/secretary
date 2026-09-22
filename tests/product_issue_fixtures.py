@@ -1,46 +1,35 @@
+"""The Product/Issue contract's setup and observations, over a real PostgreSQL store.
+
+Products and Issues have one implementation, PostgreSQL (secretary-1670), so every store below is
+a migrated database of the test's own (`tests.sql_backend_fixtures.PostgresBoard.shared`).
+"""
+
 from __future__ import annotations
 
 import contextlib
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import ClassVar
 
+from secretary.board.sql_cards import SqlCardClient
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskError
-from tests.fakes.product_issues import ProductBoard
+from tests.sql_backend_fixtures import PostgresBoard
 
 
 class ProductIssueFixture:
-    """Backend-neutral setup and observations for the Product/Issue contract.
+    """Setup and observations for the Product/Issue contract.
 
-    A PostgreSQL contract subclass only has to override ``make_store`` (and set
-    ``BACKEND``).  Test bodies use ProductIssueStore operations and the observations
-    below; the Kanboard fake remains private to this fixture.
+    Test bodies use ProductIssueStore operations and the observations below.
     """
-
-    BACKEND = "kanboard"
-    KANBOARD_ONLY: ClassVar[dict[str, str]] = {}
-    #: Cases that write or claim a card. Cards have one implementation, PostgreSQL
-    #: (secretary-1669), so they are skipped on the Kanboard fixture and run through the SQL
-    #: contract classes (`tests/test_product_issues_sql_backend.py`).
-    CARD_STORE_ONLY: ClassVar[frozenset[str]] = frozenset()
 
     def setUp(self) -> None:
         super().setUp()
-        reason = self.KANBOARD_ONLY.get(self._testMethodName)
-        if reason and self.BACKEND != "kanboard":
-            self.skipTest(reason)
-        if self._testMethodName in self.CARD_STORE_ONLY and self.BACKEND == "kanboard":
-            self.skipTest(
-                "writes a card, and cards have one implementation: runs on the store in "
-                "tests/test_product_issues_sql_backend.py"
-            )
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         (self.root / "projects").mkdir()
         (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-        self._clients: dict[int, ProductBoard] = {}
+        self._clients: dict[int, SqlCardClient] = {}
         self.store = self.make_store(root=self.root)
         self.client = self._client_for(self.store)
 
@@ -54,20 +43,22 @@ class ProductIssueFixture:
         root: Path,
         lanes: list[dict[str, object]] | None = None,
     ) -> ProductIssueStore:
-        """The sole backend factory seam used by the shared contract.
-
-        A future SQL fixture overrides this method and, where its lane disposal boundary differs,
-        the lane fixture methods below.
-        The shared bodies neither receive nor identify the concrete client.
-        """
-        client = ProductBoard()
-        if lanes is not None:
-            client.swimlanes = [dict(lane) for lane in lanes]
+        """A store over an empty database of its own, with this lane catalogue arranged by name."""
+        board = PostgresBoard.shared()
+        config = board.fresh_database()
+        client = SqlCardClient(config.for_role("app"), root)
+        client._lanes = sorted(str(lane["name"]) for lane in (lanes or []))
         store = ProductIssueStore(client, data_dir=root / "data", instance=root)
         self._clients[id(store)] = client
+
+        def dispose() -> None:
+            client.close()
+            board.release_database(config.dbname)
+
+        self.addCleanup(dispose)  # type: ignore[attr-defined]
         return store
 
-    def _client_for(self, store: ProductIssueStore) -> ProductBoard:
+    def _client_for(self, store: ProductIssueStore) -> SqlCardClient:
         return self._clients[id(store)]
 
     def store_with_lanes(
@@ -123,31 +114,20 @@ class ProductIssueFixture:
         }
 
     def record_count(self, reference: str, *, store: ProductIssueStore | None = None) -> int:
-        """Count persisted records even when their Product/Issue projection is incomplete.
-
-        A future SQL fixture may override this observation with a direct disposable-database
-        query. The Kanboard fixture reads both active and archived records because a filtered
-        domain listing cannot prove that no partial or duplicate row was written.
-        """
+        """Count persisted rows, even when their Product/Issue projection is incomplete."""
         client = self._client_for(store or self.store)
-        records = [
-            row
-            for status_id in (1, 0)
-            for row in client.call("getAllTasks", project_id=1, status_id=status_id)
-        ]
-        return sum(row.get("reference") == reference for row in records)
+        kind, identifier = reference.split(":", 1)
+        table, column = ("products", "product_id") if kind == "product" else ("issues", "issue_id")
+        return int(client._query(f"SELECT count(*) FROM {table} WHERE {column} = %s", (identifier,))[0][0])
 
     def lane_binding(self, reference: str, *, store: ProductIssueStore | None = None) -> object:
-        """Observe a record's lane through the backend protocol, never fake storage."""
+        """Observe a record's lane through the backend protocol."""
         client = self._client_for(store or self.store)
-        row = client.call("getTaskByReference", reference=reference)
+        row = client.call("getTaskByReference", project_id=1, reference=reference)
         if not isinstance(row, dict):
-            self.fail(f"record is not visible: {reference}")
-        lane_id = row.get("swimlane_id")
+            self.fail(f"record is not visible: {reference}")  # type: ignore[attr-defined]
         lanes = client.call("getActiveSwimlanes", project_id=1)
-        if not isinstance(lanes, list):
-            self.fail("backend returned no lane list")
-        return next((lane["name"] for lane in lanes if lane.get("id") == lane_id), None)
+        return next((lane["name"] for lane in lanes if lane["id"] == row["swimlane_id"]), None)
 
     def add_external_lane(
         self,
@@ -157,8 +137,8 @@ class ProductIssueFixture:
         first: bool = False,
     ) -> None:
         """Arrange a lane written by another actor at the fixture boundary."""
-        lanes = self._client_for(store or self.store).swimlanes
-        lanes.insert(0 if first else len(lanes), dict(lane))
+        names = self._client_for(store or self.store)._lane_names()
+        names.insert(0 if first else len(names), str(lane["name"]))
 
     @contextlib.contextmanager
     def named_failure(

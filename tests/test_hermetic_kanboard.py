@@ -1,7 +1,7 @@
 """Status reads fail closed and accept an explicit in-memory board seam.
 
 secretary-1026: ambient `KANBOARD_*` credentials must never make a unit test
-read or write a live board.  Tests that need sprint data pass their fake board
+read or write a live board.  Tests that need sprint data pass their own store
 through `collect_status(..., sprint_client=...)`.
 """
 
@@ -14,7 +14,7 @@ from unittest import mock
 
 from secretary.config import validate_instance
 from secretary.status import collect_status
-from tests.fakes.sprints import SprintBoard
+from tests.fakes.sprints import sprint_store, status_seed
 
 
 def _report(root: Path):
@@ -56,11 +56,11 @@ class HermeticKanboardTests(unittest.TestCase):
         self.assertEqual(snapshot["installation"]["sprints"]["items"], [])
 
     def test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape(self):
-        # The explicit fake board is the status injection seam.
+        # The explicit board is the status injection seam; the board is a store of the test's own.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
-            board = SprintBoard()
+            board = sprint_store(self, status_seed())
             board.add_sprint("sprint:1")
             snapshot = collect_status(report, offline=True, sprint_client=board)
 

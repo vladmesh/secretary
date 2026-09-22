@@ -1,6 +1,13 @@
+"""The shared Sprint fixture: seed data and a real PostgreSQL store per test.
+
+Sprints have one implementation, PostgreSQL (secretary-1670), so there is no in-memory sprint
+board here. The seeds below are only input to `tests.sql_backend_fixtures.seed_client`.
+"""
+
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import tempfile
 import unittest
@@ -9,6 +16,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.sql_cards import SqlCardClient
 from secretary.product_issues import ProductIssueStore
 from secretary.sprint_observer import (
     head_choice,
@@ -17,15 +26,12 @@ from secretary.sprints import (
     SPRINT_BOARD_NAME,
     SprintReader,
     SprintWriter,
-    ensure_sprint_board,
 )
-from secretary.tasks import TaskAudit, TaskReader
-from tests.fakes.board import BatchedCalls
+from secretary.tasks import TaskReader
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import bind_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON
-from tests.sprint_contract import CARD_STORE_ONLY as SPRINT_CARD_STORE_ONLY
-from tests.sprint_contract import KANBOARD_ONLY as SPRINT_KANBOARD_ONLY
+from tests.sql_backend_fixtures import CardStoreClient, card_store
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -44,23 +50,28 @@ def drop_cards(*refs: str) -> dict:
     }
 
 
-class SprintKanboard(BatchedCalls):
+#: The Pipeline's columns, in the numbering the seed rows below use.
+SEED_COLUMNS = [
+    {"id": 1, "title": "Issues"},
+    {"id": 2, "title": "Ready"},
+    {"id": 3, "title": "In progress"},
+    {"id": 4, "title": "Validate"},
+    {"id": 5, "title": "Blocked"},
+    {"id": 6, "title": "Done"},
+]
+
+
+class SprintSeed:
+    """The starting Pipeline of a sprint test: one Ready card, `secretary-12`, and nothing else.
+
+    Seed input only (`tests.sql_backend_fixtures.seed_client`): Sprints have one implementation,
+    PostgreSQL, so a sprint test runs on a real store and this is what is written into it.
+    """
+
     def __init__(self) -> None:
-        self.instance_dir = Path(tempfile.gettempdir())
-        self.calls: list[tuple[str, dict]] = []
-        self.projects = {"Pipeline": 7}
-        self.columns = {
-            7: [
-                {"id": 1, "title": "Issues"},
-                {"id": 2, "title": "Ready"},
-                {"id": 3, "title": "In progress"},
-                {"id": 4, "title": "Validate"},
-                {"id": 5, "title": "Blocked"},
-                {"id": 6, "title": "Done"},
-            ]
-        }
-        self.swimlanes: dict[int, list[dict[str, object]]] = {7: []}
-        self.tasks = [
+        self.columns = [dict(column) for column in SEED_COLUMNS]
+        self.lanes: list[dict[str, object]] = []
+        self.tasks: list[dict[str, object]] = [
             {
                 "id": 12,
                 "project_id": 7,
@@ -74,162 +85,27 @@ class SprintKanboard(BatchedCalls):
                 "date_modification": "1720000000",
             }
         ]
-        self.metadata = {12: {"project": "secretary", "task_type": "code"}}
-        self.comments = {12: []}
-
-    def call(self, method: str, **params: object) -> object:
-        self.calls.append((method, params))
-        if method == "getProjectByName":
-            project_id = self.projects.get(str(params["name"]))
-            return {"id": project_id} if project_id else None
-        if method == "createProject":
-            project_id = max(self.projects.values()) + 1
-            self.projects[str(params["name"])] = project_id
-            self.columns[project_id] = [{"id": project_id * 10, "title": "Backlog"}]
-            self.swimlanes[project_id] = []
-            return project_id
-        if method == "getColumns":
-            return self.columns[int(params["project_id"])]
-        if method == "getActiveSwimlanes":
-            return list(self.swimlanes[int(params["project_id"])])
-        if method == "addSwimlane":
-            project_id = int(params["project_id"])
-            lane_id = max(
-                (int(lane["id"]) for lanes in self.swimlanes.values() for lane in lanes),
-                default=0,
-            ) + 1
-            self.swimlanes[project_id].append(
-                {"id": lane_id, "name": str(params["name"]), "position": len(self.swimlanes[project_id]) + 1}
-            )
-            return lane_id
-        if method == "getAllTasks":
-            status = params.get("status_id")
-            if status not in {0, 1}:
-                return []
-            return [
-                task
-                for task in self.tasks
-                if task["project_id"] == params["project_id"]
-                and (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
-            ]
-        if method == "getTaskByReference":
-            return next(
-                (
-                    task
-                    for task in self.tasks
-                    if task["project_id"] == params["project_id"] and task["reference"] == params["reference"]
-                ),
-                None,
-            )
-        if method == "getTaskMetadata":
-            return self.metadata[int(params["task_id"])]
-        if method == "getAllComments":
-            return self.comments[int(params["task_id"])]
-        if method == "createTask":
-            task_id = max(int(task["id"]) for task in self.tasks) + 1
-            task = {
-                "id": task_id,
-                "project_id": int(params["project_id"]),
-                "reference": params.get("reference", ""),
-                "title": params["title"],
-                "description": params.get("description", ""),
-                "column_id": params["column_id"],
-                "position": len(self.tasks) + 1,
-                "swimlane_id": params.get("swimlane_id", 0),
-                "date_creation": "1720000001",
-                "date_modification": "1720000001",
-            }
-            self.tasks.append(task)
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        if method == "updateTask":
-            task = next(task for task in self.tasks if task["id"] == params["id"])
-            for field in ("reference", "title", "description"):
-                if field in params:
-                    task[field] = params[field]
-            task["date_modification"] = "1720000002"
-            return True
-        if method == "saveTaskMetadata":
-            self.metadata[int(params["task_id"])].update(params["values"])
-            return True
-        if method == "moveTaskPosition":
-            task = next(task for task in self.tasks if task["id"] == params["task_id"])
-            task["column_id"] = params["column_id"]
-            task["swimlane_id"] = params["swimlane_id"]
-            return True
-        if method == "removeTask":
-            remaining = [task for task in self.tasks if task["id"] != int(params["task_id"])]
-            if len(remaining) == len(self.tasks):
-                return False
-            self.tasks = remaining
-            return True
-        if method == "createComment":
-            self.comments[int(params["task_id"])].append(
-                {"date_creation": "1720000003", "comment": params["content"]}
-            )
-            return 1
-        if method == "closeTask":
-            task = next(task for task in self.tasks if task["id"] == int(params["task_id"]))
-            task["is_active"] = 0
-            return True
-        raise AssertionError(method)
+        self.metadata: dict[int, dict[str, str]] = {12: {"project": "secretary", "task_type": "code"}}
+        self.comments: dict[int, list[dict[str, object]]] = {12: []}
 
 
-class SprintBoard(SprintKanboard):
-    """The Sprint Kanboard fixture with a sprint board already on it, and `secretary-510` as its card.
-
-    What a status read of sprints needs and nothing else: the projection is Sprint code, which keeps
-    its Kanboard implementation until sprint:1452 retires it, so these reads need no card store.
-    """
-
-    SPRINT_BOARD = 8
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.projects[SPRINT_BOARD_NAME] = self.SPRINT_BOARD
-        self.columns[self.SPRINT_BOARD] = [{"id": 80, "title": "Backlog"}]
-        self.swimlanes[self.SPRINT_BOARD] = []
-        self.tasks[0]["reference"] = "secretary-510"
-
-    def add_sprint(self, reference: str, *, status: str = "open", **metadata: object) -> None:
-        task_id = 100 + len([task for task in self.tasks if task["project_id"] == self.SPRINT_BOARD])
-        self.tasks.append(
-            {
-                "id": task_id,
-                "project_id": self.SPRINT_BOARD,
-                "reference": reference,
-                "title": "sprint",
-                "description": "",
-                "column_id": 80,
-                "position": task_id,
-                "swimlane_id": 0,
-                "date_creation": "1720000000",
-                "date_modification": "1720000000",
-            }
-        )
-        self.metadata[task_id] = {
-            "sprint_goal": "ship the thing",
-            "sprint_definition_of_done": "the thing ships",
-            "sprint_repositories": '["secretary"]',
-            "sprint_status": status,
-            "sprint_current_task": "",
-            **{key: str(value) for key, value in metadata.items()},
-        }
-        self.comments[task_id] = []
+def status_seed() -> SprintSeed:
+    """The Pipeline a status read of sprints needs: one card, `secretary-510`, under key 12."""
+    seed = SprintSeed()
+    seed.tasks[0]["reference"] = "secretary-510"
+    return seed
 
 
-class ProductSprintKanboard(SprintKanboard):
-    """The same two boards, with the Pipeline carrying Product and Issue records.
+class ProductSprintSeed(SprintSeed):
+    """The same Pipeline, carrying Product and Issue records.
 
-    A sprint now names the Product it belongs to and the Issues it serves, so the
-    fixture holds one product with an open and a closed issue, plus a second product
-    to prove a foreign issue is refused.
+    A sprint names the Product it belongs to and the Issues it serves, so the seed holds one
+    product with an open and a closed issue, plus a second product to prove a foreign issue is
+    refused.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.columns[7] = [{"id": 1, "title": "Issues"}] + self.columns[7][1:]
         self._record(
             20,
             "product:secretary",
@@ -307,19 +183,29 @@ class ProductSprintKanboard(SprintKanboard):
         self.metadata[task_id] = dict(metadata)
         self.comments[task_id] = []
 
-    def call(self, method: str, **params: object) -> object:
-        if method == "getAllTasks":
-            self.calls.append((method, params))
-            status = params.get("status_id")
-            if status not in {0, 1}:
-                return []
-            return [
-                task
-                for task in self.tasks
-                if task["project_id"] == params["project_id"]
-                and (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
-            ]
-        return super().call(method, **params)
+
+class SprintStoreClient(CardStoreClient):
+    """The card store client, plus the final row probe some sprint cases observe."""
+
+    @property
+    def tasks(self) -> list[dict]:
+        """Every row of both boards, live and archived, as the board answers it."""
+        return [
+            row
+            for board_id in (1, 2)
+            for status_id in (1, 0)
+            for row in SqlCardClient.call(self, "getAllTasks", project_id=board_id, status_id=status_id)
+        ]
+
+
+def sprint_store(test: unittest.TestCase, seed: Any = None, *, instance_dir: Any = None) -> SprintStoreClient:
+    """A real store of this test's own, seeded with the sprint Pipeline (`ProductSprintSeed`)."""
+    return card_store(
+        test,
+        seed if seed is not None else ProductSprintSeed(),
+        instance_dir=instance_dir,
+        client_class=SprintStoreClient,
+    )
 
 
 def _write_project_registry(root: Path, *projects: str) -> Path:
@@ -357,40 +243,41 @@ def _write_head_registry(instance: Path) -> Path:
 
 
 class SprintBackendFixture:
-    """One factory and exclusion policy shared by every portable sprint suite."""
+    """The one factory every sprint suite shares: a real store seeded with `ProductSprintSeed`."""
 
-    BACKEND = "kanboard"
-    KANBOARD_ONLY: ClassVar[dict[str, str]] = SPRINT_KANBOARD_ONLY
+    def make_sprint_client(self) -> SprintStoreClient:
+        root = getattr(getattr(self, "tmp", None), "name", None)
+        return sprint_store(self, instance_dir=root)  # type: ignore[arg-type]
 
-    def make_sprint_client(self) -> ProductSprintKanboard:
-        return ProductSprintKanboard()
+    def make_ownership_client(self) -> SprintStoreClient:
+        """A store holding only the Products and Issues, and no card."""
+        seed = ProductSprintSeed()
+        seed.tasks = [row for row in seed.tasks if str(row.get("reference", "")).startswith(("product:", "issue:"))]
+        root = getattr(getattr(self, "tmp", None), "name", None)
+        return sprint_store(self, seed, instance_dir=root)  # type: ignore[arg-type]
 
-    def skip_kanboard_only(self) -> None:
-        method = getattr(type(self), self._testMethodName)  # type: ignore[attr-defined]
-        qualified = f"{method.__module__}.{method.__qualname__}"
-        reason = self.KANBOARD_ONLY.get(qualified)
-        if reason and self.BACKEND != "kanboard":
-            self.skipTest(f"Kanboard-only: {reason}")  # type: ignore[attr-defined]
-        if qualified in SPRINT_CARD_STORE_ONLY and self.BACKEND == "kanboard":
-            self.skipTest(  # type: ignore[attr-defined]
-                "writes a card, and cards have one implementation: runs on the store in "
-                "tests/test_sprints_sql_backend.py"
-            )
+    def make_empty_sprint_client(self) -> SprintStoreClient:
+        """A restore target: the Products and Issues a restored sprint names, and no card or sprint."""
+        return self.make_ownership_client()
+
+    make_target_client = make_empty_sprint_client
+
+    @staticmethod
+    def persisted_record_count(client: Any) -> int:
+        """How many cards and sprints a store holds, live or archived."""
+        return int(client._query("SELECT count(*) FROM tasks")[0][0]) + int(
+            client._query("SELECT count(*) FROM sprints")[0][0]
+        )
 
 
 class SprintFixture(SprintBackendFixture, unittest.TestCase):
-    """Backend-neutral fixture boundary for the shared sprint contract.
+    """The fixture boundary of the shared sprint contract, over a real store.
 
-    The Kanboard fake is an implementation detail of ``make_sprint_client``.  A future SQL
-    contract class overrides that factory and, where necessary, the small arrangement and
-    observation methods below.  Shared test bodies speak only through SprintReader,
-    SprintWriter, TaskReader/TaskWriter, or these helpers.  They never need the fake's row,
-    metadata, comment, RPC-log, or transaction-file representation.
+    Shared test bodies speak only through SprintReader, SprintWriter, TaskReader/TaskWriter, or
+    these helpers.
     """
 
     def setUp(self) -> None:
-        self.skip_kanboard_only()
-        self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.instance = _write_project_registry(
@@ -399,6 +286,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
             "secretary-instance",
             "other",
         )
+        self.client = self.make_sprint_client()
         self.writer = SprintWriter(  # type: ignore[arg-type]
             self.client,
             data_dir=self.tmp.name,
@@ -457,16 +345,30 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         return self.writer.transactions.status()
 
     def arrange_metadata(self, reference: str, **values: object) -> None:
-        """Arrange legacy/corrupt persisted values at the public client boundary."""
-        project = self.client.call("getProjectByName", name=SPRINT_BOARD_NAME)
-        if not isinstance(project, dict) or not project.get("id"):
-            self.fail(f"sprint board is not visible while arranging {reference}")
-        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
-        if not isinstance(row, dict):
-            self.fail(f"sprint record is not visible while arranging {reference}")
-        result = self.client.call("saveTaskMetadata", task_id=int(row["id"]), values=values)
-        if result is not True:
-            self.fail(f"backend refused fixture metadata for {reference}")
+        """Arrange persisted sprint values through the product's own writes.
+
+        A budget is arranged as the charges that make it up, and every other value through the
+        verbatim `restore` a checkpoint recovery uses.
+        """
+        budget = values.pop("sprint_budget", None)
+        if budget is not None:
+            document = json.loads(str(budget))
+            for event_type, count in (document.get("by_type") or {}).items():
+                for occurrence in range(int(count)):
+                    self.writer.record_budget(
+                        role="steward",
+                        actor="fixture",
+                        reference=reference,
+                        event_type=str(event_type),
+                        request_id=f"fixture-budget-{reference}-{event_type}-{occurrence}",
+                    )
+        if values:
+            identity = hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()[:16]
+            self.writer.restore(
+                reference=reference,
+                values={str(key): str(value) for key, value in values.items()},
+                request_id=f"fixture-restore-{reference}-{identity}",
+            )
 
     def arrange_card_sprint(self, reference: str, sprint: str) -> None:
         """Arrange an already-linked Card without making a cursor write own that relation."""
@@ -630,57 +532,4 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         return created
 
     def _events(self) -> list[dict]:
-        return TaskAudit(self.tmp.name).events()
-
-    def _sprint_rows(self) -> list[dict]:
-        """Kanboard-only raw-row observation retained for named recovery cases."""
-        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        return [
-            row
-            for status_id in (1, 0)
-            for row in self.client.call("getAllTasks", project_id=board, status_id=status_id)
-        ]
-
-    def _transactions(self) -> list[str]:
-        directory = Path(self.tmp.name) / "board" / "product-issue-transactions"
-        return sorted(path.name for path in directory.glob("v1-*.json")) if directory.is_dir() else []
-
-
-class _EmptyBoardsKanboard(SprintKanboard):
-    """A disposable backend with both boards and no rows on either.
-
-    `SprintKanboard` already models the Pipeline and sprint boards side by side;
-    a restore target differs only in starting empty, and in stamping its own
-    creation dates so a parity check cannot pass by inheriting the source's.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.tasks = []
-        self.metadata = {}
-        self.comments = {}
-        self.next_task_id = 100
-
-    def call(self, method: str, **params: object) -> object:
-        if method == "createTask":
-            self.calls.append((method, params))
-            task_id = self.next_task_id
-            self.next_task_id += 1
-            self.tasks.append(
-                {
-                    "id": task_id,
-                    "project_id": int(params["project_id"]),
-                    "reference": params.get("reference", ""),
-                    "title": params["title"],
-                    "description": params.get("description", ""),
-                    "column_id": params["column_id"],
-                    "position": len(self.tasks) + 1,
-                    "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1780000000",
-                    "date_modification": "1780000000",
-                }
-            )
-            self.metadata[task_id] = {}
-            self.comments[task_id] = []
-            return task_id
-        return super().call(method, **params)
+        return SqlTaskAudit(self.client).events()

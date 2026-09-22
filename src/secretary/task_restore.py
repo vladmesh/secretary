@@ -9,19 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.board.backend import KANBOARD, POSTGRES, entity_id, entity_number
-
-
-def _restored_backend(reference: str, *, entity: str = "task") -> str:
-    """The backend a restore event names for the entity it restored.
-
-    A card has one implementation, PostgreSQL, so a restored card's event carries its
-    `task_postgres_<n>` identity. Sprint and Product/Issue records keep the identity their own
-    implementations still write until sprint:1452 retires them.
-    """
-    if entity == "sprint" or str(reference).startswith(("product:", "issue:")):
-        return KANBOARD.value
-    return POSTGRES.value
+from secretary.board.backend import POSTGRES, entity_id, entity_number
 
 
 @dataclass(frozen=True)
@@ -55,6 +43,7 @@ def _entity_number(kind: str, identity: object) -> int:
     if number is None:
         raise RuntimeError(f"restored row carries no usable {kind} identity: {identity!r}")
     return number
+
 
 def _set_restore_phase(client: Any, phase: str) -> None:
     """Expose restore phase boundaries to an optional benchmark observer."""
@@ -200,7 +189,7 @@ def restore_cards_batched(
                         "task_id": "",
                         "ref": reference,
                         "backend": {
-                            "kind": _restored_backend(reference),
+                            "kind": POSTGRES.value,
                             "task_id": None,
                             "revision": "pending",
                         },
@@ -334,7 +323,7 @@ def restore_cards_batched(
             )
         event = writer.audit.pending_event(item.request_id)
         if event is not None:
-            backend = _restored_backend(str(item.card["reference"]))
+            backend = POSTGRES.value
             event["task_id"] = entity_id("task", backend, task_id)
             event["backend"]["kind"] = backend
             event["backend"]["task_id"] = task_id
@@ -409,7 +398,7 @@ def commit_restored_cards(
         if event is None or event.get("kind") != "restored_bulk":
             raise RuntimeError(f"restored card has no durable obligation: {reference}")
         task_id = _entity_number("task", live[reference]["id"])
-        backend = _restored_backend(reference)
+        backend = POSTGRES.value
         event["task_id"] = entity_id("task", backend, task_id)
         event["backend"]["kind"] = backend
         event["backend"]["task_id"] = task_id
@@ -658,7 +647,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
         return pending
     kind = "sprint" if item.entity == "sprint" else "task"
-    backend = _restored_backend(item.reference, entity=kind)
+    backend = POSTGRES.value
     return {
         "event_id": "evt_" + uuid.uuid4().hex,
         "schema_version": 1,
@@ -818,9 +807,9 @@ def reconcile_restore_order(
             "actor": {"role": "steward", "id": "restore"},
             "kind": "restored_order",
             "outcome": "success",
-            "task_id": entity_id("task", _restored_backend(references[0]), task_id),
+            "task_id": entity_id("task", POSTGRES.value, task_id),
             "ref": references[0],
-            "backend": {"kind": _restored_backend(references[0]), "task_id": task_id, "revision": "pending"},
+            "backend": {"kind": POSTGRES.value, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
             "payload": {**identity, "references": references},
         }

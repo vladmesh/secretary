@@ -1,77 +1,23 @@
-"""The shared Product/Issue contract and SQL-only atomicity probes on PostgreSQL 16."""
+"""Product/Issue atomicity probes on PostgreSQL 16.
+
+The shared Product/Issue contract (tests/test_product_issues.py) runs on the store itself since
+secretary-1670, so this module holds only the probes that name tables or inject a failure between
+two statements of one transaction.
+"""
 
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from secretary.board import backend
-from secretary.board.sql_cards import SqlCardClient
-from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskError
 from tests import test_product_issues as shared
-from tests.sql_backend_fixtures import PostgresBoard
-
-BOARD: PostgresBoard
+from tests.product_issue_fixtures import ProductIssueFixture
 
 
-def setUpModule() -> None:
-    global BOARD
-    for module in ("psycopg", "sqlalchemy", "alembic"):
-        __import__(module)
-    BOARD = PostgresBoard()
-
-
-def tearDownModule() -> None:
-    BOARD.stop()
-
-
-class SqlProductIssueFixture:
-    BACKEND = "postgres"
-
-    def make_store(
-        self, *, root: Path, lanes: list[dict[str, object]] | None = None
-    ) -> ProductIssueStore:
-        config = BOARD.fresh_database()
-        client = SqlCardClient(config.for_role("app"), root)
-        client._lanes = sorted(str(lane["name"]) for lane in (lanes or []))
-        self._clients[id(client)] = client
-        store = ProductIssueStore(client, data_dir=root / "data", instance=root)
-        self._clients[id(store)] = client
-        self.addCleanup(client.close)
-        return store
-
-    def add_external_lane(
-        self,
-        lane: dict[str, object],
-        *,
-        store: ProductIssueStore | None = None,
-        first: bool = False,
-    ) -> None:
-        client = self._client_for(store or self.store)
-        names = client._lane_names()
-        names.insert(0 if first else len(names), str(lane["name"]))
-
-    def lane_binding(self, reference: str, *, store: ProductIssueStore | None = None) -> object:
-        client = self._client_for(store or self.store)
-        row = client.call("getTaskByReference", project_id=1, reference=reference)
-        lanes = client.call("getActiveSwimlanes", project_id=1)
-        return next((lane["name"] for lane in lanes if lane["id"] == row["swimlane_id"]), None)
-
-    def record_count(self, reference: str, *, store: ProductIssueStore | None = None) -> int:
-        client = self._client_for(store or self.store)
-        kind, identifier = reference.split(":", 1)
-        table, column = ("products", "product_id") if kind == "product" else ("issues", "issue_id")
-        return int(client._query(f"SELECT count(*) FROM {table} WHERE {column} = %s", (identifier,))[0][0])
-
-
-class SqlProductIssueSwimlaneTests(SqlProductIssueFixture, shared.ProductIssueSwimlaneTests):
-    KANBOARD_ONLY = shared.ProductIssueSwimlaneTests.KANBOARD_ONLY
-
-
-class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStoreTests):
-    KANBOARD_ONLY = shared.ProductIssueStoreTests.KANBOARD_ONLY
+class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
+    """What one Product/Issue mutation's PostgreSQL transaction commits, and what it rolls back."""
 
     def _counts(self, request_id: str, *, reference: str = "") -> tuple[int, int, int, int]:
         client = self.client
@@ -352,10 +298,12 @@ class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStore
         self.assertTrue(self.store.show_issue(issue["ref"])["closed"])
 
 
-class SqlProductIssueDescriptionAppendTests(
-    SqlProductIssueFixture, shared.ProductIssueDescriptionAppendTests
-):
-    KANBOARD_ONLY = shared.ProductIssueDescriptionAppendTests.KANBOARD_ONLY
+class SqlProductIssueAppendTransactionTests(ProductIssueFixture, unittest.TestCase):
+    """An `issue append` that fails after its description write leaves neither the block nor the claim."""
+
+    ORIGINAL = shared.ProductIssueDescriptionAppendTests.ORIGINAL
+    _open_issue = shared.ProductIssueDescriptionAppendTests._open_issue
+    _append = shared.ProductIssueDescriptionAppendTests._append
 
     def _claims(self, request_id: str) -> tuple[int, int]:
         return tuple(

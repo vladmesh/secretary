@@ -33,10 +33,8 @@ EXISTING_CARD = "secretary-12"
 class PauseProtocolFixture(SprintProtocolFixture):
     """One installation, one data plane, one dispatcher runtime over it.
 
-    The dispatcher's cards are PostgreSQL rows, so the board is a real store (`CARD_STORE`).
+    The dispatcher's cards are PostgreSQL rows, so the board is a real store.
     """
-
-    CARD_STORE = True
 
     def setUp(self) -> None:
         super().setUp()

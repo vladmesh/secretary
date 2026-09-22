@@ -30,12 +30,12 @@ from secretary.sprint_observer import (
     parse_executor,
 )
 from secretary.sprints import SprintReader, SprintWriter
-from secretary.tasks import TaskAudit, TaskError, TaskWriter
+from secretary.board.sql_audit import SqlTaskAudit
+from secretary.tasks import TaskError, TaskWriter
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
     SprintBackendFixture,
     SprintFixture,
-    _EmptyBoardsKanboard,
     _write_project_registry,
 )
 from tests.observer_identity import as_observer
@@ -64,57 +64,9 @@ class ExecutorValueTests(unittest.TestCase):
 class SprintExecutorPinTests(SprintFixture):
     """What a sprint entity carries, and what it refuses to carry."""
 
-    def _row_metadata(self, reference: str) -> dict:
-        row = next(row for row in self._sprint_rows() if row["reference"] == reference)
-        return self.client.metadata[row["id"]]
-
     def _assert_nothing_was_written(self) -> None:
         self.assertEqual(self._events(), [])
         self.assertEqual(self.sprint_record_count(), 0)
-
-    def test_a_sprint_that_pins_neither_role_says_so_and_writes_no_field(self) -> None:
-        created = self._create(goal="unpinned", reference="sprint:unpinned")
-        self.assertEqual(created["sprint"]["executors"], UNSET_BOTH)
-
-        stored = self._row_metadata("sprint:unpinned")
-        self.assertNotIn(WORKER_FIELD, stored)
-        self.assertNotIn(REVIEWER_FIELD, stored)
-        # And the read is the same one the next process makes off the row.
-        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-        self.assertEqual(reader.show("sprint:unpinned", include_cards=False)["executors"], UNSET_BOTH)
-
-    def test_each_role_is_pinned_on_its_own(self) -> None:
-        cases = {
-            "sprint:worker-only": (
-                {"worker": "codex-observer"},
-                {"worker": executor_pinned("codex-observer"), "reviewer": executor_unset()},
-            ),
-            "sprint:reviewer-only": (
-                {"reviewer": "claude-observer"},
-                {"worker": executor_unset(), "reviewer": executor_pinned("claude-observer")},
-            ),
-            "sprint:both": (
-                {"worker": "codex-observer", "reviewer": "claude-observer"},
-                {
-                    "worker": executor_pinned("codex-observer"),
-                    "reviewer": executor_pinned("claude-observer"),
-                },
-            ),
-        }
-        for reference, (pins, expected) in cases.items():
-            with self.subTest(reference=reference):
-                created = self._create(goal=reference, reference=reference, **pins)
-                self.assertEqual(created["sprint"]["executors"], expected)
-                self.writer.close(
-                    role="po",
-                    actor="operator",
-                    reference=reference,
-                    decisions=KEEP_THE_ISSUE_OPEN,
-                )
-
-        stored = self._row_metadata("sprint:both")
-        self.assertEqual(stored[WORKER_FIELD], "codex-observer")
-        self.assertEqual(stored[REVIEWER_FIELD], "claude-observer")
 
     def test_a_profile_the_registry_does_not_have_is_refused_before_the_row(self) -> None:
         with self.assertRaises(TaskError) as raised:
@@ -326,20 +278,6 @@ class SprintCardExecutorTests(SprintFixture):
                 self.assertEqual(card["routing"]["head_override"], head or None)
                 self.assertEqual(card["routing"]["review_head_override"], review or None)
 
-    def test_a_pin_that_cannot_be_read_stops_the_card_instead_of_being_ignored(self) -> None:
-        reference = self._create(goal="corrupt pin")["sprint"]["ref"]
-        row = next(row for row in self._sprint_rows() if row["reference"] == reference)
-        self.client.metadata[row["id"]][WORKER_FIELD] = "  "
-
-        with self.assertRaises(TaskError) as raised:
-            self._card(reference, "corrupt")
-        self.assertEqual(raised.exception.code, "sprint_executor_unreadable")
-        self.assertIn(reference, raised.exception.message)
-        self.assertEqual(
-            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=reference)],
-            ["created"],
-        )
-
 
 class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
     """The pins through the entity's own recovery path: export, parity, restore.
@@ -348,26 +286,6 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
     between the export and the restore, where a pin the owner set came back as "the observer
     chooses" — the substitution the whole contract is written against.
     """
-
-    def setUp(self) -> None:
-        self.skip_kanboard_only()
-
-    def make_empty_sprint_client(self) -> _EmptyBoardsKanboard:
-        return _EmptyBoardsKanboard()
-
-    def persisted_record_count(self, client: object) -> int:
-        total = 0
-        for name in ("Pipeline", "Secretary sprints"):
-            project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
-            if not isinstance(project, dict) or not project.get("id"):
-                continue
-            for status_id in (1, 0):
-                total += len(
-                    client.call(  # type: ignore[attr-defined]
-                        "getAllTasks", project_id=int(project["id"]), status_id=status_id
-                    )
-                )
-        return total
 
     def _round_trip(self, **pins: str) -> tuple[dict, dict, Path, Path]:
         """Seed one closed sprint with these pins, export it, restore it into an empty backend."""

@@ -38,7 +38,6 @@ from secretary.memory_write import (
 )
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
-from tests.fakes.sprints import SprintKanboard
 from tests.fakes.tasks import empty_seed
 from tests.sql_backend_fixtures import card_store
 
@@ -195,11 +194,11 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             first = export_board(
-                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
             )
             first_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
             second = export_board(
-                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
             )
             second_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
 
@@ -216,7 +215,7 @@ class ExportTests(unittest.TestCase):
                     Path(tmpdir) / "secretary-data",
                     instance_dir=Path(tmpdir),
                     reader=reader,  # type: ignore[arg-type]
-                    sprint_client=SprintKanboard(),
+                    sprint_client=self.store,
                 )
 
         self.assertEqual(result.source, "secretary task")
@@ -230,7 +229,7 @@ class ExportTests(unittest.TestCase):
                 data_dir,
                 instance_dir=Path(tmpdir),
                 reader=reader,  # type: ignore[arg-type]
-                sprint_client=SprintKanboard(),
+                sprint_client=self.store,
             )
             previous = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
             failed_reader = mock.Mock(client=self.store)
@@ -241,7 +240,7 @@ class ExportTests(unittest.TestCase):
                     data_dir,
                     instance_dir=Path(tmpdir),
                     reader=failed_reader,  # type: ignore[arg-type]
-                    sprint_client=SprintKanboard(),
+                    sprint_client=self.store,
                 )
 
             current = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
@@ -252,7 +251,7 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             export_board(
-                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(client=self.store), sprint_client=SprintKanboard()
+                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(client=self.store), sprint_client=self.store
             )
             board = data_dir / "board"
             sprints = json.loads((board / "sprints.json").read_text(encoding="utf-8"))
@@ -266,20 +265,24 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(summary["sprint_count"], 0)
 
     def test_export_board_fails_when_the_sprint_read_fails(self):
-        class BrokenSprintKanboard(SprintKanboard):
-            def call(self, method, **params):
-                if method == "getProjectByName" and params.get("name") == SPRINT_BOARD_NAME:
-                    raise TaskError("backend_error", "sprint board is unreachable", 1)
-                return super().call(method, **params)
+        original = self.store.call
+
+        def broken(method, **params):
+            if method == "getProjectByName" and params.get("name") == SPRINT_BOARD_NAME:
+                raise TaskError("backend_error", "sprint board is unreachable", 1)
+            return original(method, **params)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
-            with self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"):
+            with (
+                mock.patch.object(self.store, "call", side_effect=broken),
+                self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"),
+            ):
                 export_board(
                     data_dir,
                     instance_dir=Path(tmpdir),
                     reader=TaskExportReader(client=self.store),
-                    sprint_client=BrokenSprintKanboard(),
+                    sprint_client=self.store,
                 )
             published = sorted(path.name for path in (data_dir / "board").iterdir())
 
@@ -300,7 +303,7 @@ class ExportTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             board_dir = data_dir / "board"
 
-            export_board(data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard())
+            export_board(data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store)
             old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
             old_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
             old_summary = (board_dir / "export.json").read_text(encoding="utf-8")
@@ -319,7 +322,7 @@ class ExportTests(unittest.TestCase):
             with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
                 with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
                     export_board(
-                        data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+                        data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
                     )
 
             current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")

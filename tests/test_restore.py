@@ -38,7 +38,6 @@ from secretary.restore import (
     restore_state,
 )
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
-from tests.fakes.sprints import SprintKanboard
 from tests.fakes.tasks import empty_seed
 from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
@@ -144,8 +143,8 @@ class RestoreTests(unittest.TestCase):
             export = export_board(
                 data_dir,
                 instance_dir=Path(tmpdir),
-                reader=mock.Mock(export=mock.Mock(return_value=[live_card]), client=card_store(self, empty_seed())),
-                sprint_client=SprintKanboard(),
+                reader=mock.Mock(export=mock.Mock(return_value=[live_card]), client=(store := card_store(self, empty_seed()))),
+                sprint_client=store,
             )
 
             self.assertEqual(export.count, 1)
@@ -288,9 +287,9 @@ class RestoreTests(unittest.TestCase):
                     data_dir,
                     instance_dir=Path(tmpdir),
                     reader=mock.Mock(
-                        export=mock.Mock(return_value=[card, duplicate]), client=card_store(self, empty_seed())
+                        export=mock.Mock(return_value=[card, duplicate]), client=(store := card_store(self, empty_seed()))
                     ),
-                    sprint_client=SprintKanboard(),
+                    sprint_client=store,
                 )
 
             self.assertEqual((data_dir / "board" / "cards.json").read_bytes(), good_json)

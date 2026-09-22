@@ -25,7 +25,7 @@ from secretary.sprints import SPRINT_BOARD_NAME, ensure_sprint_board
 from secretary.webproto.errors import OperationPending, ReadError
 from secretary.webproto.sprint_ops import PENDING_REASON, SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
-from tests.fakes.sprints import ProductSprintKanboard
+from tests.fakes.sprints import sprint_store
 from tests.head_registry import write_installed_pair
 
 OBSERVER_PROFILE = "codex-observer"
@@ -69,14 +69,9 @@ HEAD_SNAPSHOT = yaml.safe_dump(
 class SprintProtocolFixture(unittest.TestCase):
     """One instance, one Product/Issue board, one installed head registry, one data plane.
 
-    The board is the Sprint and Product/Issue Kanboard fixture, whose implementations are still two
-    until sprint:1452 retires them. A suite that also writes cards sets `CARD_STORE`: cards have one
-    implementation, PostgreSQL, so its board is a real store seeded with the same rows
-    (`tests/sql_backend_fixtures.py`), and its sprints go through the store's Sprint vocabulary too.
+    Cards, Sprints and Products/Issues have one implementation, PostgreSQL, so the board is a real
+    store seeded with `ProductSprintSeed` (`tests/sql_backend_fixtures.py`).
     """
-
-    #: Whether this suite's board is a real card store rather than the Kanboard fixture.
-    CARD_STORE = False
 
     def setUp(self) -> None:
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -84,12 +79,7 @@ class SprintProtocolFixture(unittest.TestCase):
         for relative in ("board", "dispatcher", "sprints"):
             (self.data_dir / relative).mkdir(parents=True)
         self.instance = self._instance()
-        if self.CARD_STORE:
-            from tests.sql_backend_fixtures import card_store
-
-            self.board = card_store(self, ProductSprintKanboard(), instance_dir=self.instance)
-        else:
-            self.board = ProductSprintKanboard()
+        self.board = sprint_store(self, instance_dir=self.instance)
         self._production({})
         self.clock = 1788652800.0
 
@@ -218,16 +208,15 @@ class SprintProtocolFixture(unittest.TestCase):
             "sprint_issues": json.dumps(["issue:open"]),
             "sprint_reservations": json.dumps([]),
         }
-        # The store holds a sprint's current task only as a card linked to that sprint, so there
-        # the card is put on the board, linked, and named once the sprint row exists.
-        if current_task is not None and not self.CARD_STORE:
-            values["sprint_current_task"] = current_task
+        # The store holds a sprint's current task only as a card linked to that sprint, so the card
+        # is put on the board, linked, and named once the sprint row exists.
         if observer is not None:
             values[OBSERVER_FIELD] = json.dumps({"kind": "head", "profile": observer})
-        if resume is not None:
-            values["sprint_resume"] = json.dumps(resume)
         self.board.call("saveTaskMetadata", task_id=task_id, values=values)
-        if current_task is not None and self.CARD_STORE:
+        # A resume is its own row (`sprint_resumes`), written only onto a sprint that exists.
+        if resume is not None:
+            self.board.call("saveTaskMetadata", task_id=task_id, values={"sprint_resume": json.dumps(resume)})
+        if current_task is not None:
             try:
                 self.board.link_card(self.board.key_of(current_task), reference)
             except KeyError:

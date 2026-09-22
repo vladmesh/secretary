@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import (
-    KANBOARD,
     BoardBackendError,
     entity_id,
     entity_number,
@@ -57,7 +56,6 @@ from secretary.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
-from secretary.product_issues import entity_audit_for
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -73,6 +71,7 @@ from secretary.sprint_observer import (
     stored_executors,
 )
 from secretary.tasks import (
+    CARD_BACKEND,
     KanboardClient,
     TaskError,
     TaskReader,
@@ -84,6 +83,7 @@ from secretary.tasks import (
     _text,
     is_significant_observer_event,
     reference_allocation_lock,
+    task_audit_for,
 )
 from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 
@@ -123,8 +123,6 @@ SPRINT_CLOSEOUT = "closeout_written"
 SPRINT_STATUSES = {state.value for state in SprintState}
 # Terminal sprint states reject semantic writes, so their resume freshness is stable.
 SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
-# A compensated refused create holds nothing and needs no pending repair.
-_ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
 
 def active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
@@ -529,11 +527,7 @@ class SprintReader:
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
-        # PostgreSQL needs no data dir for its audit; a Kanboard reader without one has none.
-        if data_dir is not None or getattr(client, "backend_kind", "kanboard") == "postgres":
-            self.audit = entity_audit_for(client, data_dir)
-        else:
-            self.audit = None
+        self.audit = task_audit_for(client)
 
     def _sprint_rows(self, board_id: int) -> list[dict[str, Any]]:
         """Every row of the sprint board that carries a sprint reference."""
@@ -643,7 +637,7 @@ class SprintReader:
         repositories = list(read.repositories)
         budget = read.budget.to_document()
         result: dict[str, Any] = {
-            "id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
+            "id": entity_id("sprint", CARD_BACKEND, task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
@@ -659,15 +653,7 @@ class SprintReader:
             "audit": {
                 "created_at": _rfc3339(raw.get("date_creation")),
                 "updated_at": _rfc3339(raw.get("date_modification")),
-                "backend": {
-                    "kind": getattr(self.client, "backend_kind", "kanboard"),
-                    **(
-                        {"store_ref": result_ref}
-                        if (result_ref := _text(raw.get("reference")))
-                        and getattr(self.client, "backend_kind", "kanboard") == "postgres"
-                        else {"kanboard_task_id": task_id, "board": SPRINT_BOARD_NAME}
-                    ),
-                },
+                "backend": {"kind": CARD_BACKEND, "store_ref": _text(raw.get("reference"))},
                 # A restored sprint sits on a fresh Kanboard row, so its own dates
                 # describe the recovery, not the sprint. The dates it was restored
                 # from stay readable here.
@@ -836,7 +822,7 @@ class SprintReader:
             if audit is not None:
                 source = audit.events(slice_refs)
             else:
-                source = self.audit.events(references=slice_refs) if self.audit else []
+                source = self.audit.events(references=slice_refs)
             for event in source:
                 if is_significant_observer_event(event, linked_refs=refs, sprint_ref=sprint["ref"]):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
@@ -861,8 +847,6 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
 
     @functools.wraps(method)
     def wrapped(self: SprintWriter, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
-            return method(self, *args, **kwargs)
         request_id = kwargs.get("request_id")
         try:
             with self.client._transaction_lock:
@@ -903,22 +887,17 @@ class SprintWriter:
         thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
     ) -> None:
-        from secretary.product_issues import ProductIssueTransaction
-
         self.client = client
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
-        self.audit = entity_audit_for(client, data_dir)
-        # Reuse the Product/Issue transaction's staged-intent semantics.
-        self.transactions = ProductIssueTransaction(data_dir, self.audit)
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            from secretary.board.sql_sprints import SqlSprintTransaction
+        from secretary.board.sql_sprints import SqlSprintTransaction
 
-            self.transactions = SqlSprintTransaction(
-                client, self.audit, Path(data_dir) / "board" / "sql-sprint-locks"
-            )
+        self.audit = task_audit_for(client)
+        self.transactions = SqlSprintTransaction(
+            client, self.audit, Path(data_dir) / "board" / "sql-sprint-locks"
+        )
         self.data_dir = Path(data_dir)
         self.instance = Path(instance) if instance is not None else None
 
@@ -1006,7 +985,6 @@ class SprintWriter:
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
         intent = self._create_intent(
             role=role,
             actor=actor,
@@ -1023,22 +1001,20 @@ class SprintWriter:
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
-            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                try:
-                    with self.client.transaction():
-                        self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
-                        return self._create_under_admission(request_id, intent)
-                except TaskError as exc:
-                    if exc.code == "audit_pending":
-                        raise TaskError(
-                            "backend_error", "PostgreSQL Sprint transaction rolled back", 1
-                        ) from None
-                    raise
-                except Exception as exc:  # noqa: BLE001 - rollback is the public fact.
+            try:
+                with self.client.transaction():
+                    self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
+                    return self._create_under_admission(request_id, intent)
+            except TaskError as exc:
+                if exc.code == "audit_pending":
                     raise TaskError(
-                        "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
+                        "backend_error", "PostgreSQL Sprint transaction rolled back", 1
                     ) from None
-            return self._create_under_admission(request_id, intent)
+                raise
+            except Exception as exc:  # noqa: BLE001 - rollback is the public fact.
+                raise TaskError(
+                    "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
+                ) from None
 
     def _create_under_admission(self, request_id: str, intent: SprintCreateIntent) -> dict[str, Any]:
         intent_document = intent.to_document()
@@ -1077,7 +1053,6 @@ class SprintWriter:
         observer — the one state the strict reader calls corrupt.
         """
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
         intent = self._create_intent(
             role="steward",
             actor="restore",
@@ -1319,22 +1294,8 @@ class SprintWriter:
             self.transactions.complete(document)
             update_active_sprint_projects(self.data_dir, sprint.admission())
             return SprintMutationReceipt(SPRINT_CREATED, str(event["event_id"])).to_document(sprint_document)
-        except TaskError as exc:
-            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                raise
-            answer = exc.code in _ADMISSION_REFUSALS or (
-                exc.code in {"validation", "role_forbidden"} and not document.get("progress")
-            )
-            # Refuse only after compensation proves the request holds no row.
-            clean = self._compensate_create(document)
-            if answer and clean:
-                self.transactions.discard(document)
-                raise
-            raise TaskError(
-                "audit_pending",
-                "sprint create is pending repair; retry with the same request id",
-                4,
-            ) from None
+        except TaskError:
+            raise
         except (OSError, KeyError, TypeError):
             self._compensate_create(document)
             raise TaskError(
@@ -1385,7 +1346,7 @@ class SprintWriter:
         event.update(
             {
                 "ref": created_ref,
-                "task_id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
+                "task_id": entity_id("sprint", CARD_BACKEND, task_id),
             }
         )
         event["backend"]["task_id"] = task_id
@@ -1496,11 +1457,7 @@ class SprintWriter:
                 title=SprintCreateIntent.from_document(document["intent"]).goal,
                 description=marker,
                 column_id=column_id,
-                **(
-                    {"reference": reference}
-                    if getattr(self.client, "backend_kind", "kanboard") == "postgres"
-                    else {}
-                ),
+                reference=reference,
             )
         )
         if created is None:
@@ -1580,7 +1537,7 @@ class SprintWriter:
         if not isinstance(actual, dict):
             raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
         stored = {str(key): _text(value) for key, value in actual.items()}
-        if getattr(self.client, "backend_kind", "kanboard") == "postgres" and "sprint_budget" in values:
+        if "sprint_budget" in values:
             if _budget(stored.get("sprint_budget"), self.thresholds) != _budget(
                 values["sprint_budget"], self.thresholds
             ):
@@ -2066,7 +2023,6 @@ class SprintWriter:
         """Close a sprint on explicit typed decisions while preserving the durable JSON contract."""
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
         try:
             offered = SprintCloseDecisions.from_document(decisions) if decisions is not None else None
         except ValueError as exc:
@@ -2135,17 +2091,16 @@ class SprintWriter:
                         return self._close_result(committed)
                     if document is None:
                         raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
-                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                    close_payload = document["event"].get("payload", {})
-                    close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
-                    closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
-                    self.client.sprints.save_close(
-                        reference,
-                        request_id,
-                        close_plan.to_document(),
-                        reason=str(close_payload.get("reason") or ""),
-                        closeout_document=closeout_plan.document if closeout_plan else None,
-                    )
+                close_payload = document["event"].get("payload", {})
+                close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
+                closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
+                self.client.sprints.save_close(
+                    reference,
+                    request_id,
+                    close_plan.to_document(),
+                    reason=str(close_payload.get("reason") or ""),
+                    closeout_document=closeout_plan.document if closeout_plan else None,
+                )
                 return self._run_close(document)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -2507,24 +2462,8 @@ class SprintWriter:
             document.setdefault("progress", {})["status_done"] = True
             self.transactions.save(document)
             self.transactions.complete(document)
-        except TaskError as exc:
-            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                raise
-            if exc.code == "close_conflict":
-                raise
-            if exc.code in {
-                "validation",
-                "closed",
-                "not_found",
-                "transition_forbidden",
-                "live_work",
-                "role_forbidden",
-            } and not _close_progressed(document, payload):
-                self.transactions.discard(document)
-                raise
-            raise TaskError(
-                "audit_pending", "sprint close is pending repair; retry with the same request id", 4
-            ) from None
+        except TaskError:
+            raise
         except (OSError, KeyError, TypeError, ValueError):
             raise TaskError(
                 "audit_pending", "sprint close is pending repair; retry with the same request id", 4
@@ -2753,7 +2692,6 @@ class SprintWriter:
         """
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
         intent = SprintReopenIntent(
             role=Role(role),
             actor=actor,
@@ -2849,19 +2787,8 @@ class SprintWriter:
             self.transactions.complete(document)
             update_active_sprint_projects(self.data_dir, sprint.admission())
             return SprintMutationReceipt(SPRINT_REOPENED, str(event["event_id"])).to_document(sprint_document)
-        except TaskError as exc:
-            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                raise
-            answer = exc.code in _ADMISSION_REFUSALS or (
-                exc.code in {"validation", "role_forbidden"} and not document.get("progress")
-            )
-            if answer and self._compensate_reopen(document, reference):
-                raise
-            raise TaskError(
-                "audit_pending",
-                "sprint reopen is pending repair; retry with the same request id",
-                4,
-            ) from None
+        except TaskError:
+            raise
         except (OSError, KeyError, TypeError, ValueError):
             raise TaskError(
                 "audit_pending",
@@ -2879,36 +2806,6 @@ class SprintWriter:
         except ValueError:
             progress["observer_preimage"] = None
         self.transactions.save(document)
-
-    def _compensate_reopen(self, document: dict[str, Any], reference: str) -> bool:
-        """Undo a refused reopen's observer write and drop its intent."""
-        progress = document.get("progress") or {}
-        if progress.get("opened_done"):
-            return False
-        try:
-            sprint_document = self.reader.show(reference, include_cards=False)
-            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
-            if sprint.state is SprintState.OPEN:
-                return False
-            if progress.get("observer_started") or progress.get("observer_done"):
-                preimage = progress.get("observer_preimage")
-                if not isinstance(preimage, str):
-                    return False
-                if (
-                    self.client.call(
-                        "saveTaskMetadata",
-                        task_id=_sprint_number(sprint),
-                        values={OBSERVER_FIELD: preimage},
-                    )
-                    is not True
-                ):
-                    return False
-        except (TaskError, OSError, KeyError, TypeError, ValueError):
-            return False
-        document["progress"] = {}
-        self.transactions.save(document)
-        self.transactions.discard(document)
-        return True
 
     @_sql_atomic
     def restore(
@@ -3023,13 +2920,7 @@ class SprintWriter:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)
         self.audit.stage(request_id, event)
-        try:
-            mutation(sprint)
-        except Exception:
-            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
-                raise
-            self.audit.discard(request_id)
-            raise
+        mutation(sprint)
         return self._record(kind, event)
 
     def _record(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -3083,7 +2974,7 @@ class SprintWriter:
             "task_id": task_id,
             "ref": reference,
             "backend": {
-                "kind": getattr(self.client, "backend_kind", "kanboard"),
+                "kind": CARD_BACKEND,
                 "task_id": _sprint_number(sprint) if sprint else None,
                 "revision": "pending",
             },
@@ -3122,26 +3013,6 @@ def _create_marker(request_id: str) -> str:
 def _close_archive_request_id(request_id: str, reference: str) -> str:
     digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
     return f"{request_id}:sprint-close-archive:{digest}"
-
-
-_CLOSE_PROGRESS_STEPS = (
-    "closed_issues",
-    "archived_tasks",
-    "moved_tasks",
-    "disposed_tasks",
-    "conflicts",
-)
-
-
-def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool:
-    """Whether this close has already performed a step its retry has to continue.
-
-    Once any step is on the record, the document is what the retry recovers from, and discarding it
-    would lose both the work already done and the plan that says what is left.
-    """
-    if document.get("progress"):
-        return True
-    return any(payload.get(step) for step in _CLOSE_PROGRESS_STEPS)
 
 
 def _closeout_result(plan: Any) -> dict[str, Any] | None:

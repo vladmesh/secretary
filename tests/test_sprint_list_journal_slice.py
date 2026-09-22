@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import tempfile
+import unittest
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskAudit, TaskError
+from secretary.tasks import TaskAudit, TaskError, task_audit_for
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
@@ -52,7 +56,7 @@ class _NarrowOnlyAudit:
     An empty set in `reads` is the bounded probe: the store is asked, and reads no event.
     """
 
-    def __init__(self, inner: TaskAudit) -> None:
+    def __init__(self, inner: Any) -> None:
         self.inner = inner
         self.rows = 0
         self.reads: list[set[str]] = []
@@ -102,31 +106,24 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
     # -- the board and the journal -------------------------------------------------------------
 
     def _pipeline_card(self, card: str, sprint: str, *, position: int) -> None:
-        pipeline = self.board.projects["Pipeline"]
-        column = next(
-            entry["id"] for entry in self.board.columns[pipeline] if entry["title"] == "In progress"
-        )
-        task_id = 8000 + position
-        self.board.tasks.append(
-            {
-                "id": task_id,
-                "project_id": pipeline,
-                "reference": card,
-                "title": card,
-                "description": "",
-                "column_id": column,
-                "position": position + 1,
-                "swimlane_id": 0,
-                "date_creation": "1720000000",
-                "date_modification": "1720000000",
-            }
-        )
-        self.board.metadata[task_id] = {"project": "secretary", "task_type": "code", "sprint_ref": sprint}
-        self.board.comments[task_id] = []
+        """The card in progress under this sprint; a sprint's current card is already on the board."""
+        try:
+            key = self.board.key_of(card)
+        except KeyError:
+            self.board.add_card(
+                8000 + position,
+                card,
+                state="in_progress",
+                position=position + 1,
+                metadata={"task_type": "code", "sprint_ref": sprint},
+            )
+        else:
+            self.board.move(key, "in_progress", position=position + 1)
 
     def _append(self, event: dict[str, Any]) -> None:
-        with (self.data_dir / "board" / "events.ndjson").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event) + "\n")
+        """Commit one event to the store's audit, under its event id as its request id."""
+        record = {"request_id": event["event_id"], **event}
+        task_audit_for(self.board).append(record["request_id"], record)
 
     def _move(self, card: str, at: str, source: str, target: str) -> None:
         self._append(
@@ -156,9 +153,9 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
             }
         )
 
-    def _unrelated_history(self, count: int) -> None:
+    def _unrelated_history(self, count: int, *, start: int = 0) -> None:
         """History of cards no listed sprint links, in every shape the journal holds."""
-        for index in range(count):
+        for index in range(start, start + count):
             card = f"secretary-{100000 + index}"
             self._move(card, BEFORE, "ready", "done")
             self._po_comment(f"sprint:{90000 + index}", AFTER)
@@ -177,8 +174,8 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
             return self.reads().sprint_list(statuses=statuses)
 
     def _narrow(self, statuses: list[str] | None) -> tuple[dict[str, Any], _NarrowOnlyAudit]:
-        audit = _NarrowOnlyAudit(TaskAudit(self.data_dir))
-        with mock.patch.object(sprint_reads_module, "entity_audit_for", return_value=audit):
+        audit = _NarrowOnlyAudit(task_audit_for(self.board))
+        with mock.patch.object(sprint_reads_module, "task_audit_for", return_value=audit):
             return self.reads().sprint_list(statuses=statuses), audit
 
     # -- the faults ----------------------------------------------------------------------------
@@ -186,7 +183,7 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
     @contextlib.contextmanager
     def _board_refuses(self) -> Iterator[None]:
         original = self.board.call
-        board = self.board.projects[SPRINT_BOARD_NAME]
+        board = self.board.call("getProjectByName", name=SPRINT_BOARD_NAME)["id"]
 
         def refuse(method: str, **params: Any) -> Any:
             if method == "getAllTasks" and params.get("project_id") == board:
@@ -202,26 +199,25 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
     @contextlib.contextmanager
     def _audit_refuses(self) -> Iterator[None]:
         """The audit owner raising on every read, the way the protocol suites refuse the journal."""
-        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+        with mock.patch.object(SqlTaskAudit, "events", side_effect=PermissionError("audit journal denied")):
             yield
 
     @contextlib.contextmanager
     def _journal_unopenable(self) -> Iterator[None]:
-        """A journal the store itself cannot open: no patched method, the real open fails."""
-        path = self.data_dir / "board" / "events.ndjson"
-        kept = path.rename(path.with_name("events.kept"))
-        path.mkdir()
-        try:
+        """An audit the store itself cannot answer: no patched `events`, its statement fails."""
+        with mock.patch.object(
+            SqlTaskAudit, "_query", side_effect=TaskError("backend_unavailable", "the store is gone", 1)
+        ):
             yield
-        finally:
-            path.rmdir()
-            kept.rename(path)
 
     def _faults(self, *names: str) -> contextlib.ExitStack:
         stack = contextlib.ExitStack()
         for name in names:
             stack.enter_context(getattr(self, name)())
         return stack
+
+    def _committed_rows(self) -> int:
+        return int(self.board._query("SELECT count(*) FROM requests WHERE status = 'committed'")[0][0])
 
     def _entry(self, document: dict[str, Any], reference: str) -> dict[str, Any]:
         return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
@@ -306,11 +302,10 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
         self._unrelated_history(20)
         _document, small = self._narrow(["open"])
         _document, small_all = self._narrow(None)
-        journal = self.data_dir / "board" / "events.ndjson"
-        before = len(journal.read_text(encoding="utf-8").splitlines())
+        before = self._committed_rows()
 
-        self._unrelated_history(200)
-        after = len(journal.read_text(encoding="utf-8").splitlines())
+        self._unrelated_history(200, start=20)
+        after = self._committed_rows()
         self.assertGreaterEqual(after - before, 10 * 40)
         _document, large = self._narrow(["open"])
         _document, large_all = self._narrow(None)
@@ -329,8 +324,16 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
                 self.assertTrue(audit.reads)
 
 
-class FileJournalProbeTests(SprintProtocolFixture):
-    """On the file journal an empty slice opens the file and reads none of it."""
+class FileJournalProbeTests(unittest.TestCase):
+    """On the file journal an empty slice opens the file and reads none of it.
+
+    `TaskAudit`'s own storage: it is no audit owner of anything (secretary-1670), and these hold
+    only what its reader does with the file.
+    """
+
+    def setUp(self) -> None:
+        self.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.data_dir / "board").mkdir()
 
     def test_the_probe_opens_the_journal_and_decodes_no_line(self) -> None:
         journal = self.data_dir / "board" / "events.ndjson"

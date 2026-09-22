@@ -712,6 +712,11 @@ class CardStoreClient(SqlCardClient):
                         **values,
                     },
                 )
+                # A resume is its own row (`sprint_resumes`), written only onto a sprint that exists.
+                if "sprint_resume" in values:
+                    self._arrange(
+                        "saveTaskMetadata", task_id=created, values={"sprint_resume": values["sprint_resume"]}
+                    )
         return {"id": key, "reference": reference}
 
     def sprint_metadata(self, reference: str) -> dict[str, str]:

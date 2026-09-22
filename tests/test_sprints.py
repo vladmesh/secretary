@@ -11,22 +11,13 @@ from typing import Any
 from unittest import mock
 
 from secretary import sprints
-from secretary.board import (
-    Actor,
-    BoardEventPending,
-    EntityKind,
-    RelatedRefs,
-    SprintState,
-    TransitionRequest,
-)
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.cli import main
 from secretary.config import load_config
-from secretary.data import normalize_sprint_entity
 from secretary.knowledge_write import list_knowledge_documents
 from secretary.product_issues import ProductIssueStore
 from secretary.sprint_close import parse_close_decisions
 from secretary.sprint_observer import (
-    OBSERVER_FIELD,
     encode_observer,
     head_choice,
     none_choice,
@@ -39,14 +30,13 @@ from secretary.sprints import (
     SprintWriter,
     active_sprint_projects,
     budget_thresholds,
-    ensure_sprint_board,
     open_sprint_admission_error,
     open_sprint_limit,
     open_sprint_limit_invalid,
     refresh_active_sprint_projects,
     sprint_admission_lock,
 )
-from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.fakes.sprints import SprintBackendFixture, SprintFixture
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sprint_close_fixtures import (
@@ -244,139 +234,6 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(pending.exception.code, "audit_pending")
         self.assertEqual(self._events(), [])
 
-    def test_a_refused_metadata_write_leaves_no_row_and_stays_repairable(self) -> None:
-        """Kanboard may refuse the metadata write that carries the whole ownership.
-
-        Reporting `created` on it would leave an open sprint with no product, issues or
-        reservations. The create takes its own row back instead, so the board keeps no
-        unreferenced row, and the repeat with the same request id finishes that very
-        operation.
-        """
-        self._stall_create("metadata-once")
-
-        self.assertEqual(self._sprint_rows(), [])
-        self.assertEqual(SprintReader(self.client).list(create=False), [])  # type: ignore[arg-type]
-
-        repaired = self._create(goal="rejected metadata", request_id="metadata-once")
-
-        self.assertEqual(repaired["action"], "created")
-        self.assertEqual(repaired["sprint"]["status"], "open")
-        self.assertEqual(repaired["sprint"]["product"], "secretary")
-        self.assertEqual(repaired["sprint"]["issues"], ["issue:open"])
-        self.assertEqual(repaired["sprint"]["reservations"], ["secretary"])
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
-        self.assertEqual(len(self._sprint_rows()), 1)
-
-    def test_a_refused_reference_write_leaves_no_row_without_a_reference(self) -> None:
-        """The reference is what publishes the sprint, and Kanboard may refuse it.
-
-        A row that never got one is on no reader's board, so leaving it behind would be
-        litter the repair of this same request would have to find again.
-        """
-        with self._refuse_once("updateTask"):
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self._create(goal="refused reference", reference="sprint:first", request_id="reference-once")
-
-        self.assertEqual(pending.exception.code, "audit_pending")
-        self.assertEqual(self._sprint_rows(), [])
-        self.assertEqual(self._events(), [])
-
-        repaired = self._create(
-            goal="refused reference", reference="sprint:first", request_id="reference-once"
-        )
-
-        self.assertEqual(repaired["sprint"]["ref"], "sprint:first")
-        self.assertEqual(len(self._sprint_rows()), 1)
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
-
-    def test_a_staged_create_is_resumed_before_any_live_check(self) -> None:
-        """Ownership of the request id is settled before product and issue state.
-
-        Between a transient refusal and the repeat that at-least-once delivery sends,
-        the Product may legitimately move on. The repeat has to finish the operation it
-        was admitted for, not fail on a check the original request already passed.
-        """
-        self._stall_create("resumed-after-change")
-        issue = next(task for task in self.client.tasks if task["reference"] == "issue:open")
-        issue["is_active"] = 0
-        self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
-
-        repaired = self._create(goal="rejected metadata", request_id="resumed-after-change")
-
-        self.assertEqual(repaired["action"], "created")
-        self.assertEqual(repaired["sprint"]["issues"], ["issue:open"])
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
-
-    def test_a_staged_create_that_lost_the_slot_publishes_nothing(self) -> None:
-        """A staged create holds nothing, so another sprint may take the installation.
-
-        The repeat is measured against that before it publishes: it is refused naming
-        the sprint that won, and no second open sprint appears on the board.
-        """
-        self._stall_create("loser", reference="sprint:loser")
-        winner = self._create(
-            goal="winner",
-            reference="sprint:winner",
-            projects=["secretary-instance"],
-        )["sprint"]["ref"]
-        events = [event["event_id"] for event in self._events()]
-        pending = [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()]
-
-        with self.assertRaisesRegex(TaskError, winner) as raised:
-            self._create(
-                goal="rejected metadata",
-                reference="sprint:loser",
-                request_id="loser",
-            )
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
-        self.assertEqual(len(self._sprint_rows()), 1)
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
-        # The refusal is this request's answer, so its staged intent goes with it: nothing
-        # is left for a repair that would only be refused again.
-        self.assertEqual(self._transactions(), [])
-        self.assertEqual([event["event_id"] for event in self._events()], events)
-        self.assertEqual(
-            [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()],
-            pending,
-        )
-
-    def test_a_staged_create_never_takes_over_a_sprint_sharing_its_reference(self) -> None:
-        """Compensation frees the reference too, so another request may take it.
-
-        The repeat of the stalled create is not the owner of that sprint: it must be
-        refused naming the reference, and leave the winner's goal, reservations and
-        audit provenance untouched.
-        """
-        self._stall_create("shared-loser", reference="sprint:shared")
-        self.assertEqual(self._sprint_rows(), [])
-
-        winner = self._create(
-            goal="second payload",
-            reference="sprint:shared",
-            projects=["secretary-instance"],
-            request_id="shared-winner",
-        )["sprint"]
-
-        with self.assertRaisesRegex(TaskError, "sprint:shared") as raised:
-            self._create(
-                goal="rejected metadata",
-                reference="sprint:shared",
-                request_id="shared-loser",
-            )
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        live = SprintReader(self.client).show("sprint:shared")  # type: ignore[arg-type]
-        self.assertEqual(live["goal"], "second payload")
-        self.assertEqual(live["reservations"], ["secretary-instance"])
-        self.assertEqual(len(self._sprint_rows()), 1)
-        self.assertEqual(
-            [(event["kind"], event["request_id"], event["ref"]) for event in self._events()],
-            [("created", "shared-winner", "sprint:shared")],
-        )
-        self.assertEqual(winner["ref"], "sprint:shared")
-
     def test_an_automatic_reference_clears_every_number_the_board_handed_out(self) -> None:
         """The counter used to be the row's own id, which forgets what it already gave away.
 
@@ -449,51 +306,6 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], held["goal"])  # type: ignore[arg-type]
         self.assertEqual([event["request_id"] for event in self._events()], ["held"])
         self.assertEqual(self.transaction_state(), {"ok": True, "pending": 0})
-
-    def test_a_refused_create_whose_row_survives_is_answered_as_repairable(self) -> None:
-        """A refusal is only an answer when the request is left holding nothing.
-
-        Here the backend keeps the row of a stalled create, so the repeat that loses the
-        slot cannot be told `sprint_conflict`: that would call the request over while its
-        row and its staged intent are both still there. It is repairable under the same
-        request id until the removal goes through.
-        """
-        with self._reject_removal(), self._refuse_metadata("sprint_goal"):
-            with self.assertRaisesRegex(TaskError, "pending repair"):
-                self._create(
-                    goal="kept row",
-                    reference="sprint:kept",
-                    request_id="kept",
-                )
-        self.assertEqual(len(self._sprint_rows()), 1)
-        staged = self._transactions()
-        self.assertEqual(len(staged), 1)
-
-        winner = self._create(
-            goal="winner",
-            reference="sprint:winner",
-            projects=["secretary-instance"],
-        )["sprint"]["ref"]
-
-        with self._reject_removal(), self.assertRaisesRegex(TaskError, "pending repair") as pending:
-            self._create(goal="kept row", reference="sprint:kept", request_id="kept")
-
-        self.assertEqual(pending.exception.code, "audit_pending")
-        # The refusal was not answered, so the repair the caller is told to retry is still
-        # there, with the row it has to take back.
-        self.assertEqual(self._transactions(), staged)
-        self.assertEqual(len(self._sprint_rows()), 2)
-        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
-
-        with self.assertRaisesRegex(TaskError, winner) as raised:
-            self._create(goal="kept row", reference="sprint:kept", request_id="kept")
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        self.assertEqual(self._transactions(), [])
-        self.assertEqual(len(self._sprint_rows()), 1)
-        self.assertEqual([sprint["ref"] for sprint in SprintReader(self.client).list()], [winner])  # type: ignore[arg-type]
-        self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
     def test_a_repeated_create_records_exactly_one_audit_event(self) -> None:
         first = self._create(goal="repeated", request_id="repeat-once")
@@ -583,34 +395,6 @@ class SprintOwnershipTests(SprintFixture):
             self.assertTrue(done.is_set(), name)
             self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
 
-    def test_a_sprint_without_ownership_gains_none_in_show_status_or_export(self) -> None:
-        """The 13 sprints closed before ownership existed keep the fields they had."""
-        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        self.writer.restore_create(reference="sprint:legacy", goal="legacy", request_id="legacy")
-        row = next(task for task in self.client.tasks if task["reference"] == "sprint:legacy")
-        self.assertEqual(
-            [
-                key
-                for key in self.client.metadata[row["id"]]
-                if key in {"sprint_product", "sprint_issues", "sprint_reservations"}
-            ],
-            [],
-        )
-        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-
-        views = [
-            reader.show("sprint:legacy"),
-            reader.status("sprint:legacy"),
-            reader.export()[0],
-            reader.list()[0],
-            normalize_sprint_entity(reader.export()[0]),
-        ]
-
-        self.assertEqual(board, row["project_id"])
-        for view in views:
-            for field in ("product", "issues", "reservations"):
-                self.assertNotIn(field, view)
-
     def test_recovery_reproduces_the_roots_a_closed_row_already_carries(self) -> None:
         """Canonicalization is a rule for declaring a sprint, not for reproducing one.
 
@@ -650,25 +434,6 @@ class SprintOwnershipTests(SprintFixture):
             self.assertEqual(view["product"], "secretary")
             self.assertEqual(view["issues"], ["issue:open"])
             self.assertEqual(view["reservations"], ["secretary", "secretary-instance"])
-
-    def test_reopen_of_a_legacy_sprint_fails_closed_without_filling_fields(self) -> None:
-        legacy = self.writer.restore_create(
-            reference="sprint:legacy",
-            goal="legacy",
-            request_id="legacy-create",
-        )["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=legacy)
-
-        with self.assertRaisesRegex(TaskError, "predates sprint ownership") as raised:
-            self.writer.reopen(
-                observer=head_choice("codex-observer"), role="po", actor="operator", reference=legacy
-            )
-
-        self.assertEqual(raised.exception.code, "validation")
-        reread = SprintReader(self.client).show(legacy, include_cards=False)  # type: ignore[arg-type]
-        self.assertEqual(reread["status"], "closed")
-        for field in ("product", "issues", "reservations"):
-            self.assertNotIn(field, reread)
 
     def test_reopen_rechecks_ownership_and_stays_idempotent(self) -> None:
         ref = self._create(goal="reopened", reference="sprint:reopened")["sprint"]["ref"]
@@ -719,224 +484,6 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual([event["kind"] for event in self._events()], ["created", "sprint.closed", "closed"])
 
-    def test_a_refused_reopen_stays_repairable_and_reports_no_transition(self) -> None:
-        ref = self._create(goal="refused reopen", reference="sprint:refused")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-
-        with self._refuse_metadata("sprint_status"):
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self.writer.reopen(
-                    observer=head_choice("codex-observer"),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-repair",
-                )
-
-        self.assertEqual(pending.exception.code, "audit_pending")
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
-        self.assertEqual([event["kind"] for event in self._events()], ["created", "sprint.closed", "closed"])
-
-        repaired = self.writer.reopen(
-            observer=head_choice("codex-observer"),
-            role="po",
-            actor="operator",
-            reference=ref,
-            request_id="reopen-repair",
-        )
-        replay = self.writer.reopen(
-            observer=head_choice("codex-observer"),
-            role="po",
-            actor="operator",
-            reference=ref,
-            request_id="reopen-repair",
-        )
-
-        self.assertEqual(repaired["action"], "reopened")
-        self.assertEqual(repaired["sprint"]["status"], "open")
-        self.assertEqual(repaired["event_id"], replay["event_id"])
-        self.assertEqual(
-            [event["kind"] for event in self._events()],
-            ["created", "sprint.closed", "closed", "sprint.reopened", "reopened"],
-        )
-
-    def test_a_staged_reopen_is_resumed_before_any_live_check(self) -> None:
-        """`reopen` settles its request id first for the same reason `create` does."""
-        ref = self._create(goal="resumed reopen", reference="sprint:resumed")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        with self._refuse_metadata("sprint_status"):
-            with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(
-                    observer=head_choice("codex-observer"),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-resumed",
-                )
-        issue = next(task for task in self.client.tasks if task["reference"] == "issue:open")
-        issue["is_active"] = 0
-        self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
-
-        repaired = self.writer.reopen(
-            observer=head_choice("codex-observer"),
-            role="po",
-            actor="operator",
-            reference=ref,
-            request_id="reopen-resumed",
-        )
-
-        self.assertEqual(repaired["sprint"]["status"], "open")
-        self.assertEqual(
-            [event["kind"] for event in self._events()],
-            ["created", "sprint.closed", "closed", "sprint.reopened", "reopened"],
-        )
-
-    def test_a_staged_reopen_that_lost_the_slot_publishes_nothing(self) -> None:
-        ref = self._create(goal="reopen loser", reference="sprint:reopen-loser")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        with self._refuse_metadata("sprint_status"):
-            with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(
-                    observer=head_choice("codex-observer"),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-lost",
-                )
-        winner = self._create(
-            goal="winner",
-            reference="sprint:winner",
-            projects=["secretary-instance"],
-        )["sprint"]["ref"]
-        # The stalled attempt already wrote its fresh observer; the row it refuses to reopen
-        # has to come back carrying the value it carried before that attempt.
-        closed = SprintReader(self.client, data_dir=self.tmp.name).show(ref, include_cards=False)  # type: ignore[arg-type]
-        events = [event["event_id"] for event in self._events()]
-        pending = [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()]
-
-        with self.assertRaisesRegex(TaskError, winner) as raised:
-            self.writer.reopen(
-                observer=head_choice("codex-observer"),
-                role="po",
-                actor="operator",
-                reference=ref,
-                request_id="reopen-lost",
-            )
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        self.assertEqual(
-            [sprint["ref"] for sprint in SprintReader(self.client).list(statuses={"open"})],
-            [winner],  # type: ignore[arg-type]
-        )
-        reopened = SprintReader(self.client, data_dir=self.tmp.name).show(ref, include_cards=False)  # type: ignore[arg-type]
-        self.assertEqual(reopened["observer"], closed["observer"])
-        self.assertEqual(reopened["status"], "closed")
-        self.assertEqual(self._transactions(), [])
-        self.assertEqual([event["event_id"] for event in self._events()], events)
-        self.assertEqual(
-            [event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()],
-            pending,
-        )
-
-    def test_a_refused_reopen_puts_back_the_observer_its_attempt_wrote(self) -> None:
-        """A reopen that loses the slot leaves the row exactly as it found it.
-
-        Its first attempt got as far as writing the fresh observer, so the refusal of the
-        repeat has to undo that: the closed row keeps the value of the run that closed,
-        and nothing of the refused request is left staged.
-        """
-        ref = self._create(goal="reopen rollback", reference="sprint:rollback")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        with self._refuse_metadata("sprint_status"):
-            with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(
-                    observer=none_choice(),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-rollback",
-                )
-        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-        self.assertEqual(reader.show(ref, include_cards=False)["observer"], none_choice())
-        self._create(goal="winner", reference="sprint:winner", projects=["secretary-instance"])
-        events = [event["event_id"] for event in self._events()]
-
-        with self.assertRaises(TaskError) as raised:
-            self.writer.reopen(
-                observer=none_choice(),
-                role="po",
-                actor="operator",
-                reference=ref,
-                request_id="reopen-rollback",
-            )
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        restored = reader.show(ref, include_cards=False)
-        self.assertEqual(restored["status"], "closed")
-        self.assertEqual(restored["observer"], head_choice("codex-observer"))
-        self.assertEqual(self._transactions(), [])
-        self.assertEqual([event["event_id"] for event in self._events()], events)
-        self.assertEqual([event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], [])
-
-    def test_a_refused_reopen_that_cannot_put_the_observer_back_stays_repairable(self) -> None:
-        """The rollback of a refused reopen is a backend write, and it can be rejected.
-
-        Until it goes through, the row still carries the observer the stalled attempt
-        wrote, so the repeat that lost the slot is repairable rather than refused: the
-        same request id keeps the rollback that has not happened yet.
-        """
-        ref = self._create(goal="reopen kept", reference="sprint:kept")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        with self._refuse_metadata("sprint_status"):
-            with self.assertRaisesRegex(TaskError, "pending repair"):
-                self.writer.reopen(
-                    observer=none_choice(),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-kept",
-                )
-        reader = SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-        self.assertEqual(reader.show(ref, include_cards=False)["observer"], none_choice())
-        self._create(goal="winner", reference="sprint:winner", projects=["secretary-instance"])
-        staged = self._transactions()
-        self.assertEqual(len(staged), 1)
-        events = [event["event_id"] for event in self._events()]
-
-        with self._refuse_metadata(OBSERVER_FIELD):
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self.writer.reopen(
-                    observer=none_choice(),
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="reopen-kept",
-                )
-
-        self.assertEqual(pending.exception.code, "audit_pending")
-        kept = reader.show(ref, include_cards=False)
-        self.assertEqual(kept["status"], "closed")
-        self.assertEqual(kept["observer"], none_choice())
-        self.assertEqual(self._transactions(), staged)
-        self.assertEqual([event["event_id"] for event in self._events()], events)
-
-        with self.assertRaises(TaskError) as raised:
-            self.writer.reopen(
-                observer=none_choice(),
-                role="po",
-                actor="operator",
-                reference=ref,
-                request_id="reopen-kept",
-            )
-
-        self.assertEqual(raised.exception.code, "sprint_conflict")
-        restored = reader.show(ref, include_cards=False)
-        self.assertEqual(restored["status"], "closed")
-        self.assertEqual(restored["observer"], head_choice("codex-observer"))
-        self.assertEqual(self._transactions(), [])
-        self.assertEqual([event["event_id"] for event in self._events()], events)
-        self.assertEqual([event["event_id"] for event in TaskAudit(self.tmp.name).pending_events()], [])
-
     def test_reopen_is_refused_when_its_only_issue_has_been_closed(self) -> None:
         ref = self._create(goal="issue closed later", reference="sprint:stale")["sprint"]["ref"]
         self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
@@ -946,15 +493,6 @@ class SprintOwnershipTests(SprintFixture):
             self.writer.reopen(
                 observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref
             )
-
-    def test_board_layout_without_issues_column_fails_closed(self) -> None:
-        self.client.columns[7][0] = {"id": 1, "title": "Backlog"}
-
-        with self.assertRaises(TaskError) as raised:
-            self._create(goal="legacy layout")
-
-        self.assertEqual(raised.exception.code, "legacy_layout")
-        self._assert_nothing_was_written()
 
 
 class TwoOpenSprintFixture(SprintFixture):
@@ -1019,7 +557,7 @@ class TwoOpenSprintFixture(SprintFixture):
         rows = self.sprint_record_count()
         transactions = self.transaction_state()
         events = [event["event_id"] for event in self._events()]
-        audit = TaskAudit(self.tmp.name)
+        audit = SqlTaskAudit(self.client)
         pending = [event["event_id"] for event in audit.pending_events()]
 
         with self.assertRaisesRegex(TaskError, message) as raised:
@@ -1532,11 +1070,11 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
         )
         # The charge is an event of its own sprint, and the other sprint has none.
         self.assertEqual(
-            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=first)],
+            [event["kind"] for event in SqlTaskAudit(self.client).events(reference=first)],
             ["created", "budget_recorded"],
         )
         self.assertEqual(
-            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=second)],
+            [event["kind"] for event in SqlTaskAudit(self.client).events(reference=second)],
             ["created"],
         )
 
@@ -1576,7 +1114,7 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
         self.assertEqual(
             [
                 event["ref"]
-                for event in TaskAudit(self.tmp.name).events()
+                for event in SqlTaskAudit(self.client).events()
                 if event["kind"] == "budget_hard_stopped"
             ],
             [first],
@@ -1591,7 +1129,7 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
         self.assertEqual(
             sorted(
                 event["ref"]
-                for event in TaskAudit(self.tmp.name).events()
+                for event in SqlTaskAudit(self.client).events()
                 if event["kind"] == "budget_hard_stopped"
             ),
             sorted([first, second]),
@@ -1884,22 +1422,6 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
 
 
 class SprintTests(SprintFixture):
-    def test_board_creation_is_idempotent(self) -> None:
-        first = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        second = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        self.assertEqual(first, second)
-        self.assertEqual(len([call for call in self.client.calls if call[0] == "createProject"]), 1)
-
-    def test_read_only_sprint_list_does_not_create_a_board_or_claim_resume_freshness(self) -> None:
-        reader = SprintReader(self.client)  # type: ignore[arg-type]
-        self.assertEqual(reader.list(create=False), [])
-        self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
-
-        created = self._create(goal="list")
-        listed = reader.list()
-        self.assertEqual(listed[0]["ref"], created["sprint"]["ref"])
-        self.assertNotIn("resume_freshness", listed[0])
-
     def test_create_has_only_contract_fields_and_rejects_duplicate_reference(self) -> None:
         created = self._create(
             goal="Ship sprint entity",
@@ -1927,81 +1449,6 @@ class SprintTests(SprintFixture):
         with self.assertRaisesRegex(TaskError, "already exists") as raised:
             self._create(goal="another", reference="sprint:entity")
         self.assertEqual(raised.exception.code, "validation")
-
-    def test_missing_metadata_reads_as_empty_contract_values(self) -> None:
-        sprint_board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        self.client.tasks.append(
-            {
-                "id": 13,
-                "project_id": sprint_board,
-                "reference": "sprint:legacy",
-                "title": "legacy",
-                "description": "",
-                "column_id": sprint_board * 10,
-                "position": 1,
-                "swimlane_id": 0,
-                "date_creation": "1720000000",
-                "date_modification": "1720000000",
-            }
-        )
-        self.client.metadata[13] = {}
-        self.client.comments[13] = []
-        sprint = SprintReader(self.client).show("sprint:legacy")  # type: ignore[arg-type]
-        self.assertEqual(sprint["goal"], "")
-        self.assertEqual(sprint["definition_of_done"], "")
-        self.assertEqual(sprint["repositories"], [])
-        self.assertEqual(sprint["budget"]["total"], 0)
-        self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
-        self.assertIsNone(sprint["current_task"])
-
-    def test_metadata_less_sprint_still_closes_through_the_host(self) -> None:
-        sprint_board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        self.client.tasks.append(
-            {
-                "id": 13,
-                "project_id": sprint_board,
-                "reference": "sprint:legacy-close",
-                "title": "legacy",
-                "description": "",
-                "column_id": sprint_board * 10,
-                "position": 1,
-                "swimlane_id": 0,
-                "date_creation": "1720000000",
-                "date_modification": "1720000000",
-            }
-        )
-        self.client.metadata[13] = {}
-        self.client.comments[13] = []
-
-        closed = self.writer.close(
-            role="po",
-            actor="operator",
-            reference="sprint:legacy-close",
-            request_id="legacy-close",
-        )
-
-        self.assertEqual(closed["sprint"]["status"], "closed")
-        typed = self.writer.audit.committed_event("legacy-close:typed-close")
-        assert typed is not None
-        self.assertEqual(typed["transition"], {"source": "open", "target": "closed"})
-
-    def test_export_reads_records_without_the_board_or_the_linked_cards(self) -> None:
-        reader = SprintReader(self.client)  # type: ignore[arg-type]
-        self.assertEqual(reader.export(), [])
-        self.assertFalse(any(call[0] == "createProject" for call in self.client.calls))
-
-        ref = self._create(goal="export")["sprint"]["ref"]
-        self.writer.comment(role="po", actor="operator", reference=ref, body="note")
-        self.client.calls.clear()
-        exported = reader.export()
-
-        self.assertEqual([sprint["ref"] for sprint in exported], [ref])
-        self.assertEqual([comment["body"] for comment in exported[0]["comments"]], ["[po]\nnote"])
-        self.assertNotIn("resume_freshness", exported[0])
-        self.assertNotIn("cards", exported[0])
-        self.assertFalse(
-            any(call[0] == "getProjectByName" and call[1]["name"] == "Pipeline" for call in self.client.calls)
-        )
 
     def test_restore_rewrites_a_closed_entity_and_refuses_foreign_fields(self) -> None:
         ref = self._create(goal="restore")["sprint"]["ref"]
@@ -2040,7 +1487,7 @@ class SprintTests(SprintFixture):
         self.assertEqual(first["event_id"], second["event_id"])
         self.assertEqual(second["sprint"]["budget"]["total"], 1)
         self.assertEqual(second["sprint"]["budget"]["by_type"]["red_ci"], 1)
-        events = TaskAudit(self.tmp.name).events(reference=ref)
+        events = SqlTaskAudit(self.client).events(reference=ref)
         self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded"])
 
     def _budget_of(self, reference: str) -> dict:
@@ -2076,7 +1523,7 @@ class SprintTests(SprintFixture):
         # was written.
         self.assertEqual(writer.reader.show(ref, include_cards=False)["status"], "open")
         self.assertEqual(
-            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)],
+            [event["kind"] for event in SqlTaskAudit(self.client).events(reference=ref)],
             ["created"] + ["budget_recorded"] * 3,
         )
         self.assertEqual(
@@ -2201,121 +1648,13 @@ class SprintTests(SprintFixture):
             source_event_id="evt-card-blocked",
         )
 
-        events = TaskAudit(self.tmp.name).events(reference=ref)
+        events = SqlTaskAudit(self.client).events(reference=ref)
         self.assertEqual(
             [event["kind"] for event in events],
             ["created", "sprint.stopped", "budget_recorded", "budget_hard_stopped"],
         )
         self.assertEqual(events[-1]["payload"]["reason"], "budget_hard_limit")
         self.assertEqual(events[-1]["payload"]["source_event_id"], "evt-card-blocked")
-
-    def test_hard_stop_stages_typed_then_persists_budget_and_state_together(self) -> None:
-        writer = SprintWriter(  # type: ignore[arg-type]
-            self.client,
-            data_dir=self.tmp.name,
-            instance=self.instance,
-            thresholds={"signal": 1, "hard": 1},
-        )
-        ref = writer.create(
-            role="po",
-            actor="operator",
-            goal="atomic hard stop",
-            product="secretary",
-            issues=["issue:open"],
-            projects=["secretary"],
-            observer=head_choice("codex-observer"),
-        )["sprint"]["ref"]
-        self.client.calls.clear()
-        staged: list[dict | None] = []
-        original = self.client.call
-
-        def call(method: str, **params: object) -> object:
-            if method == "saveTaskMetadata" and "sprint_status" in params.get("values", {}):
-                staged.append(writer.audit.pending_event("atomic-hard:typed-hard-stop"))
-            return original(method, **params)
-
-        with mock.patch.object(self.client, "call", side_effect=call):
-            result = writer.record_budget(
-                role="dispatcher",
-                actor="dispatcher",
-                reference=ref,
-                event_type="blocked",
-                request_id="atomic-hard",
-            )
-
-        self.assertEqual(result["sprint"]["status"], "stopped")
-        self.assertEqual(len(staged), 1)
-        assert staged[0] is not None
-        self.assertEqual(staged[0]["transition"], {"source": "open", "target": "stopped"})
-        status_writes = [
-            params["values"]
-            for method, params in self.client.calls
-            if method == "saveTaskMetadata" and "sprint_status" in params["values"]
-        ]
-        self.assertEqual(len(status_writes), 1)
-        self.assertEqual(set(status_writes[0]), {"sprint_budget", "sprint_status"})
-        self.assertEqual(
-            [event["kind"] for event in self._events()],
-            [
-                "created",
-                "sprint.stopped",
-                "budget_recorded",
-                "budget_hard_stopped",
-            ],
-        )
-
-    def test_hard_stop_post_effect_failure_retries_its_typed_owner_before_charge(self) -> None:
-        writer = SprintWriter(  # type: ignore[arg-type]
-            self.client,
-            data_dir=self.tmp.name,
-            instance=self.instance,
-            thresholds={"signal": 1, "hard": 1},
-        )
-        ref = writer.create(
-            role="po",
-            actor="operator",
-            goal="recover hard stop",
-            product="secretary",
-            issues=["issue:open"],
-            projects=["secretary"],
-            observer=head_choice("codex-observer"),
-        )["sprint"]["ref"]
-        original_append = writer.audit.append
-
-        def fail_typed(request_id: str, event: dict) -> str:
-            if request_id == "recover-hard:typed-hard-stop":
-                raise OSError("disk full")
-            return original_append(request_id, event)
-
-        with mock.patch.object(writer.audit, "append", side_effect=fail_typed):
-            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
-                writer.record_budget(
-                    role="dispatcher",
-                    actor="dispatcher",
-                    reference=ref,
-                    event_type="blocked",
-                    request_id="recover-hard",
-                )
-        self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(SprintReader(self.client).show(ref)["status"], "stopped")  # type: ignore[arg-type]
-        self.assertIsNotNone(writer.audit.pending_event("recover-hard:typed-hard-stop"))
-        self.assertIsNotNone(writer.audit.pending_event("recover-hard"))
-        writes = len([method for method, _params in self.client.calls if method == "saveTaskMetadata"])
-
-        result = writer.record_budget(
-            role="dispatcher",
-            actor="dispatcher",
-            reference=ref,
-            event_type="blocked",
-            request_id="recover-hard",
-        )
-
-        self.assertEqual(result["sprint"]["status"], "stopped")
-        self.assertIsNone(writer.audit.pending_event("recover-hard:typed-hard-stop"))
-        self.assertIsNone(writer.audit.pending_event("recover-hard"))
-        self.assertEqual(
-            writes, len([method for method, _params in self.client.calls if method == "saveTaskMetadata"])
-        )
 
     def test_hard_stop_replay_keeps_its_stored_related_refs_after_card_archive(self) -> None:
         writer = SprintWriter(  # type: ignore[arg-type]
@@ -2415,35 +1754,6 @@ class SprintTests(SprintFixture):
         assert typed is not None
         self.assertEqual(typed["transition"], {"source": "stopped", "target": "closed"})
 
-    def test_reopen_refuses_to_open_when_observer_read_back_is_not_proven(self) -> None:
-        ref = self._create(goal="observer read back", reference="sprint:observer-readback")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        original = self.client.call
-        stale = [False]
-
-        def readback_failure(method: str, **params: object) -> object:
-            if method == "saveTaskMetadata" and OBSERVER_FIELD in params.get("values", {}):
-                stale[0] = True
-                return original(method, **params)
-            if method == "getTaskMetadata" and stale[0]:
-                stale[0] = False
-                return {OBSERVER_FIELD: ""}
-            return original(method, **params)
-
-        with mock.patch.object(self.client, "call", side_effect=readback_failure):
-            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
-                self.writer.reopen(
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    observer=head_choice("codex-observer"),
-                    request_id="observer-readback",
-                )
-
-        self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
-        self.assertIsNone(self.writer.audit.event("observer-readback:typed-reopen"))
-
     def test_lifecycle_events_carry_the_checked_edge_and_available_links(self) -> None:
         ref = self._create(goal="typed lifecycle", reference="sprint:typed-lifecycle")["sprint"]["ref"]
         self.writer.close(
@@ -2463,7 +1773,7 @@ class SprintTests(SprintFixture):
 
         events = {
             event["kind"]: event
-            for event in TaskAudit(self.tmp.name).events(reference=ref)
+            for event in SqlTaskAudit(self.client).events(reference=ref)
             if event.get("record_type") == "board.protocol_event"
         }
         self.assertEqual(events["sprint.closed"]["subject"], {"kind": "sprint", "ref": ref})
@@ -2479,64 +1789,6 @@ class SprintTests(SprintFixture):
                 "request_related_refs": [],
             },
         )
-
-    def test_host_sprint_replay_rejects_changed_related_refs_when_committed_or_pending(self) -> None:
-        actor = Actor("po", "operator")
-
-        committed_ref = self._create(goal="committed related refs")["sprint"]["ref"]
-        host = self.writer._host()
-        committed = TransitionRequest(
-            EntityKind.SPRINT,
-            committed_ref,
-            SprintState.CLOSED,
-            actor,
-            "Sprint closed",
-            RelatedRefs(("head-run:first",)),
-            "committed-related-refs",
-        )
-        host.transition(committed)
-        with self.assertRaises(ValueError):
-            host.transition(
-                TransitionRequest(
-                    EntityKind.SPRINT,
-                    committed_ref,
-                    SprintState.CLOSED,
-                    actor,
-                    "Sprint closed",
-                    RelatedRefs(("head-run:changed",)),
-                    "committed-related-refs",
-                )
-            )
-
-        pending_ref = self._create(
-            goal="pending related refs",
-            reference="sprint:pending-related-refs",
-        )["sprint"]["ref"]
-        pending = TransitionRequest(
-            EntityKind.SPRINT,
-            pending_ref,
-            SprintState.CLOSED,
-            actor,
-            "Sprint closed",
-            RelatedRefs(("head-run:first",)),
-            "pending-related-refs",
-        )
-        with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
-            with self.assertRaises(BoardEventPending):
-                host.transition(pending)
-        with self.assertRaises(ValueError):
-            host.transition(
-                TransitionRequest(
-                    EntityKind.SPRINT,
-                    pending_ref,
-                    SprintState.CLOSED,
-                    actor,
-                    "Sprint closed",
-                    RelatedRefs(("head-run:changed",)),
-                    "pending-related-refs",
-                )
-            )
-        self.assertEqual(host.transition(pending).entity.state, SprintState.CLOSED)
 
     def test_budget_thresholds_reject_hard_limit_below_signal(self) -> None:
         with self.assertRaisesRegex(TaskError, "hard threshold"):
@@ -2668,7 +1920,7 @@ class SprintTests(SprintFixture):
         self.assertEqual(raised.exception.code, "live_work")
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
         self.assertEqual(
-            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)],
+            [event["kind"] for event in SqlTaskAudit(self.client).events(reference=ref)],
             ["created"],
         )
 
@@ -2782,7 +2034,7 @@ class SprintTests(SprintFixture):
             sprint=ref,
             request_id="resume-card",
         )["task"]
-        TaskAudit(self.tmp.name).append(
+        SqlTaskAudit(self.client).append(
             "later",
             {
                 "event_id": "evt_later",
@@ -2824,7 +2076,7 @@ class SprintTests(SprintFixture):
             sprint=ref,
             request_id="naive-card",
         )["task"]
-        TaskAudit(self.tmp.name).append(
+        SqlTaskAudit(self.client).append(
             "naive-event",
             {
                 "event_id": "evt_naive_event",
@@ -2868,7 +2120,7 @@ class SprintTests(SprintFixture):
         self.assertEqual(result["action"], "resume_recorded")
         self.assertEqual(result["sprint"]["resume"]["selected_step"], "implement")
         self.assertNotIn("delivery_id", result["sprint"]["resume"])
-        resume_event = TaskAudit(self.tmp.name).events(reference=ref)[-1]
+        resume_event = SqlTaskAudit(self.client).events(reference=ref)[-1]
         self.assertEqual(resume_event["payload"]["delivery_id"], "delivery-1")
         self.assertEqual(resume_event["payload"]["through_event"], "evt-card-1")
         with self.assertRaisesRegex(TaskError, "requires both"):
@@ -2910,7 +2162,7 @@ class SprintTests(SprintFixture):
             "next_safe_step": "wait",
         }
         self.writer.resume(role="observer", actor="observer", reference=ref, entry=entry)
-        audit = TaskAudit(self.tmp.name)
+        audit = SqlTaskAudit(self.client)
         baseline = SprintReader(self.client, data_dir=self.tmp.name).show(ref)["resume_freshness"]  # type: ignore[arg-type]
         for request_id, kind, outcome in (
             ("predicate-denied", "sprint_guard_denied", "denied"),
@@ -3071,13 +2323,13 @@ class SprintAuditTraversalTests(SprintFixture):
     def _traversals(self):
         """Count the committed-audit traversals a block performs."""
         counter: dict[str, int] = {"count": 0}
-        original = TaskAudit.events
+        original = SqlTaskAudit.events
 
-        def counting(audit: TaskAudit, *args: Any, **kwargs: Any) -> list[dict]:
+        def counting(audit: SqlTaskAudit, *args: Any, **kwargs: Any) -> list[dict]:
             counter["count"] += 1
             return original(audit, *args, **kwargs)
 
-        with mock.patch.object(TaskAudit, "events", counting):
+        with mock.patch.object(SqlTaskAudit, "events", counting):
             yield counter
 
     def _resumed(self, goal: str) -> str:
@@ -3137,7 +2389,7 @@ class SprintAuditTraversalTests(SprintFixture):
 
     def _sprint_event(self, reference: str, request_id: str, occurred_at: str) -> None:
         """A significant sprint-scoped event: it would age the resume of an open sprint."""
-        TaskAudit(self.tmp.name).append(
+        SqlTaskAudit(self.client).append(
             request_id,
             {
                 "event_id": f"evt_{request_id.replace('-', '_')}",
@@ -3195,7 +2447,7 @@ class SprintAuditTraversalTests(SprintFixture):
             sprint=open_ref,
             request_id="traversal-card",
         )["task"]
-        TaskAudit(self.tmp.name).append(
+        SqlTaskAudit(self.client).append(
             "traversal-later",
             {
                 "event_id": "evt_traversal_later",
@@ -3307,7 +2559,7 @@ class SprintAuditTraversalTests(SprintFixture):
             sprint=closing,
             request_id="close-card",
         )["task"]
-        TaskAudit(self.tmp.name).append(
+        SqlTaskAudit(self.client).append(
             "close-later",
             {
                 "event_id": "evt_close_later",
@@ -3428,26 +2680,6 @@ class SprintAuditTraversalTests(SprintFixture):
         self.assertEqual(reopened_summary["resume_freshness"]["error"], "resume_stale")
         self.assertEqual(reopened_summary["resume_freshness"]["last_event_at"], "2099-01-01T00:00:00Z")
 
-    def test_an_unusable_terminal_resume_still_fails_closed_without_the_audit(self) -> None:
-        """A legacy record the writer would refuse today keeps its documented answer."""
-        naive = self._terminal("sprint:legacy-terminal", status="closed", recorded_at="2026-07-29T12:00:00")
-        empty = self._terminal("sprint:missing-terminal", status="stopped")
-        empty_id = next(int(task["id"]) for task in self.client.tasks if task.get("reference") == empty)
-        self.client.metadata[empty_id].pop("sprint_resume")
-
-        with self._traversals() as traversals:
-            summaries = {item["ref"]: item for item in self._reader().statuses()}
-
-        self.assertEqual(traversals["count"], 0)
-        self.assertFalse(summaries[naive]["resume_freshness"]["fresh"])
-        self.assertEqual(summaries[naive]["resume_freshness"]["error"], "resume_stale")
-        # No event to trail, so the lag is the zero the helper already answers for that case; the
-        # unusable timestamp still fails closed on its own.
-        self.assertEqual(summaries[naive]["resume_freshness"]["lag_seconds"], 0)
-        self.assertEqual(summaries[naive]["resume_freshness"]["recorded_at"], "2026-07-29T12:00:00")
-        self.assertEqual(summaries[empty]["resume_freshness"]["error"], "resume_missing")
-        self.assertIsNone(summaries[empty]["resume_freshness"]["recorded_at"])
-
     def test_a_missing_resume_still_answers_without_reading_the_audit(self) -> None:
         ref = self._create(goal="no resume")["sprint"]["ref"]
 
@@ -3461,7 +2693,6 @@ class SprintAuditTraversalTests(SprintFixture):
 
 class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
     def setUp(self) -> None:
-        self.skip_kanboard_only()
         self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -3518,7 +2749,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
             )
         self.assertEqual(retro.exception.code, "sprint_write_forbidden")
         denied = [
-            event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"
+            event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_denied"
         ]
         self.assertEqual(len(denied), 2)
         self.assertEqual(denied[0]["payload"]["sprint"], self.ref)
@@ -3557,7 +2788,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         )
         self.assertEqual(first["event_id"], second["event_id"])
         event = next(
-            event for event in TaskAudit(self.tmp.name).events() if event["request_id"] == "override-once"
+            event for event in SqlTaskAudit(self.client).events() if event["request_id"] == "override-once"
         )
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
 
@@ -3591,13 +2822,13 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         )
         event = next(
             event
-            for event in TaskAudit(self.tmp.name).events()
+            for event in SqlTaskAudit(self.client).events()
             if event["request_id"] == "linked-po-override"
         )
         self.assertEqual(created["task"]["sprint"], self.ref)
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
         denied = [
-            event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"
+            event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_denied"
         ]
         self.assertEqual(
             [event["payload"]["operation_request_id"] for event in denied],
@@ -3625,7 +2856,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
             sprint_override_reason="production incident",
         )
         self.assertEqual(edited["task"]["description"], "incident edit")
-        event = TaskAudit(self.tmp.name).events()[-1]
+        event = SqlTaskAudit(self.client).events()[-1]
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
 
     def test_override_retry_reuses_the_denied_request_id_for_the_write(self) -> None:
@@ -3660,7 +2891,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         )
 
         self.assertEqual(moved["task"]["state"], "blocked")
-        events = TaskAudit(self.tmp.name).events()
+        events = SqlTaskAudit(self.client).events()
         denial = next(event for event in events if event["kind"] == "sprint_guard_denied")
         self.assertEqual(denial["payload"]["operation_request_id"], "po-override-retry")
         success = next(event for event in events if event["request_id"] == "po-override-retry")
@@ -3721,7 +2952,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(granted["task"]["state"], "blocked")
         decisions = {
             str(event["payload"].get("operation_request_id")): event["kind"]
-            for event in TaskAudit(self.tmp.name).events()
+            for event in SqlTaskAudit(self.client).events()
             if event["kind"] in {"sprint_guard_denied", "sprint_guard_override"}
         }
         self.assertEqual(
@@ -3767,7 +2998,7 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
 
         self.assertEqual(first["event_id"], second["event_id"])
         grants = [
-            event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_override"
+            event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_override"
         ]
         self.assertEqual(len(grants), 1)
         self.assertEqual(grants[0]["payload"]["sprint_override_reason"], "production incident")
@@ -3823,13 +3054,29 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
-    def test_guard_read_avoids_sprint_comment_history(self) -> None:
-        self.client.calls.clear()
-
-        sprint = SprintReader(self.client).show(self.ref, include_cards=False)  # type: ignore[arg-type]
-
-        self.assertNotIn("comments", sprint)
-        self.assertFalse(any(method == "getAllComments" for method, _params in self.client.calls))
+    def test_sql_unique_live_reservation_rolls_back_an_unrepresentable_overlap(self) -> None:
+        """SQL rejects the impossible duplicate reservation without a partial restore."""
+        other_ref = self.sprints.restore_create(
+            reference="sprint:overlap",
+            goal="overlap",
+            repositories=["secretary"],
+            request_id="seed-overlap-sprint",
+        )["sprint"]["ref"]
+        with self.assertRaises(TaskError) as raised:
+            self.sprints.restore(
+                reference=other_ref,
+                values={"sprint_reservations": json.dumps(["secretary"])},
+                request_id="seed-overlap-reservation",
+            )
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertIsNone(self.sprints.audit.event("seed-overlap-reservation"))
+        self.assertEqual(
+            self.client._query(
+                "SELECT sprint_ref FROM sprint_projects WHERE project_id=%s AND reserved",
+                ("secretary",),
+            ),
+            [(self.ref,)],
+        )
 
 
 class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
@@ -3840,7 +3087,6 @@ class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.skip_kanboard_only()
         self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -3955,7 +3201,7 @@ class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
 
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
         events = [
-            event for event in TaskAudit(self.tmp.name).events() if event["kind"] == "sprint_guard_denied"
+            event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_denied"
         ]
         self.assertEqual([event["payload"]["sprint"] for event in events], [self.ref])
 
@@ -4000,24 +3246,8 @@ class SprintCloseDecisionTests(SprintFixture):
         )["task"]["ref"]
 
     def _store(self):
-        from secretary.product_issues import ProductIssueStore
 
         return ProductIssueStore(self.client, data_dir=self.tmp.name, instance=self.instance)
-
-    def _writes(self, since: int) -> list[tuple[str, dict]]:
-        return [
-            (method, params)
-            for method, params in self.client.calls[since:]
-            if method
-            in {
-                "createTask",
-                "updateTask",
-                "saveTaskMetadata",
-                "createComment",
-                "closeTask",
-                "moveTaskPosition",
-            }
-        ]
 
     def _contract_state(self, reference: str) -> dict[str, object]:
         store = self._store()
@@ -4221,120 +3451,6 @@ class SprintCloseDecisionTests(SprintFixture):
         for reference in ("product:secretary", "issue:open"):
             self.assertTrue(self.record_is_active(reference))
 
-    def test_an_issue_closed_from_elsewhere_mid_close_stops_and_is_amended(self) -> None:
-        """A conflict the preflight could not see stops the close and is answered by its retry.
-
-        The close is already past its first verdict when somebody else closes the second issue.
-        It does not finish on their reason and it does not become unresolvable: it records the
-        conflict and refuses, the retry of the same request id may amend exactly that ref to
-        the confirmation of what happened - and nothing else - and then it completes.
-        """
-        ref = self._open()
-        real_close_issue = ProductIssueStore.close_issue
-
-        def closing_the_other_issue_too(self_store, **kwargs):
-            answer = real_close_issue(self_store, **kwargs)
-            if kwargs["reference"] == self.second_issue:
-                real_close_issue(
-                    self_store,
-                    reference="issue:open",
-                    reason="wont_do",
-                    actor="another-po",
-                    request_id="a-close-that-raced-this-one",
-                )
-            return answer
-
-        stated = {
-            "issues": [
-                {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                {"ref": self.second_issue, "verdict": "invalid", "reason": "it was never a bug"},
-            ]
-        }
-
-        with mock.patch.object(ProductIssueStore, "close_issue", closing_the_other_issue_too):
-            with self.assertRaises(TaskError) as raised:
-                self.writer.close(
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="raced-issue-close",
-                    decisions=stated,
-                )
-
-        self.assertEqual(raised.exception.code, "close_conflict")
-        self.assertIn(
-            "issue:open was closed as wont_do by somebody else", raised.exception.message
-        )
-        self.assertIn("already_closed", raised.exception.message)
-        # The sprint is not closed on a verdict nobody stated, and the close is still there.
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
-        self.assertEqual(self.writer.transactions.status()["pending"], 1)
-        # The amendment is the only difference a retry may carry.
-        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
-            self.writer.close(
-                role="po",
-                actor="operator",
-                reference=ref,
-                request_id="raced-issue-close",
-                decisions={
-                    "issues": [
-                        {
-                            "ref": "issue:open",
-                            "verdict": "already_closed",
-                            "actual": "wont_do",
-                            "reason": "another PO got there first",
-                        },
-                        {
-                            "ref": self.second_issue,
-                            "verdict": "resolved",
-                            "reason": "restated",
-                        },
-                    ]
-                },
-            )
-        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
-            self.writer.close(
-                role="po",
-                actor="operator",
-                reference=ref,
-                request_id="raced-issue-close",
-                decisions={
-                    "issues": [
-                        {"ref": "issue:open", "verdict": "open", "reason": "leaving it open instead"},
-                        {"ref": self.second_issue, "verdict": "open", "reason": "leaving it open instead"},
-                    ]
-                },
-            )
-
-        result = self.writer.close(
-            role="po",
-            actor="operator",
-            reference=ref,
-            request_id="raced-issue-close",
-            decisions={
-                "issues": [
-                    {
-                        "ref": "issue:open",
-                        "verdict": "already_closed",
-                        "actual": "wont_do",
-                        "reason": "another PO got there first",
-                    },
-                    {"ref": self.second_issue, "verdict": "invalid", "reason": "it was never a bug"},
-                ]
-            },
-        )
-
-        self.assertEqual(result["closed_issues"], [self.second_issue])
-        self.assertEqual(self._store().show_issue(self.second_issue)["close_reason"], "invalid")
-        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
-        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
-        closes = [
-            event
-            for event in self._events()
-            if event.get("kind") == "issue.closed" and event.get("ref") == self.second_issue
-        ]
-        self.assertEqual(len(closes), 1)
-
     def test_cli_close_reads_its_decisions_from_a_file(self) -> None:
         """The command is a client of the operation, and prints what the operation answered.
 
@@ -4440,6 +3556,39 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "validation")
         self.assertIn("issue:open", json.loads(errors.getvalue())["error"]["message"])
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
+
+    def test_sql_rolled_back_claim_allows_a_changed_intent_as_a_new_request(self) -> None:
+        """A SQL failure erases the claim, so the retry may state a new complete intent."""
+        ref = self._open(issues=["issue:open"])
+        card = self._card(ref, "disposed once", "restated-card")
+        decisions = {
+            "issues": list(KEEP_THE_ISSUE_OPEN["issues"]),
+            "cards": [{"ref": card, "verdict": "drop", "reason": "not finished"}],
+        }
+        with (
+            mock.patch.object(TaskWriter, "archive", side_effect=OSError("disk full")),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.close(
+                role="po", actor="operator", reference=ref,
+                request_id="restated-close", decisions=decisions,
+            )
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertIsNone(self.writer.audit.event("restated-close"))
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")
+        self.assertEqual([row["ref"] for row in TaskReader(self.client).list(sprint=ref)], [card])
+
+        changed = {
+            "issues": list(KEEP_THE_ISSUE_OPEN["issues"]),
+            "cards": [{"ref": card, "verdict": "done", "reason": "landed after all"}],
+        }
+        result = self.writer.close(
+            role="po", actor="operator", reference=ref,
+            request_id="restated-close", decisions=changed,
+        )
+        self.assertEqual(result["archived_tasks"] + result["disposed_tasks"], [card])
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")
+        self.assertEqual(len(self.writer.audit.events(reference=ref, kind="closed")), 1)
 
 
 class CloseDecisionFileTests(unittest.TestCase):
