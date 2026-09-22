@@ -59,7 +59,7 @@ dispatcher for the extracted continuation methods.
 
 `dispatch.wait_vitality` owns the shared worker/reviewer wait state machine: vitality reduction,
 recovery-policy rungs, suspension SIGCONT/operator escalation, guarded one-shot respawn, second-stall
-blocking and the bounded unobservable-head escalation. `DispatcherRuntime` calls its four package
+blocking and the bounded unobservable-head escalation. `DispatcherRuntime` (`secretary.dispatch.runtime`) calls its four package
 entry points from worker/review/gate orchestration; the module calls back only for the existing
 worker/reviewer confirmed-stop lifecycle boundaries and routing; terminal effects go directly through
 `dispatch.attempt_accounting`. Mechanical gate

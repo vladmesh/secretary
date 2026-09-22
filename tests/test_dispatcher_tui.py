@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary.dispatcher import CommandHostRuntime, HostError
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
@@ -44,6 +44,7 @@ from secretary.dispatch.tui import (
     terminal_turn_started,
     turn_started_confirm,
 )
+from secretary.dispatch.types import HostError
 from secretary.dispatch.worker_lifecycle import ContinuationProviderCondition
 from tests.fakes.observer import (
     BLOCKED_PANE_WAIT_BODY,

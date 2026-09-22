@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
@@ -30,6 +29,7 @@ from secretary.dispatch import attempt_accounting
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import review_verdict as dispatcher_review_verdict
+from secretary.dispatch import runtime as dispatcher_module
 from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
 from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
 from secretary.dispatch import worker_launch as dispatcher_worker_launch
@@ -52,10 +52,20 @@ from secretary.dispatch.heartbeat import run_heartbeat_identity
 from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
+    _legacy_worker_branch,
     _round_record_line,
     _task_doc_decision,
     _task_doc_protocol_prerequisites,
     red_review_count,
+)
+from secretary.dispatch.host import (
+    CommandHostRuntime,
+    InstanceCatalog,
+    LaunchedHead,
+    _body_file_path,
+    _continuation_note,
+    _gate_attestation_for_prompt,
+    _report_nudge_prompt,
 )
 from secretary.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
@@ -66,6 +76,7 @@ from secretary.dispatch.launch import (
     FAILURE_CLASS_TASK,
     bring_up_failure_class,
     classify_bring_up_failure,
+    launch_pid_file,
 )
 from secretary.dispatch.launcher import (
     claude_launch_model,
@@ -76,23 +87,15 @@ from secretary.dispatch.production import _budget_event_type, production_adopt_a
 from secretary.dispatch.review import (
     start_review as start_reviewer,
 )
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import (
     DispatcherRecord,
 )
-from secretary.dispatcher import (
+from secretary.dispatch.types import (
     STOPPED_BY_REVIEW_VERDICT,
     STOPPED_BY_WATCHDOG,
-    CommandHostRuntime,
     DispatcherError,
-    DispatcherRuntime,
     HostError,
-    InstanceCatalog,
-    LaunchedHead,
-    _body_file_path,
-    _continuation_note,
-    _gate_attestation_for_prompt,
-    _legacy_worker_branch,
-    _report_nudge_prompt,
 )
 from secretary.projects.contract import (
     BROAD_CHECK_NOT_DECLARED,
@@ -15347,7 +15350,7 @@ class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
         # A readable heartbeat at this card's worker pid path that describes another card's run:
         # `_adopt` refuses to promote it into this card's HeadRun, and it is a living process.
         write_heartbeat(
-            Path(dispatcher_module._launch_pid_file("worker", CARD_REF)),
+            Path(launch_pid_file("worker", CARD_REF)),
             os.getpid(),
             identity=run_heartbeat_identity(
                 {"run_id": "somebody-elses-run", "leaf": record.worker_leaf},

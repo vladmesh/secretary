@@ -26,7 +26,7 @@ from secretary.dispatch.observer_fence import (
     observer_fence,
 )
 from secretary.dispatch.production import _reconcile_production
-from secretary.dispatcher import DispatcherRuntime
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.sprint_observer import (
     REASON_HISTORICAL,
     REASON_MALFORMED,

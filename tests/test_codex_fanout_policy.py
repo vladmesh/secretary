@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from secretary.dispatcher import CommandHostRuntime
+from secretary.dispatch.host import CommandHostRuntime
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, spawn
 from triggered_agents.runtime.pane_host import Pane

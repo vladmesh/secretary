@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatcher import DispatcherRuntime
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer

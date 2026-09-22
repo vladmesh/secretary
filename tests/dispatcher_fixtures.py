@@ -20,10 +20,12 @@ from unittest import mock
 
 from secretary._fsutil import file_lock
 from secretary.dispatch.heartbeat import heartbeat_identity
+from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
+from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
 from tests.fanout_fixtures import accepted_transport_run

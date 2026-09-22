@@ -599,7 +599,7 @@ class CatalogContractTests(unittest.TestCase):
         (self.repo / "src" / "secretary" / "__init__.py").write_text("", encoding="utf-8")
 
     def catalog(self, adapter_body: str | None = ADAPTER_BODY):
-        from secretary.dispatcher import InstanceCatalog
+        from secretary.dispatch.host import InstanceCatalog
         from secretary.head_registry import snapshot_header
 
         instance = self.root / "instance"

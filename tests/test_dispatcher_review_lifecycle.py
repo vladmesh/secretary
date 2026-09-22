@@ -14,22 +14,22 @@ from unittest import mock
 from secretary.checkpoint import CheckpointResult
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.review import (
     recover_review_launch,
 )
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import (
     DispatcherRecord,
 )
-from secretary.dispatcher import (
+from secretary.dispatch.types import (
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
     STOPPED_BY_WATCHDOG,
-    CommandHostRuntime,
     DispatcherError,
-    DispatcherRuntime,
     HostError,
 )
 

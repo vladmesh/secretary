@@ -323,7 +323,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
     def test_the_dispatcher_brings_a_head_up_on_exactly_the_rendered_command(self) -> None:
         """`CommandHostRuntime.head_launch` is a lookup, a workspace preflight and this renderer —
         asked for the interactive shape, whatever prompt inputs its caller resolved."""
-        from secretary.dispatcher import InstanceCatalog
+        from secretary.dispatch.host import InstanceCatalog
 
         profile = {"adapter": "claude", "model": "opus", "effort": "high"}
         with tempfile.TemporaryDirectory() as tmp:

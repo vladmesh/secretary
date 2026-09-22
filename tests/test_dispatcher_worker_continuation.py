@@ -342,7 +342,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
 class ContinuationOwnershipTests(unittest.TestCase):
     def test_implementation_is_owned_by_the_package_not_runtime_callbacks(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        runtime_source = (root / "src/secretary/dispatcher.py").read_text(encoding="utf-8")
+        runtime_source = (root / "src/secretary/dispatch/runtime.py").read_text(encoding="utf-8")
         runtime_tree = ast.parse(runtime_source)
         runtime = next(
             n for n in runtime_tree.body if isinstance(n, ast.ClassDef) and n.name == "DispatcherRuntime"
@@ -378,7 +378,7 @@ class ContinuationOwnershipTests(unittest.TestCase):
         self.assertTrue(
             {"begin_red_transition", "complete_red_transition", "recover_worker_continuation"} <= owned
         )
-        self.assertNotIn("secretary.dispatcher", inspect.getsource(continuation_module))
+        self.assertNotIn("secretary.dispatch.runtime", inspect.getsource(continuation_module))
         advance = next(
             n for n in runtime.body if isinstance(n, ast.FunctionDef) and n.name == "_advance_worker"
         )
