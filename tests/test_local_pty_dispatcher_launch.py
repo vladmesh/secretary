@@ -45,6 +45,7 @@ from secretary.dispatch.watchdog import (
     head_process_status,
     head_run_process_status,
 )
+from secretary.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from secretary.runtime.head.command import with_pid_heartbeat
 from secretary.runtime.head.identity import publish_heartbeat
@@ -465,6 +466,87 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
             self.host.nudge_observer(record, sprint={"ref": "sprint:1459", "comments": []}, change="sprint-entity")
         self.assertEqual(_delivery_readiness_state(caught.exception), READINESS_BUSY, caught.exception)
         self.assertEqual(len(self._submitted()), 1, "nothing was typed into the working head")
+
+
+class LocalPtyRetainedWorkerContinuationTests(unittest.TestCase):
+    """secretary-1702: a red-verdict continuation into a retained local-pty worker starts a turn.
+
+    Through `_launch`, `retain_worker` and `resume_worker` onto a real supervisor and the fake
+    agent. `retain_worker` suspends the head with `SIGSTOP`; `resume_worker` hands the delivery a
+    `before_send` that sends the `SIGCONT`, which this backend never performed, so the continuation
+    was typed into a stopped process and reported `prompt_typed_but_no_turn_started`.
+    """
+
+    # The observer prompt tests' fixture: the same profile, supervisor root and fake agent.
+    setUp = LocalPtyObserverPromptTests.setUp
+    _reap = LocalPtyObserverPromptTests._reap
+    _submitted = LocalPtyObserverPromptTests._submitted
+
+    def test_a_retained_worker_is_resumed_and_its_continuation_starts_a_turn(self) -> None:
+        workspace = self.root / "workspaces" / "worker"
+        workspace.mkdir(parents=True)
+        (workspace / "TASK.md").write_text("# Task\n", encoding="utf-8")
+        with (
+            mock.patch.object(CommandHostRuntime, "_require_production_runtime"),
+            mock.patch.object(CommandHostRuntime, "_require_workspace_environment"),
+        ):
+            launched = self.host._launch(
+                str(workspace),
+                "secretary-9001 worker",
+                PROFILE,
+                str(workspace / "TASK.md"),
+                role="worker",
+                env_name="SECRETARY_1702_NO_COMMAND_OVERRIDE",
+                task={"ref": "secretary-9001"},
+                launch_prompt=f"Read {workspace}/TASK.md and do its task.",
+            )
+        run = HeadRun.from_json(launched.head_run)
+        self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
+        record = DispatcherRecord(
+            worker="secretary-9001-worker",
+            head=PROFILE,
+            review_head=PROFILE,
+            attempt_id="attempt-1702",
+            comment_baseline=0,
+            review_baseline=0,
+            state="in_progress",
+            claimed_at=time.time(),
+            workspace=str(workspace),
+            handle=launched.handle,
+            worker_leaf=launched.leaf,
+            worker_pid_file=run.pid_file,
+            worker_head_run=dict(launched.head_run),
+            worker_run={"adapter": "claude"},
+            report_generation=2,
+        )
+        self.assertEqual(len(self._submitted()), 1, "the launch prompt started the worker's round")
+        runtime = self.host.head_runtime_for(run)
+        deadline = time.monotonic() + 15.0
+        while runtime.observe(run).busy and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        self.host.retain_worker(record)
+        # Where `_deliver_red_continuation` stands when it calls `resume_worker`.
+        record.worker_continuation = WorkerContinuation(
+            stage=WorkerContinuationStage.DELIVERY_PENDING,
+            phase="review",
+            session_held=True,
+            sent_at=time.time(),
+        )
+        self.assertTrue(self.host.worker_retained_alive(record), "the worker was not suspended")
+
+        with (
+            mock.patch.object(CommandHostRuntime, "_worker_task_doc", return_value="# Task, round 2\n"),
+            mock.patch.object(self.host.catalog, "integration_base", return_value="main", create=True),
+        ):
+            self.host.resume_worker({"ref": "secretary-9001", "project": "secretary"}, record)
+
+        submitted = self._submitted()
+        self.assertEqual(len(submitted), 2, submitted)
+        self.assertIn(f"{workspace}/TASK.md", submitted[1])
+        self.assertIn("Generation 2", submitted[1])
+        self.assertTrue(record.worker_delivery_evidence.get("turn_confirmed"), record.worker_delivery_evidence)
+        self.assertFalse(head_process_status(run.pid_file).get("stopped"), "the worker is still suspended")
 
 
 class ObserverTaskIdentityTests(unittest.TestCase):
