@@ -32,6 +32,7 @@ channel cannot answer is reported unproven rather than probed harder.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -64,7 +65,7 @@ from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.head.identity import HEARTBEAT_DEAD, HEARTBEAT_LIVE_MATCH, head_process_status
 from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from secretary.runtime.local_pty_head import head_run_journal, head_run_supervisor_files
+from secretary.runtime.local_pty_head import head_run_journal_read, head_run_supervisor_lease
 from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
@@ -741,6 +742,8 @@ SUPERVISOR_SOURCE = "supervisor"
 LEASE_SOURCE = "supervisor_lock"
 JOURNAL_SOURCE = "journal"
 
+JOURNAL_DEGRADED = "degraded"
+
 LEASE_HELD = "held"
 LEASE_FREE = "free"
 
@@ -904,85 +907,39 @@ def _supervisor_answer(root: Path, run: HeadRun) -> dict[str, Any]:
 
 
 def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
-    """Who holds this run's supervisor lock, read from the kernel's lock table without taking it.
-
-    A supervisor takes an exclusive `flock` on `supervisor.lock` for its whole life and writes its
-    pid into the file; the kernel drops the lock when that process ends. So the holder comes from
-    `/proc/locks`, where reading is an observation rather than an attempt on the lock, and the pids
-    in `supervisor.lock` and `supervisor.pid` are reported beside it. A lock no process holds says
-    no supervisor owns the run; a head it left behind can still be running, which is the
-    heartbeat's question.
-    """
-    path, pid_path = head_run_supervisor_files(run_dir)
-    try:
-        info = path.stat()
-        written = path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
+    """Who holds this run's supervisor lock, as the local-pty backend reads it without taking it."""
+    lease = head_run_supervisor_lease(run_dir)
+    if not lease.lock_readable:
         return {
             "answered": False,
             "state": SourceAvailability.UNAVAILABLE.value,
             "holder_pid": None,
-            "reason": f"the supervisor lock could not be read ({exc.strerror or exc})",
+            "reason": f"the supervisor lock could not be read ({lease.error})",
         }
-    lease: dict[str, Any] = {
-        "written_pid": _pid_or_none(written),
-        "supervisor_pid": _pid_file_value(pid_path),
-    }
-    try:
-        holders = _flock_holders(info)
-    except OSError as exc:
+    files: dict[str, Any] = {"written_pid": lease.written_pid, "supervisor_pid": lease.supervisor_pid}
+    if not lease.table_readable:
         return {
-            **lease,
+            **files,
             "answered": False,
             "state": SourceAvailability.UNAVAILABLE.value,
             "holder_pid": None,
-            "reason": f"the kernel lock table could not be read ({exc.strerror or exc})",
+            "reason": f"the kernel lock table could not be read ({lease.error})",
         }
-    if not holders:
+    if not lease.holders:
         return {
-            **lease,
+            **files,
             "answered": True,
             "state": LEASE_FREE,
             "holder_pid": None,
             "reason": "no process holds the supervisor lock, so no supervisor owns this run",
         }
-    return {**lease, "answered": True, "state": LEASE_HELD, "holder_pid": holders[0], "reason": ""}
-
-
-def _flock_holders(info: os.stat_result) -> list[int]:
-    """The pids `/proc/locks` names as holding an `flock` on this file."""
-    holders = []
-    wanted = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
-    with open("/proc/locks", encoding="utf-8") as table:
-        for line in table:
-            # `N: FLOCK ADVISORY WRITE <pid> <major>:<minor>:<inode> 0 EOF`; a waiter reads `N: ->`.
-            fields = line.split()
-            if len(fields) < 6 or fields[1] != "FLOCK":
-                continue
-            try:
-                major, minor, inode = fields[5].split(":")
-                if (int(major, 16), int(minor, 16), int(inode)) == wanted:
-                    holders.append(int(fields[4]))
-            except ValueError:
-                continue
-    return holders
-
-
-def _pid_or_none(text: str) -> int | None:
-    return int(text) if text.isdigit() else None
-
-
-def _pid_file_value(path: Path) -> int | None:
-    try:
-        return _pid_or_none(path.read_text(encoding="utf-8").strip())
-    except OSError:
-        return None
+    return {**files, "answered": True, "state": LEASE_HELD, "holder_pid": lease.holders[0], "reason": ""}
 
 
 def _journal_tail(run_dir: Path) -> dict[str, Any]:
     """The last records of the head's journal, or why it could not be read."""
     try:
-        events = head_run_journal(run_dir)[-JOURNAL_TAIL_RECORDS:]
+        read = head_run_journal_read(run_dir)
     except OSError as exc:
         return {
             "answered": False,
@@ -991,8 +948,41 @@ def _journal_tail(run_dir: Path) -> dict[str, Any]:
             "tail": [],
         }
     kept = ("seq", "kind", "at", "turn", "reason", "bytes", "subject")
-    tail = [{key: event[key] for key in kept if key in event} for event in events]
-    return {"answered": True, "state": SourceAvailability.AVAILABLE.value, "tail": tail}
+    tail = [
+        {key: event[key] for key in kept if key in event} for event in read.events[-JOURNAL_TAIL_RECORDS:]
+    ]
+    untimed = sum(1 for event in tail if _journal_time(event.get("at")) is None)
+    damage = []
+    if read.malformed:
+        damage.append(f"{read.malformed} malformed line(s) skipped")
+    if read.truncated_tail:
+        damage.append("the final line is torn")
+    if not read.ordered:
+        damage.append("records are out of sequence")
+    if untimed:
+        damage.append(f"{untimed} tail record(s) carry no usable time")
+    if not damage:
+        return {"answered": True, "state": SourceAvailability.AVAILABLE.value, "tail": tail}
+    # The journal answered, but not in full: its tail is what could be read, never a clean record.
+    return {
+        "answered": True,
+        "state": JOURNAL_DEGRADED,
+        "reason": "the journal tail is incomplete: " + ", ".join(damage),
+        "malformed": read.malformed,
+        "truncated_tail": read.truncated_tail,
+        "tail": tail,
+    }
+
+
+def _journal_time(value: Any) -> float | None:
+    """A journal record's `at` as seconds, or `None` when the record carries no usable time."""
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
 def _supervised_verdict(heartbeat: dict[str, Any], supervisor: dict[str, Any]) -> tuple[str, str | None]:
@@ -1030,8 +1020,14 @@ def _supervised_summary(row: dict[str, Any], observed_at: float) -> str:
     journal = row["journal"]
     if journal["answered"]:
         last = journal["tail"][-1] if journal["tail"] else {}
-        age = f"{max(0.0, observed_at - float(last['at'])):.0f}s ago" if last.get("at") else "never"
+        at = _journal_time(last.get("at"))
+        if at is not None:
+            age = f"{max(0.0, observed_at - at):.0f}s ago"
+        else:
+            age = "at no readable time" if last else "never"
         parts.append(f"last journal record {last.get('kind') or '(none)'} {age}")
+        if journal["state"] == JOURNAL_DEGRADED:
+            parts.append(f"journal degraded ({journal['reason'].split(': ', 1)[-1]})")
     silent = row["unavailable_sources"]
     tail = (
         f"; did not answer: {', '.join(silent)}, which is a fact about those channels, not about the head"

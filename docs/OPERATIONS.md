@@ -2360,8 +2360,9 @@ A head on the `local-pty` runtime (worker, reviewer or sprint observer; `kind` n
 is read from its own supervisor instead (`runtime: local-pty`, the backend its recorded run names): `process`
 and `heartbeat` from its launch identity (state, pid), `supervisor` from the supervisor's `status` (`alive`,
 `turn_open`, `turn`, `draining`, `stopping`), `lease` from the kernel's lock table (`held` with
-`holder_pid`, or `free`), and `journal.tail`, the last eight journal records. A source that did not answer
-is listed in `unavailable_sources`, never read as a gone head. Rows read through Orca panes say
+`holder_pid`, or `free`), and `journal.tail`, the last eight journal records; a journal with skipped,
+torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
+`unavailable_sources`, never read as a gone head. Rows read through Orca panes say
 `runtime: orca-legacy`; when every recorded head is supervised, or the workspace is git-managed, Orca is not
 called and `pane_channel` is `not_consulted` with its reason.
 

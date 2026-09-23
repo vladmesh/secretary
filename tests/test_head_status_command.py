@@ -676,6 +676,51 @@ class HeadStatusTests(unittest.TestCase):
         self.assertIn("UNPROVEN", row["summary"])
         self.assertIn("not about the head", row["summary"])
 
+    def _damage_journal(self, transform) -> dict:
+        """Rewrite the worker's journal through `transform` and answer head-status over it."""
+        record = self._supervised_record()
+        self._write_run_heartbeat(record, "worker", self._live_pid())
+        path = self.root / "data" / "heads" / "run-worker-1701" / "journal.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text(transform(lines), encoding="utf-8")
+        row = self._supervised_answer({self.ref: record})["heads"][0]
+        self.assertEqual(row["head"], HEAD_ALIVE, "a damaged journal says nothing about the head")
+        self.assertTrue(row["journal"]["answered"])
+        self.assertEqual(row["journal"]["state"], "degraded")
+        self.assertNotIn("journal", row["unavailable_sources"])
+        self.assertIn("journal degraded", row["summary"])
+        return row
+
+    def test_a_journal_record_with_no_numeric_time_degrades_the_journal_instead_of_raising(self) -> None:
+        def bad_time(lines):
+            last = json.loads(lines[-1])
+            last["at"] = "bad-time"
+            return "\n".join([*lines[:-1], json.dumps(last)]) + "\n"
+
+        row = self._damage_journal(bad_time)
+
+        self.assertEqual(row["journal"]["tail"][-1]["at"], "bad-time")
+        self.assertIn("carry no usable time", row["journal"]["reason"])
+        self.assertIn(f"last journal record {TURN_STARTED} at no readable time", row["summary"])
+
+    def test_a_malformed_middle_journal_line_is_reported_as_skipped(self) -> None:
+        row = self._damage_journal(lambda lines: "\n".join([lines[0], "{not json", *lines[1:]]) + "\n")
+
+        self.assertEqual(row["journal"]["malformed"], 1)
+        self.assertFalse(row["journal"]["truncated_tail"])
+        self.assertIn("1 malformed line(s) skipped", row["journal"]["reason"])
+        self.assertEqual(
+            [event["kind"] for event in row["journal"]["tail"]], [RUN_STARTED, INPUT_ACCEPTED, TURN_STARTED]
+        )
+
+    def test_a_torn_final_journal_line_is_reported_as_torn(self) -> None:
+        row = self._damage_journal(lambda lines: "\n".join(lines) + '\n{"seq": 4, "kind": "tu')
+
+        self.assertTrue(row["journal"]["truncated_tail"])
+        self.assertEqual(row["journal"]["malformed"], 0)
+        self.assertIn("the final line is torn", row["journal"]["reason"])
+        self.assertIn(f"last journal record {TURN_STARTED} 10s ago", row["summary"])
+
     def test_a_lock_no_process_holds_is_about_the_supervisor_not_the_head(self) -> None:
         record = self._supervised_record()
         self._write_run_heartbeat(record, "worker", self._live_pid())
