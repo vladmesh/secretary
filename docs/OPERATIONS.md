@@ -2356,10 +2356,14 @@ for an answer, 3 for degraded (no workspace path, or a host in `noop` mode). No 
   `missing_progress_sources`, `last_progress`, and `next_recovery_deadline` (or `null` with
   `deadline_note`). Ladder semantics: [Head vitality](HEAD_VITALITY.md).
 
-A sprint observer on the `local-pty` runtime owns no pane and gets a row of its own (`kind: observer`,
-`runtime: local-pty`): `process` from its launch identity, `supervisor` from the supervisor's `status`
-(`alive`, `turn_open`, `turn`, `output_bytes`, `journal_seq`), and `journal.tail`, the last eight journal
-records.
+A head on the `local-pty` runtime (worker, reviewer or sprint observer; `kind` names which) owns no pane and
+is read from its own supervisor instead (`runtime: local-pty`, the backend its recorded run names): `process`
+and `heartbeat` from its launch identity (state, pid), `supervisor` from the supervisor's `status` (`alive`,
+`turn_open`, `turn`, `draining`, `stopping`), `lease` from the kernel's lock table (`held` with
+`holder_pid`, or `free`), and `journal.tail`, the last eight journal records. A source that did not answer
+is listed in `unavailable_sources`, never read as a gone head. Rows read through Orca panes say
+`runtime: orca-legacy`; when every recorded head is supervised, or the workspace is git-managed, Orca is not
+called and `pane_channel` is `not_consulted` with its reason.
 
 Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:

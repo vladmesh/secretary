@@ -49,6 +49,7 @@ from secretary.dispatch.head_vitality import (
     snapshots_from_status,
 )
 from secretary.dispatch.head_vitality_episode import recovery_outlook
+from secretary.dispatch.host import _durable_head_run
 from secretary.dispatch.observer import load_observers, observer_head_status
 from secretary.dispatch.review import (
     command_terminal_status,
@@ -60,9 +61,10 @@ from secretary.dispatch.tui import provider_progress_for_persisted_run
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
 from secretary.runtime.head import HeadRun, HeadRunError
-from secretary.runtime.head.identity import head_process_status
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.runtime.head_runtime_backends import build_head_runtime
+from secretary.runtime.head.identity import HEARTBEAT_DEAD, HEARTBEAT_LIVE_MATCH, head_process_status
+from secretary.runtime.head.local_pty.protocol import SUPERVISOR_LOCK_NAME, SUPERVISOR_PID_NAME
+from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.local_pty_head import head_run_journal
 from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
@@ -83,6 +85,7 @@ PANE_NO_RUNTIME_PANE = "no-runtime-pane"
 PANE_NO_PANE = "no-pane"
 PANE_UNKNOWN = "unknown"
 PANE_UNAVAILABLE = "unavailable"
+PANE_NOT_CONSULTED = "not-consulted"
 
 # Printed on every answer, next to every head. An operator reading a row must not have to know the
 # module invariant to read the row correctly.
@@ -96,6 +99,10 @@ PANE_ADVISORY_INVARIANT = (
 # channel that was asked and could not answer, because reporting the two as one word would make an
 # unsampled source look like a broken one.
 NOT_OBSERVED = "not_observed"
+
+# A channel this answer deliberately did not ask: the pane inventory of a workspace no Orca pane
+# can describe. Distinct from `unavailable` for the same reason as above -- nothing refused.
+NOT_CONSULTED = "not_consulted"
 
 _ROLES = (("worker", "worker"), ("review", "reviewer"))
 
@@ -138,9 +145,15 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
     """
 
     _inventory: dict[str, WorkspaceInventory] = field(default_factory=dict)
+    #: Why the pane inventory is not to be asked at all; empty when it may be.
+    pane_refusal: str = ""
 
     def workspace_inventory(self, workspace: str) -> WorkspaceInventory:
         """One reading of the workspace -- its ptys and its renderer tree -- for every head."""
+        if self.pane_refusal:
+            # A workspace no Orca pane describes: a legacy-shaped row in it falls back to its pid
+            # heartbeat, exactly as it would behind an inventory that refused.
+            raise HostError(self.pane_refusal)
         if workspace not in self._inventory:
             self._inventory[workspace] = orca_workspace_inventory(self._run_json, workspace)
         return self._inventory[workspace]
@@ -186,12 +199,35 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
             "reason": "this dispatcher host is in noop mode and observes no live workspace",
             "invariant": PANE_ADVISORY_INVARIANT,
         }
-    host = HeadStatusHost()
     payload = runtime.production_state.load()
     records = runtime.production_state.records(payload)
-    panes, pane_channel, layout = _pane_inventory(host, target)
+    # Each row's backend is the one its durable run names, never the current profile's: a head
+    # raised on one backend is read through that backend, whatever the registry says now.
+    held = [
+        (ref, record, kind, role, _durable_head_run(_recorded_run(record, kind)))
+        for ref, record in sorted(records.items())
+        if _normalised(record.workspace) == target
+        for kind, role in _ROLES
+        if record.owns_head(kind)
+    ]
+    observers = _observer_runs(payload, target)
+    host = HeadStatusHost(
+        pane_refusal=_pane_refusal(
+            runtime, target, [run for *_, run in held] + [run for *_, run in observers]
+        )
+    )
+    if host.pane_refusal:
+        panes: list[Any] = []
+        layout: RuntimeLayout | None = None
+        pane_channel = {"state": NOT_CONSULTED, "reason": host.pane_refusal}
+        runtime_pane_channel: dict[str, Any] = {**pane_channel, "supported": False}
+    else:
+        panes, pane_channel, layout = _pane_inventory(host, target)
+        runtime_pane_channel = _layout_channel(layout)
     heads = [
-        _head_row(
+        _supervised_card_row(runtime, ref, record, run, kind=kind, role=role, observed_at=observed_at)
+        if run is not None and head_runtime_name(run) == LOCAL_PTY_RUNTIME
+        else _head_row(
             host,
             ref,
             record,
@@ -202,18 +238,15 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
             layout=layout,
             observed_at=observed_at,
         )
-        for ref, record in sorted(records.items())
-        if _normalised(record.workspace) == target
-        for kind, role in _ROLES
-        if record.owns_head(kind)
+        for ref, record, kind, role, run in held
     ]
-    heads.extend(_supervised_observer_rows(runtime, payload, target, observed_at))
+    heads.extend(_supervised_observer_rows(runtime, observers, observed_at))
     return {
         "status": "ok",
         "step": "head-status",
         "workspace": target,
         "pane_channel": pane_channel,
-        "runtime_pane_channel": _layout_channel(layout),
+        "runtime_pane_channel": runtime_pane_channel,
         "heads": heads,
         "invariant": PANE_ADVISORY_INVARIANT,
         "summary": (
@@ -222,6 +255,32 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
             else ["the dispatcher holds no head in this workspace"]
         ),
     }
+
+
+def _recorded_run(record: DispatcherRecord, kind: str) -> dict[str, Any]:
+    return record.review_head_run if kind == "review" else record.worker_head_run
+
+
+def _pane_refusal(runtime: Any, workspace: str, runs: list[HeadRun | None]) -> str:
+    """Why the pane inventory is not read for this workspace, or empty when it is.
+
+    It is read when some head here would be read through a pane: a recorded run on `orca-legacy`,
+    or a head identity with no durable run at all, and -- today's answer for a record older than
+    runs -- a workspace that names no run whatever. It is not read for a workspace whose every
+    recorded head is supervised, which no pane describes, nor for a git worktree the dispatcher cut
+    itself, which Orca never made.
+    """
+    if getattr(runtime.host, "_is_git_workspace", lambda _path: False)(workspace) is True:
+        return (
+            "not consulted: this is a git-managed workspace the dispatcher made, and no Orca pane "
+            "inventory describes it"
+        )
+    if runs and all(run is not None and head_runtime_name(run) == LOCAL_PTY_RUNTIME for run in runs):
+        return (
+            "not consulted: every head recorded in this workspace runs under a local-pty "
+            "supervisor, and none of them owns a pane"
+        )
+    return ""
 
 
 def _pane_inventory(host: Any, workspace: str) -> tuple[list[Any], dict[str, str], RuntimeLayout | None]:
@@ -285,6 +344,8 @@ def _head_row(
     row: dict[str, Any] = {
         "ref": ref,
         "role": role,
+        # The legacy case: a head that lives in an Orca pane, read through that pane's inventory.
+        "runtime": ORCA_LEGACY_RUNTIME,
         "run_id": run_id or None,
         "card_state": record.state,
         "runtime_pane": pane_state,
@@ -513,6 +574,8 @@ def _pane_axis(
     layout: RuntimeLayout | None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Whether this head's pty is drawn in the workspace, as the renderer itself reports it."""
+    if channel.get("state") == NOT_CONSULTED:
+        return PANE_NOT_CONSULTED, None
     if channel.get("state") != "available":
         return PANE_UNAVAILABLE, None
     matches = pane_matcher(record, kind=kind, task_ref=ref)
@@ -591,6 +654,11 @@ def _pane_sentence(row: dict[str, Any]) -> str:
         )
     if state == PANE_NO_PANE:
         return f"No pane in the workspace inventory answers to this head; {_NOT_ABOUT_THE_HEAD}."
+    if state == PANE_NOT_CONSULTED:
+        return (
+            "The pane inventory was not consulted for this workspace, so nothing is known about its "
+            "pane; that is a fact about that channel, not about the head."
+        )
     if state == PANE_UNAVAILABLE:
         return (
             "The pane inventory could not be read, so nothing is known about its pane; "
@@ -611,7 +679,7 @@ def _summary(row: dict[str, Any]) -> str:
     """
     head = row["head"]
     run = row["run_id"] or "no run id"
-    who = f"{row['role']} head of {row['ref']} (run {run})"
+    who = f"{row['role']} head of {row['ref']} ({ORCA_LEGACY_RUNTIME} run {run})"
     if head == HEAD_ALIVE:
         proof = (
             f"{row['proved_by']} says its process is {row['process']}"
@@ -669,74 +737,306 @@ def _no_session() -> Any:
 #: How many of a supervised head's last journal records a row carries.
 JOURNAL_TAIL_RECORDS = 8
 
+# The sources a supervised row reads, beside the pid heartbeat every row shares.
+SUPERVISOR_SOURCE = "supervisor"
+LEASE_SOURCE = "supervisor_lock"
+JOURNAL_SOURCE = "journal"
 
-def _supervised_observer_rows(
-    runtime: Any, payload: dict[str, Any], workspace: str, observed_at: float
-) -> list[dict[str, Any]]:
-    """A row for each sprint observer in this workspace that a local-pty supervisor holds.
+LEASE_HELD = "held"
+LEASE_FREE = "free"
 
-    Such a head owns no pane, so the pane inventory above never lists it, and the row is read from
-    what that backend keeps instead: the launch identity, the supervisor's own `status` answer and
-    the last records of the head's journal. Read-only like the rest of this module: `observe` asks
-    the supervisor one question and the journal is read from disk; nothing is delivered, drained or
-    stopped, and a channel that cannot answer is reported as not answering.
-    """
-    rows = []
+
+def _observer_runs(payload: dict[str, Any], workspace: str) -> list[tuple[str, Any, HeadRun | None]]:
+    """Every sprint observer recorded in this workspace, with the run it names or `None`."""
+    observers = []
     for ref, record in sorted(load_observers(payload).items()):
         if _normalised(record.workspace) != workspace:
             continue
         try:
-            run = HeadRun.from_json(record.head_run)
+            run: HeadRun | None = HeadRun.from_json(record.head_run)
         except (HeadRunError, TypeError, ValueError):
+            run = None
+        observers.append((ref, record, run))
+    return observers
+
+
+def _supervised_observer_rows(
+    runtime: Any, observers: list[tuple[str, Any, HeadRun | None]], observed_at: float
+) -> list[dict[str, Any]]:
+    """A row for each sprint observer in this workspace that a local-pty supervisor holds."""
+    rows = []
+    for ref, record, run in observers:
+        if run is None or head_runtime_name(run) != LOCAL_PTY_RUNTIME:
             continue
-        if run.spec.runtime != LOCAL_PTY_RUNTIME:
-            continue
-        process = observer_head_status(record)
-        root = Path(runtime.data_dir) / "heads"
+        row = _supervised_row(
+            runtime, run, observer_head_status(record), ref=ref, role="observer", observed_at=observed_at
+        )
+        row.update(kind="observer", profile=record.head, observer_state=record.state)
+        rows.append(row)
+    return rows
+
+
+def _supervised_card_row(
+    runtime: Any,
+    ref: str,
+    record: DispatcherRecord,
+    run: HeadRun,
+    *,
+    kind: str,
+    role: str,
+    observed_at: float,
+) -> dict[str, Any]:
+    """A card's worker or reviewer that a local-pty supervisor holds, read as the observer is."""
+    review = kind == "review"
+    pid_file = (record.review_pid_file if review else record.worker_pid_file) or run.pid_file
+    process = head_run_process_status(
+        pid_file or pid_file_path(kind, ref),
+        run=record.review_head_run if review else record.worker_head_run,
+        role=kind,
+        task=f"card:{ref}",
+        leaf=record.review_leaf if review else record.worker_leaf,
+    )
+    row = _supervised_row(runtime, run, process, ref=ref, role=role, observed_at=observed_at)
+    row.update(kind=kind, profile=record.review_head if review else record.head, card_state=record.state)
+    return row
+
+
+def _supervised_row(
+    runtime: Any,
+    run: HeadRun,
+    process: dict[str, Any],
+    *,
+    ref: str,
+    role: str,
+    observed_at: float,
+) -> dict[str, Any]:
+    """One head a local-pty supervisor holds, read from what that backend keeps instead of a pane.
+
+    Four sources, each reported as answering or not: the launch identity (`process`, the pid
+    heartbeat the caller already classified for this role), the supervisor's own `status` answer,
+    the supervisor lock and who holds it, and the last records of the head's journal. Read-only
+    like the rest of this module: `observe` asks the supervisor one question and everything else
+    is read from disk; nothing is delivered, drained or stopped. As with a pane, only the pid
+    heartbeat may say the head is gone -- a supervisor that did not answer, a lock nobody holds and
+    an unreadable journal are facts about those channels.
+    """
+    root = Path(runtime.data_dir) / "heads"
+    run_dir = root / run.run_id
+    heartbeat = {
+        "source": SnapshotSource.PID_HEARTBEAT.value,
+        "answered": bool(process.get("known")),
+        "state": str(process.get("state") or "unknown"),
+        "pid": process.get("pid"),
+        "reason": str(process.get("reason") or ""),
+    }
+    supervisor = _supervisor_answer(root, run)
+    lease = _supervisor_lease(run_dir)
+    journal = _journal_tail(run_dir)
+    head, proved_by = _supervised_verdict(heartbeat, supervisor)
+    row: dict[str, Any] = {
+        "ref": ref,
+        "role": role,
+        "runtime": LOCAL_PTY_RUNTIME,
+        "run_id": run.run_id,
+        "head": head,
+        "proved_by": proved_by,
+        "process": {"state": heartbeat["state"], "pid": heartbeat["pid"]},
+        "heartbeat": heartbeat,
+        "supervisor": supervisor,
+        "lease": lease,
+        "journal": journal,
+        "unavailable_sources": [
+            name
+            for name, source in (
+                (SnapshotSource.PID_HEARTBEAT.value, heartbeat),
+                (SUPERVISOR_SOURCE, supervisor),
+                (LEASE_SOURCE, lease),
+                (JOURNAL_SOURCE, journal),
+            )
+            if not source["answered"]
+        ],
+        "invariant": PANE_ADVISORY_INVARIANT,
+    }
+    row["summary"] = _supervised_summary(row, observed_at)
+    return row
+
+
+def _supervisor_answer(root: Path, run: HeadRun) -> dict[str, Any]:
+    """The supervisor's own `status` answer, or why it gave none."""
+    try:
         seen = build_head_runtime(
             LOCAL_PTY_RUNTIME,
             session=_no_session,
             local_pty_root=lambda: root,
             head_process_status=head_process_status,
         ).observe(run)
-        status = seen.evidence if isinstance(seen.evidence, dict) else {}
-        try:
-            tail = [
-                {key: event[key] for key in ("seq", "kind", "at", "turn", "reason", "bytes", "subject") if key in event}
-                for event in head_run_journal(root / run.run_id)[-JOURNAL_TAIL_RECORDS:]
-            ]
-            journal = {"state": SourceAvailability.AVAILABLE.value, "tail": tail}
-        except OSError as exc:
-            tail = []
-            journal = {"state": SourceAvailability.UNAVAILABLE.value, "reason": str(exc)[:240], "tail": []}
-        last = tail[-1] if tail else {}
+    except (OSError, ValueError, HostError) as exc:
+        return {
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "status": "",
+            "reason": f"the supervisor could not be observed: {str(exc)[:200]}",
+        }
+    status = seen.evidence if isinstance(seen.evidence, dict) and "alive" in seen.evidence else {}
+    answer: dict[str, Any] = {
+        "answered": bool(status),
+        "state": (SourceAvailability.AVAILABLE if status else SourceAvailability.UNAVAILABLE).value,
+        "status": seen.status,
+        "reason": seen.reason,
+        **{
+            key: status[key]
+            for key in (
+                "supervisor_pid",
+                "head_pid",
+                "alive",
+                "turn_open",
+                "turn",
+                "output_bytes",
+                "journal_seq",
+                "draining",
+                "stopping",
+            )
+            if key in status
+        },
+    }
+    if not status and seen.evidence:
+        answer["detail"] = str(seen.evidence)[:240]
+    return answer
+
+
+def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
+    """Who holds this run's supervisor lock, read from the kernel's lock table without taking it.
+
+    A supervisor takes an exclusive `flock` on `supervisor.lock` for its whole life and writes its
+    pid into the file; the kernel drops the lock when that process ends. So the holder comes from
+    `/proc/locks`, where reading is an observation rather than an attempt on the lock, and the pids
+    in `supervisor.lock` and `supervisor.pid` are reported beside it. A lock no process holds says
+    no supervisor owns the run; a head it left behind can still be running, which is the
+    heartbeat's question.
+    """
+    path = run_dir / SUPERVISOR_LOCK_NAME
+    try:
+        info = path.stat()
+        written = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return {
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "holder_pid": None,
+            "reason": f"the supervisor lock could not be read ({exc.strerror or exc})",
+        }
+    lease: dict[str, Any] = {
+        "written_pid": _pid_or_none(written),
+        "supervisor_pid": _pid_file_value(run_dir / SUPERVISOR_PID_NAME),
+    }
+    try:
+        holders = _flock_holders(info)
+    except OSError as exc:
+        return {
+            **lease,
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "holder_pid": None,
+            "reason": f"the kernel lock table could not be read ({exc.strerror or exc})",
+        }
+    if not holders:
+        return {
+            **lease,
+            "answered": True,
+            "state": LEASE_FREE,
+            "holder_pid": None,
+            "reason": "no process holds the supervisor lock, so no supervisor owns this run",
+        }
+    return {**lease, "answered": True, "state": LEASE_HELD, "holder_pid": holders[0], "reason": ""}
+
+
+def _flock_holders(info: os.stat_result) -> list[int]:
+    """The pids `/proc/locks` names as holding an `flock` on this file."""
+    holders = []
+    wanted = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    with open("/proc/locks", encoding="utf-8") as table:
+        for line in table:
+            # `N: FLOCK ADVISORY WRITE <pid> <major>:<minor>:<inode> 0 EOF`; a waiter reads `N: ->`.
+            fields = line.split()
+            if len(fields) < 6 or fields[1] != "FLOCK":
+                continue
+            try:
+                major, minor, inode = fields[5].split(":")
+                if (int(major, 16), int(minor, 16), int(inode)) == wanted:
+                    holders.append(int(fields[4]))
+            except ValueError:
+                continue
+    return holders
+
+
+def _pid_or_none(text: str) -> int | None:
+    return int(text) if text.isdigit() else None
+
+
+def _pid_file_value(path: Path) -> int | None:
+    try:
+        return _pid_or_none(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return None
+
+
+def _journal_tail(run_dir: Path) -> dict[str, Any]:
+    """The last records of the head's journal, or why it could not be read."""
+    try:
+        events = head_run_journal(run_dir)[-JOURNAL_TAIL_RECORDS:]
+    except OSError as exc:
+        return {
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "reason": f"the journal could not be read ({str(exc)[:200]})",
+            "tail": [],
+        }
+    kept = ("seq", "kind", "at", "turn", "reason", "bytes", "subject")
+    tail = [{key: event[key] for key in kept if key in event} for event in events]
+    return {"answered": True, "state": SourceAvailability.AVAILABLE.value, "tail": tail}
+
+
+def _supervised_verdict(heartbeat: dict[str, Any], supervisor: dict[str, Any]) -> tuple[str, str | None]:
+    """Alive, absent or unproven, with only the pid heartbeat allowed to say absent."""
+    if heartbeat["state"] == HEARTBEAT_LIVE_MATCH:
+        return HEAD_ALIVE, SnapshotSource.PID_HEARTBEAT.value
+    if heartbeat["state"] == HEARTBEAT_DEAD:
+        return HEAD_ABSENT, SnapshotSource.PID_HEARTBEAT.value
+    if supervisor["answered"] and supervisor.get("alive"):
+        return HEAD_ALIVE, SUPERVISOR_SOURCE
+    return HEAD_UNPROVEN, None
+
+
+def _supervised_summary(row: dict[str, Any], observed_at: float) -> str:
+    """One line: the verdict and its proof, then what each supervised source said."""
+    who = f"{row['role']} head of {row['ref']} (local-pty run {row['run_id']})"
+    if row["head"] == HEAD_UNPROVEN:
+        verdict = f"{who} is UNPROVEN: no source proved it either way"
+    else:
+        verdict = f"{who} is {row['head'].upper()} by {row['proved_by']}"
+    heartbeat = row["heartbeat"]
+    parts = [f"process {heartbeat['state']} pid {heartbeat['pid'] or '-'}"]
+    supervisor = row["supervisor"]
+    if supervisor["answered"]:
+        flags = [
+            "head alive" if supervisor.get("alive") else "head exited",
+            f"turn {'open' if supervisor.get('turn_open') else 'closed'}",
+        ]
+        flags.extend(flag for flag in ("draining", "stopping") if supervisor.get(flag))
+        parts.append("supervisor " + ", ".join(flags))
+    lease = row["lease"]
+    if lease["answered"]:
+        held = lease["state"] == LEASE_HELD
+        parts.append(f"lock held by pid {lease['holder_pid']}" if held else "lock held by nobody")
+    journal = row["journal"]
+    if journal["answered"]:
+        last = journal["tail"][-1] if journal["tail"] else {}
         age = f"{max(0.0, observed_at - float(last['at'])):.0f}s ago" if last.get("at") else "never"
-        process_state = str(process.get("state") or "unknown")
-        turn = "open" if status.get("turn_open") else "closed" if status else "unread"
-        rows.append(
-            {
-                "ref": ref,
-                "kind": "observer",
-                "role": "observer",
-                "runtime": LOCAL_PTY_RUNTIME,
-                "run_id": run.run_id,
-                "head": record.head,
-                "observer_state": record.state,
-                "process": {"state": process_state, "pid": process.get("pid")},
-                "supervisor": {
-                    "status": seen.status,
-                    "reason": seen.reason,
-                    **{
-                        key: status[key]
-                        for key in ("alive", "turn_open", "turn", "output_bytes", "journal_seq", "draining", "stopping")
-                        if key in status
-                    },
-                },
-                "journal": journal,
-                "summary": (
-                    f"observer {ref}: local-pty run {run.run_id}, process {process_state}, turn {turn}, "
-                    f"last journal record {last.get('kind') or '(none)'} {age}"
-                ),
-            }
-        )
-    return rows
+        parts.append(f"last journal record {last.get('kind') or '(none)'} {age}")
+    silent = row["unavailable_sources"]
+    tail = (
+        f"; did not answer: {', '.join(silent)}, which is a fact about those channels, not about the head"
+        if silent
+        else ""
+    )
+    return f"{verdict}: {'; '.join(parts)}{tail}."
