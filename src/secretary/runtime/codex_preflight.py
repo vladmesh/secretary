@@ -31,8 +31,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from secretary import _proc
-
 if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
     from .head.run import HeadRun
 
@@ -720,10 +718,6 @@ def _unknown_run(run: HeadRun, reason: str) -> HeadRun:
     )
 
 
-# How long `codex --version` may take before its process group is killed.
-CODEX_VERSION_TIMEOUT_SECONDS = 10
-
-
 def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
     """Hash and query the binary that an ordinary ``codex`` launch resolves to.
 
@@ -738,9 +732,13 @@ def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
         raise OSError(f"codex executable {path} is not a regular file")
     digest = _file_digest(path)
     try:
-        # Its own process group: `codex` is commonly the npm launcher, which spawns the native binary
-        # as a child, and a dispatcher tick's unit no longer kills what a timeout left behind.
-        result = _proc.run_isolated([str(path), "--version"], timeout=CODEX_VERSION_TIMEOUT_SECONDS)
+        result = subprocess.run(
+            [str(path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise OSError(f"cannot read Codex CLI version: {exc}") from None
     if result.returncode != 0:

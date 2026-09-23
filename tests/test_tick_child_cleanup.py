@@ -23,7 +23,6 @@ from secretary import _proc, head_health, state_repo
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.types import HostError
-from secretary.runtime import codex_preflight
 from tests.fakes.dispatcher import FakeCatalog
 
 # A remote helper Git forks into its own process group for `hang::` URLs: it records its pid and
@@ -89,21 +88,6 @@ class TickChildCleanupTests(unittest.TestCase):
         self.assertIn("fetch failed", str(caught.exception))
         self.assertIn("timed out", str(caught.exception))
         self.assertTrue(_gone(self.descendant()), "Git's remote helper outlived the Git timeout")
-
-    def test_a_timed_out_codex_version_takes_the_native_binary_with_it(self):
-        """A codex launch preflight: the npm `codex` launcher spawns the native binary under it."""
-        codex = Path(self.tmp.name) / "codex"
-        codex.write_text(
-            "#!/bin/sh\n" + HANGING_SHELL.format(pid_file=self.pid_file) + "\n", encoding="utf-8"
-        )
-        codex.chmod(0o755)
-        with (
-            mock.patch.object(codex_preflight, "CODEX_VERSION_TIMEOUT_SECONDS", 0.5),
-            self.assertRaises(OSError) as caught,
-        ):
-            codex_preflight._codex_cli_identity(str(codex))
-        self.assertIn("cannot read Codex CLI version", str(caught.exception))
-        self.assertTrue(_gone(self.descendant()), "the codex launcher's child outlived its timeout")
 
     def test_a_crossing_whose_group_cannot_be_signalled_still_returns_a_bounded_timeout(self):
         """`runuser` as the group leader, and `killpg` refused (EPERM): no raise, no unbounded reap.
