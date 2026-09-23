@@ -16,6 +16,7 @@ assertions are written against the request the command really sends and the answ
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import math
@@ -771,8 +772,85 @@ class HeadStatusTests(unittest.TestCase):
         self.assertFalse(row["journal"]["answered"])
         self.assertEqual(row["journal"]["state"], "unavailable")
         self.assertEqual(row["journal"]["tail"], [])
-        self.assertIn("could not be interpreted (RuntimeError: reader broke)", row["journal"]["reason"])
+        self.assertIn(
+            "could not be read or interpreted (RuntimeError: reader broke)", row["journal"]["reason"]
+        )
         self.assertIn("journal", row["unavailable_sources"])
+
+    def test_no_supervised_source_that_fails_to_read_or_interpret_fails_head_status(self) -> None:
+        run_dir = self.root / "data" / "heads" / "run-worker-1701"
+
+        def write(name: str, content: bytes):
+            return lambda record, stack: (run_dir / name).write_bytes(content)
+
+        def garbage_process(**_kwargs):
+            return {"known": True, "state": 7, "pid": "not-a-pid", "reason": ["x"]}
+
+        def patched(name: str, **kwargs):
+            return lambda record, stack: stack.enter_context(
+                mock.patch.object(head_status_module, name, **kwargs)
+            )
+
+        # (case, damage, the source that must not answer, the exception its reason names or None)
+        cases = [
+            ("invalid-UTF-8 lock", write("supervisor.lock", b"\xff\n"), "supervisor_lock", None),
+            ("invalid-UTF-8 pid file", write("supervisor.pid", b"\xfe\xff\n"), "supervisor_lock", None),
+            ("pid file of 1e999", write("supervisor.pid", b"1e999\n"), "supervisor_lock", None),
+            (
+                "lease reader raises",
+                patched("head_run_supervisor_lease", side_effect=RuntimeError("lease broke")),
+                "supervisor_lock",
+                "RuntimeError",
+            ),
+            (
+                "supervisor reader raises",
+                patched("build_head_runtime", side_effect=RuntimeError("supervisor broke")),
+                "supervisor",
+                "RuntimeError",
+            ),
+            (
+                "journal reader raises",
+                patched("head_run_journal_read", side_effect=RuntimeError("journal broke")),
+                "journal",
+                "RuntimeError",
+            ),
+            (
+                "heartbeat mapping gets garbage types",
+                patched("head_run_process_status", side_effect=garbage_process),
+                "pid_heartbeat",
+                "TypeError",
+            ),
+            (
+                "invalid-UTF-8 heartbeat file",
+                lambda record, stack: Path(record.worker_pid_file).write_bytes(b"\xff{"),
+                "pid_heartbeat",
+                "UnicodeDecodeError",
+            ),
+        ]
+        for case, damage, source, raised in cases:
+            with self.subTest(case=case):
+                shutil.rmtree(self.root / "data" / "heads", ignore_errors=True)
+                record = self._supervised_record()
+                self._write_run_heartbeat(record, "worker", self._live_pid())
+                with contextlib.ExitStack() as stack:
+                    damage(record, stack)
+                    rows = self._supervised_answer({self.ref: record})["heads"]
+
+                self.assertEqual(len(rows), 1)
+                row = rows[0]
+                key = {"pid_heartbeat": "heartbeat", "supervisor_lock": "lease"}.get(source, source)
+                self.assertIn(source, row["unavailable_sources"])
+                self.assertFalse(row[key]["answered"])
+                self.assertEqual(row[key]["state"], "unavailable")
+                if raised:
+                    self.assertIn(f"could not be read or interpreted ({raised}: ", row[key]["reason"])
+                if source == "pid_heartbeat":
+                    self.assertEqual(
+                        row["head"], HEAD_UNPROVEN, "a heartbeat that did not answer proves nothing"
+                    )
+                else:
+                    self.assertEqual((row["head"], row["proved_by"]), (HEAD_ALIVE, "pid_heartbeat"))
+                self.assertIn("did not answer", row["summary"])
 
     def test_a_malformed_middle_journal_line_is_reported_as_skipped(self) -> None:
         row = self._damage_journal(lambda lines: "\n".join([lines[0], "{not json", *lines[1:]]) + "\n")

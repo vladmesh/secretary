@@ -2812,7 +2812,9 @@ class SupervisorLease:
     `lock_readable` is false when `supervisor.lock` itself could not be read; nothing else was
     then looked at. `table_readable` is false when the lock was read but `/proc/locks` was not, so
     the pids the files hold are known and the holder is not. `error` says what failed in either
-    case. With both true, an empty `holders` means no process holds the lock.
+    case. With both true, an empty `holders` means no process holds the lock. `content_error` is
+    set when either file was read but holds something other than a pid (bytes that are not UTF-8,
+    say); the pid it would have given is then `None`, and nothing was raised.
     """
 
     lock_readable: bool
@@ -2821,6 +2823,7 @@ class SupervisorLease:
     written_pid: int | None = None
     supervisor_pid: int | None = None
     error: str = ""
+    content_error: str = ""
 
 
 def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLease:
@@ -2836,11 +2839,15 @@ def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLeas
     path, pid_path = head_run_supervisor_files(run_dir)
     try:
         info = path.stat()
-        written = path.read_text(encoding="utf-8").strip()
+        written = path.read_bytes()
     except OSError as exc:
         return SupervisorLease(lock_readable=False, error=str(exc.strerror or exc))
-    written_pid = _pid_or_none(written)
-    supervisor_pid = _pid_file_value(pid_path)
+    written_pid, lock_damage = _pid_content(path.name, written)
+    try:
+        supervisor_pid, pid_damage = _pid_content(pid_path.name, pid_path.read_bytes())
+    except OSError:
+        supervisor_pid, pid_damage = None, ""
+    content_error = "; ".join(damage for damage in (lock_damage, pid_damage) if damage)
     try:
         holders = _flock_holders(info)
     except OSError as exc:
@@ -2849,6 +2856,7 @@ def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLeas
             written_pid=written_pid,
             supervisor_pid=supervisor_pid,
             error=str(exc.strerror or exc),
+            content_error=content_error,
         )
     return SupervisorLease(
         lock_readable=True,
@@ -2856,6 +2864,7 @@ def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLeas
         holders=tuple(holders),
         written_pid=written_pid,
         supervisor_pid=supervisor_pid,
+        content_error=content_error,
     )
 
 
@@ -2878,15 +2887,19 @@ def _flock_holders(info: os.stat_result) -> list[int]:
     return holders
 
 
-def _pid_or_none(text: str) -> int | None:
-    return int(text) if text.isdigit() else None
+def _pid_content(name: str, raw: bytes) -> tuple[int | None, str]:
+    """The pid a lock or pid file holds, or `None` and why its content is not one; never raises.
 
-
-def _pid_file_value(path: Path) -> int | None:
-    try:
-        return _pid_or_none(path.read_text(encoding="utf-8").strip())
-    except OSError:
-        return None
+    An empty file is a supervisor that has not written its pid yet, not damage. Anything else that
+    is not a plain ASCII decimal -- bytes that are not UTF-8, `1e999`, a sign -- is unreadable
+    content rather than an exception.
+    """
+    text = raw.strip()
+    if not text:
+        return None, ""
+    if text.isdigit():  # bytes.isdigit is ASCII-only, so int() below cannot refuse it
+        return int(text), ""
+    return None, f"{name} holds no pid ({text[:40]!r})"
 
 
 def _last_event_at(address: _Address) -> float:

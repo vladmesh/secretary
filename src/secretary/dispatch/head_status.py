@@ -36,6 +36,7 @@ import math
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -771,7 +772,12 @@ def _supervised_observer_rows(
         if run is None or head_runtime_name(run) != LOCAL_PTY_RUNTIME:
             continue
         row = _supervised_row(
-            runtime, run, observer_head_status(record), ref=ref, role="observer", observed_at=observed_at
+            runtime,
+            run,
+            lambda record=record: observer_head_status(record),
+            ref=ref,
+            role="observer",
+            observed_at=observed_at,
         )
         row.update(kind="observer", profile=record.head, observer_state=record.state)
         rows.append(row)
@@ -791,13 +797,16 @@ def _supervised_card_row(
     """A card's worker or reviewer that a local-pty supervisor holds, read as the observer is."""
     review = kind == "review"
     pid_file = (record.review_pid_file if review else record.worker_pid_file) or run.pid_file
-    process = head_run_process_status(
-        pid_file or pid_file_path(kind, ref),
-        run=record.review_head_run if review else record.worker_head_run,
-        role=kind,
-        task=f"card:{ref}",
-        leaf=record.review_leaf if review else record.worker_leaf,
-    )
+
+    def process() -> dict[str, Any]:
+        return head_run_process_status(
+            pid_file or pid_file_path(kind, ref),
+            run=record.review_head_run if review else record.worker_head_run,
+            role=kind,
+            task=f"card:{ref}",
+            leaf=record.review_leaf if review else record.worker_leaf,
+        )
+
     row = _supervised_row(runtime, run, process, ref=ref, role=role, observed_at=observed_at)
     row.update(kind=kind, profile=record.review_head if review else record.head, card_state=record.state)
     return row
@@ -806,7 +815,7 @@ def _supervised_card_row(
 def _supervised_row(
     runtime: Any,
     run: HeadRun,
-    process: dict[str, Any],
+    process: Callable[[], dict[str, Any]],
     *,
     ref: str,
     role: str,
@@ -814,26 +823,25 @@ def _supervised_row(
 ) -> dict[str, Any]:
     """One head a local-pty supervisor holds, read from what that backend keeps instead of a pane.
 
-    Four sources, each reported as answering or not: the launch identity (`process`, the pid
-    heartbeat the caller already classified for this role), the supervisor's own `status` answer,
+    Four sources, each reported as answering or not: the launch identity (`process` reads the pid
+    heartbeat the caller classifies for this role), the supervisor's own `status` answer,
     the supervisor lock and who holds it, and the last records of the head's journal. Read-only
     like the rest of this module: `observe` asks the supervisor one question and everything else
     is read from disk; nothing is delivered, drained or stopped. As with a pane, only the pid
     heartbeat may say the head is gone -- a supervisor that did not answer, a lock nobody holds and
     an unreadable journal are facts about those channels.
+
+    Every source is read through `_source`, so nothing any of them holds can make head-status fail:
+    a read or an interpretation that raises is that source not answering. What the verdict and the
+    summary read of a source is only `answered`, `state` and `reason`, the keys every shape carries;
+    anything else they look at is read with a default.
     """
     root = Path(runtime.data_dir) / "heads"
     run_dir = root / run.run_id
-    heartbeat = {
-        "source": SnapshotSource.PID_HEARTBEAT.value,
-        "answered": bool(process.get("known")),
-        "state": str(process.get("state") or "unknown"),
-        "pid": process.get("pid"),
-        "reason": str(process.get("reason") or ""),
-    }
-    supervisor = _supervisor_answer(root, run)
-    lease = _supervisor_lease(run_dir)
-    journal = _journal_tail(run_dir)
+    heartbeat = _source(SnapshotSource.PID_HEARTBEAT.value, lambda: _heartbeat(process()), pid=None)
+    supervisor = _source(SUPERVISOR_SOURCE, lambda: _supervisor_answer(root, run), status="")
+    lease = _source(LEASE_SOURCE, lambda: _supervisor_lease(run_dir), holder_pid=None)
+    journal = _source(JOURNAL_SOURCE, lambda: _journal_tail(run_dir), tail=[])
     head, proved_by = _supervised_verdict(heartbeat, supervisor)
     row: dict[str, Any] = {
         "ref": ref,
@@ -842,7 +850,7 @@ def _supervised_row(
         "run_id": run.run_id,
         "head": head,
         "proved_by": proved_by,
-        "process": {"state": heartbeat["state"], "pid": heartbeat["pid"]},
+        "process": {"state": heartbeat["state"], "pid": heartbeat.get("pid")},
         "heartbeat": heartbeat,
         "supervisor": supervisor,
         "lease": lease,
@@ -861,6 +869,49 @@ def _supervised_row(
     }
     row["summary"] = _supervised_summary(row, observed_at)
     return row
+
+
+def _source(name: str, read: Callable[[], dict[str, Any]], **empty: Any) -> dict[str, Any]:
+    """One supervised source's answer, or the uniform shape of a source that did not answer.
+
+    The one place a supervised row guards what it reads. Heartbeat files, the supervisor's reply,
+    the lock files and the journal are all outside this process's control, so any exception their
+    read or interpretation raises is this source not answering -- never a failed command and never
+    a verdict. `empty` is the source's own empty evidence (a journal's `tail`, say), so a consumer
+    of the payload finds the same keys either way.
+    """
+    try:
+        return read()
+    except Exception as exc:  # noqa: BLE001 - every supervised source is untrusted input
+        return {
+            **empty,
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "reason": f"{name} could not be read or interpreted ({type(exc).__name__}: {str(exc)[:200]})",
+        }
+
+
+def _heartbeat(process: dict[str, Any]) -> dict[str, Any]:
+    """The pid heartbeat as a supervised source, from the classification of this role's pid file."""
+    if not isinstance(process, dict):
+        raise TypeError(f"the heartbeat classification is a {type(process).__name__}, not a mapping")
+    known, state, pid, reason = (process.get(key) for key in ("known", "state", "pid", "reason"))
+    for key, value, types in (
+        ("known", known, (bool, type(None))),
+        ("state", state, (str, type(None))),
+        ("reason", reason, (str, type(None))),
+    ):
+        if not isinstance(value, types):
+            raise TypeError(f"the heartbeat's {key} is a {type(value).__name__}")
+    if pid is not None and (isinstance(pid, bool) or not isinstance(pid, int)):
+        raise TypeError(f"the heartbeat's pid is a {type(pid).__name__}")
+    return {
+        "source": SnapshotSource.PID_HEARTBEAT.value,
+        "answered": bool(known),
+        "state": state or "unknown",
+        "pid": pid,
+        "reason": reason or "",
+    }
 
 
 def _supervisor_answer(root: Path, run: HeadRun) -> dict[str, Any]:
@@ -917,6 +968,14 @@ def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
             "reason": f"the supervisor lock could not be read ({lease.error})",
         }
     files: dict[str, Any] = {"written_pid": lease.written_pid, "supervisor_pid": lease.supervisor_pid}
+    if lease.content_error:
+        return {
+            **files,
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "holder_pid": None,
+            "reason": f"the supervisor lock files hold unreadable content ({lease.content_error})",
+        }
     if not lease.table_readable:
         return {
             **files,
@@ -937,27 +996,14 @@ def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
 
 
 def _journal_tail(run_dir: Path) -> dict[str, Any]:
-    """The last records of the head's journal, or why it could not be read or interpreted.
+    """The last records of the head's journal, or why it could not be read.
 
-    The one boundary where journal data enters a row, and it is total: nothing a journal holds can
-    make head-status fail. Everything the rest of the module reads from the answer is normalised
-    here -- each tail record's `at` is a finite positive float or absent -- so no consumer parses a
-    raw journal field. A journal that cannot be read, or whose content cannot be interpreted, is an
-    unavailable source; one read only in part is degraded. Neither says anything about the head.
+    Everything the rest of the module reads from the answer is normalised here -- each tail
+    record's `at` is a finite positive float or absent -- so no consumer parses a raw journal field.
+    A journal that cannot be read is an unavailable source; one read only in part is degraded.
+    Neither says anything about the head. Content that cannot be interpreted at all raises, and
+    `_source` reports that as the journal not answering.
     """
-    try:
-        return _journal_tail_read(run_dir)
-    except Exception as exc:  # noqa: BLE001 - journal content is untrusted; any failure is the source's
-        return {
-            "answered": False,
-            "state": SourceAvailability.UNAVAILABLE.value,
-            "reason": f"the journal could not be interpreted ({type(exc).__name__}: {str(exc)[:200]})",
-            "tail": [],
-        }
-
-
-def _journal_tail_read(run_dir: Path) -> dict[str, Any]:
-    """`_journal_tail` without its guard: the read, the tail, its times and the damage accounting."""
     try:
         read = head_run_journal_read(run_dir)
     except OSError as exc:
@@ -988,7 +1034,7 @@ def _journal_tail_read(run_dir: Path) -> dict[str, Any]:
     if untimed:
         damage.append(f"{untimed} tail record(s) carry no usable time")
     if not damage:
-        return {"answered": True, "state": SourceAvailability.AVAILABLE.value, "tail": tail}
+        return {"answered": True, "state": SourceAvailability.AVAILABLE.value, "reason": "", "tail": tail}
     # The journal answered, but not in full: its tail is what could be read, never a clean record.
     return {
         "answered": True,
@@ -1034,7 +1080,7 @@ def _supervised_summary(row: dict[str, Any], observed_at: float) -> str:
     else:
         verdict = f"{who} is {row['head'].upper()} by {row['proved_by']}"
     heartbeat = row["heartbeat"]
-    parts = [f"process {heartbeat['state']} pid {heartbeat['pid'] or '-'}"]
+    parts = [f"process {heartbeat['state']} pid {heartbeat.get('pid') or '-'}"]
     supervisor = row["supervisor"]
     if supervisor["answered"]:
         flags = [
@@ -1046,15 +1092,16 @@ def _supervised_summary(row: dict[str, Any], observed_at: float) -> str:
     lease = row["lease"]
     if lease["answered"]:
         held = lease["state"] == LEASE_HELD
-        parts.append(f"lock held by pid {lease['holder_pid']}" if held else "lock held by nobody")
+        parts.append(f"lock held by pid {lease.get('holder_pid')}" if held else "lock held by nobody")
     journal = row["journal"]
     if journal["answered"]:
         # `at` is `_journal_tail`'s normalised float or absent, never a raw journal field.
-        last = journal["tail"][-1] if journal["tail"] else {}
+        records = journal.get("tail") or []
+        last = records[-1] if records else {}
         if "at" in last:
             age = f"{max(0.0, observed_at - last['at']):.0f}s ago"
         else:
-            age = "at no readable time" if journal["tail"] else "never"
+            age = "at no readable time" if records else "never"
         parts.append(f"last journal record {last.get('kind') or '(none)'} {age}")
         if journal["state"] == JOURNAL_DEGRADED:
             parts.append(f"journal degraded ({journal['reason'].split(': ', 1)[-1]})")
