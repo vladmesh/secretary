@@ -52,12 +52,12 @@ def probe_env() -> dict[str, str]:
     """This process's environment with our own interpreter's directory first on ``PATH``.
 
     The probe string lives in the head registry (`resources.*.probe`) and stays host-agnostic on
-    purpose — it says `python3 -P -m triggered_agents ...` so the registry restores onto another
+    purpose — it says `python3 -P -m <product module> ...` so the registry restores onto another
     machine — which only resolves to the dispatcher's own interpreter when that interpreter's
     directory is on `PATH`. Under systemd it is not: the unit pins a `PATH` without the venv while
     starting the dispatcher from `.venv/bin/secretary`, so once `691673d` (2026-08-19) moved the
     package under `src/` and the working directory stopped carrying it, every probe died with
-    `No module named triggered_agents`. Repairing it here rather than in the unit or in the
+    `No module named ...` for the probe's package. Repairing it here rather than in the unit or in the
     registry keeps both of those portable and fixes every caller of the probe at once.
     """
     env = dict(os.environ)

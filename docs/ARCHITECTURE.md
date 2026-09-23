@@ -17,15 +17,19 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`, `schemas`, `web`,
   `webfront`, `webproto`.
-- `src/triggered_agents` is a legacy namespace. It holds runtime primitives Secretary uses directly
-  (head runtimes, session-manager and delivery helpers, the mechanical-role driver, the curator,
-  steward and retro agents). New shared runtime code goes into `secretary`. The only allowed imports
-  from `triggered_agents` into `secretary` are the ones listed in the test: production telemetry and
-  curator discovery reading `secretary.config`, and `secretary.sprints`.
-- `src/secretary/runtime` is the home of the head-runtime utilities being moved out of
-  `triggered_agents.runtime` (so far: `paths`, `references`, `prompt_document`, `launch_prefix`,
-  `shared_state`, `claude_sessions`, `claude_env`). It never imports `triggered_agents`;
-  `triggered_agents` may import it, and that is the only new direction the architecture test admits.
+- `src/triggered_agents` is the CLI of the three background agents (curator, steward, retro), built
+  on top of `secretary`. `python3 -P -m triggered_agents <agent> <cmd>` is their one entry: its
+  composition root (`triggered_agents.composition`) injects Secretary's board ports and hands the
+  rest to the mechanical-role driver and the agents' deterministic helpers. It may import any
+  `secretary` module; no `secretary` module imports it. `secretary` finds the agents' shipped
+  `automation.toml` specs through the product manifest (`[tool.secretary] agent-specs` in
+  `pyproject.toml`), not by the package name. `tests/test_architecture.py` holds the one direction,
+  and the only remaining mentions of the package under `src/secretary` (the resource-probe strings
+  in `runtime/heads.toml`).
+- `src/secretary/runtime` holds the head-runtime utilities both the pipeline and the background
+  agents use (`paths`, `references`, `prompt_document`, `launch_prefix`, `shared_state`,
+  `claude_sessions`, `claude_env`, `state`, ...). New shared runtime code goes here, not into
+  `triggered_agents`.
 
 The target package layout is feature-first. Modules move there one feature at a time, keeping
 compatibility imports where an installed command depends on an old path:
@@ -168,9 +172,9 @@ writes one budget event per source event. At the hard limit the sprint becomes `
 removes the live head without touching claimed cards. The sprint's resume entry is structured
 metadata; its freshness is computed against card audit.
 
-Standing agents: curator runs on its generic triggered-agent entrypoint. Steward and retro enter
-`secretary.dispatch.standing_agent`, which supplies task-backed ports for steward reports and retro
-Done retention. The generic runtime owns only the port interfaces and does not import Secretary.
+Standing agents: curator, steward and retro all enter `python3 -P -m triggered_agents`. Its
+composition root supplies task-backed ports for steward signals and reports and for retro Done
+retention; curator needs none. The generic triggered-agent runtime owns only the port interfaces.
 
 ### Head runtime ownership
 

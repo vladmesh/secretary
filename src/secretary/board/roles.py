@@ -1,9 +1,9 @@
 """Canonical product-side board role vocabulary.
 
-The product protocol owns these values. Runtime launch roles live in ``secretary.runtime``
-and the legacy ``triggered_agents`` package, neither of which imports the board; importing
-board code into them would invert the dependency direction guarded by the architecture
-tests.
+The product protocol owns these values. Runtime launch roles live in ``secretary.runtime``,
+which does not import the board; importing board code into it would invert the dependency
+direction guarded by the architecture tests. The background agents' CLI, built on top of
+``secretary``, receives its board ports from its own composition root.
 """
 
 from __future__ import annotations

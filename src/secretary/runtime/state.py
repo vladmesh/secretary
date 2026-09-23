@@ -393,14 +393,12 @@ class AgentState:
                 with suppress(OSError):
                     os.close(fd)
                 raise
-        raise SystemExit(f"triggered_agents[{self.agent}]: lock file keeps changing ({self.lockfile})")
+        raise SystemExit(f"{self.agent}: lock file keeps changing ({self.lockfile})")
 
     def _refuse(self, record: dict) -> NoReturn:
         holder = record.get("pid") if record.get("pid") is not None else (record.get("raw") or "?")
         self.log_run("lock-refused", holder_pid=holder, recorded_start=record.get("start"))
-        raise SystemExit(
-            f"triggered_agents[{self.agent}]: another run holds the lock ({self.lockfile}, pid {holder})"
-        )
+        raise SystemExit(f"{self.agent}: another run holds the lock ({self.lockfile}, pid {holder})")
 
 
 _LOCK_ACQUIRE_ATTEMPTS = 8

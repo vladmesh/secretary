@@ -124,7 +124,7 @@ def add_head_status_command(subparsers) -> None:
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", required=True)
     # Same pair, same order, as `secretary task` (task_commands._add_data_dir_args) and as the
-    # telemetry reader in triggered_agents/runtime/production_telemetry.py: an installation that
+    # background agents' production-telemetry reader: an installation that
     # points its data plane elsewhere through the environment must move the dispatcher's writes
     # and its readers together, or health and steward scan would report a file nobody writes
     # (secretary-833 review, round 3).

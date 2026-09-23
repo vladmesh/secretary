@@ -4,8 +4,8 @@
 # replaced, so the branch logic is reviewable and covered by tests instead of hiding in a systemd
 # unit string (triggered-agents-276).
 #
-# Exit-code protocol of the role launcher precheck (curator uses
-# `triggered_agents`; steward/retro use `secretary.dispatch.standing_agent`; see
+# Exit-code protocol of the role launcher precheck (every agent enters through
+# `python3 -P -m triggered_agents`, whose composition root injects the board ports; see
 # each cli.py and secretary/runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
 #   100            -> deliberate skip (nothing changed / paused): no new skill dispatch, but still
@@ -90,15 +90,9 @@ export PYTHONPATH="$product_root/src${PYTHONPATH:+:$PYTHONPATH}"
 agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"
 
-# Curator remains on its released triggered-agent entrypoint.  Steward and
-# retro are board-owning roles: their live paths enter through Secretary's
-# composition root, which injects the canonical TaskReader/TaskWriter ports.
-# Keep this selection outside role_env so the role-local environment boundary
-# remains identical for every command below.
+# One entry for every agent: `triggered_agents` wires Secretary's canonical
+# TaskReader/TaskWriter ports into the board-owning steward and retro itself.
 role_module="triggered_agents"
-case "$agent" in
-    steward|retro) role_module="secretary.dispatch.standing_agent" ;;
-esac
 
 run_role_env() {
     "$managed_python" -P -m secretary.runtime.role_env exec --role "$agent" -- "$@"

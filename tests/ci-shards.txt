@@ -149,7 +149,7 @@ integration-board tests/test_web_run_protocol.py
 integration-board tests/test_web_sprint_protocol.py
 integration-board tests/test_web_sprint_transport.py
 integration-board tests/test_sprint_user_path.py
-integration-board tests/test_standing_agent_entrypoint.py
+integration-board tests/test_triggered_agents_composition.py
 unit tests/test_task_commands.py
 unit tests/test_task_routing.py
 integration-board tests/test_tasks.py

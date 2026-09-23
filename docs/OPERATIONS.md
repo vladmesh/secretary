@@ -1471,7 +1471,7 @@ neutral. An unreadable config prints an error. Non-zero exit: an enabled role is
 unavailable.
 
 - `scripts/secretary-agent-gate.sh` runs every role through one environment and exit-code protocol
-  (steward and retro through `secretary.dispatch.standing_agent`, curator through `triggered_agents`). It
+  (every role through `python3 -P -m triggered_agents`, which injects the board ports steward and retro need). It
   resolves the checkout as `TA_RUNTIME_PYTHONPATH`, then `TA_SECRETARY_REPO`, then `$HOME/secretary`, and
   uses only that checkout's `.venv/bin/python3`. A `configuration error` naming the checkout means its
   source tree or interpreter is missing, non-executable or another venv's; it fails before precheck.
@@ -1830,7 +1830,7 @@ Restart reasons, from repository-relative changed paths:
 
 | reason | what moved |
 | --- | --- |
-| `product code or dependencies changed` | `src/secretary/`, `src/triggered_agents/`, `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
+| `product code or dependencies changed` | `src/` (both `secretary` and the background agents' `triggered_agents`), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
 | `bundled schemas changed` | `src/secretary/schemas/` |
 | `a web unit file changed` | `secretary-web.service` or the front unit |
 | `the head registry snapshot changed` | `heads/heads.yaml` regenerated |

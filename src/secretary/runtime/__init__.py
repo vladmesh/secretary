@@ -1,4 +1,5 @@
-"""Head-runtime utilities moving out of the legacy `triggered_agents` package.
+"""Head-runtime utilities shared by the pipeline and the background agents built on top of it.
 
-This package must never import `triggered_agents`; `triggered_agents` depends on it instead.
+Like every `secretary` package, this one never imports the background agents' CLI; that CLI
+depends on it instead.
 """

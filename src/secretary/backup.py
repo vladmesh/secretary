@@ -275,7 +275,7 @@ def _pipeline_action(
 ) -> dict[str, Any] | None:
     """Freeze or resume the pipeline through the product CLI (secretary-731).
 
-    This used to shell out to `triggered_agents pipeline pause`, which wrote a flag the production
+    This used to shell out to the background agents' `pipeline pause`, which wrote a flag the production
     dispatcher never read: the backup ran while cards kept being claimed. `secretary pause` is now
     the one door, and it mirrors the flag back to the legacy path for the background roles.
     """

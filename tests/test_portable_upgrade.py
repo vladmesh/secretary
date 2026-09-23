@@ -683,6 +683,9 @@ class InstallationOwnerTests(PortableFixture):
         agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
+        (self.product / "pyproject.toml").write_text(
+            '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+        )
 
         worktrees = upgrade.desired_role_worktrees(self.product, self.home)
         specs = upgrade.load_specs(self.product, home=self.home)

@@ -76,7 +76,7 @@ def resolve_reader(reader: StewardSignalReader | None = None) -> StewardSignalRe
 
     The generic steward helpers intentionally have no board implementation of
     their own.  Live automation supplies Secretary's canonical adapter through
-    ``secretary.dispatch.standing_agent``; a missing port is a wiring error,
+    ``triggered_agents.composition``; a missing port is a wiring error,
     never an opportunity to bypass audit and sprint guards through the retired
     pipeline CLI.
     """

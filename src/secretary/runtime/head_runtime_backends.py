@@ -7,7 +7,7 @@ caller is acting on. They are separate files because the vocabulary is imported 
 and that check must stay free of the backends it is validating names against.
 
 Two callers read it, and it is the same mapping for both. `secretary.dispatch.host.CommandHostRuntime`
-raises, observes and stops the pipeline's heads through it; `triggered_agents.runtime.dispatch` —
+raises, observes and stops the pipeline's heads through it; the background agents' dispatch —
 the mechanical-role driver for curator, steward and retro — chooses through it which of the two
 ways it holds a head of its own. A second copy of either half is a way for one of them to raise a head the other cannot
 reach, so there is deliberately one build site and one name reader, and both are here.

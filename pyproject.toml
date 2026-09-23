@@ -120,6 +120,7 @@ files = [
     "src/secretary/runtime/head/local_pty/journal.py",
     "src/secretary/runtime/head/local_pty/protocol.py",
     "src/secretary/runtime/head/local_pty/supervisor.py",
+    "src/triggered_agents/composition.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true
@@ -189,7 +190,13 @@ secretary = "secretary.cli:main"
 secretary-memory-mcp = "secretary.memory_service:main"
 secretary-memory-po-bridge = "secretary.memory.po_bridge:main"
 secretary-memory-reindex = "secretary.memory_reindex:main"
-triggered-agents = "triggered_agents.__main__:main"
+triggered-agents = "triggered_agents.composition:main"
+
+[tool.secretary]
+# Where this product ships its background agents' `<agent>/automation.toml` specs. `secretary`
+# reads the location from here (automations, role worktrees) rather than naming the agents'
+# package: that package is built on top of `secretary`, never the other way round.
+agent-specs = "src/triggered_agents/agents"
 
 [tool.setuptools.packages.find]
 where = ["src"]
