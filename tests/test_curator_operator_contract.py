@@ -18,9 +18,9 @@ class CuratorOperatorContractTests(unittest.TestCase):
             "### Manual curator routing in an instance canon",
             "`INSTANCE/heads/heads.toml`",
             "`role_defaults.curator` as `PREVIOUS_PROFILE`",
-            '`model = "gpt-5.6-terra"` and `effort = "extra"`',
+            '`model = "gpt-5.6-terra"` and `effort = "high"`',
             "declared `fallback` sequence",
-            'curator = "codex-curator"',
+            'curator = "codex-terra-high"',
             "`secretary-curator.timer` is the sole scheduler owner",
             "Orca curator\nautomation must remain disabled",
             "`DISABLED curator`",
@@ -41,17 +41,14 @@ class CuratorOperatorContractTests(unittest.TestCase):
         shipped = ROOT / "src" / "secretary" / "runtime" / "heads.toml"
         canon = tomllib.loads(shipped.read_text(encoding="utf-8"))
 
-        self.assertNotIn("codex-curator", canon["profiles"])
+        # secretary-1697: the curator is routed by role_defaults onto one of the five pipeline
+        # tiers; no curator-specific profile ships. The tiers pin their models (the owner's rule for
+        # the portable registry since then), so model pins are no longer asserted absent here.
+        self.assertFalse(any("curator" in pid for pid in canon["profiles"]))
         self.assertEqual(
             {
                 resource.get("account")
                 for resource in canon["resources"].values()
             },
             {"claude-subscription", "openai-subscription"},
-        )
-        self.assertFalse(
-            any(
-                any(char.isdigit() for char in str(profile.get("model", "")))
-                for profile in canon["profiles"].values()
-            )
         )

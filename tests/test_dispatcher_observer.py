@@ -29,7 +29,6 @@ from secretary.dispatch.observer import (
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
-    OBSERVER_HEAD_FALLBACK,
     DeliveryStage,
     ObserverDelivery,
     ObserverLaunchAborted,
@@ -5525,13 +5524,13 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("observer", role_defaults)
         self.assertNotEqual(role_defaults["observer"], role_defaults["new_card"])
         self.assertIn(role_defaults["observer"], canonical["profiles"])
-        self.assertIn(OBSERVER_HEAD_FALLBACK, canonical["profiles"])
 
-    def test_a_registry_without_the_key_falls_back_to_the_named_profile(self) -> None:
+    def test_a_registry_without_the_key_is_refused_by_that_key(self) -> None:
         catalog = FakeCatalog()
         catalog.role_defaults.pop("observer")
 
-        self.assertEqual(catalog.observer_head(), OBSERVER_HEAD_FALLBACK)
+        with self.assertRaisesRegex(HostError, r"role_defaults\.observer"):
+            catalog.observer_head()
 
     def test_the_observer_runs_with_the_role_scoped_environment(self) -> None:
         self.assertIn("observer", ROLE_ALLOWLIST)
@@ -6897,7 +6896,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
         return {}
 
     def test_the_bring_up_trusts_the_repository_root_of_the_observer_workspace(self) -> None:
-        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-sol-high", prompt="# Sprint\n")
 
         trusted = tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
         workspace = Path(self.host.observer_workspace("sprint:1")).resolve()
@@ -6916,16 +6915,16 @@ class ObserverCodexTrustTests(unittest.TestCase):
             "reservations": ["unavailable-project"],
         }
 
-        launched = self.host.prepare_observer(sprint, "codex-observer", prompt="# Sprint 1425\n")
+        launched = self.host.prepare_observer(sprint, "codex-sol-high", prompt="# Sprint 1425\n")
 
         self.assertEqual(launched["handle"], "term-obs")
         self.assertEqual(len(self.commands), 1)
 
     def test_a_second_bring_up_leaves_the_recorded_trust_alone(self) -> None:
-        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-sol-high", prompt="# Sprint\n")
         first = (self.codex_home / "config.toml").read_text(encoding="utf-8")
 
-        self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
+        self.host.prepare_observer({"ref": "sprint:1"}, "codex-sol-high", prompt="# Sprint\n")
 
         self.assertEqual((self.codex_home / "config.toml").read_text(encoding="utf-8"), first)
 
@@ -6943,7 +6942,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
         workspace = self.root / "worker-workspace"
         workspace.mkdir()
 
-        for head, role in (("codex", "worker"), ("codex-reviewer", "reviewer")):
+        for head, role in (("codex-terra-high", "worker"), ("codex-sol-medium", "reviewer")):
             with self.subTest(role=role):
                 launch = self.host.catalog.head_launch(head, "TASK.md", workspace=str(workspace), role=role)
                 self.assertIn(

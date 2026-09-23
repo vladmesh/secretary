@@ -416,8 +416,8 @@ def _preferred_head(agent: str, spec: dict, snapshot: RegistrySnapshot | None = 
 
     The spec's own `head` is the last resort for a registry that routes this role nowhere, and it
     goes through the registry's own resolution. A resolution refusal reaches the caller rather than
-    becoming a bare `claude` invocation: a Codex-pinned service agent whose registry has no
-    interactive Codex head left for that name is a dispatch that must not happen.
+    becoming a bare `claude` invocation: a spec naming a head the registry does not define is a
+    dispatch that must not happen.
 
     `snapshot` is the tick's one reading of the registry (`RegistrySnapshot`), so this answer and
     the resolution's cannot come from two different registries.

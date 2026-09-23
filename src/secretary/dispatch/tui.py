@@ -882,7 +882,7 @@ def _record_timestamp(record: dict[str, Any]) -> float | None:
 def _is_user_turn(record: dict[str, Any]) -> bool:
     """Whether one Codex rollout record is a user turn, in either shape Codex writes them.
 
-    `event_msg`/`user_message` is what `codex exec` writes. The interactive `codex-tui` never
+    `event_msg`/`user_message` is what `codex exec` writes. The interactive Codex TUI never
     writes it: at cli 0.147.0 the same submission is persisted as `response_item`/`message` with
     `role: "user"`, and only the `originator` in the session header tells the two apart. Reading
     the first shape alone therefore answered "no user turn" for every interactive head this product

@@ -2149,14 +2149,14 @@ route observers (`role_defaults.observer` only labels an observer record with no
 ### Manual curator routing in an instance canon
 
 This is a deferred, manual operator procedure for an installation whose private
-`INSTANCE/heads/heads.toml` already declares `profiles.codex-curator`. It changes only that instance canon. Do not
-add `codex-curator`, its model, or its account policy to
+`INSTANCE/heads/heads.toml` already declares the Terra tier `profiles.codex-terra-high`. It changes only that instance
+canon. Do not add the curator's profile choice, its model, or its account policy to
 `src/secretary/runtime/heads.toml`: the product file remains the portable fallback for an installation
 with no canon of its own.
 
 Before changing the role default, record the current `role_defaults.curator` as `PREVIOUS_PROFILE`. Inspect the
-existing `profiles.codex-curator` without editing it: it must remain a Codex profile with
-`model = "gpt-5.6-terra"` and `effort = "extra"`, and its declared `fallback` sequence must name existing profiles.
+existing `profiles.codex-terra-high` without editing it: it must remain a Codex profile with
+`model = "gpt-5.6-terra"` and `effort = "high"`, and its declared `fallback` sequence must name existing profiles.
 The fallback is instance policy. Record its current order and do not invent, delete, or reorder it as part of this
 routing change. If the profile is missing, malformed, has a different model or effort, or has an invalid fallback,
 stop. That is a separate canon-policy decision, not a reason to edit the portable registry or make a replacement
@@ -2166,7 +2166,7 @@ Change the existing instance table only as follows:
 
 ```toml
 [role_defaults]
-curator = "codex-curator"
+curator = "codex-terra-high"
 ```
 
 `secretary-curator.timer` is the sole scheduler owner when the curator component is enabled. The Orca curator

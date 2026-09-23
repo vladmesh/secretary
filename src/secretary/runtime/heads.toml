@@ -1,9 +1,8 @@
 # The product's portable default head registry — the fallback for an installation that has not
 # written its own. An installation owns its heads by putting `heads/heads.toml` in its instance
 # directory; `secretary upgrade` prefers that file and only falls back here. So this file stays
-# deliberately small and neutral: enough to bring a clean host up on a Claude subscription, an
-# OpenAI subscription, or both, and nothing that encodes one installation's account policy, model
-# choices or spend decisions.
+# deliberately small: the five pipeline tiers on a Claude subscription and an OpenAI subscription,
+# and nothing that encodes one installation's account policy or spend decisions.
 #
 # A resource is a shared account/limit a head draws from (probe is a health-check command for that
 # resource, run on a TTL by secretary.head_health — red lives on the resource, every profile drawing
@@ -37,108 +36,63 @@ probe = "python3 -P -m secretary.runtime.resource_probe --resource claude-sub"
 account = "openai-subscription"
 probe = "python3 -P -m secretary.runtime.resource_probe --resource openai-sub"
 
-# Claude heads. They are the fallback the codex heads below walk to, and since 2026-08-06 they
-# name the return chain too: a spent claude-sub sends a card to the codex head of comparable class
-# rather than leaving it in Ready until the subscription resets (secretary-1165). Comparable is the
-# whole of the rule. A chain to a head that is merely cheaper is what burned three worker attempts
-# overnight on 2026-07-04, and that decision stands: what changed is that a head of another family
-# at the same class is not the weaker head that decision was about.
+# Profile ids are `<family>-<model>-<effort>`, and the pipeline runs on exactly these five tiers:
+# Codex on Terra at high, Codex on Sol at medium and high, Claude Opus at medium and high. Each
+# falls back to the tier of the other family at comparable class, so a host whose one subscription
+# is red — or that never had it — keeps running without editing this file. Comparable is the whole
+# of the rule: a chain to a head that is merely cheaper is what burned three worker attempts
+# overnight on 2026-07-04.
+#
+# Every Codex tier is `codex_mode = "tui"`: an interactive session the launcher brings up empty and
+# then sends the prompt into. It is stated on each profile rather than left to the default so the
+# generated installation snapshot says it too; the one-shot `codex exec` head is gone from the
+# product (secretary-1173), and a profile naming it is refused when the registry is validated.
 
-[profiles.claude-default]
-# Bare `claude --dangerously-skip-permissions <prompt>`, no --model flag: whatever the CLI's own
-# default model is. The one profile that keeps working when a named model is retired.
-resource = "claude-sub"
-adapter = "claude"
-fallback = ["codex"]
+[profiles.codex-terra-high]
+resource = "openai-sub"
+adapter = "codex"
+model = "gpt-5.6-terra"
+effort = "high"
+codex_mode = "tui"
+fallback = ["claude-opus-high"]
 
-[profiles.claude-sonnet]
-resource = "claude-sub"
-adapter = "claude"
-model = "sonnet"
-fallback = ["codex"]
+[profiles.codex-sol-medium]
+resource = "openai-sub"
+adapter = "codex"
+model = "gpt-6-sol"
+effort = "medium"
+codex_mode = "tui"
+fallback = ["claude-opus-medium"]
 
-[profiles.claude-opus]
-resource = "claude-sub"
-adapter = "claude"
-model = "opus"
-fallback = ["codex-high"]
+[profiles.codex-sol-high]
+resource = "openai-sub"
+adapter = "codex"
+model = "gpt-6-sol"
+effort = "high"
+codex_mode = "tui"
+fallback = ["claude-opus-high"]
 
 [profiles.claude-opus-medium]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
 effort = "medium"
-fallback = ["codex"]
+fallback = ["codex-sol-medium"]
 
-[profiles.claude-observer]
-# The observer's Claude head is a profile of its own rather than a pointer at claude-opus: the
-# observer slices cards and judges drift from the sprint goal, so its head stays a deliberate
-# choice and not whatever the worker default happens to be.
+[profiles.claude-opus-high]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
-fallback = ["codex-observer"]
-
-[profiles.claude-observer-medium]
-resource = "claude-sub"
-adapter = "claude"
-model = "opus"
-effort = "medium"
-fallback = ["codex-observer"]
-
-# Codex heads. Each falls back to its Claude counterpart, so a host whose OpenAI subscription is
-# red — or that never had one — keeps running without editing this file.
-#
-# Every one of them is `codex_mode = "tui"`: an interactive session the launcher brings up empty
-# and then sends the prompt into. It is stated on each profile rather than left to the default so
-# the generated installation snapshot says it too, and it is the only mode there is — the one-shot
-# `codex exec` head is gone from the product (secretary-1173), so a profile naming it is refused
-# when the registry is validated.
-
-[profiles.codex]
-# Stable default id for the native OpenAI head, at the model's own default reasoning effort. No
-# `model` pin: the product does not choose which model an installation pays for, and the CLI's
-# default is the one id that cannot go stale when a model is retired.
-resource = "openai-sub"
-adapter = "codex"
-effort = "default"
-codex_mode = "tui"
-fallback = ["claude-sonnet"]
-
-[profiles.codex-high]
-# Explicit high reasoning for harder implementation and debug work.
-resource = "openai-sub"
-adapter = "codex"
 effort = "high"
-codex_mode = "tui"
-fallback = ["claude-opus"]
-
-[profiles.codex-reviewer]
-# Layer-3 reviewer: extra reasoning (Codex CLI value: xhigh), Claude second so a review is still
-# possible on a single-subscription host.
-resource = "openai-sub"
-adapter = "codex"
-effort = "extra"
-codex_mode = "tui"
-fallback = ["claude-opus"]
-
-[profiles.codex-observer]
-# Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
-# the sprint closes. It was the first head held to an interactive session, because the observer is
-# one continuous session for the whole sprint — a one-shot head would exit after its first turn and
-# the tick would read that as a dead head every time.
-resource = "openai-sub"
-adapter = "codex"
-effort = "extra"
-codex_mode = "tui"
-fallback = ["claude-observer"]
+fallback = ["codex-terra-high"]
 
 [role_defaults]
-# Which head each role runs on. An installation that wants different models, efforts or accounts
-# per role repoints these in its own canon rather than editing the product.
-new_card = "codex"
-reviewer = "codex-reviewer"
-observer = "codex-observer"
-curator = "codex"
-retro = "codex"
-steward = "codex-high"
+# Which head each role runs on. The reviewer is of the other family from new_card, so a card is
+# never reviewed by the model that wrote it. An installation that wants different tiers per role
+# repoints these in its own canon rather than editing the product.
+new_card = "claude-opus-medium"
+reviewer = "codex-terra-high"
+observer = "claude-opus-high"
+curator = "codex-sol-medium"
+retro = "claude-opus-medium"
+steward = "codex-sol-high"

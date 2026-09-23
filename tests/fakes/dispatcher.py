@@ -23,7 +23,6 @@ from secretary.dispatch.host import (
 )
 from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
 from secretary.dispatch.launcher import claude_launch_model, role_launch_env
-from secretary.dispatch.observer import OBSERVER_HEAD_FALLBACK
 from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_REVIEW_FREEZE,
@@ -538,9 +537,11 @@ class FakeCatalog:
         )
 
     def observer_head(self) -> str:
-        # Same rule as InstanceCatalog: the observer's own role_defaults key, with a named fallback
-        # profile rather than the worker's default.
-        head = str(self.role_defaults.get("observer") or OBSERVER_HEAD_FALLBACK)
+        # Same rule as InstanceCatalog: the observer's own role_defaults key, refused by that key
+        # when the registry has none rather than borrowing the worker's default.
+        head = self.role_defaults.get("observer")
+        if not head:
+            raise HostError("head registry has no role_defaults.observer")
         if head not in self.profiles:
             raise HostError(f"unknown head {head!r}")
         return head

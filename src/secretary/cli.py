@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-H",
         default=None,
         help="head profile or adapter (claude/codex/hermes or any heads.toml profile id); "
-        "default claude-default",
+        "default: the registry's role_defaults.new_card",
     )
     shell.add_argument(
         "--workspace",

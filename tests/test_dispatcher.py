@@ -11220,6 +11220,17 @@ class WaitWatchdogTests(unittest.TestCase):
                 self.assertEqual(stall_seconds("worker"), WORKER_REPORT_STALL_DEFAULT)
 
 
+# A Claude profile that pins no model: the CLI picks one at startup, and the launch record has to
+# name that model rather than leave the profile id as the only key.
+UNPINNED_CLAUDE = "claude-cli-default"
+
+
+def _with_unpinned_claude(heads: dict) -> dict:
+    profiles = dict(heads["profiles"])
+    profiles[UNPINNED_CLAUDE] = {"resource": "claude-sub", "adapter": "claude", "fallback": []}
+    return {**heads, "profiles": profiles}
+
+
 class DispatcherLauncherTests(unittest.TestCase):
     # Which model a codex head runs on is installation configuration, not something the shipped
     # registry decides, so the model-pinning cases here run against a fixture registry of their own.
@@ -11255,75 +11266,42 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(head, "pinned-terra")
         self.assertIn("-m gpt-5.6-terra", command)
 
-    # A registry an installation can publish and `validate_registry` accepts, in which one of the
-    # old Codex ids has been reused for a Claude profile. Profile ids are not reserved by adapter,
-    # so this is valid input, and every persisted override naming `codex-terra` was written when
-    # that id meant Codex.
-    COLLIDING_REGISTRY: ClassVar = {
+    # secretary-1697: an installation's registry after it retired its old ids. Every persisted
+    # override naming one of them was written against a registry that no longer exists, and no alias
+    # table maps it onto today's tiers.
+    TIER_REGISTRY: ClassVar = {
         "resources": {"openai-sub": {"account": "openai-subscription"}},
         "profiles": {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
-            "codex": {"resource": "openai-sub", "adapter": "codex"},
+            "codex-terra-high": {"resource": "openai-sub", "adapter": "codex", "effort": "high"},
+            "claude-opus-high": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
         },
-        "role_defaults": {"new_card": "codex", "reviewer": "codex"},
-    }
-    CLAUDE_ONLY_REGISTRY: ClassVar = {
-        "resources": {"openai-sub": {"account": "openai-subscription"}},
-        "profiles": {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
-        },
-        "role_defaults": {},
+        "role_defaults": {"new_card": "codex-terra-high", "reviewer": "claude-opus-high"},
     }
 
-    def test_an_old_codex_override_never_launches_the_claude_profile_on_that_id(self) -> None:
-        """The reviewer's reproduction: worker, reviewer and claimed routes all stay in family."""
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
-            catalog = object.__new__(InstanceCatalog)
-            catalog._heads = self.COLLIDING_REGISTRY  # type: ignore[attr-defined]
-
-            routes = {
-                "worker": catalog.worker_head(  # type: ignore[attr-defined]
-                    {"routing": {"head_override": "codex-terra"}}
-                ),
-                "review": catalog.review_head(  # type: ignore[attr-defined]
-                    {"routing": {"review_head_override": "codex-terra"}}
-                ),
-                "claimed-worker": catalog.claimed_worker_head(  # type: ignore[attr-defined]
-                    {"routing": {"resolved_worker_head": "codex-terra"}}
-                ),
-                "claimed-review": catalog.claimed_review_head(  # type: ignore[attr-defined]
-                    {"routing": {"resolved_review_head": "codex-terra"}}
-                ),
-            }
-            command = catalog.head_launch(
-                routes["worker"], "TASK.md", workspace=str(workspace), role="worker"
-            ).command
-
-        for route, head in routes.items():
-            with self.subTest(route=route):
-                self.assertEqual(head, "codex")
-        self.assertIn("codex", command)
-        self.assertNotIn("claude", command)
-
-    def test_an_old_codex_override_with_no_codex_head_left_fails_closed(self) -> None:
-        """Nothing in family to serve the name is a refused head, not a Claude launch."""
+    def test_a_retired_override_fails_closed_by_name_on_every_route(self) -> None:
+        """Worker, reviewer and claimed routes all refuse a retired id rather than substitute."""
         catalog = object.__new__(InstanceCatalog)
-        catalog._heads = self.CLAUDE_ONLY_REGISTRY  # type: ignore[attr-defined]
+        catalog._heads = self.TIER_REGISTRY  # type: ignore[attr-defined]
 
-        for route, task in (
-            ("worker", {"routing": {"head_override": "codex-terra"}}),
-            ("review", {"routing": {"review_head_override": "codex-terra"}}),
-            ("claimed-worker", {"routing": {"resolved_worker_head": "codex-terra"}}),
-        ):
-            with self.subTest(route=route), self.assertRaisesRegex(HostError, "unavailable"):
-                if route == "worker":
-                    catalog.worker_head(task)  # type: ignore[attr-defined]
-                elif route == "review":
-                    catalog.review_head(task)  # type: ignore[attr-defined]
-                else:
-                    catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
+        for retired in ("codex-terra", "codex-high", "claude-opus"):
+            for route, task in (
+                ("worker", {"routing": {"head_override": retired}}),
+                ("review", {"routing": {"review_head_override": retired}}),
+                ("claimed-worker", {"routing": {"resolved_worker_head": retired}}),
+                ("claimed-review", {"routing": {"resolved_review_head": retired}}),
+            ):
+                with (
+                    self.subTest(head=retired, route=route),
+                    self.assertRaisesRegex(HostError, f"unknown head {retired!r}"),
+                ):
+                    if route == "worker":
+                        catalog.worker_head(task)  # type: ignore[attr-defined]
+                    elif route == "review":
+                        catalog.review_head(task)  # type: ignore[attr-defined]
+                    elif route == "claimed-worker":
+                        catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
+                    else:
+                        catalog.claimed_review_head(task)  # type: ignore[attr-defined]
 
     def test_head_run_snapshots_the_launched_profiles_configuration(self) -> None:
         """The launch record must carry the configuration, not just the profile id: two profiles
@@ -11385,7 +11363,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(reviewer.model, profile.get("model", ""))
 
     def test_head_run_snapshots_the_cli_model_for_a_profile_that_pins_none(self) -> None:
-        """`claude-default` pins no model, so the CLI picks one from its settings at startup. The
+        """A Claude profile that pins no model leaves the CLI to pick one from its settings at startup. The
         record has to name that model: an empty field would make the profile id the only historical
         key, which is exactly what this telemetry exists to avoid."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -11395,8 +11373,8 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             (workspace / ".claude").mkdir(parents=True)
             catalog = object.__new__(InstanceCatalog)
-            catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
-            card = {"routing": {"review_head_override": "claude-default"}}
+            catalog._heads = _with_unpinned_claude(canonical_heads(Path(__file__).resolve().parents[1]))  # type: ignore[attr-defined]
+            card = {"routing": {"review_head_override": UNPINNED_CLAUDE}}
             env = {"CLAUDE_CONFIG_DIR": str(config), "CLAUDE_MANAGED_SETTINGS": str(config / "none.json")}
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("ANTHROPIC_MODEL", None)
@@ -11407,7 +11385,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 )
                 project = catalog.head_run(card, role="reviewer", workspace=str(workspace))  # type: ignore[attr-defined]
 
-        self.assertEqual((user.head, user.adapter), ("claude-default", "claude"))
+        self.assertEqual((user.head, user.adapter), (UNPINNED_CLAUDE, "claude"))
         self.assertEqual((user.model, user.model_source), ("opus", "user_settings"))
         self.assertEqual((project.model, project.model_source), ("sonnet", "project_settings"))
 
@@ -11438,8 +11416,8 @@ class DispatcherLauncherTests(unittest.TestCase):
                 **dict(zip(LEGACY_ENV, LEGACY_VALUES)),
             }
             catalog = object.__new__(InstanceCatalog)
-            catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
-            card = {"routing": {"review_head_override": "claude-default"}}
+            catalog._heads = _with_unpinned_claude(canonical_heads(repo))  # type: ignore[attr-defined]
+            card = {"routing": {"review_head_override": UNPINNED_CLAUDE}}
             probe = (
                 f"PYTHONPATH={shlex.quote(str(repo / 'src'))} python3 -c 'import json,sys;"
                 "from secretary.dispatch.launcher import claude_launch_model;"
@@ -11503,37 +11481,21 @@ class DispatcherLauncherTests(unittest.TestCase):
                 {"routing": {"head_override": "codex-does-not-exist"}}
             )
 
-    def test_a_recorded_old_codex_head_still_reaches_a_launchable_profile(self) -> None:
-        """An override written before the installation republished its Codex heads.
-
-        `codex-terra` is not in this snapshot any more. The card, the reviewer field and the
-        dispatcher record that named it are all still there, and each has to resolve to the
-        equivalent interactive profile rather than stopping the attempt on an unknown head.
-        """
+    def test_an_ordinary_override_is_launched_under_its_own_id(self) -> None:
+        """No resolution step renames a head: the id on the card is the id that runs."""
         catalog = object.__new__(InstanceCatalog)
-        catalog._heads = {  # type: ignore[attr-defined]
-            "profiles": {
-                "codex": {"adapter": "codex", "resource": "openai-sub"},
-                "codex-extra": {"adapter": "codex", "effort": "extra", "resource": "openai-sub"},
-            },
-            "role_defaults": {"new_card": "codex", "reviewer": "codex-extra"},
-        }
+        catalog._heads = self.TIER_REGISTRY  # type: ignore[attr-defined]
 
-        worker = catalog.worker_head({"routing": {"head_override": "codex-terra"}})  # type: ignore[attr-defined]
-        reviewer = catalog.review_head({"routing": {"review_head_override": "codex-reviewer"}})  # type: ignore[attr-defined]
-        claimed = catalog.claimed_worker_head({"routing": {"resolved_worker_head": "codex-mini"}})  # type: ignore[attr-defined]
-
-        self.assertEqual(worker, "codex")
-        self.assertEqual(reviewer, "codex-extra")
-        self.assertEqual(claimed, "codex")
-        # The journal still calls it the card's own head: resolving an id is not a fallback walk.
+        worker = catalog.worker_head({"routing": {"head_override": "claude-opus-high"}})  # type: ignore[attr-defined]
         run = catalog.head_run(  # type: ignore[attr-defined]
-            {"routing": {"head_override": "codex-terra"}}, role="worker", head=worker
+            {"routing": {"head_override": "claude-opus-high"}}, role="worker", head=worker
         )
-        self.assertEqual((run.head, run.head_source, run.codex_mode), ("codex", "card", "tui"))
+
+        self.assertEqual(worker, "claude-opus-high")
+        self.assertEqual((run.head, run.head_source), ("claude-opus-high", "card"))
 
     def test_an_unknown_non_codex_head_is_still_rejected(self) -> None:
-        """Resolution is for the declared old Codex ids only; nothing else is substituted."""
+        """Nothing is substituted for an id the registry does not define."""
         catalog = object.__new__(InstanceCatalog)
         catalog._heads = {  # type: ignore[attr-defined]
             "profiles": {"codex": {"adapter": "codex", "resource": "openai-sub"}},
