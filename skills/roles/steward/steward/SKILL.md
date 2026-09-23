@@ -36,16 +36,16 @@ watermark (step 6):
 
 - Nothing needs a human → move to Done:
   ```
-  python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Done
+  python3 -P -m secretary task move --role steward --ref <ref> --to done
   ```
 - There are items under "Needs a human" → instead of Done, move the report card itself to Blocked with
   the same "Needs a human" section as in the report comment:
   ```
-  python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Blocked
-  python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+  python3 -P -m secretary task move --role steward --ref <ref> --to blocked
+  python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
   ```
 
-This is separate from the ordinary escalation path (`move --to Blocked`) for OTHER cards you touch
+This is separate from the ordinary escalation path (`task move --to blocked`) for OTHER cards you touch
 while investigating (the Blocked card from a signal, a new card for an anomaly you found, and so on);
 that path does not change, see "Act" below. Your own report card is always closed, even if you changed
 nothing on the board during the run.
@@ -74,8 +74,9 @@ nothing on the board during the run.
 - **Issues→Ready on other agents' cards is not your gate.** The transition is technically available to
   the role, but promoting proposals into the queue is a human decision: agents' proposals, including your
   own non-urgent ones, wait for the owner. A Product issue is not movable at all: it is the owner's
-  backlog record, and the board refuses the transition. Create your own urgent infrastructure tasks directly with
-  `create --column Ready` — that is not promoting an idea, it is a direct consequence of your watch.
+  backlog record, and the board refuses the transition. The board does not let the steward file
+  proposals in Issues, and a steward card in Ready must belong to an open sprint on that project
+  (`task create --state ready --sprint <ref>`); see "Act" below for what to do otherwise.
 - **The only stop line is judgement, not a numeric cap.** "I do not dare do this myself" → a card in
   Blocked with the analysis, and wait for a human. There is no cap on how deep you dig or how many
   actions you take in a run.
@@ -117,7 +118,7 @@ JSON with five kinds of signal, each of them a reason you were woken at all:
   than `TA_STEWARD_STALE_HOURS` (24h by default). Assessment is on that list because nothing else
   watches it: a card there waits on the observer's release / rework / reslice decision, with no head
   running and no watchdog that could time it out. Your way out of it is the ordinary escalation,
-  `move --to Blocked` with a reason, and it is the only Assessment move this CLI will make: the
+  `task move --to blocked` with a reason file, and it is the only Assessment move this CLI will make: the
   decision itself belongs to the observer and is written with `python3 -P -m secretary task move`.
 - `resource_flip` — a resource's health status changed since the previous run. Both a flip to red and a
   recovery to green are worth investigating after the fact. The source is the same live data plane as
@@ -217,7 +218,7 @@ its own watermark.
 ### 1. Work it out
 
 For each signal, find the root cause, not just the formal fact. Do not stop at what `scan` shows: if the
-signal is a new Blocked card, read the whole card (`pipeline show --ref <ref>`), the worker's and
+signal is a new Blocked card, read the whole card (`python3 -P -m secretary task show --ref <ref>`, which includes the comments), the worker's and
 reviewer's transcripts, the local card cache, and if needed the code that produced the state. If the
 signal is an unhealthy dispatcher tick, look at the context around it (the dispatcher's journal, adjacent
 records in the tick telemetry) and if needed the defect in the dispatcher, worker or validation code. If
@@ -236,18 +237,20 @@ Investigation gives three outcomes, one per signal:
   process, workspace debris. Commit and push to this repository's default branch directly (see
   "Permissions" above) with an ordinary `git push`, no force, no secrets in the diff. Each such fix is
   its own meaningful commit.
-- **File a card.** An improvement that does not block the pipeline now → an **Issues** proposal
-  (`pipeline --role steward idea --project <project> --type <code|research> --title <...>
-  --description <...>`). An urgent infrastructure task you cannot or should not fix in the
-  moment (it needs a bigger refactor, or the risk is higher than is reasonable to take without review) →
-  the **Ready** column with the same `create --column Ready`, straight into the workers' queue.
+- **File a card.** An urgent infrastructure task you cannot or should not fix in the moment (it needs a
+  bigger refactor, or the risk is higher than is reasonable to take without review), on a project with an
+  open sprint → `python3 -P -m secretary task create --role steward --state ready --sprint <ref>
+  --project <project> --type <code|research|infra> --title <...> --body-file <file>`, straight into the
+  workers' queue. The board refuses a steward card in Issues (`execution tasks cannot be created in
+  Issues`) and a Ready card with no open sprint (`task creation requires an open sprint`). Everything
+  else, including non-urgent improvements, goes into "Needs a human" in the report with the full
+  proposal, so the owner can file it.
 - **Escalate.** You cannot find the cause, or the fix needs a human decision (an architectural choice, a
   risk you are not prepared to take) → a card in **Blocked** with a full analysis of what happened and what
   is needed from a human. If the card already exists on the board (the Blocked card from the signal, or any
-  other active one) use `pipeline --role steward move --ref <ref> --to Blocked` and put the analysis in a
-  separate comment (step 3). If there is no card yet (you found the anomaly yourself), use
-  `idea --project <project> --title <...> --description <analysis>` and then
-  `move --to Blocked --reason "<why a human decision is needed>"`.
+  other active one) use `secretary task move --role steward --ref <ref> --to blocked` and put the analysis in a
+  separate comment (step 3). If there is no card yet (you found the anomaly yourself), put the full
+  analysis under "Needs a human" in the report; the report card itself goes to Blocked (step 5).
   Pulling an active in-progress or validate card out from under a live worker is a last resort (the
   dispatcher usually resolves it through its watchdog), but it is safe: the next dispatcher tick sees that
   the card went another way, stops the worker's terminal itself and cleans up its own record, while the
@@ -262,13 +265,13 @@ on without the full review loop** (a false positive, an external cause already f
 one-off mishap), you have a `Blocked → Done` override:
 
 ```
-python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Done \
-  --reason "<why skipping review is legitimate>"
+python3 -P -m secretary task move --role steward --ref <ref> --to done \
+  --reason-file <file: why skipping review is legitimate>
 ```
 
-`--reason` is mandatory and must be non-empty; without it the command refuses with a guard error. This
+`--reason-file` is mandatory and must be non-empty; without it the command refuses with a guard error. This
 replaces manual edits through the raw board API, which should no longer happen. Use it rarely and only when
-you are sure: the ordinary path for a recoverable card is `move --to Ready`, back into the queue for a
+you are sure: the ordinary path for a recoverable card is `task move --to ready`, back into the queue for a
 normal run, and the override is a last resort.
 
 ### 3. Comment on the cards
@@ -277,7 +280,7 @@ On every card you touched (fixed, created, escalated, overrode), leave a comment
 why:
 
 ```
-python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
 ```
 
 The comment is not a duplicate of the report (step 4) but a short note on the card itself, so the history is
@@ -289,7 +292,7 @@ A comment on this wake-up's report card (the `<ref>` from `--card`, see above) �
 repository:
 
 ```
-python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
 ```
 
 Report structure:
@@ -340,6 +343,6 @@ on a state change of the cards you already filed).
   under the permissions above. Ordinary `git push`, no history rewriting.
 - **Secrets never reach** a card comment or a commit. If you see a raw key in a log or transcript, refer to it
   by name and do not copy the value.
-- **Do not touch the raw board API.** Go through `pipeline --role steward ...`, which is where the role guards
+- **Do not touch the raw board API.** Go through `python3 -P -m secretary task ... --role steward`, which is where the role guards
   live.
 - Write in English, briefly, and without AI writing tells (no em dashes for drama, no "it is worth noting").
