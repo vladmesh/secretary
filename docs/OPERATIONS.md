@@ -2356,6 +2356,11 @@ for an answer, 3 for degraded (no workspace path, or a host in `noop` mode). No 
   `missing_progress_sources`, `last_progress`, and `next_recovery_deadline` (or `null` with
   `deadline_note`). Ladder semantics: [Head vitality](HEAD_VITALITY.md).
 
+A sprint observer on the `local-pty` runtime owns no pane and gets a row of its own (`kind: observer`,
+`runtime: local-pty`): `process` from its launch identity, `supervisor` from the supervisor's `status`
+(`alive`, `turn_open`, `turn`, `output_bytes`, `journal_seq`), and `journal.tail`, the last eight journal
+records.
+
 Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:
 no lifecycle call, no rebinding, no harder probing.

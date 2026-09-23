@@ -74,6 +74,7 @@ from tests.support.head_runtime_contract import HeadRuntimeContract
 from secretary.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
     DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
+    DELIVER_NOT_SUBMITTED,
     DELIVER_STATE_UNKNOWN,
     DELIVERY_ARRIVED,
     DELIVERY_LANDED_NOTHING,
@@ -108,6 +109,9 @@ ORPHAN = REPO / "tests" / "fixtures" / "local_pty_orphan.py"
 #: can say whether two payloads reached the head as one sentence; every other one is a receipt.
 LINE_READER = REPO / "tests" / "fixtures" / "local_pty_line_reader.py"
 DEAF_COMMAND = f"{sys.executable} -u {ORPHAN}"
+#: A head that keeps a composer the way an agent's TUI does: a line feed is a line break in it, and
+#: only a carriage return sends it (issue:70562b15a7dc8764437e).
+FAKE_TUI = REPO / "tests" / "fixtures" / "local_pty_fake_tui.py"
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
 #: Long enough that a mid-turn assertion is never racing the child's own silence, short enough
 #: that a test which has to see the turn end waits about two seconds for it.
@@ -2233,6 +2237,120 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
             if "local-pty" in text or "local_pty" in text:
                 offenders.append(str(path.relative_to(REPO)))
         self.assertEqual(offenders, [], "a profile selects a backend this card does not wire in")
+
+
+class AnAgentPromptIsSubmittedTests(LocalPtyRuntimeTestCase):
+    """issue:70562b15a7dc8764437e: a prompt for an agent's composer is typed, then sent, then seen taken.
+
+    Every byte of the observer's launch prompt reached Claude's terminal and the prompt sat in its
+    composer unsent, while the evidence said `turn_confirmed`. The fake TUI below keeps a composer
+    the same way: what it records is what it was *asked to do*, which is the one thing a byte count
+    cannot say.
+    """
+
+    #: What the dispatcher hands every backend with an agent's prompt; this backend only reads that
+    #: one was handed.
+    TRANSPORT = object()
+    PROMPT = "Read /tmp/SPRINT.md and do its task."
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.runtime = LocalPtyHeadRuntime(
+            self.root,
+            head_process_status=head_process_status,
+            delivery_grace=TEST_GRACE_SECONDS,
+            prompt_quiet=0.5,
+            prompt_poll=0.05,
+            prompt_first_output=2.0,
+            submit_confirm=3.0,
+        )
+        self.record = self.root / "submitted.jsonl"
+
+    def tui(self, *flags: str) -> str:
+        return f"{sys.executable} -u {FAKE_TUI} {self.record} {' '.join(flags)}".strip()
+
+    def submitted(self) -> list[str]:
+        if not self.record.exists():
+            return []
+        return [json.loads(line)["submitted"] for line in self.record.read_text().splitlines() if line]
+
+    def test_a_bare_line_is_typed_into_the_composer_and_never_sent(self) -> None:
+        # The defect itself, kept as a fact about a line with no transport: it lands whole, and the
+        # agent is asked to do nothing.
+        run = self.live_run(command=self.tui())
+        time.sleep(0.8)
+        receipt = self.runtime.deliver(run, NudgePointer.line(self.PROMPT))
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        time.sleep(1.0)
+        self.assertEqual(self.submitted(), [])
+
+    def test_a_prompt_is_sent_and_its_turn_is_confirmed(self) -> None:
+        run = self.live_run(command=self.tui())
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line(self.PROMPT), subject="observer-wake", transport=self.TRANSPORT
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual([text.strip() for text in self.submitted()], [self.PROMPT])
+        evidence = receipt.delivery.evidence
+        self.assertTrue(evidence.turn_confirmed)
+        self.assertFalse(evidence.payload_left_in_composer)
+        self.assertEqual(evidence.submit_count, 1)
+        self.assertEqual(evidence.submit_bytes_written, 1)
+        self.assertEqual(evidence.stage, "turn_observed")
+        accepted = [
+            event
+            for event in read_events(self.runtime._address(run).journal_path).events
+            if event.get("kind") == INPUT_ACCEPTED
+        ]
+        self.assertEqual(
+            [(event["subject"], event["bytes"]) for event in accepted],
+            [("observer-wake", len(self.PROMPT) + 1), ("observer-wake:submit", 1)],
+            "the line and its Enter are two deliveries, the Enter alone",
+        )
+
+    def test_a_launch_prompt_waits_for_the_head_to_settle_and_is_sent(self) -> None:
+        receipt = self.bring_up(
+            command=self.tui("--banner-delay", "1.0"),
+            pointer=NudgePointer.line(self.PROMPT),
+            transport=self.TRANSPORT,
+            subject="observer-launch",
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual([text.strip() for text in self.submitted()], [self.PROMPT])
+        self.assertTrue(receipt.delivery.evidence.turn_confirmed)
+        # A head still working on it is not typed into: the next prompt is refused, not queued.
+        busy = self.runtime.deliver(
+            receipt.run, NudgePointer.line("too soon"), subject="observer-wake", transport=self.TRANSPORT
+        )
+        self.assertEqual(busy.status, HEAD_BUSY, busy.reason)
+        # And once its turn has ended, the head it raised takes the next prompt the same way.
+        self.end_turn(receipt.run)
+        again = self.runtime.deliver(
+            receipt.run, NudgePointer.line("and again"), subject="observer-wake", transport=self.TRANSPORT
+        )
+        self.assertEqual(again.status, HEAD_OK, again.reason)
+        self.assertEqual([text.strip() for text in self.submitted()], [self.PROMPT, "and again"])
+
+    def test_a_prompt_no_enter_sends_is_not_reported_as_delivered(self) -> None:
+        run = self.live_run(command=self.tui("--deaf-enter"))
+        receipt = self.runtime.deliver(run, NudgePointer.line(self.PROMPT), transport=self.TRANSPORT)
+        self.assertEqual(receipt.status, HEAD_ALIVE, receipt.reason)
+        self.assertFalse(receipt.ok)
+        self.assertEqual(receipt.reason, DELIVER_NOT_SUBMITTED)
+        self.assertTrue(receipt.evidence.payload_left_in_composer)
+        self.assertFalse(receipt.evidence.turn_confirmed)
+        self.assertEqual(receipt.evidence.submit_count, 2, "one more Enter is given, and no more")
+        self.assertEqual(self.submitted(), [])
+
+    def test_a_launch_prompt_no_enter_sends_stops_the_head(self) -> None:
+        receipt = self.bring_up(
+            command=self.tui("--deaf-enter"),
+            pointer=NudgePointer.line(self.PROMPT),
+            transport=self.TRANSPORT,
+        )
+        self.assertFalse(receipt.ok)
+        self.assertEqual(receipt.status, HEAD_GONE, receipt.reason)
+        self.assertIn(DELIVER_NOT_SUBMITTED, receipt.reason)
 
 
 if __name__ == "__main__":

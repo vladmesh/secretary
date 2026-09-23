@@ -663,6 +663,22 @@ def _reconcile_open_sprint(
             "action": "observer-none",
             "reason": "sprint declares no observer",
         }
+    declared = str(decision["head"])
+    if record is not None and record.head != declared and record.state != "launching":
+        # The declaration moved to another profile while this record was kept (a `sprint reopen
+        # --observer` over a live record). The fence holds the sprint on `observer_head_mismatch`
+        # for as long as the record names the old head, and nothing else retires it, so the sprint
+        # stayed fenced for good (issue:c61deb40b2d2b0745f37). The old head is stopped and its
+        # record dropped, exactly as a close would; the next tick launches the declared head. A
+        # bring-up still in flight is resolved first, by the branch below, and meets this on the
+        # tick after.
+        return _stop_observer(
+            runtime,
+            payload,
+            observers,
+            ref,
+            reason=f"sprint declares observer {declared}, not {record.head or '(none recorded)'}",
+        )
     if record is not None and record.state == "blocked":
         # A provider-policy refusal has no retry condition inside the dispatcher.  Keep this
         # sprint-visible record and typed evidence until an independently attested launch replaces

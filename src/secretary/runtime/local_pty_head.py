@@ -206,6 +206,9 @@ from secretary.runtime.tui_delivery import (
     NUDGE_FILE_MODE,
     READINESS_BUSY,
     READINESS_READY,
+    STAGE_ENTER_ACCEPTED,
+    STAGE_PAYLOAD_WRITTEN,
+    STAGE_TURN_OBSERVED,
     DeliveryEvidence,
     DeliveryOutcome,
     payload_fingerprint,
@@ -289,6 +292,29 @@ DELIVERY_GRACE_SECONDS = 5.0
 
 #: Missing delivery bounds use the substrate default, not a runtime knob.
 UNDECLARED_DELIVERY_BOUND = protocol.INPUT_DELIVERY_SECONDS
+
+#: The keystroke that sends what an agent's composer holds. It travels alone, as a delivery of its
+#: own: a line and its carriage return in one burst are read by a TUI as a paste, and the line sits
+#: in the composer unsent (issue:70562b15a7dc8764437e).
+SUBMIT_KEY = b"\r"
+#: How long a prompt waits for an agent's TUI to settle before it is typed, how much silence counts
+#: as settled, and how often that is asked. A TUI drawing its banner and starting its MCP servers
+#: is not ready for a line; the same numbers the product runtime settles a raised head on.
+PROMPT_SETTLE_SECONDS = 90.0
+PROMPT_QUIET_SECONDS = 4.0
+PROMPT_POLL_SECONDS = 0.25
+#: A head that has printed nothing at all is waited on this long before its silence counts as
+#: settled: the process may not have drawn its first frame yet.
+PROMPT_FIRST_OUTPUT_SECONDS = 20.0
+#: What says a submitted prompt started a turn: this much output after the submit, within this long.
+#: An agent that takes a prompt redraws its composer, prints the prompt back and starts a spinner,
+#: which is kilobytes; an Enter that sent nothing redraws at most a cursor.
+SUBMIT_CONFIRM_BYTES = 256
+SUBMIT_CONFIRM_SECONDS = 20.0
+#: How many submits one prompt is given before it is reported as typed and not taken.
+SUBMIT_ATTEMPTS = 2
+#: Why an agent prompt did not start a turn: it is in the composer, and no submit made it go.
+DELIVER_NOT_SUBMITTED = "prompt_typed_but_no_turn_started"
 
 #: Why a stop-if-quiescent refused. The same two tokens the legacy backend uses, because the
 #: refusals mean the same thing and a caller must not have to tell the backends apart to read them.
@@ -552,6 +578,11 @@ class LocalPtyHeadRuntime:
         delivery_grace: float = DELIVERY_GRACE_SECONDS,
         delivery_poll: float = 0.02,
         stop_timeout: float = STOP_CONFIRM_SECONDS,
+        prompt_settle: float | None = None,
+        prompt_quiet: float | None = None,
+        prompt_poll: float | None = None,
+        prompt_first_output: float | None = None,
+        submit_confirm: float | None = None,
     ) -> None:
         if not callable(head_process_status):
             raise LocalPtyRuntimeError(
@@ -571,6 +602,15 @@ class LocalPtyHeadRuntime:
         self._delivery_grace = float(delivery_grace)
         self._delivery_poll = delivery_poll
         self._stop_timeout = stop_timeout
+        # The prompt waits default to the module's numbers as they are when this runtime is built,
+        # so a test can shorten them for a runtime the dispatcher builds for itself.
+        self._prompt_settle = float(PROMPT_SETTLE_SECONDS if prompt_settle is None else prompt_settle)
+        self._prompt_quiet = float(PROMPT_QUIET_SECONDS if prompt_quiet is None else prompt_quiet)
+        self._prompt_poll = float(PROMPT_POLL_SECONDS if prompt_poll is None else prompt_poll)
+        self._prompt_first_output = float(
+            PROMPT_FIRST_OUTPUT_SECONDS if prompt_first_output is None else prompt_first_output
+        )
+        self._submit_confirm = float(SUBMIT_CONFIRM_SECONDS if submit_confirm is None else submit_confirm)
         # Reentrant, so `stop_if_quiescent` can perform `stop`.
         self._lock = threading.RLock()
         # This backend alone tracks terminals left with an unfinished payload prefix.
@@ -611,6 +651,7 @@ class LocalPtyHeadRuntime:
         delivery_seconds: float | None = None,
         env: Mapping[str, str] | None = None,
         pid_file: str = "",
+        transport: Any = None,
         **ignored: Any,
     ) -> StartReceipt:
         """Bring one head up under a supervisor of its own, and point it at its task.
@@ -634,8 +675,80 @@ class LocalPtyHeadRuntime:
         directory's `head.pid`: the dispatcher reads its watchdog heartbeat at a path it knew before
         the head existed. The head writes its launch identity there, once, through the supervisor;
         the command it is handed is the bare head command.
+
+        A `pointer` handed over with a `transport` is an agent's prompt, and it is delivered the
+        way `deliver` delivers one (see there): once the head has settled, typed, then submitted,
+        with a turn seen to start. That wait happens outside this runtime's lock, after the spawn.
         """
         del title, ignored
+        receipt = self._start_locked(
+            spec,
+            workspace,
+            task_ref,
+            command=command,
+            pointer=None if transport is not None else pointer,
+            run_id=run_id,
+            role=role,
+            run=run,
+            subject=subject,
+            rows=rows,
+            cols=cols,
+            quiet_seconds=quiet_seconds,
+            delivery_seconds=delivery_seconds,
+            env=env,
+            pid_file=pid_file,
+        )
+        live = receipt.run
+        if pointer is None or transport is None or live is None or not receipt.ok:
+            return receipt
+        delivered = self._deliver_prompt(live, pointer, subject or "head-launch")
+        if delivered.ok:
+            return StartReceipt(
+                status=HEAD_OK,
+                run=delivered.run or live.working(),
+                delivery=delivered.delivery,
+                epoch=delivered.epoch,
+                lease=delivered.lease,
+                rotation_ready=delivered.rotation_ready,
+            )
+        with self._lock:
+            # Stop a head whose bring-up prompt did not start its turn.
+            self.activity.release(live.run_id)
+            report = delivered.evidence if isinstance(delivered.evidence, DeliveryReport) else None
+            refusal = None
+            if report is None or not report.fatal:
+                refusal = _Refusal(
+                    status=delivered.status,
+                    reason=delivered.reason,
+                    failure=delivered.failure,
+                    evidence=delivered.evidence,
+                )
+            return self._abandon_bring_up(live, report, refusal, delivered.epoch)
+
+    def _start_locked(
+        self,
+        spec: HeadSpec,
+        workspace: str,
+        task_ref: TaskRef,
+        *,
+        command: str,
+        pointer: NudgePointer | None,
+        run_id: str,
+        role: str,
+        run: HeadRun | None,
+        subject: str,
+        rows: int,
+        cols: int,
+        quiet_seconds: float | None,
+        delivery_seconds: float | None,
+        env: Mapping[str, str] | None,
+        pid_file: str,
+    ) -> StartReceipt:
+        """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery.
+
+        Given no pointer, its receipt carries the live run, which is what lets `start` put an
+        agent's prompt in front of it without holding this runtime's lock across the settling.
+        """
         with self._lock:
             claimed = run.run_id if run is not None else (run_id or "")
             if claimed:
@@ -736,7 +849,13 @@ class LocalPtyHeadRuntime:
             )
 
     def deliver(
-        self, run: HeadRun, pointer: NudgePointer, *, subject: str = "", **ignored: Any
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        *,
+        subject: str = "",
+        transport: Any = None,
+        **ignored: Any,
     ) -> DeliverReceipt:
         """Put one prompt in front of a running head, and say what became of the bytes.
 
@@ -753,8 +872,28 @@ class LocalPtyHeadRuntime:
         `delivery_state` and its two byte counts. `ok` is only ever `DELIVERY_ARRIVED`, and it
         means the head received *this payload as its own message* rather than that these bytes were
         written. See the module docstring for which of the outcomes close this head and why.
+
+        **A `transport` makes the pointer an agent's prompt.** The dispatcher hands every backend
+        the transport it delivers a prompt to an agent's TUI through; this backend owns no pane and
+        does not use it, but its presence is what says the line is for a composer, and a composer
+        needs its line *submitted*: a line that ends in a newline is a line break in Claude's
+        composer, and a line with its carriage return in one burst is read as a paste. Without the
+        transport the line is delivered as it always was, which is what a line-reading head needs.
+        See `_deliver_prompt` for what delivering a prompt means here.
         """
         del ignored
+        if transport is not None:
+            return self._deliver_prompt(run, pointer, subject or "head-nudge")
+        return self._deliver_payload(run, pointer, subject or "head-nudge")
+
+    def _deliver_payload(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        payload: bytes | None = None,
+    ) -> DeliverReceipt:
+        """`deliver` for one payload: the pointer's line, or `payload` when one is given."""
         with self._lock:
             # Rehydrate under the decision lock from the section's single status frame.
             _, probe = self._section_probe(run)
@@ -789,9 +928,9 @@ class LocalPtyHeadRuntime:
                         lease=held,
                     )
                 self.activity.release(run.run_id)
-            lease = self.activity.grant(run.run_id, subject or "head-nudge")
+            lease = self.activity.grant(run.run_id, subject)
             try:
-                report, refusal = self._put(run, pointer, subject or "head-nudge", probe)
+                report, refusal = self._put(run, pointer, subject, probe, payload)
             except BaseException:
                 self.activity.release(run.run_id)
                 raise
@@ -817,7 +956,7 @@ class LocalPtyHeadRuntime:
                 return DeliverReceipt(
                     status=HEAD_OK,
                     run=run.working() if run.running else run,
-                    delivery=_outcome_of(run, pointer, report, subject or "head-nudge"),
+                    delivery=_outcome_of(run, pointer, report, subject),
                     delivery_state=report.state,
                     delivered_bytes=report.written,
                     offered_bytes=report.offered,
@@ -826,6 +965,138 @@ class LocalPtyHeadRuntime:
                     lease=lease,
                 )
             return self._delivery_that_did_not_arrive(run, report, lease, epoch)
+
+    def _deliver_prompt(self, run: HeadRun, pointer: NudgePointer, subject: str) -> DeliverReceipt:
+        """Put an agent's prompt in front of it the way a keyboard does, and see a turn start.
+
+        Four steps, each through this runtime's own verbs, and none holding its lock across a wait:
+
+        1. **wait until the head has stopped printing** (`_await_settled`). A TUI that is drawing
+           its banner and starting its MCP servers is not ready for a line; a head in a turn is
+           not waited on here, because step 2 refuses it `HEAD_BUSY` by itself;
+        2. **deliver the line.** It lands in the composer and sends nothing. Every refusal and
+           every fatal outcome is this delivery's, exactly as for a bare line;
+        3. **wait until the substrate's turn over that line has closed** (`_await_idle`). The
+           supervisor opens a turn for every payload and closes it on silence, so a second payload
+           made at once is refused by a turn that is about the echo rather than about the agent;
+        4. **deliver `SUBMIT_KEY` alone, and watch the head answer** (`_await_turn`). A prompt the
+           agent took is kilobytes of redraw and spinner; an Enter that sent nothing is at most a
+           cursor. One more Enter is given, and then the prompt is reported as typed and not taken:
+           `HEAD_ALIVE` with `DELIVER_NOT_SUBMITTED`, never `ok`.
+
+        So `ok` here means what the dispatcher's own TUI transport means by it: a turn was seen to
+        start, and the evidence says `turn_confirmed` only then (the launch evidence of
+        issue:70562b15a7dc8764437e said it over a prompt still sitting in the composer).
+        """
+        self._await_settled(run)
+        typed = self._deliver_payload(run, pointer, subject)
+        if not typed.ok or not isinstance(typed.evidence, DeliveryReport):
+            return typed
+        report = typed.evidence
+        live = typed.run or run
+        last: DeliverReceipt = typed
+        submits = 0
+        submitted = 0
+        confirmed = False
+        for _ in range(SUBMIT_ATTEMPTS):
+            self._await_idle(live)
+            before = self._output_bytes(live)
+            last = self._deliver_payload(live, pointer, f"{subject}:submit", SUBMIT_KEY)
+            if not last.ok:
+                break
+            submits += 1
+            submitted += last.delivered_bytes
+            if self._await_turn(live, before):
+                confirmed = True
+                break
+        outcome = _outcome_of(
+            live, pointer, report, subject, submits=submits, submitted=submitted, confirmed=confirmed
+        )
+        if confirmed:
+            return DeliverReceipt(
+                status=HEAD_OK,
+                run=live,
+                delivery=outcome,
+                delivery_state=typed.delivery_state,
+                delivered_bytes=typed.delivered_bytes,
+                offered_bytes=typed.offered_bytes,
+                evidence=report,
+                epoch=last.epoch,
+                lease=last.lease,
+            )
+        evidence = outcome.evidence
+        if last.status == HEAD_BUSY:
+            evidence.readiness_state = READINESS_BUSY
+        reason = DELIVER_NOT_SUBMITTED if last.ok else f"{DELIVER_NOT_SUBMITTED}: {last.reason or last.status}"
+        evidence.reason = reason
+        return DeliverReceipt(
+            status=last.status if not last.ok else HEAD_ALIVE,
+            run=live,
+            reason=reason,
+            failure=HeadNudgeFailed(reason),
+            evidence=evidence,
+            delivery_state=typed.delivery_state,
+            delivered_bytes=typed.delivered_bytes,
+            offered_bytes=typed.offered_bytes,
+            epoch=last.epoch,
+            lease=last.lease,
+            rotation_ready=last.rotation_ready,
+        )
+
+    def _await_settled(self, run: HeadRun) -> None:
+        """Wait until the head has printed nothing new for `prompt_quiet`, within `prompt_settle`.
+
+        Read off the supervisor's count of what the head printed, the only thing that moves while
+        a TUI draws itself. A head that has printed nothing at all is given `prompt_first_output`
+        before its silence counts. A head that cannot be observed, or is in a turn, is not waited
+        on: the delivery that follows says what it is.
+        """
+        began = time.monotonic()
+        deadline = began + self._prompt_settle
+        printed = -1
+        steady_since = began
+        while True:
+            seen = self.observe(run)
+            if not seen.ok or seen.busy:
+                return
+            now = time.monotonic()
+            current = _output_of(seen)
+            if current != printed:
+                printed, steady_since = current, now
+            elif now - steady_since >= self._prompt_quiet and (
+                printed > 0 or now - began >= self._prompt_first_output
+            ):
+                return
+            if now >= deadline:
+                return
+            time.sleep(self._prompt_poll)
+
+    def _await_idle(self, run: HeadRun) -> None:
+        """Wait until neither the substrate's turn nor this runtime's lease holds the head."""
+        deadline = time.monotonic() + self._prompt_settle
+        while time.monotonic() < deadline:
+            seen = self.observe(run)
+            if not seen.ok or not seen.busy:
+                return
+            time.sleep(self._prompt_poll)
+
+    def _await_turn(self, run: HeadRun, before: int) -> bool:
+        """Whether the head printed `SUBMIT_CONFIRM_BYTES` past `before` within `submit_confirm`."""
+        deadline = time.monotonic() + self._submit_confirm
+        while True:
+            seen = self.observe(run)
+            if seen.status == HEAD_GONE:
+                return False
+            if seen.ok and _output_of(seen) - before >= SUBMIT_CONFIRM_BYTES:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._prompt_poll)
+
+    def _output_bytes(self, run: HeadRun) -> int:
+        """How much the head has printed in this supervisor's life, or 0 when it cannot be read."""
+        seen = self.observe(run)
+        return _output_of(seen) if seen.ok else 0
 
     def observe(self, run: HeadRun) -> ObserveReceipt:
         """What the substrate can say about this head now: its status, its journal, its process.
@@ -1542,6 +1813,7 @@ class LocalPtyHeadRuntime:
         pointer: NudgePointer,
         subject: str,
         probe: _Probe | None = None,
+        payload: bytes | None = None,
     ) -> tuple[DeliveryReport | None, _Refusal | None]:
         """Offer one payload and follow it until this backend can say what became of it.
 
@@ -1575,7 +1847,8 @@ class LocalPtyHeadRuntime:
             # the same classifier. At the connection bound that is `HEAD_BUSY`, and nothing here
             # is closed, drained or remembered as fatal.
             return None, _stated_refusal(probe.answer)
-        payload = _payload_of(pointer)
+        if payload is None:
+            payload = _payload_of(pointer)
         try:
             client = self._connect(address)
         except _UNREACHABLE as exc:
@@ -2378,12 +2651,31 @@ def _payload_of(pointer: NudgePointer) -> bytes:
     return (pointer.text + "\n").encode("utf-8")
 
 
-def _outcome_of(run: HeadRun, pointer: NudgePointer, report: DeliveryReport, subject: str) -> DeliveryOutcome:
+def _output_of(seen: ObserveReceipt) -> int:
+    """The supervisor's count of what the head printed, off an observation's status frame."""
+    evidence = seen.evidence if isinstance(seen.evidence, Mapping) else {}
+    value = evidence.get("output_bytes")
+    return value if isinstance(value, int) else 0
+
+
+def _outcome_of(
+    run: HeadRun,
+    pointer: NudgePointer,
+    report: DeliveryReport,
+    subject: str,
+    *,
+    submits: int = 0,
+    submitted: int = 0,
+    confirmed: bool = True,
+) -> DeliveryOutcome:
     """The delivery evidence for a payload that provably reached the head's terminal.
 
     `confirmed` rather than `accepted`, and it is the stronger word on purpose: on this backend the
     proof is the supervisor's own count of the bytes the kernel took, corroborated by the journal,
     rather than a session manager's report that a send was accepted.
+
+    An agent's prompt (`_deliver_prompt`) carries its submits beside the line: `turn_confirmed` is
+    then whether a turn was seen to start, and the line is `payload_left_in_composer` when not.
     """
     payload_bytes, payload_hash = payload_fingerprint(pointer.text)
     evidence = DeliveryEvidence(
@@ -2403,6 +2695,22 @@ def _outcome_of(run: HeadRun, pointer: NudgePointer, report: DeliveryReport, sub
         turn_confirmed=True,
         reason=report.detail,
     )
+    if submits or not confirmed:
+        evidence = replace(
+            evidence,
+            stage=(
+                STAGE_TURN_OBSERVED
+                if confirmed
+                else STAGE_ENTER_ACCEPTED if submits else STAGE_PAYLOAD_WRITTEN
+            ),
+            submit_write_accepted=submits > 0,
+            submit_bytes_written=submitted,
+            submit_count=submits,
+            attempts=max(submits, 1),
+            resends=max(submits - 1, 0),
+            turn_confirmed=confirmed,
+            payload_left_in_composer=not confirmed,
+        )
     return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
 
 

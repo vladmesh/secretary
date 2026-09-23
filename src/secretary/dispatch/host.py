@@ -1634,13 +1634,20 @@ class CommandHostRuntime:
         leaf = str(getattr(record, "leaf", "") or "")
         if not workspace or not (handle or leaf):
             raise HostError("observer has no terminal handle for an event wake")
-        terminals = self._worktree_terminals(workspace)
-        terminal = next((pane for pane in terminals if leaf and pane.leaf == leaf), None)
-        if terminal is None and not leaf:
-            terminal = next((pane for pane in terminals if handle and pane.handle == handle), None)
-        current = terminal.handle if terminal is not None else ""
-        if not current:
-            raise HostError("observer terminal is unavailable for an event wake")
+        observer_run = self._observer_lifecycle_run(record)
+        if _head_runtime_name(observer_run) == ORCA_LEGACY_RUNTIME:
+            terminals = self._worktree_terminals(workspace)
+            terminal = next((pane for pane in terminals if leaf and pane.leaf == leaf), None)
+            if terminal is None and not leaf:
+                terminal = next((pane for pane in terminals if handle and pane.handle == handle), None)
+            current = terminal.handle if terminal is not None else ""
+            if not current:
+                raise HostError("observer terminal is unavailable for an event wake")
+            waking = replace(observer_run, handle=current)
+        else:
+            # A supervised head owns no pane, so Orca's inventory never lists it: its backend
+            # addresses it by its own run (issue:70562b15a7dc8764437e).
+            waking = observer_run
         delivery = getattr(record, "delivery", None)
         message = _render_observer_wake_context(sprint, change=change, delivery=delivery)
         document = Path(workspace) / OBSERVER_PROMPT_FILE
@@ -1658,7 +1665,6 @@ class CommandHostRuntime:
             # is what a launch has always been confirmed by, and it says the same thing about a
             # wake. What stays out of band is the causal acknowledgement, not the delivery: the
             # observer still quotes the delivery id in the resume it writes from this turn.
-            waking = replace(self._observer_lifecycle_run(record), handle=current)
             receipt = self.head_runtime_for(waking).deliver(
                 waking,
                 pointer,
@@ -1680,6 +1686,13 @@ class CommandHostRuntime:
         if not receipt.ok:
             failure = HostError(f"observer wake was not delivered: {receipt.reason}")
             failure.evidence = receipt.evidence
+            if (
+                receipt.status == head_ops.HEAD_BUSY
+                and _delivery_readiness_state(receipt.evidence) != READINESS_BUSY
+            ):
+                # The head is in a turn and nothing was typed: a wake to make again once it ends,
+                # not a wake it refused (which is what spends the retries that replace a head).
+                failure.evidence = {"readiness_state": READINESS_BUSY, "reason": receipt.reason}
             raise failure from None
         return receipt.delivery
 

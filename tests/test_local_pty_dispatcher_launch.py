@@ -28,9 +28,16 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from secretary.dispatch.head_status import HeadStatusHost, head_status
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.observer import ObserverRecord, observer_head_is_dead, observer_head_status
+from secretary.dispatch.observer import (
+    ObserverRecord,
+    observer_head_is_dead,
+    observer_head_status,
+    put_observers,
+)
+from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import (
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,
@@ -43,6 +50,8 @@ from secretary.runtime.head.identity import publish_heartbeat
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty.journal import RUN_STARTED, read_events
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from secretary.runtime.tui_delivery import READINESS_BUSY
+from secretary.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
 from tests.fakes.dispatcher import FakeCatalog
 
 PROFILE = "claude-local-pty"
@@ -252,6 +261,130 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
                 self.assertEqual(status["record"]["task"], "card:secretary-9001")
                 self.assertEqual(status["record"]["role"], role)
                 self._reap()
+
+
+FAKE_TUI = Path(__file__).resolve().parent / "fixtures" / "local_pty_fake_tui.py"
+
+
+class _PromptAfterStartCatalog(_StandInCatalog):
+    """The same profile, rendered as the dispatcher renders every Claude head: prompt after start."""
+
+    def head_launch(self, head: str, prompt_file: str, **_options: Any) -> HeadCommand:
+        return HeadCommand(self.command, prompt_after_start=True, adapter="claude")
+
+
+class LocalPtyObserverPromptTests(unittest.TestCase):
+    """issue:70562b15a7dc8764437e: a local-pty observer is given its launch prompt and its wakes.
+
+    Through the dispatcher's own code — `prepare_observer` and `nudge_observer` — onto a real
+    supervisor and a fake agent that keeps a composer. The launch prompt sat unsent in Claude's
+    composer, and a wake never reached the head at all, because the wake looked the observer up in
+    Orca's pane inventory, where a supervised head is never listed.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="lp-prompt-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.addCleanup(self._reap)
+        self.record = self.root / "submitted.jsonl"
+        command = f"{shlex.quote(sys.executable)} -u {shlex.quote(str(FAKE_TUI))} {shlex.quote(str(self.record))}"
+        patches = [
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                    "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                    "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
+                },
+            ),
+            mock.patch("secretary.runtime.local_pty_head.PROMPT_QUIET_SECONDS", 0.5),
+            mock.patch("secretary.runtime.local_pty_head.PROMPT_POLL_SECONDS", 0.05),
+            mock.patch("secretary.runtime.local_pty_head.SUBMIT_CONFIRM_SECONDS", 3.0),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.host = CommandHostRuntime(_PromptAfterStartCatalog(command), self.root / "data", mode="real")  # type: ignore[arg-type]
+
+    def _reap(self) -> None:
+        heads = self.root / "data" / "heads"
+        for run_dir in heads.glob("*") if heads.exists() else ():
+            for event in read_events(run_dir / protocol.JOURNAL_NAME).events:
+                if event.get("kind") == RUN_STARTED:
+                    _kill(int(event.get("head_pid") or 0), group=True)
+                    _kill(int(event.get("head_pid") or 0))
+                    _kill(int(event.get("supervisor_pid") or 0))
+
+    def _submitted(self) -> list[str]:
+        if not self.record.exists():
+            return []
+        return [json.loads(line)["submitted"].strip() for line in self.record.read_text().splitlines() if line]
+
+    def _launch(self) -> tuple[dict[str, Any], ObserverRecord]:
+        workspace = self.root / "workspaces" / "observer"
+        workspace.mkdir(parents=True)
+        with mock.patch.object(CommandHostRuntime, "_create_observer_workspace", return_value=workspace):
+            launched = self.host.prepare_observer({"ref": "sprint:1459"}, PROFILE, prompt="# Sprint\n")
+        record = ObserverRecord(
+            sprint="sprint:1459",
+            head=PROFILE,
+            workspace=str(workspace),
+            handle=str(launched["handle"]),
+            leaf=str(launched["leaf"]),
+            pid_file=str(launched["pid_file"]),
+            head_run=dict(launched["head_run"]),
+        )
+        return launched, record
+
+    def _await_turn_end(self, record: ObserverRecord) -> None:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if self.host.observer_status(record).get("idle"):
+                return
+            time.sleep(0.05)
+        self.fail("the observer's turn never ended")
+
+    def test_the_launch_prompt_is_submitted_and_a_wake_reaches_the_head(self) -> None:
+        launched, record = self._launch()
+        self.assertTrue(launched["prompt_delivered"])
+        self.assertTrue(launched["delivery_evidence"].get("turn_confirmed"), launched["delivery_evidence"])
+        workspace = Path(record.workspace)
+        self.assertEqual(self._submitted(), [f"Read {workspace}/SPRINT.md and do its task."])
+
+        self._await_turn_end(record)
+        delivered = self.host.nudge_observer(record, sprint={"ref": "sprint:1459", "comments": []}, change="sprint-entity")
+        self.assertTrue(delivered.evidence.turn_confirmed)
+        submitted = self._submitted()
+        self.assertEqual(len(submitted), 2, submitted)
+        self.assertIn("SPRINT.md", submitted[1])
+
+    def test_head_status_reads_a_local_pty_observer_from_its_own_backend(self) -> None:
+        _launched, record = self._launch()
+        payload: dict[str, Any] = {}
+        put_observers(payload, {"sprint:1459": record})
+        runtime = mock.Mock()
+        runtime.host.mode = "real"
+        runtime.data_dir = self.root / "data"
+        runtime.production_state.load.return_value = payload
+        runtime.production_state.records.return_value = {}
+        with mock.patch.object(HeadStatusHost, "workspace_inventory", side_effect=HostError("no orca here")):
+            answer = head_status(runtime, workspace=record.workspace)
+
+        self.assertEqual(len(answer["heads"]), 1, answer)
+        row = answer["heads"][0]
+        self.assertEqual((row["kind"], row["runtime"], row["run_id"]), ("observer", LOCAL_PTY_RUNTIME, record.head_run["run_id"]))
+        self.assertEqual(row["process"]["state"], HEARTBEAT_LIVE_MATCH)
+        self.assertTrue(row["supervisor"]["alive"])
+        self.assertIn("input.accepted", [event["kind"] for event in row["journal"]["tail"]])
+        self.assertIn("local-pty run", answer["summary"][0])
+
+    def test_a_wake_to_a_working_observer_is_a_busy_wait_not_a_failed_wake(self) -> None:
+        _launched, record = self._launch()
+        # The head is still printing the turn its launch prompt started.
+        with self.assertRaises(Exception) as caught:
+            self.host.nudge_observer(record, sprint={"ref": "sprint:1459", "comments": []}, change="sprint-entity")
+        self.assertEqual(_delivery_readiness_state(caught.exception), READINESS_BUSY, caught.exception)
+        self.assertEqual(len(self._submitted()), 1, "nothing was typed into the working head")
 
 
 class ObserverTaskIdentityTests(unittest.TestCase):
