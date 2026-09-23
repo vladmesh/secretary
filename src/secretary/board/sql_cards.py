@@ -161,6 +161,14 @@ def _translated(action: str) -> Iterator[None]:
         raise _driver_error(action, exc) from None
 
 
+def _unusable(connection: Any) -> bool:
+    """psycopg's own verdict that a connection can carry no further statement.
+
+    Compared with `True` so a stand-in without the attributes reads as alive.
+    """
+    return getattr(connection, "closed", False) is True or getattr(connection, "broken", False) is True
+
+
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
 
@@ -255,6 +263,16 @@ class SqlCardClient:
 
     @property
     def connection(self) -> Any:
+        """The kept connection, replaced first when it is dead and no transaction holds it (§5.6).
+
+        A board-store restart leaves the kept object `closed` or `broken` for good; without this
+        check every later call of a long-lived holder (the web layer) failed with "the connection
+        is closed" until the process restarted.  Inside `transaction()` a dead connection is kept,
+        so the statement fails and the transaction with it: a reconnect there would run the rest
+        of the transaction on a connection that never saw its first half.
+        """
+        if self._connection is not None and not self._depth and _unusable(self._connection):
+            self._discard()
         if self._connection is None:
             with _translated("open a connection"):
                 import psycopg
@@ -267,6 +285,26 @@ class SqlCardClient:
             with _translated("close its connection"):
                 self._connection.close()
             self._connection = None
+
+    def _discard(self) -> None:
+        """Drop the kept connection so the next call opens a new one; closing it may fail."""
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            with contextlib.suppress(Exception):
+                connection.close()
+
+    @contextlib.contextmanager
+    def _statement(self, action: str) -> Iterator[None]:
+        """`_translated`, plus: a statement outside a transaction that left the connection dead
+        discards it, so this call still fails as `backend_unavailable` and the next one reconnects.
+        """
+        try:
+            with _translated(action):
+                yield
+        except TaskError:
+            if not self._depth and self._connection is not None and _unusable(self._connection):
+                self._discard()
+            raise
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
@@ -290,7 +328,12 @@ class SqlCardClient:
             finally:
                 self._depth -= 1
             return
+        # Checked before the depth is raised: a transaction may start on a new connection, never
+        # continue on one (§5.6).
+        if self._connection is not None and _unusable(self._connection):
+            self._discard()
         self._depth = 1
+        suspect = False
         try:
             yield
         except BaseException as failure:
@@ -299,6 +342,7 @@ class SqlCardClient:
             try:
                 self.connection.rollback()
             except Exception as exc:  # noqa: BLE001 - every driver failure becomes one refusal.
+                suspect = True
                 raise _driver_error("roll back", exc) from failure
             finally:
                 # Two pieces of state are derived from rows this transaction wrote and are wrong
@@ -327,19 +371,23 @@ class SqlCardClient:
                 self.connection.commit()
         finally:
             self._depth = 0
+            # A transaction whose connection died, or whose rollback failed, leaves a connection
+            # nothing may reuse: dropped here, so the next operation opens a new one (§5.6).
+            if self._connection is not None and (suspect or _unusable(self._connection)):
+                self._discard()
 
     def _commit_unless_nested(self) -> None:
         if not self._depth:
-            with _translated("commit"):
+            with self._statement("commit"):
                 self.connection.commit()
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        with _translated("answer a read"), self.connection.cursor() as cursor:
+        with self._statement("answer a read"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.fetchall()
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
-        with _translated("apply a write"), self.connection.cursor() as cursor:
+        with self._statement("apply a write"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.rowcount
 

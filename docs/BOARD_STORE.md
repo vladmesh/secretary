@@ -855,6 +855,21 @@ off. There is no connection pool: one libpq connection carries one transaction a
 client serializes use with a re-entrant lock. The web process, dispatcher tick and each CLI process
 build their own clients.
 
+Reconnect rule: a long-lived client survives a board-store restart without a process restart.
+Connection acquisition is the one place that enforces it, using psycopg's own `closed` and
+`broken`:
+
+- outside a transaction, a kept connection that is `closed` or `broken` is discarded and a new
+  one is opened;
+- a statement outside a transaction that fails and leaves the connection `closed` or `broken`
+  still fails as `backend_unavailable`, and the connection is discarded, so the next call
+  reconnects. The failed call is not retried;
+- inside `transaction()` there is never a reconnect: the statement and the transaction fail as
+  before. When the transaction ends with the connection dead, or its rollback fails, the
+  connection is discarded and the next operation opens a new one;
+- a statement error on a live connection (`backend_error`) and a rollback that succeeds keep
+  the connection. A healthy connection is reused, so there is no reconnect per call.
+
 ### 5.7 Backup and restore
 
 A `full` archive carries a custom-format data-only dump (`postgres_dump` component); roles and
