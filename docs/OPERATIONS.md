@@ -2187,7 +2187,7 @@ example `secretary upgrade --no-pull --instance INSTANCE --product-root PRODUCT_
 snapshot was written. The routing assignment has no automatic rollout, shim, migration, or dependency step. The
 routing change takes effect only for a later eligible scheduled run; it does not justify a
 manual invocation. To roll back, restore `role_defaults.curator = "PREVIOUS_PROFILE"` in the same private canon,
-leave `profiles.codex-curator` and its fallback untouched, repeat that same manual materialization, and confirm the
+leave `profiles.codex-terra-high` and its fallback untouched, repeat that same manual materialization, and confirm the
 resulting instance snapshot. Do not delete the profile or alter scheduler ownership during rollback.
 
 The role route does not widen the curator protocol. A fact-bearing pending batch remains bound to its curator workspace, run and
