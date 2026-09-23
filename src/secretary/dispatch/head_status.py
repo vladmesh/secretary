@@ -62,10 +62,9 @@ from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
 from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.head.identity import HEARTBEAT_DEAD, HEARTBEAT_LIVE_MATCH, head_process_status
-from secretary.runtime.head.local_pty.protocol import SUPERVISOR_LOCK_NAME, SUPERVISOR_PID_NAME
 from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from secretary.runtime.local_pty_head import head_run_journal
+from secretary.runtime.local_pty_head import head_run_journal, head_run_supervisor_files
 from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
@@ -914,7 +913,7 @@ def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
     no supervisor owns the run; a head it left behind can still be running, which is the
     heartbeat's question.
     """
-    path = run_dir / SUPERVISOR_LOCK_NAME
+    path, pid_path = head_run_supervisor_files(run_dir)
     try:
         info = path.stat()
         written = path.read_text(encoding="utf-8").strip()
@@ -927,7 +926,7 @@ def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
         }
     lease: dict[str, Any] = {
         "written_pid": _pid_or_none(written),
-        "supervisor_pid": _pid_file_value(run_dir / SUPERVISOR_PID_NAME),
+        "supervisor_pid": _pid_file_value(pid_path),
     }
     try:
         holders = _flock_holders(info)

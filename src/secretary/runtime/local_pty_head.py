@@ -2783,6 +2783,17 @@ def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], .
     return local_pty.read_events(Path(run_dir) / protocol.JOURNAL_NAME).events
 
 
+def head_run_supervisor_files(run_dir: str | os.PathLike[str]) -> tuple[Path, Path]:
+    """Where one head's supervisor keeps its lock and its pid file, for a reader outside it.
+
+    The pair is `(supervisor.lock, supervisor.pid)` under the run directory. Nothing is opened: a
+    diagnostic that wants the lease reads the kernel's lock table for the first and the pid in the
+    second, and must never take the lock itself.
+    """
+    root = Path(run_dir)
+    return root / protocol.SUPERVISOR_LOCK_NAME, root / protocol.SUPERVISOR_PID_NAME
+
+
 def _last_event_at(address: _Address) -> float:
     """The head's own clock, as the newest thing its journal has to say about it."""
     events = local_pty.read_tail(address.journal_path).events
