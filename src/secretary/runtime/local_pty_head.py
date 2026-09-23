@@ -701,7 +701,7 @@ class LocalPtyHeadRuntime:
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
             return receipt
-        delivered = self._deliver_prompt(live, pointer, subject or "head-launch")
+        delivered = self._deliver_prompt(live, pointer, subject or "head-launch", _wake_hook(transport))
         if delivered.ok:
             return StartReceipt(
                 status=HEAD_OK,
@@ -875,7 +875,8 @@ class LocalPtyHeadRuntime:
 
         **A `transport` makes the pointer an agent's prompt.** The dispatcher hands every backend
         the transport it delivers a prompt to an agent's TUI through; this backend owns no pane and
-        does not use it, but its presence is what says the line is for a composer, and a composer
+        reads nothing of it but its `before_send` hook (see `_wake_if_suspended`), but its presence
+        is what says the line is for a composer, and a composer
         needs its line *submitted*: a line that ends in a newline is a line break in Claude's
         composer, and a line with its carriage return in one burst is read as a paste. Without the
         transport the line is delivered as it always was, which is what a line-reading head needs.
@@ -883,7 +884,7 @@ class LocalPtyHeadRuntime:
         """
         del ignored
         if transport is not None:
-            return self._deliver_prompt(run, pointer, subject or "head-nudge")
+            return self._deliver_prompt(run, pointer, subject or "head-nudge", _wake_hook(transport))
         return self._deliver_payload(run, pointer, subject or "head-nudge")
 
     def _deliver_payload(
@@ -892,8 +893,13 @@ class LocalPtyHeadRuntime:
         pointer: NudgePointer,
         subject: str,
         payload: bytes | None = None,
+        wake: Callable[[], Any] | None = None,
     ) -> DeliverReceipt:
-        """`deliver` for one payload: the pointer's line, or `payload` when one is given."""
+        """`deliver` for one payload: the pointer's line, or `payload` when one is given.
+
+        `wake` is the caller's own way to resume this head, and it is performed only once the
+        payload has been admitted and only for a head that is suspended (`_wake_if_suspended`).
+        """
         with self._lock:
             # Rehydrate under the decision lock from the section's single status frame.
             _, probe = self._section_probe(run)
@@ -930,6 +936,8 @@ class LocalPtyHeadRuntime:
                 self.activity.release(run.run_id)
             lease = self.activity.grant(run.run_id, subject)
             try:
+                if wake is not None:
+                    self._wake_if_suspended(run, wake)
                 report, refusal = self._put(run, pointer, subject, probe, payload)
             except BaseException:
                 self.activity.release(run.run_id)
@@ -966,7 +974,13 @@ class LocalPtyHeadRuntime:
                 )
             return self._delivery_that_did_not_arrive(run, report, lease, epoch)
 
-    def _deliver_prompt(self, run: HeadRun, pointer: NudgePointer, subject: str) -> DeliverReceipt:
+    def _deliver_prompt(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        wake: Callable[[], Any] | None = None,
+    ) -> DeliverReceipt:
         """Put an agent's prompt in front of it the way a keyboard does, and see a turn start.
 
         Four steps, each through this runtime's own verbs, and none holding its lock across a wait:
@@ -975,7 +989,9 @@ class LocalPtyHeadRuntime:
            its banner and starting its MCP servers is not ready for a line; a head in a turn is
            not waited on here, because step 2 refuses it `HEAD_BUSY` by itself;
         2. **deliver the line.** It lands in the composer and sends nothing. Every refusal and
-           every fatal outcome is this delivery's, exactly as for a bare line;
+           every fatal outcome is this delivery's, exactly as for a bare line. A head that is
+           suspended — a retained worker the dispatcher froze with `SIGSTOP` — is resumed first by
+           `wake`, the caller's own hook, once the line has been admitted (secretary-1702);
         3. **wait until the substrate's turn over that line has closed** (`_await_idle`). The
            supervisor opens a turn for every payload and closes it on silence, so a second payload
            made at once is refused by a turn that is about the echo rather than about the agent;
@@ -989,7 +1005,7 @@ class LocalPtyHeadRuntime:
         issue:70562b15a7dc8764437e said it over a prompt still sitting in the composer).
         """
         self._await_settled(run)
-        typed = self._deliver_payload(run, pointer, subject)
+        typed = self._deliver_payload(run, pointer, subject, wake=wake)
         if not typed.ok or not isinstance(typed.evidence, DeliveryReport):
             return typed
         report = typed.evidence
@@ -1042,6 +1058,32 @@ class LocalPtyHeadRuntime:
             lease=last.lease,
             rotation_ready=last.rotation_ready,
         )
+
+    def _wake_if_suspended(self, run: HeadRun, wake: Callable[[], Any]) -> None:
+        """Resume this head through the caller's `wake` when its launch identity says it is stopped.
+
+        A retained worker is suspended with `SIGSTOP` between rounds, and its continuation hands
+        the delivery a hook that sends the `SIGCONT` (`CommandHostRuntime.resume_worker`). The Orca
+        transport performs that hook itself, after the pane was seen ready and before the first
+        byte; this backend has no pane transport, so it performs it here, at the same point: after
+        admission, before `_put`. Without it every byte of the continuation and both Enters were
+        written into the pty of a stopped process, the supervisor's turns closed on silence, and the
+        continuation was reported `prompt_typed_but_no_turn_started` (secretary-1702).
+
+        Only a suspended head is woken: the same hook carries other pre-send work for heads that
+        are running (a Codex provider-source binding), which this backend does not perform, and a
+        running head needs no wake. The hook's return value is not read, for the same reason.
+        """
+        address = self._address(run)
+        if address is None:
+            return
+        expected = {"run_id": run.run_id, "role": run.role, "task": _task_of(run)}
+        if all(expected.values()):
+            status = self._identity(str(address.pid_file), expected=expected)
+        else:
+            status = self._identity(str(address.pid_file))
+        if status.get("alive") and status.get("match") and status.get("stopped"):
+            wake()
 
     def _await_settled(self, run: HeadRun) -> None:
         """Wait until the head has printed nothing new for `prompt_quiet`, within `prompt_settle`.
@@ -2644,6 +2686,12 @@ def _admission_refusal(answer: Mapping[str, Any]) -> _Refusal:
         return _Refusal(HEAD_BUSY, detail, HeadNudgeFailed(detail), answer)
     # An oversized payload and everything else: the head is untouched and still the caller's.
     return _Refusal(HEAD_ALIVE, detail, HeadNudgeFailed(detail), answer)
+
+
+def _wake_hook(transport: Any) -> Callable[[], Any] | None:
+    """The pre-send hook a caller's transport carries (`before_send`), or `None`."""
+    hook = getattr(transport, "before_send", None)
+    return hook if callable(hook) else None
 
 
 def _payload_of(pointer: NudgePointer) -> bytes:

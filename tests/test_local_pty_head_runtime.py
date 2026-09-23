@@ -36,6 +36,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.dispatch.watchdog import clear_head_heartbeat, head_process_status
@@ -2351,6 +2352,133 @@ class AnAgentPromptIsSubmittedTests(LocalPtyRuntimeTestCase):
         self.assertFalse(receipt.ok)
         self.assertEqual(receipt.status, HEAD_GONE, receipt.reason)
         self.assertIn(DELIVER_NOT_SUBMITTED, receipt.reason)
+
+
+class ARetainedHeadIsWokenForItsContinuationTests(LocalPtyRuntimeTestCase):
+    """secretary-1702: a red-verdict continuation into a retained worker starts a turn in it.
+
+    A retained worker is suspended with `SIGSTOP` once its round is done, and the continuation
+    hands the delivery a transport whose `before_send` sends the `SIGCONT`. This backend read
+    nothing of the transport, so the line and both Enters went into the pty of a stopped process
+    and every red round ended `prompt_typed_but_no_turn_started`. The fake TUI below is that
+    worker: it has finished a turn, then it is stopped the way `retain_worker` stops it.
+    """
+
+    FIRST = "Read /tmp/TASK.md and do its task."
+    CONTINUATION = (
+        "Read /tmp/TASK.md and do its task. Generation 2: use its report command, not an earlier turn's."
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.runtime = LocalPtyHeadRuntime(
+            self.root,
+            head_process_status=head_process_status,
+            delivery_grace=TEST_GRACE_SECONDS,
+            prompt_quiet=0.5,
+            prompt_poll=0.05,
+            prompt_first_output=2.0,
+            submit_confirm=3.0,
+        )
+        self.record = self.root / "submitted.jsonl"
+        self.woken: list[str] = []
+
+    def submitted(self) -> list[str]:
+        if not self.record.exists():
+            return []
+        return [json.loads(line)["submitted"].strip() for line in self.record.read_text().splitlines() if line]
+
+    def retained_head(self) -> HeadRun:
+        """A head that has completed one turn and is now suspended, as a retained worker is."""
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+        first = self.runtime.deliver(
+            run, NudgePointer.line(self.FIRST), subject="head-launch", transport=Transport()
+        )
+        self.assertEqual(first.status, HEAD_OK, first.reason)
+        self.end_turn(run)
+        self.signal_head(run, signal.SIGSTOP)
+        self.addCleanup(self.signal_head, run, signal.SIGCONT)
+        self._await(lambda: self.stopped(run), message="the head was never suspended")
+        return run
+
+    def signal_head(self, run: HeadRun, number: int) -> None:
+        """`CommandHostRuntime._signal_head`: the head's own process group, by its launch identity."""
+        status = head_process_status(run.pid_file)
+        if status.get("alive"):
+            _kill(os.getpgid(int(status["pid"])), number, group=True)
+
+    def stopped(self, run: HeadRun) -> bool:
+        return bool(head_process_status(run.pid_file).get("stopped"))
+
+    def resume(self, run: HeadRun):
+        """The hook `resume_worker` hands the delivery: it records the call and sends `SIGCONT`."""
+
+        def before_send() -> None:
+            self.woken.append(run.run_id)
+            self.signal_head(run, signal.SIGCONT)
+
+        return Transport(before_send=before_send)
+
+    def test_the_continuation_wakes_the_retained_head_and_starts_a_turn_in_it(self) -> None:
+        run = self.retained_head()
+        receipt = self.runtime.deliver(
+            run,
+            NudgePointer.line(self.CONTINUATION),
+            subject="worker-continuation",
+            transport=self.resume(run),
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertTrue(receipt.delivery.evidence.turn_confirmed)
+        self.assertEqual(receipt.delivery.evidence.submit_count, 1)
+        self.assertEqual(self.woken, [run.run_id], "the caller's hook is what wakes the head, once")
+        self.assertFalse(self.stopped(run))
+        self.assertEqual(self.submitted(), [self.FIRST, self.CONTINUATION])
+
+    def test_a_retained_head_nobody_wakes_is_not_reported_as_delivered(self) -> None:
+        # The live failure itself, for a caller that hands no hook: the runtime does not invent a
+        # way to resume a head the dispatcher froze, and it does not call the typed line a turn.
+        run = self.retained_head()
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line(self.CONTINUATION), subject="worker-continuation", transport=Transport()
+        )
+        self.assertEqual(receipt.status, HEAD_ALIVE, receipt.reason)
+        self.assertEqual(receipt.reason, DELIVER_NOT_SUBMITTED)
+        self.assertEqual(receipt.evidence.submit_count, 2)
+        self.assertTrue(self.stopped(run))
+        self.assertEqual(self.submitted(), [self.FIRST])
+
+    def test_a_running_head_is_not_handed_to_the_hook(self) -> None:
+        # The same hook carries other pre-send work for running heads (a Codex provider-source
+        # binding) that this backend does not perform: a head that is not suspended never calls it.
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line(self.FIRST), subject="observer-wake", transport=self.resume(run)
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(self.woken, [])
+        self.assertEqual(self.submitted(), [self.FIRST])
+
+    def test_a_continuation_refused_at_admission_leaves_the_retained_head_suspended(self) -> None:
+        # Woken only once the line is admitted: a refused delivery must not turn into a `SIGCONT`
+        # the dispatcher then reads as a retained worker that is no longer confirmably suspended.
+        run = self.retained_head()
+        self.runtime.request_drain(run, StopInitiator(actor="dispatcher", reason="replacement"))
+        receipt = self.runtime.deliver(
+            run,
+            NudgePointer.line(self.CONTINUATION),
+            subject="worker-continuation",
+            transport=self.resume(run),
+        )
+        self.assertEqual(receipt.status, HEAD_DRAINING, receipt.reason)
+        self.assertEqual(self.woken, [])
+        self.assertTrue(self.stopped(run))
+
+
+@dataclass(frozen=True)
+class Transport:
+    """The one field of the dispatcher's transport this backend reads."""
+
+    before_send: object = None
 
 
 if __name__ == "__main__":
