@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
@@ -58,12 +59,13 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
         payload = self.runtime.production_state.load()
         self.assertNotIn("respawn_interrupted_command", payload["records"]["secretary-510"])
 
-    def test_a_real_quiet_sleep_child_is_named_to_the_successor(self) -> None:
-        """Round 2 reproduction: the wait tick's own child readings of a live ``sleep 3600``
-        (never above the noise floor) are what the respawn names -- nothing injected."""
+    def _respawn_over_a_real_sleep_child(self, stdout: Any) -> str:
+        """The wait tick's own child readings of a live ``sleep 3600`` (never above the noise
+        floor) drive the respawn; answers the successor's TASK.md. ``stdout`` is the child's, set
+        explicitly so the runner's own stdout never becomes its output file (secretary-1694)."""
         if not Path("/proc/self/stat").exists():
             self.skipTest("needs Linux /proc")
-        head = subprocess.Popen(["sh", "-c", "sleep 3600; true"], stderr=subprocess.DEVNULL)
+        head = subprocess.Popen(["sh", "-c", "sleep 3600; true"], stdout=stdout, stderr=subprocess.DEVNULL)
 
         def stop() -> None:
             subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False)
@@ -83,7 +85,24 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
 
         self.host.worker_status = with_children  # type: ignore[method-assign]
         self._stall_to_the_respawn(command="")
-        self.assertIn("The previous head was stopped while running: sleep 3600", self._task_doc())
+        return self._task_doc()
+
+    def test_a_real_quiet_sleep_child_is_named_to_the_successor(self) -> None:
+        """Round 2 reproduction, stdout discarded: the command alone, nothing injected."""
+        document = self._respawn_over_a_real_sleep_child(subprocess.DEVNULL)
+        self.assertIn("The previous head was stopped while running: sleep 3600\n", document)
+        self.assertNotIn("redirected to", document)
+
+    def test_a_real_sleep_childs_output_file_is_named_to_the_successor(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        log = Path(tmp.name) / "sleep.log"
+        with log.open("w", encoding="utf-8") as stdout:
+            document = self._respawn_over_a_real_sleep_child(stdout)
+        self.assertIn(
+            f"The previous head was stopped while running: sleep 3600 (its output was redirected to {log})",
+            document,
+        )
 
     def test_no_child_reading_means_nothing_new(self) -> None:
         self._stall_to_the_respawn(command="")

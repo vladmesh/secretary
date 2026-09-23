@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
@@ -420,13 +421,20 @@ class RealProcessTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def _head(self, child_code: str, *, output: Path | None = None, extra: str = "") -> subprocess.Popen:
-        """A stand-in head process whose one child runs ``child_code``."""
-        redirect = f"stdout=open({str(output)!r}, 'w')" if output is not None else "stdout=None"
+        """A stand-in head process whose one child runs ``child_code``.
+
+        The child's stdout is ``output`` when given and ``/dev/null`` otherwise, never the
+        runner's own stdout: a runner writing to a regular file would otherwise be named as the
+        child's output file (secretary-1694).
+        """
+        redirect = f"stdout=open({str(output)!r}, 'w')" if output is not None else "stdout=subprocess.DEVNULL"
         head_code = (
             "import subprocess, sys; "
             f"subprocess.run([sys.executable, '-c', {child_code!r}] + {extra.split()!r}, {redirect})"
         )
-        head = subprocess.Popen([sys.executable, "-c", head_code], cwd=self.tmp.name)
+        head = subprocess.Popen(
+            [sys.executable, "-c", head_code], stdout=subprocess.DEVNULL, cwd=self.tmp.name
+        )
 
         def stop() -> None:
             for pid in [item["pid"] for item in read_head_children(head.pid).get("descendants", [])]:
@@ -485,6 +493,7 @@ class RealProcessTests(unittest.TestCase):
         # Quiet, and still described: the youngest live descendant (round 2).
         self.assertTrue(second.child_key.startswith("y:"))
         self.assertIn("time.sleep(60)", second.command)
+        self.assertEqual(second.output_path, "")
 
     def test_an_older_busy_child_under_many_newer_idle_sleepers_is_advancing(self) -> None:
         """Reviewer reproduction for BLOCKER-UNSEEN-WORKING-DESCENDANT: one busy loop started
@@ -496,7 +505,7 @@ class RealProcessTests(unittest.TestCase):
             "sleepers = [subprocess.Popen(['sleep', '60']) for _ in range(17)]\n"
             "busy.wait()\n"
         )
-        head = subprocess.Popen([sys.executable, "-c", code], cwd=self.tmp.name)
+        head = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, cwd=self.tmp.name)
 
         def stop() -> None:
             for pid in [item["pid"] for item in read_head_children(head.pid).get("descendants", [])]:
@@ -519,11 +528,14 @@ class RealProcessTests(unittest.TestCase):
         self.assertIs(second.progress, ProgressState.ADVANCING)
         self.assertIn("while True", second.command)
 
-    def test_two_quiet_readings_of_a_sleeping_child_leave_a_respawn_note(self) -> None:
-        """Reviewer reproduction for BLOCKER-OMITTED-INTERRUPTED-COMMAND: a live ``sleep 3600``
-        that never crosses the noise floor, reduced to ConfirmedStall at 900 s."""
+    def _respawn_note_of_a_sleeping_child(self, stdout: Any) -> str:
+        """A live ``sleep 3600`` that never crosses the noise floor, reduced to ConfirmedStall at
+        900 s; answers the respawn note. ``stdout`` is the child's, set explicitly (secretary-1694)."""
         head = subprocess.Popen(
-            ["sh", "-c", "sleep 3600; true"], stderr=subprocess.DEVNULL, cwd=self.tmp.name
+            ["sh", "-c", "sleep 3600; true"],
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            cwd=self.tmp.name,
         )
         self.addCleanup(
             lambda: (subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False), head.kill())
@@ -548,16 +560,31 @@ class RealProcessTests(unittest.TestCase):
             key = scenario_episode.last_child_key
         assert scenario_episode is not None
         self.assertIs(scenario_episode.verdict, VitalityVerdict.CONFIRMED_STALL)
+        return interrupted_command_note(scenario_episode, RUN_ID)
+
+    def test_two_quiet_readings_of_a_sleeping_child_leave_a_respawn_note(self) -> None:
+        """Reviewer reproduction for BLOCKER-OMITTED-INTERRUPTED-COMMAND, stdout discarded."""
         self.assertEqual(
-            interrupted_command_note(scenario_episode, RUN_ID),
+            self._respawn_note_of_a_sleeping_child(subprocess.DEVNULL),
             "The previous head was stopped while running: sleep 3600",
         )
 
+    def test_the_respawn_note_names_the_sleeping_childs_output_file(self) -> None:
+        log = Path(self.tmp.name) / "sleep.log"
+        with log.open("w", encoding="utf-8") as stdout:
+            note = self._respawn_note_of_a_sleeping_child(stdout)
+        self.assertEqual(
+            note,
+            f"The previous head was stopped while running: sleep 3600 (its output was redirected to {log})",
+        )
+
     def test_a_head_without_children_and_a_gone_head(self) -> None:
-        lonely = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        lonely = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL
+        )
         self.addCleanup(lambda: (lonely.kill(), lonely.wait(timeout=10)))
         self.assertEqual(read_head_children(lonely.pid)["descendants"], [])
-        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL)
         gone.wait(timeout=10)
         self.assertEqual(read_head_children(gone.pid)["state"], "unavailable")
 
