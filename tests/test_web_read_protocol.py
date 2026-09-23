@@ -28,7 +28,7 @@ from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import InvalidCursor, TaskNotFound
 from secretary.webproto.reads import ReadLayer
 from tests.fakes.dispatcher import dispatcher_seed
-from tests.sql_backend_fixtures import card_store
+from tests.sql_backend_fixtures import card_store, terminate_session
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -390,6 +390,22 @@ class DegradedSourceTests(ReadLayerFixture):
         self.assertIn("board store is not answering", snapshot["tasks"]["source"]["reason"])
         self.assertEqual(snapshot["tasks"]["items"], [])
         self.assertEqual(snapshot["agents"]["source"]["state"], "available")
+
+    def test_a_restarted_board_store_is_read_again_by_the_same_long_lived_layer(self) -> None:
+        # The web service keeps one layer, and so one board client, for its whole life.
+        layer = self.layer()
+        before = layer.system_snapshot()["tasks"]
+        self.assertEqual(before["source"]["state"], "available")
+        terminate_session(self.board)
+
+        failed = layer.system_snapshot()["tasks"]
+        self.assertEqual(failed["source"]["state"], "unavailable")
+        self.assertIn("unreachable", failed["source"]["reason"])
+        self.assertNotIn(self.board.credentials.password, failed["source"]["reason"])
+
+        recovered = layer.system_snapshot()["tasks"]
+        self.assertEqual(recovered["source"]["state"], "available")
+        self.assertEqual(recovered["items"], before["items"])
 
     def test_health_that_cannot_be_collected_carries_a_reason_and_the_age_of_what_is_left(
         self,

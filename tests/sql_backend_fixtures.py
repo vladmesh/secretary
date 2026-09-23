@@ -787,6 +787,20 @@ def card_store(
     return client
 
 
+def terminate_session(client: SqlCardClient) -> None:
+    """End the client's server session from a second connection, as a board-store restart would.
+
+    The shared test server keeps running; only this client's backend goes away.
+    """
+    import psycopg
+
+    pid = client.connection.info.backend_pid
+    with psycopg.connect(client.credentials.conninfo(), autocommit=True) as admin:
+        row = admin.execute("SELECT pg_terminate_backend(%s)", (pid,)).fetchone()
+    if not row or not row[0]:
+        raise AssertionError(f"backend {pid} was not terminated")
+
+
 class CardStoreCase(unittest.TestCase):
     """A TestCase whose board is a real card store: `self.card_store(seed)`."""
 
@@ -803,4 +817,5 @@ __all__ = [
     "docker",
     "ensure_sprint_row",
     "seed_client",
+    "terminate_session",
 ]
