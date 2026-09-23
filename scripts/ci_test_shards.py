@@ -28,6 +28,8 @@ SUITES = (
     "integration-recovery",
     "integration-memory",
     "integration-board",
+    "integration-dispatcher",
+    "integration-heads",
     "packaging",
 )
 

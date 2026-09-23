@@ -248,7 +248,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         ):
             validate_fast_profile(root)
 
-    def test_fast_action_skips_the_seven_suite_manifest(self) -> None:
+    def test_fast_action_skips_the_suite_manifest(self) -> None:
         with (
             patch("scripts.ci_test_shards.load_manifest") as manifest,
             patch("scripts.ci_test_shards.run_fast", return_value=0) as fast,

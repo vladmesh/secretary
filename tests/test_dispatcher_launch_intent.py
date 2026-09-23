@@ -3582,6 +3582,17 @@ class HostLaunchContourTests(unittest.TestCase):
         self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
 
+    @staticmethod
+    def _reap_head(head: subprocess.Popen) -> None:
+        """Kill a stand-in head and collect its exit status.
+
+        `kill` alone leaves a zombie until the process ends, and `Popen.__del__` then reports
+        `ResourceWarning: subprocess is still running` (issue:3a06b695f4dc731da91a)."""
+        with contextlib.suppress(ProcessLookupError):
+            head.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            head.wait(timeout=5)
+
     def run_json(self, answers: dict[str, Any]):
         """Stand in for the Orca CLI: the first word after `orca` picks the answer."""
 
@@ -3962,7 +3973,7 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_head_with_no_pane_is_stopped_through_its_heartbeat(self) -> None:
         """The shape every adopted head has: no handle, only a pid."""
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -3986,7 +3997,7 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_stopped_head_is_woken_before_its_graceful_stop(self) -> None:
         """SIGTERM is pending while stopped, so handoff must SIGCONT first."""
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -4065,7 +4076,7 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_claude_retained_worker_rewrites_task_before_delivering_rework(self) -> None:
         """Claude's interactive pane is reusable just like Codex TUI."""
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -4138,7 +4149,7 @@ class HostLaunchContourTests(unittest.TestCase):
         turn rather than treating process liveness as delivery evidence.
         """
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -4214,7 +4225,7 @@ class HostLaunchContourTests(unittest.TestCase):
         path takes it from the caller rather than choosing one itself.
         """
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -4270,7 +4281,7 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_running_retained_claude_recovers_from_its_durable_user_turn(self) -> None:
         """A Claude JSONL user record proves delivery after a crash without terminal guessing."""
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         sent_at = time.time() - 1
         record = DispatcherRecord(
             worker="w1",
@@ -4313,7 +4324,7 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_confirmed_retained_continuation_is_not_delivered_twice_on_recovery(self) -> None:
         """A crash after checkpointing delivery must leave the active worker alone."""
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir),
@@ -4369,7 +4380,7 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def test_a_stopped_retained_worker_with_no_workspace_refuses_continuation(self) -> None:
         head = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(head.kill)
+        self.addCleanup(self._reap_head, head)
         record = DispatcherRecord(
             worker="w1",
             workspace=str(self.data_dir / "missing"),

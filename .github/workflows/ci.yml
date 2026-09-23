@@ -16,10 +16,11 @@ jobs:
   test_suites:
     name: test / ${{ matrix.suite }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, component, runtime-component, integration-recovery, integration-memory, integration-board, packaging]
+        suite: [unit, component, runtime-component, integration-recovery, integration-memory, integration-board, integration-dispatcher, integration-heads, packaging]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +30,20 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[memory,ci]'
+      - name: Pull the throwaway PostgreSQL image before any suite needs it
+        # The card-store fixtures pull `postgres:16` from inside a test; a Docker Hub hiccup there
+        # reads as a red product test. Pull it up front, with retries, so the pull either succeeds
+        # or fails in a step of its own that the gate classifies as infrastructure.
+        if: >-
+          ${{ contains(fromJSON('["integration-board", "integration-dispatcher", "integration-heads", "integration-recovery"]'), matrix.suite) }}
+        run: |
+          for attempt in 1 2 3 4; do
+            if docker pull --quiet postgres:16; then exit 0; fi
+            echo "pull image postgres:16 failed (attempt $attempt), retrying"
+            sleep 15
+          done
+          echo "pull image postgres:16 failed after 4 attempts"
+          exit 1
       - name: Run reported suite
         id: run_suite
         continue-on-error: true
@@ -75,6 +90,7 @@ jobs:
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,6 +107,7 @@ jobs:
     if: ${{ always() }}
     needs: test_suites
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
