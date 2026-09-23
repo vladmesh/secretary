@@ -21,6 +21,7 @@ from secretary.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
 )
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
+from secretary.dispatch.head_vitality_episode import interrupted_command_note as _interrupted_command_note
 from secretary.dispatch.head_vitality_episode import reduce_vitality as _reduce_vitality
 from secretary.dispatch.head_vitality_guard import (
     assert_destructive_allowed as _assert_destructive_allowed,
@@ -965,6 +966,9 @@ def reduce_and_store_vitality_episode(
       exact-HeadRun evidence ``command_terminal_status`` fetched; compared against the
       previous cursor persisted on the episode.
     * ``pane_advisory`` -- from the same status's ``idle`` flag, advisory by construction.
+    * ``execution_child`` -- from ``status["child_activity"]``, the head's descendants read
+      from ``/proc`` by ``command_terminal_status`` for a pid the heartbeat proved; compared
+      against the previous child cursor and described child kept on the episode.
     """
     field_name = f"{kind}_vitality_episode"
     previous = getattr(record, field_name)
@@ -983,6 +987,7 @@ def reduce_and_store_vitality_episode(
         not isinstance(pid_status, dict)
         and not isinstance(provider_progress, dict)
         and "idle" not in status
+        and not isinstance(status.get("child_activity"), dict)
     ):
         # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
         # no reduction to run and no episode to write, so return before saving anything.
@@ -999,6 +1004,14 @@ def reduce_and_store_vitality_episode(
             (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
             if previous is not None
             else ""
+        ),
+        previous_child_cursor=(
+            (previous.evidence_cursors or {}).get(_SnapshotSource.EXECUTION_CHILD.value, "")
+            if previous is not None and previous.run_id == run_id
+            else ""
+        ),
+        previous_child_key=(
+            previous.last_child_key if previous is not None and previous.run_id == run_id else ""
         ),
         observed_at=now,
     )
@@ -1151,6 +1164,43 @@ def _trigger_wait_watchdog(
 
 
 def _respawn_wait(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    kind: str,
+    now: float,
+    trigger: str,
+    degraded: bool = False,
+) -> dict[str, Any]:
+    # The successor is told which command its predecessor was stopped in (secretary-1692), read
+    # from the stopped run's own episode before the bring-up replaces that run. The note rides
+    # the record only for the bring-up below and is never persisted.
+    record.respawn_interrupted_command = _interrupted_command_note(
+        getattr(record, f"{kind}_vitality_episode"),
+        str((record.review_head_run if kind == "review" else record.worker_head_run).get("run_id") or ""),
+    )
+    try:
+        return _respawn_wait_bring_up(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            kind=kind,
+            now=now,
+            trigger=trigger,
+            degraded=degraded,
+        )
+    finally:
+        record.respawn_interrupted_command = ""
+
+
+def _respawn_wait_bring_up(
     runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,

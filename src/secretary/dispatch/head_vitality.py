@@ -60,6 +60,17 @@ SNAPSHOT_VERSION = 1
 # writes, short enough that one snapshot can never smuggle a transcript into durable state.
 REASON_LIMIT = 240
 CURSOR_LIMIT = 240
+# Bound on a child's command line carried on a snapshot or an episode.
+COMMAND_LIMIT = 300
+
+# What one ``execution_child`` reading must show, summed over the descendants it can compare, to
+# count as advancement rather than noise. An idle helper the head keeps alive (an MCP server's
+# timers, a watcher) burns tens of milliseconds a minute and moves no bytes; a working test run
+# burns a large fraction of a core or streams output. Half a CPU-second, or a quarter MiB of
+# read+written bytes, between two readings sits well between the two.
+CHILD_CPU_ADVANCE_MS = 500
+CHILD_IO_ADVANCE_BYTES = 256 * 1024
+_CHILD_CURSOR_PREFIX = "c1:"
 
 
 class HeadVitalityError(RuntimeError):
@@ -122,6 +133,9 @@ class SnapshotSource(StrEnum):
     PROVIDER_CURSOR = "provider_cursor"
     PANE_ADVISORY = "pane_advisory"
     EXECUTION_RECEIPT = "execution_receipt"
+    # The head's own child processes, read from /proc (secretary-1692): a head blocked on a long
+    # foreground command is silent everywhere else while its child works.
+    EXECUTION_CHILD = "execution_child"
 
 
 @dataclass(frozen=True)
@@ -146,6 +160,13 @@ class VitalitySnapshot:
     # alone. ``None`` when this channel exposed no cursor or could not be read.
     cursor: str | None = None
     reason: str = ""
+    # Only the ``execution_child`` source fills these: the one descendant this reading describes
+    # (the busiest mover, or the previously described one while it still lives), as a
+    # ``pid.start`` key, its redacted bounded command line and, best effort, the regular file its
+    # stdout goes to. Empty on every other source and when no descendant is described.
+    child_key: str = ""
+    command: str = ""
+    output_path: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
@@ -161,6 +182,9 @@ class VitalitySnapshot:
         object.__setattr__(self, "observed_at", observed_at)
         object.__setattr__(self, "cursor", None if self.cursor is None else str(self.cursor)[:CURSOR_LIMIT])
         object.__setattr__(self, "reason", str(self.reason or "")[:REASON_LIMIT])
+        object.__setattr__(self, "child_key", str(self.child_key or "")[:80])
+        object.__setattr__(self, "command", str(self.command or "")[:COMMAND_LIMIT])
+        object.__setattr__(self, "output_path", str(self.output_path or "")[:COMMAND_LIMIT])
 
     @property
     def advisory(self) -> bool:
@@ -180,6 +204,9 @@ class VitalitySnapshot:
             "progress": self.progress.value,
             "cursor": self.cursor,
             "reason": self.reason,
+            "child_key": self.child_key,
+            "command": self.command,
+            "output_path": self.output_path,
         }
 
     @classmethod
@@ -225,6 +252,10 @@ class VitalitySnapshot:
             progress=progress,
             cursor=None if cursor is None else str(cursor),
             reason=str(payload.get("reason") or ""),
+            # Optional since secretary-1692: a payload written before them names no child.
+            child_key=str(payload.get("child_key") or ""),
+            command=str(payload.get("command") or ""),
+            output_path=str(payload.get("output_path") or ""),
         )
 
     @classmethod
@@ -355,6 +386,122 @@ class VitalitySnapshot:
         )
 
     @classmethod
+    def from_child_activity(
+        cls,
+        evidence: Any,
+        *,
+        run_id: str,
+        previous_cursor: str = "",
+        previous_key: str = "",
+        observed_at: float,
+    ) -> VitalitySnapshot:
+        """Wrap one ``runtime.head.children.read_head_children`` answer against the earlier cursor.
+
+        The cursor is this source's own compact record of ``(pid, start time, cpu, io)`` for the
+        newest descendants, plus the reading's uptime stamp; it is parsed only here, by the
+        builder that wrote it. A descendant present in both readings contributes its counter
+        deltas; one born after the previous reading contributes its whole counters (the head
+        started something); one merely not listed last time contributes nothing, because its
+        delta is unknown. Summed deltas past ``CHILD_CPU_ADVANCE_MS`` or
+        ``CHILD_IO_ADVANCE_BYTES`` are ``Advancing``; anything less, including a live child whose
+        counters are frozen, is ``Quiet``. How long child advancement may hold off a stall is the
+        reducer's question (``VitalityThresholds.child_activity_ceiling``), not this one's.
+        """
+        if not isinstance(evidence, dict) or str(evidence.get("state") or "") != "observed":
+            detail = str(evidence.get("reason") or "") if isinstance(evidence, dict) else ""
+            return cls._unavailable(
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.EXECUTION_CHILD,
+                reason=f"child processes were not read: {detail}".strip(": "),
+            )
+        descendants: list[dict[str, Any]] = []
+        for item in evidence.get("descendants") or ():
+            if not isinstance(item, dict):
+                continue
+            try:
+                descendants.append(
+                    {
+                        "pid": int(item["pid"]),
+                        "start": int(item["start"]),
+                        "cpu_ms": max(0, int(item.get("cpu_ms") or 0)),
+                        "io": max(0, int(item.get("io") or 0)),
+                        "command": str(item.get("command") or ""),
+                        "output": str(item.get("output") or ""),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        try:
+            uptime = max(0, int(evidence.get("uptime_ticks") or 0))
+        except (TypeError, ValueError):
+            uptime = 0
+        cursor = _child_cursor(uptime, descendants)
+        previous = _parse_child_cursor(previous_cursor)
+
+        def reading(progress: ProgressState, reason: str, item: dict[str, Any] | None) -> VitalitySnapshot:
+            return cls(
+                run_id=run_id,
+                source=SnapshotSource.EXECUTION_CHILD,
+                observed_at=observed_at,
+                availability=SourceAvailability.AVAILABLE,
+                progress=progress,
+                cursor=cursor,
+                reason=reason,
+                child_key="" if item is None else f"{item['pid']}.{item['start']}",
+                command="" if item is None else item["command"],
+                output_path="" if item is None else item["output"],
+            )
+
+        def still_alive() -> dict[str, Any] | None:
+            return next(
+                (
+                    item
+                    for item in descendants
+                    if previous_key and f"{item['pid']}.{item['start']}" == previous_key
+                ),
+                None,
+            )
+
+        if not descendants:
+            return reading(ProgressState.QUIET, "the head has no live child process", None)
+        if previous is None:
+            return reading(
+                ProgressState.UNKNOWN,
+                "first observation of this source: no earlier cursor to compare against",
+                still_alive(),
+            )
+        described: dict[str, Any] | None = None
+        previous_uptime, counters = previous
+        cpu_total = 0
+        io_total = 0
+        best: tuple[int, int] = (0, 0)
+        for item in descendants:
+            known = counters.get((item["pid"], item["start"]))
+            if known is not None:
+                cpu = max(0, item["cpu_ms"] - known[0])
+                io = max(0, item["io"] - known[1])
+            elif previous_uptime and item["start"] > previous_uptime:
+                cpu, io = item["cpu_ms"], item["io"]
+            else:
+                continue
+            cpu_total += cpu
+            io_total += io
+            if (cpu or io) and (cpu, io) > best:
+                best = (cpu, io)
+                described = item
+        advanced = cpu_total >= CHILD_CPU_ADVANCE_MS or io_total >= CHILD_IO_ADVANCE_BYTES
+        if not advanced:
+            # Not a mover this time: keep describing the child already on file while it lives, so
+            # a frozen long command stays the one a successor is told about.
+            return reading(
+                ProgressState.QUIET,
+                f"child counters moved {cpu_total}ms cpu and {io_total} bytes since the previous reading",
+                still_alive(),
+            )
+        return reading(ProgressState.ADVANCING, "", described)
+
+    @classmethod
     def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
         """Wrap one pane readiness answer (`{"idle": bool}` as callers of ``PaneHost`` build it).
 
@@ -402,11 +549,42 @@ class VitalitySnapshot:
         )
 
 
+def _child_cursor(uptime: int, descendants: list[dict[str, Any]]) -> str:
+    """This source's cursor: the reading's uptime and as many newest descendants as fit."""
+    cursor = f"{_CHILD_CURSOR_PREFIX}{uptime:x};"
+    entries: list[str] = []
+    for item in descendants:
+        entry = f"{item['pid']:x}.{item['start']:x}.{item['cpu_ms']:x}.{item['io']:x}"
+        if len(cursor) + len(",".join([*entries, entry])) > CURSOR_LIMIT:
+            break
+        entries.append(entry)
+    return cursor + ",".join(entries)
+
+
+def _parse_child_cursor(cursor: str) -> tuple[int, dict[tuple[int, int], tuple[int, int]]] | None:
+    """Read back a cursor ``_child_cursor`` wrote; anything else is no previous reading."""
+    text = str(cursor or "")
+    if not text.startswith(_CHILD_CURSOR_PREFIX):
+        return None
+    head, _, body = text[len(_CHILD_CURSOR_PREFIX) :].partition(";")
+    try:
+        uptime = int(head, 16)
+        counters: dict[tuple[int, int], tuple[int, int]] = {}
+        for entry in filter(None, body.split(",")):
+            pid, start, cpu, io = (int(part, 16) for part in entry.split("."))
+            counters[(pid, start)] = (cpu, io)
+    except ValueError:
+        return None
+    return uptime, counters
+
+
 def snapshots_from_status(
     status: Any,
     *,
     run_id: str,
     previous_cursor: str = "",
+    previous_child_cursor: str = "",
+    previous_child_key: str = "",
     observed_at: float,
 ) -> list[VitalitySnapshot]:
     """Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``.
@@ -441,4 +619,15 @@ def snapshots_from_status(
         )
     if "idle" in status:
         snapshots.append(VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=observed_at))
+    child_activity = status.get("child_activity")
+    if isinstance(child_activity, dict):
+        snapshots.append(
+            VitalitySnapshot.from_child_activity(
+                child_activity,
+                run_id=run_id,
+                previous_cursor=previous_child_cursor,
+                previous_key=previous_child_key,
+                observed_at=observed_at,
+            )
+        )
     return snapshots

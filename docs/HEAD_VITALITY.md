@@ -57,6 +57,7 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant.
 | `pid_heartbeat` | `dispatcher_watchdog.head_process_status` | Process |
 | `provider_cursor` | `dispatcher_tui.provider_progress_for_run` | Progress |
 | `pane_advisory` | pane readiness (`{"idle": bool}`, from `pane_host.Pane`) | Turn |
+| `execution_child` | `runtime.head.children.read_head_children` (the head's `/proc` descendants) | Progress |
 
 Mappings:
 
@@ -66,7 +67,10 @@ Mappings:
 - cursor moved since this run's previous snapshot → `Advancing`; unchanged → `Quiet`; unadmitted,
   foreign or unreadable → `Unknown` + unavailable; the first observation of a source records its cursor
   without a progress opinion;
-- pane ready → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`.
+- pane ready → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`;
+- child processes (see [Child processes](#child-processes)): summed CPU or IO movement of the head's
+  descendants since the previous reading past the noise floor → `Advancing`; less, or no descendant →
+  `Quiet`; first reading → no opinion; `/proc` unreadable → the source is left out of the status.
 
 Snapshots are frozen dataclasses with `to_json`/`from_json`. A payload with an unknown version or axis
 value raises instead of being normalised.
@@ -97,7 +101,8 @@ Reducer rules (pinned in `tests/test_head_vitality_episode.py`):
 - With `retained=True` a parked process reduces to `Retained` instead of `Suspended`; the freeze is the
   same. `Dead` still outranks it, and a retained process that is running again is not `Retained`.
 - Advancement from any non-advisory source ends a suspected or confirmed episode, resets phase
-  timestamps, stamps `last_progress_at`/`last_progress_source` and bumps `activity_epoch`.
+  timestamps, stamps `last_progress_at`/`last_progress_source` and bumps `activity_epoch`. Child
+  process advancement is the bounded exception described under [Child processes](#child-processes).
 - An unavailable source freezes its evidence and is tracked in `unavailable_since` until it answers.
   When every strong source (pid and provider) is dark the verdict is `Unverifiable`, except that an
   already confirmed episode stays confirmed.
@@ -105,10 +110,52 @@ Reducer rules (pinned in `tests/test_head_vitality_episode.py`):
   advisory turn seen to end, raises `HealthyQuiet` to `SuspectedStall` at once. Without an owed answer
   advisory readings carry no weight.
 - Advisory pane readings only corroborate in `basis`; they never drive a stall verdict.
-- Quiet is measured from `max(last_progress_at, quiet_since)`, or `started_at` if neither is set, not
-  from the observing tick. The ladder climbs `HealthyQuiet` → `SuspectedStall` → `ConfirmedStall` as
+- Quiet is measured from `max(last_progress_at, quiet_since, child_progress_at)`, or `started_at` if
+  none is set, not from the observing tick. The ladder climbs `HealthyQuiet` → `SuspectedStall` → `ConfirmedStall` as
   that age crosses `suspect_after` and then `suspect_after + confirm_after`.
 - Confirmation is sticky. Only progress, suspension, death or identity change ends it.
+
+### Child processes
+
+A head running one long foreground command is silent in its pane and provider journal until the
+command returns (secretary-1665: two integration shards, respawned at 968 s of strong quiet with the
+test child alive and on CPU). `command_terminal_status` therefore reads the descendants of the pid the
+heartbeat proved (`live-match` only) through `host.head_children` → `read_head_children`: one scan of
+`/proc/*/stat` builds the tree; each descendant carries its start time, cumulative CPU
+(`utime+stime+cutime+cstime`, so reaped grandchildren count) and `rchar+wchar` from `/proc/<pid>/io`,
+newest first, at most 16. Command lines are redacted (`runtime.redact.scrub_secrets`), flattened and
+bounded to 300 characters when read; the output file is named when `/proc/<pid>/fd/1` is a regular
+file.
+
+The `execution_child` cursor is `c1:<uptime>;` plus `pid.start.cpu.io` for the newest descendants that
+fit 240 characters. A reading compares against it: a known `(pid, start)` contributes its counter
+deltas, a process born after the previous reading contributes its whole counters, and anything else
+contributes nothing. Advancement needs ≥ 500 ms CPU or ≥ 256 KiB IO summed per reading
+(`CHILD_CPU_ADVANCE_MS`, `CHILD_IO_ADVANCE_BYTES`), well above an idle MCP server or watcher.
+
+The reducer fuses it separately from the head's own channels:
+
+- child advancement makes the verdict `HealthyActive` (`basis` `advancing@execution_child`) and stamps
+  `child_progress_at`, **only while** `now − child_activity_since < child_activity_ceiling`, where
+  `child_activity_since` is the head's own quiet reference when the streak began. It never touches
+  `last_progress_at`, `last_progress_source` or `activity_epoch`; the head's own advancement clears the
+  streak;
+- past the ceiling the child's movement is ignored (`basis` `child-ceiling:<n>s@execution_child`) and
+  the ordinary ladder runs from the last accepted child progress: suspected at about ceiling + 5 min,
+  confirmed at about ceiling + 15 min;
+- a quiet child, no child, or no child reading leaves every other rule exactly as it was: the child
+  source is excluded from the strong set that selects the quiet, pid-only and dark arms.
+
+The episode keeps the last reading's described descendant (`last_child_key`, `last_child_command`,
+`last_child_output`, `last_child_at`): the busiest mover, or the previously described one while it
+still lives with frozen counters. A reading with no such descendant clears them; a tick without a child
+reading keeps them. A child never seen moving is not described (it looks like an idle helper).
+
+On a wait-watchdog respawn (`_respawn_wait`, worker and reviewer) the successor's task document gets
+one section, `## Interrupted command`, with the line `The previous head was stopped while running:
+<command> (its output was redirected to <file>)` from the stopped run's own episode. The note rides
+`DispatcherRecord.respawn_interrupted_command`, a transient field that is never serialised and is
+cleared after the bring-up, so no rework, review or restart renders a stale one.
 
 ### Pid-only evidence
 
@@ -161,6 +208,7 @@ active retention follows the `Suspended` ladder.
 | `suspect_after` | `IDLE_STALL_DEFAULT` (5 min) |
 | `confirm_after` | `2 × IDLE_STALL_DEFAULT` (10 min) |
 | `dark_ceiling` | `2 × IDLE_STALL_DEFAULT` (10 min) |
+| `child_activity_ceiling` | `CHILD_ACTIVITY_CEILING_DEFAULT` (45 min) |
 | suspension response window | 5 min (`SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS`, `SUSPENSION_RESPONSE_WINDOW_DEFAULT`) |
 | deterministic refusal limit | 3 |
 | worker report outer ceiling | `WORKER_REPORT_STALL_DEFAULT` (6 h) |
@@ -170,12 +218,32 @@ active retention follows the `Suspended` ladder.
 cannot tell a starting head from a settled one, and stay far below the six-hour ceilings. A dark and
 quiet head is nudged at `max(dark_ceiling, suspect_after)`.
 
+`child_activity_ceiling` must outlast the longest command a worker legitimately runs in the
+foreground (two `timeout 580` integration shards, or one broad suite: about 20 minutes, plus slack for
+a slow host) and still catch a hung child that spins within the hour. Forty-five minutes puts a
+spinning child's confirmation at about an hour of head silence.
+
+**`SECRETARY_HEAD_IDLE_STALL_SECONDS` governs no production path.** It is read only by
+`watchdog.idle_stall_seconds()`, whose last production caller (the idle fence and clock-only wait
+ladder) was removed in cadc5c7 when the wait tick moved onto the vitality verdict; today only tests call
+it. The vitality thresholds are built from the constant `IDLE_STALL_DEFAULT` and ignore the variable,
+which is why an installation setting it to 1500 still confirmed a stall at 968 s. It is deliberately
+**not** wired into the thresholds: doing so would move every head's suspicion from 5 to 25 minutes and
+confirmation from 15 to 75 minutes as a side effect of a workaround (issue:b5195041, 2026-08-12) that
+predates the vitality ladder, while the failure it was meant to cover — a working head read as stalled —
+is now answered by the child-process source above. An installation may drop the line.
+
 ### Verdict persistence
 
 The worker/review wait tick persists each role's episode (`worker_vitality_episode`,
 `review_vitality_episode` on the dispatcher record) and writes one durable comment per verdict change,
 keyed on the transition. A tick whose status carries none of the observed sources runs no reduction and
 writes nothing. A reduction failure degrades to "no episode" with a comment and never breaks the tick.
+
+The episode format stays at `EPISODE_VERSION = 1`: fields added later (`quiet_since`, the Turn pair,
+and the child-process fields `child_progress_at`, `child_activity_since`, `last_child_*`) are optional
+with empty defaults, so an older record loads, and an older reader, which reads named keys only, ignores
+them. Snapshots gained optional `child_key`, `command` and `output_path` on the same terms.
 
 ## Decision path
 

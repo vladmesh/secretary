@@ -110,6 +110,7 @@ files = [
     "src/secretary/runtime/heads.py",
     "src/secretary/runtime/head/__init__.py",
     "src/secretary/runtime/head/command.py",
+    "src/secretary/runtime/head/children.py",
     "src/secretary/runtime/head/identity.py",
     "src/secretary/runtime/head/operations.py",
     "src/secretary/runtime/head/run.py",
