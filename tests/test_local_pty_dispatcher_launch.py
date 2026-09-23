@@ -37,6 +37,7 @@ from secretary.dispatch.observer import (
     observer_head_status,
     put_observers,
 )
+from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import (
     HEARTBEAT_IDENTITY_MISMATCH,
@@ -261,6 +262,85 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
                 self.assertEqual(status["record"]["task"], "card:secretary-9001")
                 self.assertEqual(status["record"]["role"], role)
                 self._reap()
+
+
+    def test_head_status_reads_a_local_pty_worker_and_reviewer_from_their_supervisors(self) -> None:
+        """secretary-1701: a card's supervised heads are read like the observer, and Orca is not asked."""
+        workspace = self.root / "workspaces" / "card"
+        workspace.mkdir(parents=True)
+        (workspace / "TASK.md").write_text("# Task\n", encoding="utf-8")
+        launched = {}
+        for role in ("worker", "reviewer"):
+            with (
+                mock.patch.object(CommandHostRuntime, "_require_production_runtime"),
+                mock.patch.object(CommandHostRuntime, "_require_workspace_environment"),
+            ):
+                launched[role] = self.host._launch(
+                    str(workspace),
+                    f"secretary-9001 {role}",
+                    PROFILE,
+                    str(workspace / "TASK.md"),
+                    role=role,
+                    env_name="SECRETARY_1698_NO_COMMAND_OVERRIDE",
+                    task={"ref": "secretary-9001"},
+                )
+        worker, reviewer = (HeadRun.from_json(launched[role].head_run) for role in ("worker", "reviewer"))
+        record = DispatcherRecord(
+            worker="worker-1",
+            workspace=str(workspace),
+            handle=launched["worker"].handle,
+            head=PROFILE,
+            review_head=PROFILE,
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            claimed_at=0.0,
+            worker_leaf=launched["worker"].leaf,
+            worker_pid_file=worker.pid_file,
+            worker_head_run=dict(launched["worker"].head_run),
+            review_handle=launched["reviewer"].handle,
+            review_leaf=launched["reviewer"].leaf,
+            review_pid_file=reviewer.pid_file,
+            review_head_run=dict(launched["reviewer"].head_run),
+            state="review",
+        )
+        runtime = mock.Mock()
+        runtime.host = self.host
+        runtime.data_dir = self.root / "data"
+        runtime.production_state.load.return_value = {}
+        runtime.production_state.records.return_value = {"secretary-9001": record}
+
+        def no_orca(argv: Any, **_kwargs: Any) -> Any:
+            self.fail(f"head-status called {argv!r} for a workspace whose heads are all supervised")
+
+        with mock.patch("secretary._proc.run", no_orca):
+            deadline = time.monotonic() + 15.0
+            while True:
+                answer = head_status(runtime, workspace=str(workspace))
+                if all(row["process"]["state"] == HEARTBEAT_LIVE_MATCH for row in answer["heads"]):
+                    break
+                self.assertLess(time.monotonic(), deadline, answer)
+                time.sleep(0.05)
+
+        self.assertEqual(answer["pane_channel"]["state"], "not_consulted")
+        rows = {row["role"]: row for row in answer["heads"]}
+        self.assertEqual(sorted(rows), ["reviewer", "worker"])
+        for role, run in (("worker", worker), ("reviewer", reviewer)):
+            with self.subTest(role=role):
+                row = rows[role]
+                started = self._started(run.run_id)
+                self.assertEqual((row["runtime"], row["run_id"]), (LOCAL_PTY_RUNTIME, run.run_id))
+                self.assertEqual(row["head"], "alive")
+                self.assertEqual(row["process"]["pid"], started["head_pid"])
+                self.assertTrue(row["supervisor"]["answered"], row["supervisor"])
+                self.assertTrue(row["supervisor"]["alive"])
+                for key in ("turn", "turn_open", "draining", "stopping"):
+                    self.assertIn(key, row["supervisor"])
+                self.assertEqual(row["lease"]["state"], "held")
+                self.assertEqual(row["lease"]["holder_pid"], started["supervisor_pid"])
+                self.assertIn(RUN_STARTED, [event["kind"] for event in row["journal"]["tail"]])
+                self.assertEqual(row["unavailable_sources"], [])
+                self.assertIn(f"local-pty run {run.run_id}", row["summary"])
 
 
 FAKE_TUI = Path(__file__).resolve().parent / "fixtures" / "local_pty_fake_tui.py"

@@ -2780,7 +2780,126 @@ def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], .
     to be able to report as one, and returning an empty tuple for it would make "I could not read
     this" indistinguishable from "there is nothing here".
     """
-    return local_pty.read_events(Path(run_dir) / protocol.JOURNAL_NAME).events
+    return head_run_journal_read(run_dir).events
+
+
+def head_run_journal_read(run_dir: str | os.PathLike[str]) -> local_pty.JournalReadResult:
+    """`head_run_journal` with what the read had to leave out, for a reader that must say so.
+
+    The same whole-file read, returned as the reader's own result: `malformed` counts complete
+    lines that were not usable records, and `truncated_tail` says the last line was torn. A
+    diagnostic that shows the records without these would present a damaged journal as a clean
+    one. Read-only, and `OSError` propagates for the same reason it does there.
+    """
+    return local_pty.read_events(Path(run_dir) / protocol.JOURNAL_NAME)
+
+
+def head_run_supervisor_files(run_dir: str | os.PathLike[str]) -> tuple[Path, Path]:
+    """Where one head's supervisor keeps its lock and its pid file, for a reader outside it.
+
+    The pair is `(supervisor.lock, supervisor.pid)` under the run directory. Nothing is opened: a
+    diagnostic that wants the lease reads the kernel's lock table for the first and the pid in the
+    second, and must never take the lock itself.
+    """
+    root = Path(run_dir)
+    return root / protocol.SUPERVISOR_LOCK_NAME, root / protocol.SUPERVISOR_PID_NAME
+
+
+@dataclass(frozen=True)
+class SupervisorLease:
+    """Who holds one run's supervisor lock, as the kernel's lock table says, and what the files say.
+
+    `lock_readable` is false when `supervisor.lock` itself could not be read; nothing else was
+    then looked at. `table_readable` is false when the lock was read but `/proc/locks` was not, so
+    the pids the files hold are known and the holder is not. `error` says what failed in either
+    case. With both true, an empty `holders` means no process holds the lock. `content_error` is
+    set when either file was read but holds something other than a pid (bytes that are not UTF-8,
+    say); the pid it would have given is then `None`, and nothing was raised.
+    """
+
+    lock_readable: bool
+    table_readable: bool = False
+    holders: tuple[int, ...] = ()
+    written_pid: int | None = None
+    supervisor_pid: int | None = None
+    error: str = ""
+    content_error: str = ""
+
+
+def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLease:
+    """Read who holds this run's supervisor lock without taking it, for a reader outside the run.
+
+    A supervisor takes an exclusive `flock` on `supervisor.lock` for its whole life and writes its
+    pid into the file; the kernel drops the lock when that process ends. So the holder comes from
+    `/proc/locks`, where reading is an observation rather than an attempt on the lock, and the pids
+    in `supervisor.lock` and `supervisor.pid` are reported beside it. A lock no process holds says
+    no supervisor owns the run; a head it left behind can still be running, which is the
+    heartbeat's question, not this one's.
+    """
+    path, pid_path = head_run_supervisor_files(run_dir)
+    try:
+        info = path.stat()
+        written = path.read_bytes()
+    except OSError as exc:
+        return SupervisorLease(lock_readable=False, error=str(exc.strerror or exc))
+    written_pid, lock_damage = _pid_content(path.name, written)
+    try:
+        supervisor_pid, pid_damage = _pid_content(pid_path.name, pid_path.read_bytes())
+    except OSError:
+        supervisor_pid, pid_damage = None, ""
+    content_error = "; ".join(damage for damage in (lock_damage, pid_damage) if damage)
+    try:
+        holders = _flock_holders(info)
+    except OSError as exc:
+        return SupervisorLease(
+            lock_readable=True,
+            written_pid=written_pid,
+            supervisor_pid=supervisor_pid,
+            error=str(exc.strerror or exc),
+            content_error=content_error,
+        )
+    return SupervisorLease(
+        lock_readable=True,
+        table_readable=True,
+        holders=tuple(holders),
+        written_pid=written_pid,
+        supervisor_pid=supervisor_pid,
+        content_error=content_error,
+    )
+
+
+def _flock_holders(info: os.stat_result) -> list[int]:
+    """The pids `/proc/locks` names as holding an `flock` on this file."""
+    holders = []
+    wanted = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+    with open("/proc/locks", encoding="utf-8") as table:
+        for line in table:
+            # `N: FLOCK ADVISORY WRITE <pid> <major>:<minor>:<inode> 0 EOF`; a waiter reads `N: ->`.
+            fields = line.split()
+            if len(fields) < 6 or fields[1] != "FLOCK":
+                continue
+            try:
+                major, minor, inode = fields[5].split(":")
+                if (int(major, 16), int(minor, 16), int(inode)) == wanted:
+                    holders.append(int(fields[4]))
+            except ValueError:
+                continue
+    return holders
+
+
+def _pid_content(name: str, raw: bytes) -> tuple[int | None, str]:
+    """The pid a lock or pid file holds, or `None` and why its content is not one; never raises.
+
+    An empty file is a supervisor that has not written its pid yet, not damage. Anything else that
+    is not a plain ASCII decimal -- bytes that are not UTF-8, `1e999`, a sign -- is unreadable
+    content rather than an exception.
+    """
+    text = raw.strip()
+    if not text:
+        return None, ""
+    if text.isdigit():  # bytes.isdigit is ASCII-only, so int() below cannot refuse it
+        return int(text), ""
+    return None, f"{name} holds no pid ({text[:40]!r})"
 
 
 def _last_event_at(address: _Address) -> float:
