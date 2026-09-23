@@ -29,15 +29,13 @@ from secretary.runtime.head import (
 )
 from secretary.runtime.role_env import load_env_file
 
-# The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
-# bare adapter name to a concrete default profile. Any real heads.toml profile id is also accepted
-# verbatim, so `--head claude-opus` or `--head codex-high` work too.
-ADAPTER_DEFAULT_PROFILE = {
-    "claude": "claude-default",
-    "codex": "codex",
-    "hermes": "hermes",
-}
-DEFAULT_HEAD = "claude-default"
+# The operator names a head the way a human thinks about it ("claude", "codex", "hermes"): a bare
+# adapter name is an adapter choice, never a profile id, and picks that adapter's head from the
+# installation's registry. Any real heads.toml profile id is also accepted verbatim, so
+# `--head claude-opus-high` or `--head codex-sol-medium` work too. With no `--head`, the shell opens
+# on the registry's `role_defaults.new_card`.
+SHELL_ADAPTERS = ("claude", "codex", "hermes")
+DEFAULT_HEAD_ROLE = "new_card"
 
 
 class SessionError(RuntimeError):
@@ -63,14 +61,35 @@ def operator_env(
 def resolve_profile_id(head: str | None, *, registry: head_registry.Registry | None = None) -> str:
     """Resolve a user-supplied head name to a real heads.toml profile id."""
     reg = registry or head_registry.load_registry()
-    name = head or DEFAULT_HEAD
-    # `resolve` keeps a Codex id from before the TUI-only rule pointing at the interactive Codex
-    # profile the installation publishes now, and refuses the name outright when it has none left
-    # rather than opening an operator session on whatever other family now answers to it. Anything
-    # it does not recognise is handed to the lookup unchanged and still fails by name.
-    candidate = reg.resolve(ADAPTER_DEFAULT_PROFILE.get(name, name))
-    reg.profile(candidate)  # raises HeadRegistryError listing known ids if unknown
-    return candidate
+    if not head:
+        head = head_registry.required_role_default(reg.role_defaults, DEFAULT_HEAD_ROLE)
+    elif head in SHELL_ADAPTERS:
+        return adapter_profile(head, reg)
+    # An id the registry does not define — one the installation has retired included — fails by
+    # name with the known ids rather than being routed to a look-alike.
+    return reg.resolve(head)
+
+
+def adapter_profile(adapter: str, registry: head_registry.Registry) -> str:
+    """The profile a bare adapter name opens: the first role default on that adapter, else the
+    first profile on it in id order. Pty-held variants are left to an explicit `--head`."""
+    routed = [str(head) for head in registry.role_defaults.values() if isinstance(head, str)]
+    candidates = [*routed, *registry.known()]
+    for pid in candidates:
+        profile = registry.profiles.get(pid)
+        if (
+            isinstance(profile, dict)
+            and profile.get("adapter") == adapter
+            and not profile.get("runtime")
+        ):
+            return pid
+    for pid in candidates:
+        profile = registry.profiles.get(pid)
+        if isinstance(profile, dict) and profile.get("adapter") == adapter:
+            return pid
+    raise head_registry.HeadRegistryError(
+        f"no {adapter} head in the registry (known: {', '.join(registry.known()) or '(none)'})"
+    )
 
 
 def render_interactive(

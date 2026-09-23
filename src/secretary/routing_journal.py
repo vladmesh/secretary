@@ -6,7 +6,7 @@ and the whole routing block is reset on the way back to Ready. The append-only t
 every launch instead, one `routing` event per head bring-up plus one per verdict.
 
 A profile id alone is not a historical key: several profiles resolve to one model with different
-effort, `claude-default` pins no model at all, and profiles get re-pinned over time. So every
+effort, a profile may pin no model at all, and profiles get re-pinned over time. So every
 event carries the launch configuration itself, snapshotted at bring-up and never re-read from
 `heads.toml` afterwards.
 """

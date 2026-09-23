@@ -621,7 +621,15 @@ class TaskReader:
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
-        from secretary.runtime.heads import default_head, reviewer_head
+        from secretary.runtime.heads import HeadRegistryError, default_head, reviewer_head
+
+        def role_default_or_blank(lookup: Callable[[], str]) -> str:
+            # A read path: a registry with no role default for this role leaves the effective head
+            # blank rather than refusing to list the board.
+            try:
+                return lookup()
+            except HeadRegistryError:
+                return ""
 
         project_id, columns, swimlanes = self._board()
         cards = all_project_cards(self.client, project_id)
@@ -657,10 +665,10 @@ class TaskReader:
                     "project": _text(meta.get("project")),
                     "blocked_by": _text(meta.get("blocked_by")),
                     "head": head,
-                    "effective_head": _text(meta.get("resolved_head")) or head or default_head(),
+                    "effective_head": _text(meta.get("resolved_head")) or head or role_default_or_blank(default_head),
                     "review_head": review,
                     "effective_review_head": (
-                        _text(meta.get("resolved_review_head")) or review or reviewer_head()
+                        _text(meta.get("resolved_review_head")) or review or role_default_or_blank(reviewer_head)
                     ),
                     "claim": _text(meta.get("claim")),
                     "slug": _text(meta.get("slug")),

@@ -27,7 +27,6 @@ import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck 
 
 from .codex_preflight import codex_home
 from .head.command import (
-    CODEX_TUI_MODE,
     HeadCommandError,
     validate_launch_shape,
 )
@@ -78,40 +77,6 @@ def registry_path() -> Path:
 # use a throwaway home.
 CODEX_HOME = codex_home({})
 
-# Last-resort profile ids, used only when the selected registry routes a role nowhere. Which head a
-# role actually runs on is `[role_defaults]` in that registry; these keep a tick launching something
-# rather than nothing when it has been stripped out.
-DEFAULT_PROFILE = "codex"
-REVIEWER_PROFILE = "codex-reviewer"
-
-# Codex profile ids from before that rule. They are written down in places the registry does not
-# own — a card's `head_override` or `review_head_override`, a dispatcher record, an agent's
-# automation.toml — so an installation that republishes its Codex heads under interactive ids must
-# not orphan them. Each maps to the ids an equivalent profile may be published under, closest
-# first.
-#
-# The names below are a compatibility namespace reserved for Codex, not ordinary ids: every one of
-# them, the id itself included, is only usable when the profile behind it is an interactive Codex
-# head. A registry is free to define `codex-terra` as a Claude profile — the validator does not
-# reserve ids by adapter — and an override written in the Codex generation must not follow that id
-# onto another model family. So the id itself wins only on that condition, the stand-ins are held
-# to the same one, and a name here with no interactive Codex profile left behind it fails closed.
-LEGACY_CODEX_HEADS: dict[str, tuple[str, ...]] = {
-    "codex": ("codex-tui", "codex-terra"),
-    "codex-sol": ("codex", "codex-tui"),
-    "codex-terra": ("codex", "codex-tui"),
-    "codex-luna": ("codex", "codex-tui"),
-    "codex-5-4": ("codex", "codex-tui"),
-    "codex-mini": ("codex", "codex-tui"),
-    "codex-spark": ("codex", "codex-tui"),
-    "codex-high": ("codex-high-tui", "codex-extra", "codex", "codex-tui"),
-    "codex-extra": ("codex-extra-tui", "codex-high", "codex-high-tui", "codex", "codex-tui"),
-    "codex-reviewer": ("codex-reviewer-tui", "codex-extra", "codex-extra-tui", "codex-high", "codex"),
-    "codex-curator": ("codex-extra", "codex-reviewer", "codex-high", "codex"),
-    "codex-steward": ("codex-high", "codex-extra", "codex-reviewer", "codex"),
-    "codex-retro": ("codex-high", "codex", "codex-tui"),
-}
-
 
 class HeadRegistryError(HeadCommandError):
     """heads.toml is missing/malformed, or a profile/resource/adapter/runtime/fallback it names is
@@ -119,40 +84,32 @@ class HeadRegistryError(HeadCommandError):
     """
 
 
-def is_interactive_codex(profile: Any) -> bool:
-    """Whether a registry entry is a Codex head this product can still launch.
-
-    An absent `codex_mode` is the interactive one; a profile pinning anything else names a launch
-    shape no renderer produces and is not a head at all here.
-    """
-    return (
-        isinstance(profile, Mapping)
-        and profile.get("adapter") == "codex"
-        and str(profile.get("codex_mode", CODEX_TUI_MODE)) == CODEX_TUI_MODE
-    )
-
-
 def resolve_head_id(profile_id: str, profiles: Mapping[str, Any]) -> str:
-    """The profile id that actually serves `profile_id` in a registry's `profiles` table.
+    """The profile id that serves `profile_id` in a registry's `profiles` table: the id itself.
 
-    An ordinary id is returned untouched, whatever it names: the lookup that follows either finds it
-    or fails closed by name. A name in `LEGACY_CODEX_HEADS` is resolved instead of looked up — the id
-    itself only while it still holds an interactive Codex profile, then the declared stand-ins in
-    order — and a name with none of them left raises rather than handing back an id that would launch
-    another model family under a Codex head's name.
+    There is no alias table any more. A head id written down before the installation renamed its
+    profiles — a card override, a dispatcher record, an agent's automation.toml — is launched under
+    its own name or not at all: an unknown id fails closed by name here rather than being routed to
+    whatever profile happens to look closest. Only launch resolution is strict; the records that
+    carry such an id still load, and read paths display it as the string it is.
     """
-    if not isinstance(profiles, Mapping):
+    if isinstance(profiles, Mapping) and profile_id in profiles:
         return profile_id
-    candidates = LEGACY_CODEX_HEADS.get(profile_id)
-    if candidates is None:
-        return profile_id
-    for candidate in (profile_id, *candidates):
-        if is_interactive_codex(profiles.get(candidate)):
-            return candidate
-    known = ", ".join(sorted(profiles)) or "(none)"
-    raise HeadRegistryError(
-        f"codex head {profile_id!r} has no interactive Codex profile left to run on (known: {known})"
-    )
+    known = ", ".join(sorted(profiles)) if isinstance(profiles, Mapping) and profiles else "(none)"
+    raise HeadRegistryError(f"unknown head {profile_id!r} (known: {known})")
+
+
+def required_role_default(role_defaults: Any, role: str) -> str:
+    """The head `[role_defaults]` routes `role` to, or HeadRegistryError naming the missing key.
+
+    The product has no head id of its own to fall back on: which heads exist is the installation's
+    registry, so a registry that routes a role nowhere is refused by that key rather than handed a
+    product-chosen id it may not define.
+    """
+    head = role_defaults.get(role) if isinstance(role_defaults, Mapping) else None
+    if not head or not isinstance(head, str):
+        raise HeadRegistryError(f"head registry has no role_defaults.{role}")
+    return head
 
 
 class Registry:
@@ -183,22 +140,19 @@ class Registry:
         return sorted(self.profiles)
 
 
-def role_head(role: str, fallback: str, registry: Registry | None = None) -> str:
-    """The head the selected registry routes `role` to, or `fallback` when it routes it nowhere.
+def role_head(role: str, registry: Registry | None = None) -> str:
+    """The head the selected registry routes `role` to.
 
-    Best-effort by design: an unreadable registry must not leave a role with no head to launch. The
-    caller that then tries to render `fallback` raises the same registry error anyway.
+    An unreadable registry, or one with no `role_defaults.<role>`, raises HeadRegistryError: there
+    is no product-side head id left to launch instead.
     """
-    try:
-        reg = registry or load_registry()
-    except HeadRegistryError:
-        return fallback
-    return reg.role_default(role) or fallback
+    reg = registry or load_registry()
+    return required_role_default(reg.role_defaults, role)
 
 
 def default_head(registry: Registry | None = None) -> str:
     """The head a card that names none of its own runs on."""
-    return role_head("new_card", DEFAULT_PROFILE, registry)
+    return role_head("new_card", registry)
 
 
 def reviewer_head(registry: Registry | None = None) -> str:
@@ -210,7 +164,7 @@ def reviewer_head(registry: Registry | None = None) -> str:
     override = os.environ.get("TA_REVIEWER_HEAD")
     if override:
         return override
-    return role_head("reviewer", REVIEWER_PROFILE, registry)
+    return role_head("reviewer", registry)
 
 
 def profile_info(profile_id: str, registry: Registry | None = None) -> dict:

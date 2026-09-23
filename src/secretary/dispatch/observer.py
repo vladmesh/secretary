@@ -94,8 +94,6 @@ from secretary.tasks import TaskError, is_significant_observer_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
-# Observers never silently inherit another role's head.
-OBSERVER_HEAD_FALLBACK = "codex-observer"
 OBSERVER_PROMPT_FILE = "SPRINT.md"
 OBSERVER_SKILL = "observe-sprint"
 

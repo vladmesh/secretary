@@ -675,11 +675,11 @@ python3 -P -m secretary task list --project PROJECT
 python3 -P -m secretary task show --ref PROJECT-N
 python3 -P -m secretary task list --sprint sprint:ID
 python3 -P -m secretary task create --role po --project PROJECT --type code \
-  --title TITLE --state ready --head codex-extra --sprint sprint:ID
+  --title TITLE --state ready --head codex-sol-high --sprint sprint:ID
 python3 -P -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
 python3 -P -m secretary task edit --role po --ref PROJECT-N \
-  --body-file SPEC.md --head codex-terra --review-head claude-opus
+  --body-file SPEC.md --head codex-terra-high --review-head claude-opus-high
 python3 -P -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
   --sprint sprint:ID --sprint-override --sprint-override-reason-file REASON.md
 ```
@@ -1081,7 +1081,7 @@ are executable:
 
 | form | meaning |
 | --- | --- |
-| `{"kind": "head", "profile": "claude-observer"}` | the sprint is observed by that one head profile |
+| `{"kind": "head", "profile": "claude-opus-high"}` | the sprint is observed by that one head profile |
 | `{"kind": "none"}` | the sprint runs without an observer |
 | `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head was recovered from durable lifecycle events |
 | `{"kind": "historical", "profile": null, "source": "migration_unknown"}` | a closed row that never launched an observer |
@@ -1336,9 +1336,9 @@ attempt's heads.
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
   "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
-  "heads": [{"role": "worker", "head": "codex", "head_source": "card",
+  "heads": [{"role": "worker", "head": "codex-terra-high", "head_source": "card",
              "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
-             "effort": "default", "codex_mode": "tui",
+             "effort": "high", "codex_mode": "tui",
              "resource": "openai-sub", "account": "openai-subscription",
              "session_id": "0198b0b0-...", "session_id_reason": "",
              "prompt_path": "/workspaces/PROJECT-N/TASK.md",

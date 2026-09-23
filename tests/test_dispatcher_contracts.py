@@ -23,10 +23,12 @@ import hashlib
 import inspect
 import os
 import pwd
+import re
 import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 from typing import ClassVar
@@ -1122,138 +1124,195 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         self.assertNotIn("import secretary", source)
         self.assertNotIn("from secretary", source)
 
-    def test_a_declared_old_codex_id_resolves_instead_of_orphaning_an_override(self) -> None:
-        """A head id already written onto a card or a spec keeps pointing at a launchable head.
+    def test_an_ordinary_id_resolves_to_itself(self) -> None:
+        """Whatever family an id names, the registry that defines it is the one answer."""
+        profiles = {
+            "claude-opus-medium": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            "codex-terra-high": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+            "hermes": {"resource": "openai-sub", "adapter": "hermes", "fallback": []},
+        }
+        registry = heads.Registry(self.RESOURCES, profiles)
 
-        The installation republishes its Codex heads under interactive ids; the ids the old exec
-        profiles had are still sitting in `head_override`, `review_head_override` and an agent's
-        automation spec, and each one has to reach the equivalent profile that exists now.
+        for pid in profiles:
+            with self.subTest(head=pid):
+                self.assertEqual(registry.resolve(pid), pid)
+
+    def test_a_retired_id_fails_closed_by_name(self) -> None:
+        """secretary-1697: no alias table stands a retired id in for a profile of today's registry.
+
+        A card override or an agent spec written before the installation renamed its profiles is
+        refused under its own name, even when a profile of the same family and effort exists.
         """
         profiles = {
-            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
-            "codex-high": {
+            "codex-terra-high": {
                 "resource": "openai-sub",
                 "adapter": "codex",
                 "effort": "high",
                 "fallback": [],
             },
-            "codex-extra": {
-                "resource": "openai-sub",
-                "adapter": "codex",
-                "effort": "extra",
-                "fallback": [],
-            },
+            "codex-sol-medium": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
         }
-        heads.validate_registry(self.RESOURCES, profiles)
         registry = heads.Registry(self.RESOURCES, profiles)
 
-        for old in (
-            "codex",
-            "codex-sol",
-            "codex-terra",
-            "codex-luna",
-            "codex-5-4",
-            "codex-mini",
-            "codex-spark",
-            "codex-high",
-            "codex-extra",
-            "codex-reviewer",
-            "codex-curator",
-            "codex-steward",
-            "codex-retro",
+        for retired in ("codex", "codex-high", "codex-reviewer", "codex-terra", "claude-opus", ""):
+            with (
+                self.subTest(head=retired),
+                self.assertRaisesRegex(heads.HeadRegistryError, f"unknown head {retired!r}"),
+            ):
+                registry.resolve(retired)
+
+    def test_a_persisted_record_carrying_a_retired_id_still_loads(self) -> None:
+        """Read paths take any string; only launch resolution is strict."""
+        worker_run = {
+            "role": "worker",
+            "head": "codex-high",
+            "head_source": "role_default",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "model_source": "profile",
+            "effort": "high",
+        }
+        record = DispatcherRecord(
+            worker="worker-1",
+            workspace="/tmp/card",
+            handle="pane-1",
+            head="codex-high",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=1.0,
+            worker_run=worker_run,
+        )
+
+        loaded = DispatcherRecord.from_json(record.to_json())
+
+        self.assertEqual((loaded.head, loaded.review_head), ("codex-high", "codex-reviewer"))
+        self.assertEqual(loaded.worker_run.snapshot.head, "codex-high")
+        self.assertEqual(loaded.worker_run.to_json(), worker_run)
+
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = {  # type: ignore[attr-defined]
+            "resources": self.RESOURCES,
+            "profiles": {
+                "codex-terra-high": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+            },
+            "role_defaults": {"new_card": "codex-terra-high", "reviewer": "codex-terra-high"},
+        }
+        task = {"routing": {"resolved_worker_head": "codex-high"}}
+        with self.assertRaisesRegex(HostError, "'codex-high'"):
+            catalog.claimed_worker_head(task)
+
+    def test_role_defaults_are_the_only_default_heads(self) -> None:
+        """No product-chosen id stands in for a role the registry routes nowhere."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = {  # type: ignore[attr-defined]
+            "resources": self.RESOURCES,
+            "profiles": {
+                "codex-terra-high": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+            },
+            "role_defaults": {},
+        }
+
+        for role, launch in (
+            ("new_card", lambda: catalog.worker_head({})),
+            ("reviewer", lambda: catalog.review_head({})),
+            ("observer", catalog.observer_head),
         ):
-            with self.subTest(head=old):
-                resolved = registry.resolve(old)
-                self.assertIn(resolved, profiles, f"{old} would orphan its override")
-                self.assertEqual(registry.profile(resolved)["adapter"], "codex")
+            with self.subTest(role=role), self.assertRaisesRegex(HostError, rf"role_defaults\.{role}\b"):
+                launch()
+        registry = heads.Registry(self.RESOURCES, catalog._heads["profiles"])  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.new_card"):
+            heads.default_head(registry)
+        with mock.patch.dict(os.environ, {}, clear=False) as env:
+            env.pop("TA_REVIEWER_HEAD", None)
+            with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.reviewer"):
+                heads.reviewer_head(registry)
 
-    def test_an_unavailable_non_codex_id_still_fails_closed(self) -> None:
-        """No substitution across model families, and no substitution for an id nobody declared."""
-        profiles = {"codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []}}
-        registry = heads.Registry(self.RESOURCES, profiles)
 
-        for unknown in ("claude-opus", "hermes", "codex-does-not-exist", ""):
-            with self.subTest(head=unknown):
-                self.assertEqual(registry.resolve(unknown), unknown)
-                with self.assertRaises(heads.HeadRegistryError):
-                    registry.profile(registry.resolve(unknown))
+class ShippedRegistryTiersTests(unittest.TestCase):
+    """secretary-1697: the portable registry names the five pipeline tiers and nothing retired."""
 
-    def test_an_old_id_is_never_resolved_onto_another_family(self) -> None:
-        """A registry that reused one of the candidate ids for a Claude profile is not a stand-in.
+    TIERS: ClassVar = {
+        "codex-terra-high": ("codex", "gpt-5.6-terra", "high"),
+        "codex-sol-medium": ("codex", "gpt-6-sol", "medium"),
+        "codex-sol-high": ("codex", "gpt-6-sol", "high"),
+        "claude-opus-medium": ("claude", "opus", "medium"),
+        "claude-opus-high": ("claude", "opus", "high"),
+    }
+    RETIRED: ClassVar = (
+        "codex", "codex-tui", "codex-high", "codex-extra", "codex-reviewer", "codex-observer",
+        "codex-curator", "codex-steward", "codex-retro", "codex-sol", "codex-terra", "codex-luna",
+        "codex-5-4", "codex-mini", "codex-spark", "claude-default", "claude-sonnet", "claude-opus",
+        "claude-observer", "claude-fable",
+    )
+    # `<family>-<model>-<effort>`; a `*-local-pty` runtime variant and the `hermes` fallback family
+    # are the only ids allowed another shape.
+    PROFILE_ID = re.compile(r"^(claude|codex)-[a-z0-9.]+(-[a-z0-9.]+)*-(low|medium|high|xhigh|max|extra)$")
 
-        Previously this asserted the id came back unchanged, which was fail-closed only because
-        nothing in that registry answered to it either. The contract this card owes is stronger:
-        an old Codex id resolves to an interactive Codex profile or to nothing at all.
-        """
-        profiles = {
-            "codex-tui": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+    @classmethod
+    def id_is_well_formed(cls, pid: str, profile: dict) -> bool:
+        if pid.endswith("-local-pty") or profile.get("adapter") == "hermes":
+            return True
+        return bool(cls.PROFILE_ID.match(pid)) and pid.split("-", 1)[0] == profile.get("adapter")
+
+    def test_the_shipped_registry_is_exactly_the_five_tiers(self) -> None:
+        canon = canonical_heads(upgrade.running_product_root())
+        profiles = canon["profiles"]
+
+        self.assertEqual(sorted(profiles), sorted(self.TIERS))
+        for pid, (adapter, model, effort) in self.TIERS.items():
+            with self.subTest(profile=pid):
+                self.assertEqual(
+                    (profiles[pid]["adapter"], profiles[pid]["model"], profiles[pid]["effort"]),
+                    (adapter, model, effort),
+                )
+        for retired in self.RETIRED:
+            self.assertNotIn(retired, profiles)
+
+    def test_every_shipped_id_follows_the_naming_rule(self) -> None:
+        canon = canonical_heads(upgrade.running_product_root())
+        for pid, profile in canon["profiles"].items():
+            with self.subTest(profile=pid):
+                self.assertTrue(self.id_is_well_formed(pid, profile), pid)
+
+    def test_the_naming_rule_admits_only_the_allowed_variants(self) -> None:
+        cases = {
+            "codex-terra-high": ({"adapter": "codex"}, True),
+            "claude-opus-medium": ({"adapter": "claude"}, True),
+            "claude-steward-local-pty": ({"adapter": "claude", "runtime": "local-pty"}, True),
+            "hermes": ({"adapter": "hermes"}, True),
+            "codex": ({"adapter": "codex"}, False),
+            "codex-high": ({"adapter": "codex"}, False),
+            "claude-default": ({"adapter": "claude"}, False),
+            "claude-opus": ({"adapter": "claude"}, False),
+            "codex-sol-medium": ({"adapter": "claude"}, False),
         }
-        registry = heads.Registry(self.RESOURCES, profiles)
+        for pid, (profile, expected) in cases.items():
+            with self.subTest(profile=pid):
+                self.assertEqual(self.id_is_well_formed(pid, profile), expected)
 
-        with self.assertRaisesRegex(heads.HeadRegistryError, "no interactive Codex profile"):
-            registry.resolve("codex-terra")
+    def test_role_defaults_route_to_tiers_with_a_cross_family_reviewer(self) -> None:
+        canon = canonical_heads(upgrade.running_product_root())
+        role_defaults = canon["role_defaults"]
+        profiles = canon["profiles"]
 
-    def test_an_old_codex_id_republished_as_a_claude_profile_does_not_win(self) -> None:
-        """The id itself is held to the same family check as every stand-in behind it.
+        for role in ("new_card", "reviewer", "observer", "curator", "retro", "steward"):
+            with self.subTest(role=role):
+                self.assertIn(role_defaults[role], self.TIERS)
+        self.assertNotEqual(
+            profiles[role_defaults["reviewer"]]["adapter"], profiles[role_defaults["new_card"]]["adapter"]
+        )
 
-        `validate_registry` reserves no id by adapter, so an installation can validly publish a
-        Claude profile called `codex-terra` — by accident or because it reused a retired name. A
-        `head_override` written in the Codex generation still says Codex, so it must reach the
-        interactive Codex head this registry does have, never the Claude profile now sitting on
-        that name.
-        """
-        profiles = {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
-        }
-        heads.validate_registry(self.RESOURCES, profiles)
-        registry = heads.Registry(self.RESOURCES, profiles)
-
-        resolved = registry.resolve("codex-terra")
-
-        self.assertEqual(resolved, "codex")
-        self.assertEqual(registry.profile(resolved)["adapter"], "codex")
-
-    def test_an_old_codex_id_with_only_another_family_left_fails_closed(self) -> None:
-        """No Codex head to serve the name is a refusal, not a Claude launch under a Codex id."""
-        profiles = {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-            "claude-default": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-        }
-        heads.validate_registry(self.RESOURCES, profiles)
-        registry = heads.Registry(self.RESOURCES, profiles)
-
-        with self.assertRaises(heads.HeadRegistryError):
-            registry.resolve("codex-terra")
-
-    def test_a_codex_profile_pinning_a_retired_mode_is_not_a_stand_in(self) -> None:
-        """Family alone is not enough: the stand-in has to be a head the product can launch."""
-        profiles = {
-            "codex": {
-                "resource": "openai-sub",
-                "adapter": "codex",
-                "codex_mode": "exec",
-                "fallback": [],
-            },
-        }
-        registry = heads.Registry(self.RESOURCES, profiles)
-
-        with self.assertRaises(heads.HeadRegistryError):
-            registry.resolve("codex-terra")
-        with self.assertRaises(heads.HeadRegistryError):
-            registry.resolve("codex")
-
-    def test_an_ordinary_id_keeps_its_direct_lookup(self) -> None:
-        """The family constraint covers the declared old Codex names, not every profile id."""
-        profiles = {
-            "claude-default": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-            "hermes": {"resource": "openai-sub", "adapter": "hermes", "fallback": []},
-        }
-        registry = heads.Registry(self.RESOURCES, profiles)
-
-        for pid in ("claude-default", "hermes"):
-            with self.subTest(head=pid):
-                self.assertEqual(registry.resolve(pid), pid)
+    def test_shipped_automation_specs_name_shipped_tiers(self) -> None:
+        agents = Path(upgrade.running_product_root()) / "src" / "triggered_agents" / "agents"
+        for spec in sorted(agents.glob("*/automation.toml")):
+            head = tomllib.loads(spec.read_text(encoding="utf-8")).get("head")
+            if head is None:
+                continue
+            with self.subTest(agent=spec.parent.name):
+                self.assertIn(head, self.TIERS)
 
 
 class PerProfileRuntimeTests(unittest.TestCase):

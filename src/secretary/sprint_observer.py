@@ -3,7 +3,7 @@
 A sprint carries exactly one observer value. There is no dynamic default, no value inherited from
 the head registry, no missing-field fallback and no permanent tri-state:
 
-  {"kind": "head", "profile": "claude-observer"}   executable, one concrete head
+  {"kind": "head", "profile": "claude-opus-high"}  executable, one concrete head
   {"kind": "none"}                                  executable, the sprint runs without one
   {"kind": "historical", "profile": <head>,         a closed row whose head the migration
    "source": "observer_lifecycle_audit",            recovered from durable lifecycle events

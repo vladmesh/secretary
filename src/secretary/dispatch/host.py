@@ -102,7 +102,6 @@ from secretary.dispatch.launcher import (
     role_launch_env as _role_launch_env,
 )
 from secretary.dispatch.observer import (
-    OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
@@ -237,6 +236,7 @@ from secretary.runtime.heads import (
     HeadRegistryError,
 )
 from secretary.runtime.heads import (
+    required_role_default as _required_role_default,
     resolve_head_id as _resolve_head_id,
 )
 from secretary.runtime import head as head_ops
@@ -483,7 +483,7 @@ class InstanceCatalog:
         head = self._resolved_head(
             str(requested)
             if requested
-            else str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+            else self._role_default("new_card")
         )
         self._head_profile(head)
         return head
@@ -493,17 +493,23 @@ class InstanceCatalog:
         head = self._resolved_head(
             str(requested)
             if requested
-            else str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+            else self._role_default("reviewer")
         )
         self._head_profile(head)
         return head
 
-    def _resolved_head(self, head: str) -> str:
-        """The profile in this snapshot that serves a head id somebody else wrote down.
+    def _role_default(self, role: str) -> str:
+        """The head this snapshot's `[role_defaults]` routes `role` to, refused by the missing key."""
+        try:
+            return _required_role_default(self._heads.get("role_defaults"), role)
+        except HeadRegistryError as exc:
+            raise HostError(str(exc)) from None
 
-        A declared old Codex id resolves to the equivalent interactive Codex profile; a Codex id with
-        no interactive Codex profile at all is refused rather than resolved, because launching what
-        that name points at now would move a claimed attempt onto another model family.
+    def _resolved_head(self, head: str) -> str:
+        """The profile in this snapshot that serves a head id somebody else wrote down: that id.
+
+        An id this snapshot does not define — one the installation has since retired — is refused
+        by name rather than routed to another profile.
         """
         profiles = self._heads.get("profiles")
         try:
@@ -565,14 +571,14 @@ class InstanceCatalog:
             asked = self._resolved_head(
                 str(override)
                 if override
-                else str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+                else self._role_default("new_card")
             )
         else:
             override = routing.get("review_head_override")
             asked = self._resolved_head(
                 str(override)
                 if override
-                else str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+                else self._role_default("reviewer")
             )
         launched = str(head) if head else asked
         if launched != asked:
@@ -599,7 +605,7 @@ class InstanceCatalog:
 
     def observer_head(self) -> str:
         """The head profile a sprint observer is launched with."""
-        head = str(self._heads.get("role_defaults", {}).get("observer") or OBSERVER_HEAD_FALLBACK)
+        head = self._role_default("observer")
         self._head_profile(head)
         return head
 

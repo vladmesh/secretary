@@ -212,7 +212,7 @@ def ensure_codex_update_modal_dismissed(
 
     Same shape and the same reason as `ensure_codex_workspace_trusted`: nobody is sitting in front
     of the pane, so a dialog that waits for a person is a head that never receives its prompt. On
-    `issue:e4d6f307` this exact modal held a `codex-high` reviewer for 51 minutes with the review
+    `issue:e4d6f307` this exact modal held a high-effort Codex reviewer for 51 minutes with the review
     pointer swallowed, `tui-idle` satisfied throughout and the codex process at zero CPU.
 
     The answer written here is the file codex itself writes when a human picks "Skip until next
