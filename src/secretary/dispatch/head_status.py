@@ -937,7 +937,27 @@ def _supervisor_lease(run_dir: Path) -> dict[str, Any]:
 
 
 def _journal_tail(run_dir: Path) -> dict[str, Any]:
-    """The last records of the head's journal, or why it could not be read."""
+    """The last records of the head's journal, or why it could not be read or interpreted.
+
+    The one boundary where journal data enters a row, and it is total: nothing a journal holds can
+    make head-status fail. Everything the rest of the module reads from the answer is normalised
+    here -- each tail record's `at` is a finite positive float or absent -- so no consumer parses a
+    raw journal field. A journal that cannot be read, or whose content cannot be interpreted, is an
+    unavailable source; one read only in part is degraded. Neither says anything about the head.
+    """
+    try:
+        return _journal_tail_read(run_dir)
+    except Exception as exc:  # noqa: BLE001 - journal content is untrusted; any failure is the source's
+        return {
+            "answered": False,
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "reason": f"the journal could not be interpreted ({type(exc).__name__}: {str(exc)[:200]})",
+            "tail": [],
+        }
+
+
+def _journal_tail_read(run_dir: Path) -> dict[str, Any]:
+    """`_journal_tail` without its guard: the read, the tail, its times and the damage accounting."""
     try:
         read = head_run_journal_read(run_dir)
     except OSError as exc:
@@ -947,11 +967,17 @@ def _journal_tail(run_dir: Path) -> dict[str, Any]:
             "reason": f"the journal could not be read ({str(exc)[:200]})",
             "tail": [],
         }
-    kept = ("seq", "kind", "at", "turn", "reason", "bytes", "subject")
-    tail = [
-        {key: event[key] for key in kept if key in event} for event in read.events[-JOURNAL_TAIL_RECORDS:]
-    ]
-    untimed = sum(1 for event in tail if _journal_time(event.get("at")) is None)
+    kept = ("seq", "kind", "turn", "reason", "bytes", "subject")
+    tail = []
+    untimed = 0
+    for event in read.events[-JOURNAL_TAIL_RECORDS:]:
+        record = {key: event[key] for key in kept if key in event}
+        at = _journal_time(event.get("at"))
+        if at is None:
+            untimed += 1
+        else:
+            record["at"] = at
+        tail.append(record)
     damage = []
     if read.malformed:
         damage.append(f"{read.malformed} malformed line(s) skipped")
@@ -975,12 +1001,16 @@ def _journal_tail(run_dir: Path) -> dict[str, Any]:
 
 
 def _journal_time(value: Any) -> float | None:
-    """A journal record's `at` as seconds, or `None` when the record carries no usable time."""
-    if isinstance(value, bool):
+    """A journal record's `at` as seconds, or `None` for any value that is not a usable time.
+
+    Total: a bool, a string, a container, an int too large for a float, an infinity or a NaN, or
+    anything else that fails to convert gives `None` rather than raising.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - an int too large for a float, or anything else, is no time
         return None
     return seconds if math.isfinite(seconds) and seconds > 0 else None
 
@@ -1019,12 +1049,12 @@ def _supervised_summary(row: dict[str, Any], observed_at: float) -> str:
         parts.append(f"lock held by pid {lease['holder_pid']}" if held else "lock held by nobody")
     journal = row["journal"]
     if journal["answered"]:
+        # `at` is `_journal_tail`'s normalised float or absent, never a raw journal field.
         last = journal["tail"][-1] if journal["tail"] else {}
-        at = _journal_time(last.get("at"))
-        if at is not None:
-            age = f"{max(0.0, observed_at - at):.0f}s ago"
+        if "at" in last:
+            age = f"{max(0.0, observed_at - last['at']):.0f}s ago"
         else:
-            age = "at no readable time" if last else "never"
+            age = "at no readable time" if journal["tail"] else "never"
         parts.append(f"last journal record {last.get('kind') or '(none)'} {age}")
         if journal["state"] == JOURNAL_DEGRADED:
             parts.append(f"journal degraded ({journal['reason'].split(': ', 1)[-1]})")

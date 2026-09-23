@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +29,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import _proc
+from secretary.dispatch import head_status as head_status_module
 from secretary.dispatch.head_status import (
     HEAD_ABSENT,
     HEAD_ALIVE,
@@ -699,9 +702,77 @@ class HeadStatusTests(unittest.TestCase):
 
         row = self._damage_journal(bad_time)
 
-        self.assertEqual(row["journal"]["tail"][-1]["at"], "bad-time")
+        self.assertNotIn("at", row["journal"]["tail"][-1], "only a usable time reaches the row")
         self.assertIn("carry no usable time", row["journal"]["reason"])
         self.assertIn(f"last journal record {TURN_STARTED} at no readable time", row["summary"])
+
+    @staticmethod
+    def _last_at(raw: str):
+        """A journal transform that writes the final record's `at` as the raw JSON text `raw`."""
+
+        def transform(lines):
+            last = json.loads(lines[-1])
+            last["at"] = "@AT@"
+            return "\n".join([*lines[:-1], json.dumps(last).replace('"@AT@"', raw)]) + "\n"
+
+        return transform
+
+    def test_a_journal_time_too_large_for_a_float_degrades_the_journal_instead_of_raising(self) -> None:
+        row = self._damage_journal(self._last_at(str(10**400)))
+
+        self.assertNotIn("at", row["journal"]["tail"][-1])
+        self.assertIn("carry no usable time", row["journal"]["reason"])
+        self.assertIn(f"last journal record {TURN_STARTED} at no readable time", row["summary"])
+
+    def test_no_hostile_journal_time_fails_head_status_or_moves_the_verdict(self) -> None:
+        hostile = {
+            "huge int": str(10**400),
+            "negative": "-1",
+            "zero": "0",
+            "bool": "true",
+            "nan string": '"nan"',
+            "infinity": "1e999",
+            "list": "[]",
+            "object": "{}",
+        }
+        for name, raw in hostile.items():
+            with self.subTest(at=name):
+                shutil.rmtree(self.root / "data" / "heads", ignore_errors=True)
+                record = self._supervised_record()
+                self._write_run_heartbeat(record, "worker", self._live_pid())
+                path = self.root / "data" / "heads" / "run-worker-1701" / "journal.jsonl"
+                path.write_text(
+                    self._last_at(raw)(path.read_text(encoding="utf-8").splitlines()), encoding="utf-8"
+                )
+
+                row = self._supervised_answer({self.ref: record})["heads"][0]
+
+                self.assertEqual((row["head"], row["proved_by"]), (HEAD_ALIVE, "pid_heartbeat"))
+                self.assertIn(row["journal"]["state"], ("degraded", "unavailable"))
+                for event in row["journal"]["tail"]:
+                    if "at" in event:
+                        self.assertIsInstance(event["at"], float)
+                        self.assertTrue(math.isfinite(event["at"]) and event["at"] > 0)
+                self.assertTrue(row["summary"])
+
+    def test_a_journal_reader_that_raises_anything_is_an_unavailable_source(self) -> None:
+        record = self._supervised_record()
+        self._write_run_heartbeat(record, "worker", self._live_pid())
+        broken = mock.patch.object(
+            head_status_module, "head_run_journal_read", side_effect=RuntimeError("reader broke")
+        )
+
+        with broken:
+            row = self._supervised_answer({self.ref: record})["heads"][0]
+
+        self.assertEqual(
+            row["head"], HEAD_ALIVE, "a journal that cannot be interpreted says nothing about the head"
+        )
+        self.assertFalse(row["journal"]["answered"])
+        self.assertEqual(row["journal"]["state"], "unavailable")
+        self.assertEqual(row["journal"]["tail"], [])
+        self.assertIn("could not be interpreted (RuntimeError: reader broke)", row["journal"]["reason"])
+        self.assertIn("journal", row["unavailable_sources"])
 
     def test_a_malformed_middle_journal_line_is_reported_as_skipped(self) -> None:
         row = self._damage_journal(lambda lines: "\n".join([lines[0], "{not json", *lines[1:]]) + "\n")
