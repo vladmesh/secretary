@@ -156,7 +156,6 @@ class GateTests(unittest.TestCase):
         source = root / "src"
         for package in (
             source / "triggered_agents" / "runtime",
-            source / "secretary" / "dispatch",
             source / "secretary" / "runtime",
         ):
             package.mkdir(parents=True)
@@ -214,10 +213,6 @@ class GateTests(unittest.TestCase):
         )
         (source / "triggered_agents" / "__main__.py").write_text(
             target + "if __name__ == '__main__':\n    main('triggered_agents')\n", encoding="utf-8"
-        )
-        (source / "secretary" / "dispatch" / "standing_agent.py").write_text(
-            target + "if __name__ == '__main__':\n    main('secretary.dispatch.standing_agent')\n",
-            encoding="utf-8",
         )
 
         venv.EnvBuilder(with_pip=False).create(root / ".venv")
@@ -329,25 +324,20 @@ class GateTests(unittest.TestCase):
         self.assertIn("settlement busy, tick deferred", result.stderr)
         self.assertNotIn("ran:", result.stdout)
 
-    def test_gate_routes_board_roles_through_secretary_and_leaves_curator_legacy(self):
-        for agent in ("retro", "steward"):
+    def test_gate_routes_every_agent_through_the_one_triggered_agents_entry(self):
+        for agent in ("curator", "retro", "steward"):
             with self.subTest(agent):
                 result = self.run_gate([0], agent=agent)
                 self.assertEqual(result.returncode, 0)
-                self.assertIn(f"-m secretary.dispatch.standing_agent {agent} dispatch", result.stdout)
+                self.assertIn(f"-m triggered_agents {agent} dispatch", result.stdout)
+                self.assertNotIn("secretary.dispatch", result.stdout)
                 self.assert_selected_venv(result, self.product)
 
-        curator = self.run_gate([0], agent="curator")
-        self.assertEqual(curator.returncode, 0)
-        self.assertIn("-m triggered_agents curator dispatch", curator.stdout)
-        self.assertNotIn("secretary.dispatch.standing_agent", curator.stdout)
-        self.assert_selected_venv(curator, self.product)
-
-    def test_deep_sweep_keeps_its_ungated_variant_through_the_standing_root(self):
+    def test_deep_sweep_keeps_its_ungated_variant_through_the_one_entry(self):
         result = self.run_gate([], agent="steward", variant="deep-sweep")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.attempts, 0)
-        self.assertIn("-m secretary.dispatch.standing_agent steward dispatch deep-sweep", result.stdout)
+        self.assertIn("-m triggered_agents steward dispatch deep-sweep", result.stdout)
         self.assert_selected_venv(result, self.product)
 
     def test_curator_enters_and_leaves_role_env_with_the_selected_venv_not_ambient_python(self):

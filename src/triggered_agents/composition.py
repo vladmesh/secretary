@@ -1,8 +1,10 @@
-"""Secretary-owned composition root for the board-owning standing agents.
+"""Composition root of the three background agents: ``python3 -P -m triggered_agents``.
 
-The live steward and retro gate paths enter here so every board read/write uses
-Secretary's canonical task adapters.  The generic triggered-agent runtime
-remains independent: it receives only its narrow structural ports.
+Every entry — the systemd gate, an Orca precheck, a manual run — comes through here. Curator
+needs no board port and is passed straight on; steward and retro get Secretary's canonical
+task adapters injected, so every board read/write goes through ``secretary.tasks``.  The
+generic triggered-agent runtime stays independent: it receives only its narrow structural
+ports.  The dependency runs one way: this package imports ``secretary``, never the reverse.
 """
 
 from __future__ import annotations
@@ -10,18 +12,20 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import cast
 
 from secretary.board.backend import card_client
 from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.config import instance_data_dir
 from secretary.runtime.paths import default_instance_path
+from secretary.runtime.state import BoardUnavailable
 from secretary.tasks import TaskError, TaskReader, TaskWriter
 from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
+from triggered_agents.agents.steward.signals import StewardSignalReader
 from triggered_agents.runtime import dispatch
-from secretary.runtime.state import BoardUnavailable
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})
 
@@ -82,7 +86,9 @@ def _done_retention_board() -> DoneRetentionBoard:
 def _steward(argv: list[str]) -> int:
     command = argv[0] if argv else "help"
     if command != "dispatch":
-        reader = _signal_board() if command in _SIGNAL_COMMANDS else None
+        # The board adapter answers with the board's card dicts; they carry the StewardSignalCard
+        # keys, which `secretary` cannot name without importing this package back.
+        reader = cast(StewardSignalReader, _signal_board()) if command in _SIGNAL_COMMANDS else None
         return steward_cli.main(argv, reader=reader)
 
     parsed = triggered_main.parse_dispatch_arguments(argv[1:])
@@ -104,7 +110,7 @@ def _retro(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run ``<agent> <cmd> [args]`` through the alternative composition root."""
+    """Run ``<agent> <cmd> [args]`` with the agent's board ports wired in."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         return triggered_main.main(argv)
@@ -113,7 +119,3 @@ def main(argv: list[str] | None = None) -> int:
     if argv[0] != "steward":
         return triggered_main.main(argv)
     return _steward(argv[1:])
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

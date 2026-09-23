@@ -30,27 +30,33 @@ LEGACY_FLAT_MODULES = frozenset(
     """.split()
 )
 
-# These are the only approved product edges.  Production telemetry reads the installation config;
-# curator discovery reads the canonical project registry and SprintReader rather than copying either
-# protocol into the triggered-agent package. Holding the exact set prevents another back edge.
-# `secretary.runtime` is the other admitted direction: it is where the head-runtime utilities move
-# out of `triggered_agents`, so the legacy package depends on it and never the reverse.
-LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
-    {
-        ("runtime/production_telemetry.py", "secretary.config"),
-        ("agents/curator/discover.py", "secretary.config"),
-        ("agents/curator/discover.py", "secretary.sprints"),
-    }
-)
+# `triggered_agents` is the CLI of the three background agents, built on top of `secretary`: it may
+# import any `secretary` module, and no `secretary` module may import it back. The only mention of
+# the package left under `src/secretary` is the pair of resource-probe command strings in
+# heads.toml, which leave with the resource-health single writer (sprint:1455 fork #2).
+REMAINING_TRIGGERED_AGENTS_MENTIONS = frozenset({"runtime/heads.toml:30", "runtime/heads.toml:38"})
+
+
+def _imports_triggered_agents(relative: str, source: str) -> list[str]:
+    """Every absolute import of `triggered_agents` in one `secretary` module, as offender lines."""
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(source, filename=relative)):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module]
+        offenders.extend(
+            f"{relative}:{node.lineno}: {name}"
+            for name in names
+            if name == "triggered_agents" or name.startswith("triggered_agents.")
+        )
+    return offenders
 
 
 # The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
 # must not come back, and nothing may import it under its old name.
 RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
-
-
-def _is_runtime_package(module: str) -> bool:
-    return module == "secretary.runtime" or module.startswith("secretary.runtime.")
 
 
 class SourceLayoutTests(unittest.TestCase):
@@ -380,46 +386,37 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertIn(f"def {entry}(", wait_source)
         self.assertNotIn("from secretary.dispatch.runtime import", wait_source)
 
-    def test_triggered_agents_adds_no_new_dependency_on_secretary(self) -> None:
-        package = ROOT / "src" / "triggered_agents"
-        imports: set[tuple[str, str]] = set()
-        for path in package.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    imports.update(
-                        (path.relative_to(package).as_posix(), alias.name)
-                        for alias in node.names
-                        if alias.name == "secretary" or alias.name.startswith("secretary.")
-                    )
-                elif (
-                    isinstance(node, ast.ImportFrom)
-                    and node.module
-                    and (node.module == "secretary" or node.module.startswith("secretary."))
-                ):
-                    imports.add((path.relative_to(package).as_posix(), node.module))
-        imports = {edge for edge in imports if not _is_runtime_package(edge[1])}
-        self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)
-
-    def test_secretary_runtime_never_imports_triggered_agents(self) -> None:
-        """The landing zone for the head-runtime core must not depend back on the legacy package."""
-        package = ROOT / "src" / "secretary" / "runtime"
+    def test_no_secretary_module_imports_triggered_agents(self) -> None:
+        """The dependency runs one way: `triggered_agents` -> `secretary`, never back."""
+        package = ROOT / "src" / "secretary"
         offenders: list[str] = []
         for path in sorted(package.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                names: list[str] = []
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                    names = [node.module]
-                offenders.extend(
-                    f"{path.relative_to(ROOT)}:{node.lineno}: {name}"
-                    for name in names
-                    if name == "triggered_agents" or name.startswith("triggered_agents.")
-                )
-        self.assertTrue((package / "__init__.py").is_file())
+            relative = path.relative_to(ROOT).as_posix()
+            offenders.extend(_imports_triggered_agents(relative, path.read_text(encoding="utf-8")))
+        self.assertTrue((package / "runtime" / "__init__.py").is_file())
         self.assertEqual(offenders, [])
+
+    def test_a_planted_back_edge_is_caught_anywhere_in_secretary(self) -> None:
+        for relative, source in (
+            ("src/secretary/dispatch/planted.py", "from triggered_agents import __main__\n"),
+            ("src/secretary/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
+            ("src/secretary/runtime/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
+        ):
+            with self.subTest(relative):
+                self.assertEqual(len(_imports_triggered_agents(relative, source)), 1)
+        # The admitted direction is not a back edge.
+        self.assertEqual(_imports_triggered_agents("src/secretary/x.py", "from secretary import tasks\n"), [])
+
+    def test_secretary_names_triggered_agents_only_in_the_remaining_probe_strings(self) -> None:
+        package = ROOT / "src" / "secretary"
+        mentions: set[str] = set()
+        for path in sorted(package.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if "triggered_agents" in line:
+                    mentions.add(f"{path.relative_to(package).as_posix()}:{number}")
+        self.assertEqual(mentions, REMAINING_TRIGGERED_AGENTS_MENTIONS)
 
 
 # Every place in `secretary` that builds the *file* audit (`TaskAudit` over a data dir) rather than

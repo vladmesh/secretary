@@ -18,6 +18,7 @@ from unittest import mock
 
 from secretary import state_repo, status, upgrade
 from secretary.automations import (
+    AutomationError,
     AutomationSpec,
     create_argv,
     drifted_fields,
@@ -558,6 +559,58 @@ class AutomationSpecTests(unittest.TestCase):
         for role in ("curator", "retro", "steward"):
             self.assertFalse(specs[role].enabled, f"{role} Orca automation must be disabled")
             self.assertIn("--disabled", create_argv(specs[role]))
+
+    def test_the_product_manifest_locates_the_shipped_specs_unchanged(self):
+        # secretary-1689: the specs are found through `[tool.secretary] agent-specs` instead of a
+        # package name written into `secretary`. What they materialize must not move by a byte.
+        product = upgrade.running_product_root()
+        home = Path("/home/owner")
+        workspaces = home / "orca" / "workspaces" / "secretary"
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TA_WORKSPACES_ROOT", None)
+            specs = load_specs(product, repo="/repo", home=home)
+            worktrees = upgrade.desired_role_worktrees(product, home)
+        self.assertEqual(
+            [(spec.name, spec.prompt, spec.precheck, spec.trigger, spec.workspace) for spec in specs],
+            [
+                ("curator", "/curate", "python3 -P -m triggered_agents curator precheck", "hourly",
+                 str(workspaces / "curator")),
+                ("retro", "/retro", "python3 -P -m triggered_agents retro precheck", "daily",
+                 str(workspaces / "retro")),
+                ("steward", "/steward", "python3 -P -m triggered_agents steward precheck", "0 */3 * * *",
+                 str(workspaces / "steward")),
+            ],
+        )
+        self.assertEqual(worktrees, [workspaces / name for name in ("curator", "pipeline", "retro", "steward")])
+
+    def test_the_product_manifest_decides_whether_any_specs_ship(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            product = Path(tmpdir)
+            agent = product / "agents" / "curator"
+            agent.mkdir(parents=True)
+            (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
+            # No manifest, or a manifest that declares none: the product ships no agents.
+            self.assertEqual(load_specs(product), [])
+            self.assertEqual(upgrade.desired_role_worktrees(product), [])
+            manifest = product / "pyproject.toml"
+            manifest.write_text("[project]\nname = 'x'\n", encoding="utf-8")
+            self.assertEqual(load_specs(product), [])
+
+            manifest.write_text('[tool.secretary]\nagent-specs = "agents"\n', encoding="utf-8")
+            self.assertEqual([spec.name for spec in load_specs(product)], ["curator"])
+
+            for broken in (
+                "[tool.secretary\n",
+                '[tool.secretary]\nagent-specs = "../x"\n',
+                '[tool.secretary]\nagent-specs = "/abs"\n',
+                "[tool.secretary]\nagent-specs = 3\n",
+            ):
+                with self.subTest(broken=broken):
+                    manifest.write_text(broken, encoding="utf-8")
+                    with self.assertRaises(AutomationError):
+                        load_specs(product)
+                    context = SimpleNamespace(product_root=product, runtime_home=None)
+                    self.assertEqual(upgrade.step_worktrees(context).status, "failed")
 
 
 class UpgradeStepTests(unittest.TestCase):
@@ -1329,6 +1382,9 @@ class UpgradeStepTests(unittest.TestCase):
             agent = product / "src" / "triggered_agents" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
+            (product / "pyproject.toml").write_text(
+                '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+            )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
             subprocess.run(
@@ -1358,6 +1414,9 @@ class UpgradeStepTests(unittest.TestCase):
             agent = product / "src" / "triggered_agents" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
+            (product / "pyproject.toml").write_text(
+                '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+            )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
             subprocess.run(

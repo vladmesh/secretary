@@ -30,6 +30,7 @@ from secretary import _proc, role_skills, state_repo
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
+    agents_root,
     apply_automations,
     load_specs,
     workspaces_root,
@@ -87,8 +88,11 @@ WEB_COMPONENT = "web"
 # of them, so a source-only or schema-only revision — `f9cabc3`, the one that took the web process
 # down — moved no flag at all and no long-lived process was ever restarted for it. The prefixes are
 # therefore derived from the tree, and `tests/test_web_process_coherence.py` fails if a listed
-# prefix stops naming a directory that exists (secretary-1624 rework).
-PRODUCT_SOURCE_PATHS = ("src/secretary/", "src/triggered_agents/")
+# prefix stops naming a directory that exists (secretary-1624 rework). Every package under `src/` is
+# product code a long-lived process imports — `secretary` and the background-agent CLI on top of it
+# alike — so the one prefix covers them all without this module naming a package it must not
+# depend on (secretary-1689).
+PRODUCT_SOURCE_PATHS = ("src/",)
 DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
 # The bundled JSON Schemas are product data a long-lived process reads from the checkout through
 # `importlib.resources` *after* it started, while its validation callables were loaded at start. So
@@ -741,7 +745,9 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
 def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
     """Every derived role worktree shipped by this product, present or absent."""
     root = workspaces_root(home) / "secretary"
-    agents = product_root / "src" / "triggered_agents" / "agents"
+    agents = agents_root(product_root)
+    if agents is None:
+        return []
     try:
         names = sorted(entry.name for entry in agents.iterdir() if (entry / "automation.toml").is_file())
     except OSError:
@@ -835,7 +841,10 @@ def _worktree_git_dir(worktree: Path) -> Path | None:
 
 
 def step_worktrees(context: UpgradeContext) -> StepResult:
-    worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
+    try:
+        worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
+    except AutomationError as exc:
+        return StepResult("role-worktrees", "failed", str(exc))
     if not worktrees:
         return StepResult("role-worktrees", "skipped", "the product ships no role worktrees")
     created: list[str] = []

@@ -7,6 +7,8 @@ lock, precheck, redaction. The per-agent judgment lives in that agent's Orca ski
 `<cmd>` helpers here are the deterministic parts the agent drives via Bash.
 
 Agents are modules under `triggered_agents.agents.<name>` exposing `cli.main(argv)`.
+`python3 -m triggered_agents` enters through `triggered_agents.composition`, which injects the
+board ports steward and retro need from `secretary` and hands everything else to `main` here.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ HEALTH_COMPONENTS = ("curator", "retro", "pipeline", "steward")
 
 @dataclass(frozen=True)
 class DispatchArguments:
-    """The dispatch flags interpreted by both composition roots.
+    """The dispatch flags interpreted by both this runner and the composition root.
 
     This deliberately preserves the legacy loose argv interpretation: a value
     following ``--generation`` is still eligible to be the variant, because
@@ -102,4 +104,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from triggered_agents.composition import main as composed_main
+
+    raise SystemExit(composed_main())

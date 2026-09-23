@@ -66,8 +66,39 @@ class AutomationError(RuntimeError):
     """An automation could not be read or applied."""
 
 
-def agents_root(product_root: Path) -> Path:
-    return product_root / "src" / "triggered_agents" / "agents"
+# The product declares where its background agents' specs live in its own `pyproject.toml`:
+# the agents are a package on top of `secretary`, so `secretary` reads their location from the
+# product's manifest instead of naming the package (sprint:1455, secretary-1689).
+AGENT_SPECS_KEY = "agent-specs"
+
+
+def agents_root(product_root: Path) -> Path | None:
+    """The directory of ``<agent>/automation.toml`` specs this product declares, or None.
+
+    A product tree without a manifest, or whose manifest declares no specs, ships no agents —
+    as a tree without the directory always did. A manifest that cannot be parsed, or declares a
+    path outside the product, is a broken product rather than an empty one.
+    """
+    manifest = product_root / "pyproject.toml"
+    try:
+        raw = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise AutomationError(
+            f"{manifest}: product manifest is unreadable: {exc.__class__.__name__}"
+        ) from None
+    tool = raw.get("tool")
+    table = tool.get("secretary") if isinstance(tool, dict) else None
+    declared = table.get(AGENT_SPECS_KEY) if isinstance(table, dict) else None
+    if declared is None:
+        return None
+    relative = Path(declared) if isinstance(declared, str) else None
+    if relative is None or not declared or relative.is_absolute() or ".." in relative.parts:
+        raise AutomationError(
+            f"{manifest}: [tool.secretary] {AGENT_SPECS_KEY} must be a path inside the product"
+        )
+    return product_root / relative
 
 
 def workspaces_root(home: Path | str | None = None) -> Path:
@@ -96,6 +127,8 @@ def load_specs(
     root = agents_root(product_root)
     repo_path = repo or str(product_root)
     specs: list[AutomationSpec] = []
+    if root is None:
+        return []
     try:
         entries = sorted(entry for entry in root.iterdir() if entry.is_dir())
     except OSError:

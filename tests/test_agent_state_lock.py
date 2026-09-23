@@ -99,7 +99,7 @@ class AgentStateLockTest(unittest.TestCase):
             self.fail("body must not run under a live holder")
         self.assertEqual(
             str(caught.exception.code),
-            f"triggered_agents[curator]: another run holds the lock ({self.state.lockfile}, pid {holder})",
+            f"curator: another run holds the lock ({self.state.lockfile}, pid {holder})",
         )
         self.assertEqual(_events(self.state_dir, "lock-refused")[-1]["holder_pid"], holder)
         self.assertTrue(self.state.lockfile.exists())
