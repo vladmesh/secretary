@@ -14,6 +14,7 @@ Each layer against the thing it claims:
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -411,6 +412,19 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual([snapshot.source for snapshot in snapshots], [SnapshotSource.EXECUTION_CHILD])
 
 
+def _stop_group(head: subprocess.Popen) -> None:
+    """Kill a stand-in head's whole process group, then reap the head.
+
+    Each stand-in starts in its own session, so the group holds every descendant that did not
+    leave it -- more than ``read_head_children`` lists -- and none survives to hold the runner's
+    pipe open (secretary-1695)."""
+    try:
+        os.killpg(head.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    head.wait(timeout=10)
+
+
 class RealProcessTests(unittest.TestCase):
     """The reader and builder against real processes under a stand-in head."""
 
@@ -433,19 +447,13 @@ class RealProcessTests(unittest.TestCase):
             f"subprocess.run([sys.executable, '-c', {child_code!r}] + {extra.split()!r}, {redirect})"
         )
         head = subprocess.Popen(
-            [sys.executable, "-c", head_code], stdout=subprocess.DEVNULL, cwd=self.tmp.name
+            [sys.executable, "-c", head_code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=self.tmp.name,
+            start_new_session=True,
         )
-
-        def stop() -> None:
-            for pid in [item["pid"] for item in read_head_children(head.pid).get("descendants", [])]:
-                try:
-                    os.kill(pid, 9)
-                except OSError:
-                    pass
-            head.kill()
-            head.wait(timeout=10)
-
-        self.addCleanup(stop)
+        self.addCleanup(_stop_group, head)
         deadline = time.time() + 10
         while time.time() < deadline:
             if read_head_children(head.pid).get("descendants"):
@@ -505,19 +513,14 @@ class RealProcessTests(unittest.TestCase):
             "sleepers = [subprocess.Popen(['sleep', '60']) for _ in range(17)]\n"
             "busy.wait()\n"
         )
-        head = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, cwd=self.tmp.name)
-
-        def stop() -> None:
-            for pid in [item["pid"] for item in read_head_children(head.pid).get("descendants", [])]:
-                try:
-                    os.kill(pid, 9)
-                except OSError:
-                    pass
-            subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False)
-            head.kill()
-            head.wait(timeout=10)
-
-        self.addCleanup(stop)
+        head = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=self.tmp.name,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop_group, head)
         deadline = time.time() + 15
         while time.time() < deadline and read_head_children(head.pid).get("descendant_count", 0) < 18:
             time.sleep(0.05)
@@ -536,10 +539,9 @@ class RealProcessTests(unittest.TestCase):
             stdout=stdout,
             stderr=subprocess.DEVNULL,
             cwd=self.tmp.name,
+            start_new_session=True,
         )
-        self.addCleanup(
-            lambda: (subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False), head.kill())
-        )
+        self.addCleanup(_stop_group, head)
         deadline = time.time() + 10
         while time.time() < deadline and not read_head_children(head.pid).get("descendants"):
             time.sleep(0.05)
@@ -580,11 +582,19 @@ class RealProcessTests(unittest.TestCase):
 
     def test_a_head_without_children_and_a_gone_head(self) -> None:
         lonely = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        self.addCleanup(lambda: (lonely.kill(), lonely.wait(timeout=10)))
+        self.addCleanup(_stop_group, lonely)
         self.assertEqual(read_head_children(lonely.pid)["descendants"], [])
-        gone = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL)
+        gone = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         gone.wait(timeout=10)
         self.assertEqual(read_head_children(gone.pid)["state"], "unavailable")
 
