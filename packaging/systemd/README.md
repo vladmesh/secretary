@@ -28,6 +28,10 @@ venv's isolated `runtime_preflight.py`. The preflight runs by pathname before th
 point can import an editable package, refuses foreign or task-workspace provenance with the existing
 production-state diagnostic, and execs the tick only after a valid observation. It is materialized
 with the unit through `reconcile apply` or `secretary upgrade`; do not copy or edit it on the host.
+Every one-shot unit that can launch a local-pty head (the production tick and the curator, retro,
+steward and deep-sweep ticks) sets `KillMode=process`: the head's supervisor outlives the tick, and
+systemd's default control-group kill would SIGTERM it the moment the tick exits. A new one-shot unit
+either sets it too or is listed in `tests/test_board_boot_race.py` as one that launches no head.
 `secretary-instance-maintenance.timer` fires daily (`Persistent=true`) a one-shot
 `secretary instance-maintenance` at idle CPU and I/O priority: Git's own `gc --auto` heuristic run
 outside any tick, because the lifecycle sets `gc.auto=0` in the instance repository so that no

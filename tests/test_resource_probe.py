@@ -162,7 +162,7 @@ class HeadHealthReadsTheEntryTests(unittest.TestCase):
         completed = subprocess.CompletedProcess("probe", code, "", err)
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(head_health.subprocess, "run", return_value=completed),
+            mock.patch.object(head_health._proc, "run_isolated", return_value=completed),
         ):
             return HeadHealth(_Catalog(), Path(tmp)).check(resource)
 
@@ -219,7 +219,7 @@ class HeadHealthReadsTheEntryTests(unittest.TestCase):
         completed = subprocess.CompletedProcess("probe", code, "", err)
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(head_health.subprocess, "run", return_value=completed),
+            mock.patch.object(head_health._proc, "run_isolated", return_value=completed),
         ):
             readiness = HeadHealth(_Catalog(), Path(tmp)).check("nope")
         self.assertEqual(readiness.status, "unknown")

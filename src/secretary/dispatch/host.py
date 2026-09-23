@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from secretary import state_repo
+from secretary import _proc, state_repo
 from secretary._fsutil import write_text_atomic
 from secretary.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
@@ -4620,9 +4620,7 @@ class CommandHostRuntime:
         self, args: list[str], label: str, *, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         try:
-            completed = subprocess.run(
-                args, cwd=cwd, text=True, capture_output=True, timeout=900, check=False
-            )
+            completed = _run_bounded(args, cwd)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
         if completed.returncode != 0:
@@ -4637,9 +4635,25 @@ class CommandHostRuntime:
         non-zero code as a red verdict, not a host failure). Still raises HostError when the process
         can't run at all."""
         try:
-            return subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900, check=False)
+            return _run_bounded(args, cwd)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
+
+
+# How long one host child (Orca, Git, a gate or adapter shell) may run before its group is killed.
+HOST_COMMAND_TIMEOUT_SECONDS = 900
+
+
+def _run_bounded(args: list[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
+    """Run one host child to completion, and on a timeout take its descendants down with it.
+
+    A plain ``subprocess.run`` timeout kills only the direct child: the test processes under a
+    ``bash -lc`` gate or adapter setup would keep running. The production tick's unit sets
+    ``KillMode=process`` so the local-pty heads it launches outlive it (secretary-1699), which means
+    the unit's control-group kill no longer sweeps them either. The child's own process group is
+    what bounds them now.
+    """
+    return _proc.run_isolated(args, cwd=cwd, timeout=HOST_COMMAND_TIMEOUT_SECONDS)
 
 
 def _gate_attestation_for_prompt(

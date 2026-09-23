@@ -21,6 +21,7 @@ import unittest
 import venv
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from triggered_agents.agents.retro import cli as retro_cli
@@ -432,6 +433,16 @@ class UnitSpecTests(unittest.TestCase):
         "secretary-steward.service",
         "secretary-steward-deep-sweep.service",
     )
+    # A shipped oneshot service that starts no head, and why. Everything else of Type=oneshot is
+    # treated as a head launcher and must carry KillMode=process.
+    ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD: ClassVar[dict[str, str]] = {
+        "secretary-instance-maintenance.service": (
+            "runs `git gc` on the instance repository outside any tick; it dispatches no role and "
+            "its bounded pack is exactly what the control-group kill should clean up"
+        ),
+    }
+    # What a unit's ExecStart runs to launch heads: the mechanical roles' gate and the tick.
+    HEAD_LAUNCHER_ENTRYPOINTS = ("secretary-agent-gate.sh", "production-tick")
 
     def test_the_board_dependent_units_stay_oneshot_with_no_start_timeout(self):
         """A start timeout would kill the gate mid-wait; a non-oneshot Type would change what
@@ -452,15 +463,49 @@ class UnitSpecTests(unittest.TestCase):
 
         systemd's default ``KillMode=control-group`` sends SIGTERM to every process the service
         left behind when its main process exits. That made the production steward canary record
-        ``run.started`` and ``signal:15`` almost back-to-back. Mechanical roles can all select the
-        local-pty backend, so every unit that launches one must leave its supervisor to the
-        runtime's explicit drain/stop protocol.
+        ``run.started`` and ``signal:15`` almost back-to-back, and later the production observer
+        (secretary-1699). Mechanical roles can all select the local-pty backend, and so can every
+        head the production tick launches, so every unit that launches one must leave its
+        supervisor to the runtime's explicit drain/stop protocol.
+
+        The covered set is derived, not listed: every shipped ``Type=oneshot`` service is a head
+        launcher unless it is named in ``ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD`` with its reason, so a
+        new tick unit without the setting fails here until someone decides which it is.
         """
-        for name in self.MECHANICAL_ROLE_UNITS:
+        launchers = [
+            name for name in self.oneshot_services() if name not in self.ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD
+        ]
+        self.assertIn("secretary-dispatcher-production.service", launchers)
+        self.assertLessEqual(set(self.MECHANICAL_ROLE_UNITS), set(launchers))
+        for name in launchers:
             with self.subTest(name):
                 body = (UNITS / name).read_text(encoding="utf-8")
-                self.assertIn("Type=oneshot\n", body)
                 self.assertIn("KillMode=process\n", body)
+
+    def test_a_oneshot_unit_excluded_from_the_kill_mode_rule_really_launches_no_head(self):
+        """An exclusion is a claim about what the unit runs; hold it against the unit itself.
+
+        An excluded unit keeps systemd's control-group kill as the cleanup of whatever it spawned,
+        so it must stay a oneshot, must not run a head launcher, and must not quietly opt out of
+        that cleanup either.
+        """
+        oneshots = self.oneshot_services()
+        for name in self.ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD:
+            with self.subTest(name):
+                self.assertIn(name, oneshots)
+                body = (UNITS / name).read_text(encoding="utf-8")
+                self.assertNotIn("KillMode=", body)
+                for launcher in self.HEAD_LAUNCHER_ENTRYPOINTS:
+                    self.assertNotIn(launcher, body)
+
+    def oneshot_services(self) -> list[str]:
+        names = sorted(
+            path.name
+            for path in UNITS.glob("*.service")
+            if "Type=oneshot\n" in path.read_text(encoding="utf-8")
+        )
+        self.assertTrue(names, "no shipped oneshot service was found")
+        return names
 
 
 if __name__ == "__main__":

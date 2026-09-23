@@ -5728,7 +5728,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr="")
                 raise AssertionError(args)
 
-            with mock.patch.object(dispatcher_host_module.subprocess, "run", side_effect=run):
+            with mock.patch.object(dispatcher_host_module._proc, "run_isolated", side_effect=run):
                 status = host.observer_status(record)
 
         self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": False})

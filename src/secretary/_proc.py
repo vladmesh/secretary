@@ -36,11 +36,13 @@ def run_isolated(
     *,
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a child in its own process group and reap that group on abnormal exit."""
     process = subprocess.Popen(
         argv,
         env=env,
+        cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -57,10 +59,23 @@ def run_isolated(
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
+# How long the output of a killed group may keep flowing. Only a descendant that left the group
+# (its own `setsid`) can still hold the pipes open after the kill; reading until it lets go would
+# turn a bounded child into an unbounded wait.
+_REAP_GRACE_SECONDS = 5.0
+
+
 def _kill_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
     """Kill an isolated child's complete process group, then reap its leader."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    return process.communicate()
+    try:
+        return process.communicate(timeout=_REAP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait()
+        return "", ""
