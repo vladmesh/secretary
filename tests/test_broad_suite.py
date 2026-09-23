@@ -27,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 OTHER_CI_SUITES = (
     "runtime-component",
     "integration-board",
+    "integration-dispatcher",
+    "integration-heads",
     "packaging",
     "integration-recovery",
     "integration-memory",

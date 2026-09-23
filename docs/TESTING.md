@@ -1,7 +1,7 @@
 # Testing
 
 Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates
-`tests/ci-shards.txt`, then runs seven named jobs in parallel:
+`tests/ci-shards.txt`, then runs nine named jobs in parallel:
 
 | Suite | CI job | Scope |
 | --- | --- | --- |
@@ -10,7 +10,9 @@ Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates
 | runtime-component | test / runtime-component | Runtime and local-PTY component boundaries. |
 | integration-recovery | test / integration-recovery | Backup, checkpoint, restore and recovery flows. |
 | integration-memory | test / integration-memory | Memory and curator integration flows. |
-| integration-board | test / integration-board | Board, dispatcher and Pipeline integration flows. |
+| integration-board | test / integration-board | Board, sprint, task and web protocol integration flows over a card store. |
+| integration-dispatcher | test / integration-dispatcher | Dispatcher host: claims, ticks, gates and project git access. |
+| integration-heads | test / integration-heads | Head launch, vitality, observer, review lifecycle and attempt accounting. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
 ## Suite manifest
@@ -28,7 +30,7 @@ A missing required dependency is an infrastructure failure, never a green skip:
 
 - `integration-memory` needs `secretary[memory]`;
 - PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_postgres_recovery`,
-  and the `integration-board` card-store fixtures) need Docker, Compose, `postgres:16`, psycopg,
+  and the `integration-board`, `integration-dispatcher` and `integration-heads` card-store fixtures) need Docker, Compose, `postgres:16`, psycopg,
   SQLAlchemy and Alembic. They use disposable Compose projects and volumes on dynamically selected
   loopback ports.
 
@@ -92,7 +94,7 @@ suite, run the broad profile once through the receipt wrapper.
     python3 -m tests.broad
 
 The Secretary project's local broad suite: the manifest's `unit` and `component` modules only. Use it,
-not bare `python3 -m unittest` (repository-wide discovery of all seven suites). The other five suites
+not bare `python3 -m unittest` (repository-wide discovery of all nine suites). The other seven suites
 run only in exact-SHA GitHub CI. A green local broad receipt is a worker's evidence for its round, never
 a substitute for that gate.
 

@@ -3,13 +3,13 @@
 `python3 -m tests.broad` is the answer to the question the broad-check contract could not ask before
 issue:8b39e60e4df361c6138e — which suite IS this project's broad suite. Until it existed, the worker
 task packet printed the placeholder ``<this project's broad suite module>`` and every document
-answered it with bare ``python3 -m unittest``: repository-wide discovery, all seven CI suites in one
+answered it with bare ``python3 -m unittest``: repository-wide discovery, all CI suites in one
 process, 3782 tests and about 402 seconds. That is not a check a worker runs between edits, so in
 practice it was either skipped or paid for once and reused past the point where it meant anything.
 
 The composition here is the owner's decision, measured: `unit` (~58s) plus `component` (~19s), about
-1440 tests in ~77s. The other five suites — `runtime-component`, `integration-board`, `packaging`,
-`integration-recovery` and `integration-memory` — stay in dispatcher-owned exact-SHA GitHub CI,
+1440 tests in ~77s. The other seven suites — `runtime-component`, `integration-board`, `integration-dispatcher`,
+`integration-heads`, `packaging`, `integration-recovery` and `integration-memory` — stay in dispatcher-owned exact-SHA GitHub CI,
 which remains the complete gate and is not weakened by anything here. A green local broad receipt
 has never been, and still is not, a substitute for it.
 
