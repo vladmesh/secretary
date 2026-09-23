@@ -61,6 +61,7 @@ from secretary.dispatch.gate_receipt import (
 from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
+from secretary.dispatch.git_workspace import GitWorkspaceManager
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.helpers import (
     _decision_record_line,
@@ -1064,8 +1065,11 @@ class CommandHostRuntime:
                 # checkout is gone. No host repairs it and no later tick finds it: this is the one
                 # bring-up family that is about the card rather than the host.
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
-            workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
-            self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
+            if self._is_git_workspace(workspace):
+                workspace = self._git_workspaces.create(task, worker_id, seed, expected=workspace)
+            else:
+                workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
+                self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
@@ -1832,7 +1836,9 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             launch_prompt=nudge,
             prompt_document=str(document),
-            split_from=self._split_anchor(record),
+            # Only an Orca reviewer is a pane to split off the worker's; a supervised one is a second
+            # process in the same checkout, and the pane inventory is not asked about it at all.
+            split_from=self._split_anchor(record) if self._runs_in_orca_pane(record.review_head) else "",
             task=task,
             failover=bool(record.preferred_review_head),
             heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
@@ -2099,16 +2105,71 @@ class CommandHostRuntime:
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         """Where this card's worker checkout lives, new or already cut.
 
-        The namespace under the workspaces root is Orca's: <root>/<repo registration name>/<worktree
-        name>, where the registration name is the binding's `orca_binding` and not the Secretary
-        project id — the two spellings differ and the id is not what decides where the checkout goes.
+        A checkout that already exists answers for itself: the git-managed one under
+        `<data_dir>/workspaces/<project id>/<worker>`, then the Orca one. Only a card with neither
+        is placed by its heads — under the git root when its worker and reviewer profiles both run
+        on a supervised runtime, and otherwise under the Orca root, whose namespace is Orca's:
+        <root>/<repo registration name>/<worktree name>, where the registration name is the
+        binding's `orca_binding` and not the Secretary project id — the two spellings differ and the
+        id is not what decides where an Orca checkout goes.
         """
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
-        root = Path(
+        project = str(task.get("project") or "")
+        root = self._orca_workspaces_root()
+        git_path = self._git_workspace_path(project, worker)
+        if git_path is not None and self._is_git_workspace(str(git_path)):
+            if git_path.exists():
+                return str(git_path)
+            if self._card_heads_supervised(task):
+                # An Orca checkout this card already has keeps it on Orca. Only the binding's own
+                # spelling is looked at: asking Orca for its registration is the call this path is
+                # without, and every enabled binding names `orca_binding` anyway.
+                named = self.catalog.binding(project).get("orca_binding")
+                if not (isinstance(named, str) and named and (root / named / worker).exists()):
+                    return str(git_path)
+        return str(root / self._orca_binding_name(project) / worker)
+
+    @staticmethod
+    def _orca_workspaces_root() -> Path:
+        """Where Orca's worktrees are namespaced; `SECRETARY_DISPATCHER_WORKSPACES_ROOT` names only this."""
+        return Path(
             os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces"))
         )
-        return str(root / self._orca_binding_name(str(task.get("project") or "")) / worker)
+
+    @property
+    def _git_workspaces(self) -> GitWorkspaceManager:
+        return GitWorkspaceManager(self)
+
+    def _git_workspace_path(self, project: str, worker: str) -> Path | None:
+        try:
+            return self._git_workspaces.path(project, worker)
+        except HostError:
+            return None
+
+    def _is_git_workspace(self, workspace: str) -> bool:
+        """Whether an existing or placed workspace is git-managed, read from its path alone.
+
+        Never from the card's profiles: a card keeps the manager its checkout was made by even if
+        its profiles or the registry change while it is in flight.
+        """
+        if self.mode == "noop" or not workspace:
+            return False
+        return self._git_workspaces.owns(workspace, orca_root=self._orca_workspaces_root())
+
+    def _card_heads_supervised(self, task: dict[str, Any]) -> bool:
+        """Whether both of this card's heads, as claimed, run on a runtime other than `orca-legacy`.
+
+        A head that cannot be resolved answers no: a card nobody can place on git keeps today's path.
+        """
+        try:
+            heads = (self.catalog.claimed_worker_head(task), self.catalog.claimed_review_head(task))
+        except (HostError, AttributeError, KeyError, TypeError):
+            return False
+        return not any(self._runs_in_orca_pane(head) for head in heads)
+
+    def _runs_in_orca_pane(self, head: str) -> bool:
+        return _head_runtime_name(self._head_spec(head, "")) == ORCA_LEGACY_RUNTIME
 
     def _orca_binding_name(self, project: str) -> str:
         """The Orca repo registration name this project's workspaces are namespaced by."""
@@ -2377,7 +2438,11 @@ class CommandHostRuntime:
             )
             if not receipt.ok:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
-        if live and all(_head_runtime_name(run) != ORCA_LEGACY_RUNTIME for run, _ in live):
+        if not any(_head_runtime_name(run) == ORCA_LEGACY_RUNTIME for run, _ in live) and (
+            live or self._is_git_workspace(workspace)
+        ):
+            # Every recorded head is supervised, or the workspace is one Orca never made and no
+            # legacy head was ever recorded in it: there is no pane for Orca to give back.
             return
         try:
             self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)
@@ -2733,6 +2798,9 @@ class CommandHostRuntime:
         except HostError:
             return
         self._require_production_runtime("cleanup-before-worktree-remove")
+        if self._is_git_workspace(record.workspace):
+            self._git_workspaces.teardown(record.workspace)
+            return
         try:
             self._run_json(
                 ["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"]
@@ -2842,6 +2910,8 @@ class CommandHostRuntime:
 
     def _discard_workspace(self, path: str) -> str:
         """Remove a worktree that was created but must not be adopted, and say what is left."""
+        if self._is_git_workspace(path):
+            return self._git_workspaces.discard(path)
         try:
             self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"])
         except HostError as exc:

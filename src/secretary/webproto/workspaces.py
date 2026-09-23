@@ -6,6 +6,10 @@ criterion 2 of secretary-1562 asks the product runtime to shed, and the whole of
 in this file: `git worktree add --detach` out of the project's own repository, into a directory
 under the installation's data plane, and `git worktree remove` to take it back.
 
+The worktree mechanics themselves are shared with the card workspaces that run without Orca
+(`secretary.infra.git_worktree`); what is this file's own is where a run's workspace goes, that it is
+detached, and what a refusal is called.
+
 Three properties, and each is a decision rather than an accident:
 
 **It is detached, and it creates no branch.** A product run is a run, not an attempt: nothing here
@@ -24,10 +28,10 @@ a session manager and never through a shell. `git` is the only executable this m
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from secretary import _proc
+from secretary.infra import git_worktree
 from secretary.webproto.errors import RuntimeUnavailable
 from secretary.webproto.runs import WORKSPACES_RELATIVE
 
@@ -54,12 +58,11 @@ def provision(repo: str | os.PathLike[str], workspace: Path, *, base: str) -> st
     target = Path(workspace)
     if (target / ".git").exists():
         return _head_of(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and any(target.iterdir()):
         raise RuntimeUnavailable(
             f"the workspace path {target} already exists and is not a worktree of {repo}"
         )
-    result = _git(["worktree", "add", "--detach", str(target), base], cwd=repo)
+    result = git_worktree.add(_git, Path(repo), target, base)
     if result.returncode != 0:
         raise RuntimeUnavailable(
             f"a workspace for this run could not be cut from {repo} at {base}: "
@@ -78,19 +81,14 @@ def release(repo: str | os.PathLike[str], workspace: Path) -> bool:
     target = Path(workspace)
     if not target.exists():
         return True
-    _git(["worktree", "remove", "--force", str(target)], cwd=repo)
-    if target.exists():
-        shutil.rmtree(target, ignore_errors=True)
-    _git(["worktree", "prune"], cwd=repo)
-    return not target.exists()
+    return git_worktree.remove(_git, Path(repo), target)
 
 
 def _head_of(workspace: Path) -> str:
-    result = _git(["rev-parse", "HEAD"], cwd=workspace)
-    return (result.stdout or "").strip() if result.returncode == 0 else ""
+    return git_worktree.head_of(_git, workspace)
 
 
-def _git(argv: list[str], *, cwd: str | os.PathLike[str]):
+def _git(argv: list[str], cwd: str | os.PathLike[str]):
     try:
         return _proc.run(["git", *argv], cwd=cwd, timeout=GIT_TIMEOUT_SECONDS)
     except OSError as exc:
