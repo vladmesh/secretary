@@ -303,7 +303,6 @@ class RemoteExecution:
                         timeout=timeout,
                         extra_env=environment,
                         child=child,
-                        isolated=True,
                     )
             except FileNotFoundError:
                 raise CredentialError(f"{label}: command not found", code="command-not-found") from None

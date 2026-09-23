@@ -251,18 +251,11 @@ def run_git(
         except (KeyError, OSError) as exc:
             raise StateRepoError(f"{label} failed: could not select instance runtime user: {exc}") from None
     try:
-        result = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-            input=input,
-        )
+        # Its own process group: a timeout must take Git's remote helper (`git-remote-https`) down
+        # with Git, since the production tick's unit no longer kills what it leaves behind.
+        return _proc.run_isolated(command, input=input, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
-    return result
 
 
 def run_as_git_child(
@@ -273,7 +266,6 @@ def run_as_git_child(
     timeout: float = 120,
     extra_env: dict[str, str] | None = None,
     child: GitChildIdentity | None = None,
-    isolated: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a non-Git consumer under the identity selected for instance Git.
 
@@ -302,9 +294,7 @@ def run_as_git_child(
             *command,
         ]
     try:
-        if isolated:
-            return _proc.run_isolated(command, timeout=timeout, env=env)
-        return subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+        return _proc.run_isolated(command, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
 

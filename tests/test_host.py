@@ -848,6 +848,49 @@ class ReconcilePlanTests(unittest.TestCase):
         for standard_dir in ("/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(standard_dir, path_value.split(":"))
 
+    def test_an_upgrade_installs_the_dispatcher_kill_mode_that_lets_its_heads_outlive_the_tick(self):
+        """The production tick launches local-pty heads that must outlive it (secretary-1699).
+
+        The rendered unit carries ``KillMode=process``, and a host whose manifest recorded the unit
+        without it plans exactly one ``update``, for that unit: the digest is the rendered bytes,
+        so reconcile and upgrade install the setting without any other change.
+        """
+        import shutil
+        import tempfile
+
+        layout = SystemdLayout(
+            REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
+        )
+        shipped_root = REPO_ROOT / "packaging" / "systemd"
+        name = "secretary-dispatcher-production.service"
+        shipped = load_packaged_units(shipped_root, "secretary-", layout)
+        unit = next(unit for unit in shipped if unit.name == name)
+        self.assertIn("KillMode=process", unit.content.decode("utf-8").splitlines())
+
+        setting = (
+            "# A local-pty head deliberately outlives the short scheduler tick. The runtime owns that\n"
+            "# supervisor through its socket and identity record; ending this oneshot must not SIGTERM it.\n"
+            "KillMode=process\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_root = Path(tmp)
+            for entry in shipped_root.iterdir():
+                shutil.copy(entry, previous_root / entry.name)
+            template = (previous_root / name).read_text(encoding="utf-8")
+            self.assertIn(setting, template)
+            (previous_root / name).write_text(template.replace(setting, ""), encoding="utf-8")
+            previous = load_packaged_units(previous_root, "secretary-", layout)
+
+        instance = {"host": {"unit_prefix": "secretary-"}}
+        applied = build_plan(instance, [], packaged=previous)
+        desired = build_plan(instance, [], packaged=shipped)
+        actual = HostInventory(units={resource.name for resource in applied if resource.kind == "unit"})
+        changes = {change.name: change.action for change in plan_changes(desired, actual, applied)}
+
+        self.assertEqual(changes.pop(name), "update")
+        self.assertTrue(changes)
+        self.assertEqual(set(changes.values()), {"unchanged"})
+
     def test_memory_unit_uses_persistent_cache_and_configured_thread_limit(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",

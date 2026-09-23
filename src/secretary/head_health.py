@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary import _proc
 from secretary._fsutil import write_json
 from secretary.dispatch.types import HostError
 
@@ -97,13 +98,10 @@ def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
     reports on a probe without owning the dispatcher's TTL cache.
     """
     try:
-        completed = subprocess.run(
-            probe,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            env=probe_env(),
+        # Its own process group, so a timeout takes the provider CLI under the shell down too: the
+        # production tick's unit no longer kills what it leaves behind (secretary-1699).
+        completed = _proc.run_isolated(
+            ["/bin/sh", "-c", probe], timeout=PROBE_TIMEOUT_SECONDS, env=probe_env()
         )
     except subprocess.TimeoutExpired:
         # A probe that started and then hung says nothing about the account either way.

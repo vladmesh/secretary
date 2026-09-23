@@ -30,7 +30,7 @@ class HeadHealthTests(unittest.TestCase):
 
     def test_auth_failure_is_cached_and_blocks_launch(self) -> None:
         failed = subprocess.CompletedProcess("probe", 1, "", "Login expired. Please run /login")
-        with mock.patch("secretary.head_health.subprocess.run", return_value=failed) as run:
+        with mock.patch("secretary.head_health._proc.run_isolated", return_value=failed) as run:
             first = self.health.check("openai-sub")
             second = self.health.check("openai-sub")
 
@@ -41,7 +41,7 @@ class HeadHealthTests(unittest.TestCase):
 
     def test_provider_failure_is_unavailable(self) -> None:
         failed = subprocess.CompletedProcess("probe", 1, "", "503 biscuit_baker_service_me_circuit_open")
-        with mock.patch("secretary.head_health.subprocess.run", return_value=failed):
+        with mock.patch("secretary.head_health._proc.run_isolated", return_value=failed):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "unavailable")
@@ -58,7 +58,7 @@ class HeadHealthTests(unittest.TestCase):
             "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
             "to purchase more credits or try again at Aug 8th, 2026 9:13 PM.",
         )
-        with mock.patch("secretary.head_health.subprocess.run", return_value=spent):
+        with mock.patch("secretary.head_health._proc.run_isolated", return_value=spent):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "exhausted")
@@ -74,7 +74,7 @@ class HeadHealthTests(unittest.TestCase):
             "",
             "429 insufficient_quota: you exceeded your current quota",
         )
-        with mock.patch("secretary.head_health.subprocess.run", return_value=both):
+        with mock.patch("secretary.head_health._proc.run_isolated", return_value=both):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "exhausted")
@@ -82,7 +82,7 @@ class HeadHealthTests(unittest.TestCase):
 
     def test_probe_failure_is_unknown_and_allows_launch(self) -> None:
         with mock.patch(
-            "secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)
+            "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
@@ -303,7 +303,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
     def check(self, completed: subprocess.CompletedProcess) -> HeadReadiness:
         """One verdict per call: a fresh store, so the TTL cache never answers for the next case."""
         health = HeadHealth(Catalog(), Path(tempfile.mkdtemp(dir=self.tmpdir.name)))
-        with mock.patch("secretary.head_health.subprocess.run", return_value=completed):
+        with mock.patch("secretary.head_health._proc.run_isolated", return_value=completed):
             return health.check("openai-sub")
 
     def test_a_missing_module_is_a_broken_probe(self) -> None:
@@ -328,7 +328,9 @@ class BrokenProbeStatusTests(unittest.TestCase):
 
     def test_a_probe_that_cannot_be_started_at_all_is_a_broken_probe(self) -> None:
         """No shell to run it with is the same defect as no interpreter to run it under."""
-        with mock.patch("secretary.head_health.subprocess.run", side_effect=OSError(8, "Exec format error")):
+        with mock.patch(
+            "secretary.head_health._proc.run_isolated", side_effect=OSError(8, "Exec format error")
+        ):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
@@ -339,7 +341,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
         deliberately unchanged: `unknown` still means "nothing is known" and still lets a claim
         through."""
         with mock.patch(
-            "secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)
+            "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
