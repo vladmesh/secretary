@@ -53,6 +53,10 @@ The invariants encoded here (each pinned by a named test):
     ``HealthyQuiet`` to ``SuspectedStall`` at once (``answer_owed_since``): the pair is an
     explicit signal, not something a ceiling eventually notices;
   * advisory pane readings corroborate in ``basis`` and can never drive a stall verdict;
+  * a head's child processes whose CPU or IO counters move hold the head ``HealthyActive``
+    while it is itself silent (secretary-1692), but only for ``thresholds.child_activity_ceiling``
+    measured from the head's own last progress; a child with frozen counters, a child past the
+    ceiling and no child at all leave the ordinary quiet rules exactly as they were;
   * quiet accumulates from ``last_progress_at`` (or episode start), not from the last tick, so
     irregular ticks cannot stretch or shrink a stall;
   * confirmation is sticky: only real progress, suspension, death or an identity change ends it.
@@ -67,6 +71,7 @@ from enum import StrEnum
 from typing import Any
 
 from secretary.dispatch.head_vitality import (
+    COMMAND_LIMIT,
     CURSOR_LIMIT,
     REASON_LIMIT,
     HeadVitalityError,
@@ -95,6 +100,10 @@ _PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
 # How long a *dark* progress source may freeze an episode's stall clock before the episode ages
 # anyway (secretary-1543). See ``VitalityThresholds.dark_ceiling`` for why this number.
 DARK_CEILING_DEFAULT = 2.0 * float(IDLE_STALL_DEFAULT)
+
+# How long advancement seen ONLY in the head's child processes may hold off a stall
+# (secretary-1692). See ``VitalityThresholds.child_activity_ceiling`` for why this number.
+CHILD_ACTIVITY_CEILING_DEFAULT = 45.0 * 60.0
 
 
 class VitalityVerdict(StrEnum):
@@ -138,14 +147,25 @@ class VitalityThresholds:
     first conversational nudge at ``max(dark_ceiling, suspect_after)`` -- ten minutes instead of
     never -- while nothing destructive happens before ``suspect_after + confirm_after`` of quiet
     AND the guard's own outer ceiling (:mod:`head_vitality_guard`).
+
+    ``child_activity_ceiling`` (secretary-1692) bounds how long a head that is itself silent may
+    be held healthy by its child processes' CPU or IO alone, measured from the head's own last
+    progress. Lower bound: the longest single command a worker legitimately runs in the
+    foreground -- two integration shards under ``timeout 580`` each (secretary-1665) or one
+    broad suite, i.e. up to roughly twenty minutes -- with room for a slow host. Upper bound: a
+    hung child that spins (a busy-looping test, a retry loop) must still be caught in the same
+    hour, far below the six-hour report ceiling. Forty-five minutes sits between them; past it
+    the child's movement is ignored and the ordinary ladder runs from the last child advancement
+    it accepted, so such a head is suspected at about 50 and confirmed at about 60 minutes.
     """
 
     suspect_after: float
     confirm_after: float
     dark_ceiling: float = float(DARK_CEILING_DEFAULT)
+    child_activity_ceiling: float = float(CHILD_ACTIVITY_CEILING_DEFAULT)
 
     def __post_init__(self) -> None:
-        for name in ("suspect_after", "confirm_after", "dark_ceiling"):
+        for name in ("suspect_after", "confirm_after", "dark_ceiling", "child_activity_ceiling"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise HeadVitalityError(f"vitality threshold {name} is a number")
@@ -154,12 +174,14 @@ class VitalityThresholds:
         object.__setattr__(self, "suspect_after", float(self.suspect_after))
         object.__setattr__(self, "confirm_after", float(self.confirm_after))
         object.__setattr__(self, "dark_ceiling", float(self.dark_ceiling))
+        object.__setattr__(self, "child_activity_ceiling", float(self.child_activity_ceiling))
 
 
 DEFAULT_VITALITY_THRESHOLDS = VitalityThresholds(
     suspect_after=float(IDLE_STALL_DEFAULT),
     confirm_after=2.0 * float(IDLE_STALL_DEFAULT),
     dark_ceiling=float(DARK_CEILING_DEFAULT),
+    child_activity_ceiling=float(CHILD_ACTIVITY_CEILING_DEFAULT),
 )
 
 
@@ -234,6 +256,23 @@ class VitalityEpisode:
     # measurement) -- never stamps it.
     last_turn: str = ""
     turn_ended_at: float = 0.0
+    # Child-process activity (secretary-1692). ``child_progress_at`` is the last instant the
+    # head's children were accepted as advancement; it feeds the quiet reference like
+    # ``quiet_since`` does, and is kept apart from ``last_progress_at`` because it is not the
+    # head's own work. ``child_activity_since`` is the head's own quiet reference when the current
+    # child-only streak began (0.0 when none runs): the child activity ceiling is measured from
+    # it, and the head's own advancement clears it.
+    child_progress_at: float = 0.0
+    child_activity_since: float = 0.0
+    # The last child reading's described descendant: its ``m:``/``y:pid.start`` key (measured
+    # mover or youngest live descendant), redacted bounded command line and redirected output
+    # file, and when it was read. Cleared by a reading that saw no live descendant; kept while
+    # the child source is not observed. A respawn tells
+    # the successor about this command.
+    last_child_key: str = ""
+    last_child_command: str = ""
+    last_child_output: str = ""
+    last_child_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
@@ -249,8 +288,14 @@ class VitalityEpisode:
             "updated_at",
             "stall_frozen_since",
             "turn_ended_at",
+            "child_progress_at",
+            "child_activity_since",
+            "last_child_at",
         ):
             object.__setattr__(self, name, _finite_timestamp(getattr(self, name), name))
+        object.__setattr__(self, "last_child_key", str(self.last_child_key or "")[:80])
+        object.__setattr__(self, "last_child_command", str(self.last_child_command or "")[:COMMAND_LIMIT])
+        object.__setattr__(self, "last_child_output", str(self.last_child_output or "")[:COMMAND_LIMIT])
         if isinstance(self.recovery_rung, bool) or not isinstance(self.recovery_rung, int):
             raise HeadVitalityError("a vitality episode recovery rung is an int")
         if self.recovery_rung < 0:
@@ -314,6 +359,12 @@ class VitalityEpisode:
             "stall_frozen_since": self.stall_frozen_since,
             "last_turn": self.last_turn,
             "turn_ended_at": self.turn_ended_at,
+            "child_progress_at": self.child_progress_at,
+            "child_activity_since": self.child_activity_since,
+            "last_child_key": self.last_child_key,
+            "last_child_command": self.last_child_command,
+            "last_child_output": self.last_child_output,
+            "last_child_at": self.last_child_at,
         }
 
     @classmethod
@@ -384,6 +435,17 @@ class VitalityEpisode:
             # the missing fields answer for themselves.
             last_turn=str(payload.get("last_turn") or ""),
             turn_ended_at=_finite_timestamp(payload.get("turn_ended_at", 0.0), "turn_ended_at"),
+            # Written before secretary-1692 added child activity: absent means no child was ever
+            # read for this episode, which is what the empty values say. Same version, same rule
+            # as the Turn fields above; a reader from before this card ignores the extra keys.
+            child_progress_at=_finite_timestamp(payload.get("child_progress_at", 0.0), "child_progress_at"),
+            child_activity_since=_finite_timestamp(
+                payload.get("child_activity_since", 0.0), "child_activity_since"
+            ),
+            last_child_key=str(payload.get("last_child_key") or ""),
+            last_child_command=str(payload.get("last_child_command") or ""),
+            last_child_output=str(payload.get("last_child_output") or ""),
+            last_child_at=_finite_timestamp(payload.get("last_child_at", 0.0), "last_child_at"),
         )
 
 
@@ -467,10 +529,15 @@ def reduce_vitality(
     )
     episode = _unfreeze_if_resumed(episode, owned, now)
 
+    # The child source is strong about one thing only -- that the head's children are advancing
+    # -- and is fused separately below, so its quiet or its absence never changes which arm the
+    # head's own channels select.
     strong = [
         snapshot
         for snapshot in owned.values()
-        if snapshot.availability is SourceAvailability.AVAILABLE and not snapshot.advisory
+        if snapshot.availability is SourceAvailability.AVAILABLE
+        and not snapshot.advisory
+        and snapshot.source is not SnapshotSource.EXECUTION_CHILD
     ]
     progress_evidence = [
         snapshot for snapshot in strong if snapshot.progress in (ProgressState.ADVANCING, ProgressState.QUIET)
@@ -550,6 +617,28 @@ def reduce_vitality(
                 else episode.turn_ended_at,
             )
 
+    # Child processes (secretary-1692). The reading's described descendant is kept for a respawn
+    # to name; its advancement holds the head healthy only inside ``child_activity_ceiling``,
+    # measured from the head's own quiet reference, so a hung-but-spinning child is still caught.
+    child = owned.get(SnapshotSource.EXECUTION_CHILD)
+    child_hold = False
+    child_since = 0.0
+    if child is not None and child.availability is SourceAvailability.AVAILABLE:
+        episode = replace(
+            episode,
+            last_child_key=child.child_key,
+            last_child_command=child.command if child.child_key else "",
+            last_child_output=child.output_path if child.child_key else "",
+            last_child_at=child.observed_at if child.child_key else 0.0,
+        )
+        if child.progress is ProgressState.ADVANCING:
+            child_since = episode.child_activity_since or _head_quiet_reference(episode)
+            held = max(0.0, child.observed_at - child_since)
+            if held < thresholds.child_activity_ceiling:
+                child_hold = True
+            else:
+                basis.append(f"child-ceiling:{int(held)}s@{child.source.value}")
+
     verdict = VitalityVerdict.UNVERIFIABLE
     if any(snapshot.process is ProcessState.DEAD for snapshot in strong):
         # Death outranks everything: a gone process cannot also be quietly working.
@@ -590,7 +679,29 @@ def reduce_vitality(
             last_progress_source=advancing.source.value,
             activity_epoch=episode.activity_epoch + (1 if moved_ahead else 0),
             stall_frozen_since=0.0,
+            # The head moved by itself: any child-only streak is over.
+            child_activity_since=0.0,
             reason="",
+        )
+    elif child_hold:
+        # The head is silent but a child it is waiting on works: not a stall, inside the ceiling.
+        # It does not touch ``last_progress_at`` or the activity epoch -- those are the head's
+        # own work -- only the child stamp the quiet reference reads.
+        assert child is not None
+        verdict = VitalityVerdict.HEALTHY_ACTIVE
+        basis.append(f"advancing@{child.source.value}")
+        held = max(0.0, child.observed_at - child_since)
+        episode = replace(
+            episode,
+            suspected_since=0.0,
+            confirmed_since=0.0,
+            child_progress_at=max(episode.child_progress_at, child.observed_at),
+            child_activity_since=child_since,
+            stall_frozen_since=0.0,
+            reason=(
+                f"the head is quiet while its child process works ({int(held)}s of the "
+                f"{int(thresholds.child_activity_ceiling)}s child activity ceiling)"
+            ),
         )
     elif progress_evidence:
         # Only observed quiet from a strong, admitted source accumulates toward a stall, and it
@@ -917,10 +1028,20 @@ def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool
 def _quiet_reference(episode: VitalityEpisode) -> float:
     """The instant this episode's current quiet began: what every threshold is measured from.
 
-    The later of the last observed advancement and the last conversational restart
-    (``quiet_since``), falling back to the episode's start before either has happened. A nudge
+    The later of the last observed advancement, the last conversational restart
+    (``quiet_since``) and the last accepted child-process advancement (``child_progress_at``,
+    secretary-1692), falling back to the episode's start before either has happened. A nudge
     that restarts the clock therefore buys the head the grace its own comment promises, without
     erasing the progress history an operator reads (secretary-1543).
+    """
+    return max(episode.last_progress_at, episode.quiet_since, episode.child_progress_at) or episode.started_at
+
+
+def _head_quiet_reference(episode: VitalityEpisode) -> float:
+    """The quiet reference of the head's OWN channels, ignoring child activity.
+
+    The child activity ceiling is measured from here, so the child's movement can never extend
+    the window it is itself bounded by.
     """
     return max(episode.last_progress_at, episode.quiet_since) or episode.started_at
 
@@ -953,7 +1074,29 @@ def _unfreeze_if_resumed(
         started_at=shift(episode.started_at),
         last_progress_at=shift(episode.last_progress_at),
         quiet_since=shift(episode.quiet_since),
+        child_progress_at=shift(episode.child_progress_at),
+        child_activity_since=shift(episode.child_activity_since),
         suspected_since=shift(episode.suspected_since),
         confirmed_since=shift(episode.confirmed_since),
         stall_frozen_since=0.0,
+    )
+
+
+def interrupted_command_note(episode: Any, run_id: str) -> str:
+    """The factual line a respawned successor gets about its predecessor's running command.
+
+    Taken from the last child reading kept on ``run_id``'s own episode (secretary-1692): empty
+    when there is no such episode, when it names another run, or when its last reading described
+    no live child. The command was redacted and bounded when it was read.
+    """
+    if not isinstance(episode, VitalityEpisode) or not run_id or episode.run_id != str(run_id):
+        return ""
+    command = episode.last_child_command.strip()
+    if not command:
+        return ""
+    output = episode.last_child_output.strip()
+    return (
+        "The previous head was stopped while running: "
+        + command
+        + (f" (its output was redirected to {output})" if output else "")
     )

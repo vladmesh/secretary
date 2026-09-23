@@ -738,6 +738,11 @@ class DispatcherRecord:
     # instead of something the outer ceiling notices hours later. Cleared when a report is
     # accepted, and when a replacement head that never saw the rejection takes over.
     worker_answer_owed_since: float = 0.0
+    # Transient, never serialised (secretary-1692): the factual line a wait-watchdog respawn hands
+    # the successor about the command its predecessor was stopped in, set by ``_respawn_wait`` for
+    # the one bring-up it calls and cleared right after. Keeping it off the durable record means
+    # no later rework, review or restart can ever render a stale one.
+    respawn_interrupted_command: str = field(default="", compare=False)
     # Reviewer leaf is stable across handle aliases; its commit fences verdicts to its checkout.
     review_handle: str = ""
     review_leaf: str = ""

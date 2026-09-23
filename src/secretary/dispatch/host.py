@@ -240,6 +240,7 @@ from secretary.runtime.heads import (
     resolve_head_id as _resolve_head_id,
 )
 from secretary.runtime import head as head_ops
+from secretary.runtime.head.children import read_head_children
 from secretary.runtime.codex_preflight import (
     CodexFanoutPolicyError,
     preflight_codex_launch,
@@ -785,6 +786,18 @@ def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
     except (head_ops.HeadRunError, head_ops.TaskRefError, TypeError, ValueError):
         return None
     return run if run.run_id else None
+
+
+def _interrupted_command_section(record: DispatcherRecord | None) -> list[str]:
+    """The one factual line a respawned head gets about the command its predecessor was running.
+
+    ``respawn_interrupted_command`` is set by the wait watchdog's respawn for exactly the bring-up
+    it performs (secretary-1692) and is never persisted, so no other launch renders it.
+    """
+    line = _safe_one_line(getattr(record, "respawn_interrupted_command", "") or "", limit=600)
+    if not line:
+        return []
+    return ["## Interrupted command", "", line, ""]
 
 
 class CommandHostRuntime:
@@ -1718,6 +1731,14 @@ class CommandHostRuntime:
                     self._commit_worker_run(record, updated)
                 lifecycle_run = updated
         return _provider_progress_for_run(lifecycle_run)
+
+    def head_children(self, head_pid: int) -> dict[str, Any]:
+        """The live descendants of a head's heartbeat-proven pid, with their movement counters.
+
+        Read from ``/proc`` by ``runtime.head.children`` (secretary-1692); the vitality reducer
+        counts their CPU/IO movement as the head's activity while it waits on its own command.
+        """
+        return read_head_children(head_pid)
 
     def safe_recover_worker_continuation(
         self,
@@ -3944,6 +3965,7 @@ class CommandHostRuntime:
             "Perform this task in this head only. Do not spawn, create, delegate to, or manage",
             "subagents or child agents. Use ordinary tools directly when needed.",
             "",
+            *_interrupted_command_section(record),
         ]
         decision, review_red = self._select_revision_bound_worker_feedback(task, decision)
         prerequisites = self._validated_worker_prerequisites(task, decision, protocol_prerequisites)
@@ -4329,6 +4351,7 @@ class CommandHostRuntime:
             "Perform this review in this head only. Do not spawn, create, delegate to, or manage",
             "subagents or child agents. Use ordinary tools directly when needed.",
             "",
+            *_interrupted_command_section(record),
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",

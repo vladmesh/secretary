@@ -312,6 +312,12 @@ def _head_row(
             if bound_episode is not None
             else ""
         ),
+        previous_child_cursor=(
+            (bound_episode.evidence_cursors or {}).get(SnapshotSource.EXECUTION_CHILD.value, "")
+            if bound_episode is not None
+            else ""
+        ),
+        previous_child_key=bound_episode.last_child_key if bound_episode is not None else "",
         observed_at=observed_at,
     )
     by_source = {snapshot.source: snapshot for snapshot in snapshots}
@@ -388,6 +394,15 @@ def _episode_row(
         "deadline_note": outlook["note"],
         "answer_owed_since": (float(record.worker_answer_owed_since or 0.0) if kind == "worker" else 0.0),
         "turn_ended_at": episode.turn_ended_at,
+        # The child command a respawn would name (secretary-1692), and how long the head's
+        # children have been holding it healthy while the head itself was silent.
+        "child_activity": {
+            "command": episode.last_child_command,
+            "output": episode.last_child_output,
+            "read_at": episode.last_child_at,
+            "progress_at": episode.child_progress_at,
+            "holding_since": episode.child_activity_since,
+        },
     }
 
 

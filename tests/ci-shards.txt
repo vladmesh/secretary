@@ -61,6 +61,8 @@ runtime-component tests/test_head_runtime.py
 unit tests/test_head_spec.py
 unit tests/test_head_status_command.py
 unit tests/test_head_vitality.py
+unit tests/test_head_vitality_child_activity.py
+integration-board tests/test_head_vitality_child_respawn.py
 unit tests/test_head_vitality_episode.py
 unit tests/test_head_vitality_guard.py
 integration-board tests/test_head_vitality_guard_sites.py

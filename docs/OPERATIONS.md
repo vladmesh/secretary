@@ -1428,7 +1428,8 @@ Returning the same card again gets a fresh answer. While unresolved, `secretary 
 - `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — first-output window, default 180.
 - `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — verdict ceiling after first output, default 5400.
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — report ceiling after first output, default 21600.
-- `SECRETARY_HEAD_IDLE_STALL_SECONDS` — idle-ready window, default 300.
+- `SECRETARY_HEAD_IDLE_STALL_SECONDS` — no production effect since the wait tick moved onto the vitality
+  verdict; the vitality thresholds do not read it (see `docs/HEAD_VITALITY.md`, Thresholds).
 - `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — bring-ups deferred over a pane not ready for its launch prompt
   before Blocked, default 5.
 - `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,

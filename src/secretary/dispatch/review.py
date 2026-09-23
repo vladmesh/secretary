@@ -371,6 +371,9 @@ def command_terminal_status(
             "pid_status": dict(pid_status),
             "provider_progress": dict(provider_progress),
         }
+        child_activity = _head_child_activity(host, pid_status)
+        if child_activity is not None:
+            status["child_activity"] = child_activity
         if pid_confirmed:
             # Whether the head is working or waiting at its prompt. Only asked of a process the
             # heartbeat proves is running, because that is the one case where no timing ceiling
@@ -404,13 +407,17 @@ def command_terminal_status(
         # The classification rides along (a suspended head behind a lost pane must be
         # seen as Suspended, never aged as Unverifiable), and the pid answers the
         # process axis alone: no pane flag exists on this shape.
-        return {
+        status = {
             "known": True,
             "live": True,
             "reason": "pid",
             "pid_confirmed": True,
             "pid_status": dict(pid_status),
         }
+        child_activity = _head_child_activity(host, pid_status)
+        if child_activity is not None:
+            status["child_activity"] = child_activity
+        return status
     if _heartbeat_is_dead(pid_status):
         # The pane vanished AND the heartbeat names a gone process: the reclaim is
         # evidence-backed, so the classification rides along and the reduction sees Dead.
@@ -439,6 +446,27 @@ def command_terminal_status(
         "reason": "missing-terminal",
         "pid_status": dict(pid_status),
     }
+
+
+def _head_child_activity(host: Any, pid_status: Any) -> dict[str, Any] | None:
+    """The head's child processes, for a pid the heartbeat proved is this run (secretary-1692).
+
+    Asked only of an exact live match -- a foreign or dead pid has no children of this run -- and
+    only of a host that can answer. A read that fails is left out of the status entirely: the
+    child source is extra evidence of work, and its absence changes no other channel's meaning.
+    """
+    if not isinstance(pid_status, dict) or not _heartbeat_is_live_match(pid_status):
+        return None
+    probe = getattr(host, "head_children", None)
+    if probe is None:
+        return None
+    try:
+        evidence = probe(int(pid_status.get("pid") or 0))
+    except Exception:  # noqa: BLE001 - an observation failure is not evidence about the head
+        return None
+    if not isinstance(evidence, dict) or str(evidence.get("state") or "") != "observed":
+        return None
+    return evidence
 
 
 def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:
