@@ -7,6 +7,7 @@ when that episode kept a child reading, and nothing new when it did not.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -18,6 +19,15 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary.runtime.head.children import read_head_children
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
+
+
+def _stop_group(head: subprocess.Popen) -> None:
+    """Kill a stand-in head's whole process group, then reap the head (secretary-1695)."""
+    try:
+        os.killpg(head.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    head.wait(timeout=10)
 
 
 class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.TestCase):
@@ -65,14 +75,13 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
         explicitly so the runner's own stdout never becomes its output file (secretary-1694)."""
         if not Path("/proc/self/stat").exists():
             self.skipTest("needs Linux /proc")
-        head = subprocess.Popen(["sh", "-c", "sleep 3600; true"], stdout=stdout, stderr=subprocess.DEVNULL)
-
-        def stop() -> None:
-            subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False)
-            head.kill()
-            head.wait(timeout=10)
-
-        self.addCleanup(stop)
+        head = subprocess.Popen(
+            ["sh", "-c", "sleep 3600; true"],
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop_group, head)
         deadline = time.time() + 10
         while time.time() < deadline and not read_head_children(head.pid).get("descendants"):
             time.sleep(0.05)
