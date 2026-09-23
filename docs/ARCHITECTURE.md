@@ -221,6 +221,13 @@ verdict if the checkout has moved since. Orca decides where the worktree lives (
 repository and this card's workspace name; otherwise it is removed before bring-up fails. Head
 rendering and delivery are adapter-specific, but not a stable plugin API.
 
+The manager is chosen once, when the workspace is created: a card whose claimed worker and reviewer
+profiles both run on a runtime other than `orca-legacy` gets a plain `git worktree` on its card
+branch at `<data_dir>/workspaces/<project id>/<worker>` (`dispatch.git_workspace`); any other card
+gets an Orca worktree. Resume validation, discard, stop and teardown read the manager from the path
+(under the git root means git), never from current profiles, so a live card keeps its manager. A
+supervised reviewer starts in the same worktree as a second process and never reads Orca's panes.
+
 The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` belongs to the
 project adapter. It claims the environment with an owner record, adds its workspace paths to Git's
 `info/exclude`, and never writes production package paths into either environment. One immutable
