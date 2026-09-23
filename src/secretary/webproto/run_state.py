@@ -59,6 +59,8 @@ from secretary.dispatch.watchdog import (
     HEARTBEAT_UNREADABLE,
     head_process_status,
 )
+from secretary.runtime.head.identity import task_binding
+from secretary.runtime.head.task_ref import TASK_CARD
 from secretary.webproto import sources
 from secretary.webproto.agents import (
     FINISHED,
@@ -215,11 +217,12 @@ def settled_result(run: ProductRun) -> dict[str, Any]:
 def expected_identity(run: ProductRun) -> dict[str, str]:
     """The identity this run's head wrote, in the shape its own backend writes and compares.
 
-    `LocalPtyHeadRuntime._process_alive` builds exactly this — run id, role and the raw task string
-    the supervisor was handed — and the supervisor's `with_pid_heartbeat` wrapper writes exactly
-    these three. Asking with any other shape would read a live head as somebody else's process.
+    `LocalPtyHeadRuntime._process_alive` builds exactly this — run id, role and the card's task
+    binding (`card:<ref>`) the supervisor was handed — and the supervisor's `with_pid_heartbeat`
+    wrapper writes exactly these three. A head raised before secretary-1698 wrote the bare
+    reference instead, and the reader still accepts that spelling for the same run id.
     """
-    return {"run_id": run.run_id, "role": run.role, "task": run.ref}
+    return {"run_id": run.run_id, "role": run.role, "task": task_binding(TASK_CARD, run.ref)}
 
 
 def _classify(

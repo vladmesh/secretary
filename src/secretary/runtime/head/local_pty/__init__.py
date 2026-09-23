@@ -83,6 +83,11 @@ There is no second identity scheme. The head's command is wrapped by
 `head.pid` is written by the head's own process (`$$` plus `exec`) and carries `pid`, `boot_id`,
 `proc_starttime_ticks`, `run_id`, `role` and `task`. `secretary.dispatch.watchdog`'s reader
 classifies it with no change at all.
+
+The supervisor is the only writer of that record: a caller hands it the bare head command, never one
+already wrapped, and names the `pid_file` it will read when that is not the run directory's own
+(secretary-1698). `task` is spelled by `head.identity.task_binding`, the one spelling every other
+launcher writes.
 """
 
 from __future__ import annotations

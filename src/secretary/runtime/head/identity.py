@@ -110,6 +110,34 @@ def _unreadable(reason: str) -> dict[str, Any]:
     return {"known": False, "alive": False, "match": False, "state": HEARTBEAT_UNREADABLE, "reason": reason}
 
 
+def task_binding(kind: str, ref: str) -> str:
+    """The `task` a launch identity names: `kind:ref`, with the kind written exactly once.
+
+    A sprint's reference already reads `sprint:<ID>`, so prefixing it again produced
+    `sprint:sprint:<ID>` (secretary-1698); a reference that already carries its kind is kept as it is.
+    Every writer and every reader of the record spells the task through this one function.
+    """
+    kind = str(kind or "")
+    ref = str(ref or "")
+    if not kind or not ref:
+        return ""
+    return ref if ref.startswith(f"{kind}:") else f"{kind}:{ref}"
+
+
+def _task_matches(recorded: str, expected: str) -> bool:
+    """Whether a record's `task` is the binding expected, in its spelling or a pre-1698 one.
+
+    Heads launched before secretary-1698 wrote two other spellings and may still be running: an
+    Orca-launched observer says `sprint:sprint:<ID>`, and a local-pty head says its bare reference
+    (`steward`, `secretary-1463`). Reading those as foreign would declare a running head someone
+    else's and replace it. The alias is safe because the run id beside it is still compared exactly.
+    """
+    if recorded == expected:
+        return True
+    kind, separator, ref = expected.partition(":")
+    return bool(separator) and recorded in (f"{kind}:{expected}", ref)
+
+
 def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, Any] | None) -> bool:
     if expected is None:
         return True
@@ -117,7 +145,10 @@ def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, A
     # cannot prove a process belongs to it, even when its pid file happens to be well formed.
     for name in ("run_id", "role", "task"):
         value = str(expected.get(name) or "")
-        if not value or str(record.get(name) or "") != value:
+        if not value:
+            return False
+        recorded = str(record.get(name) or "")
+        if not (_task_matches(recorded, value) if name == "task" else recorded == value):
             return False
     leaf = str(expected.get("leaf") or "")
     return not leaf or str(record.get("leaf") or "") == leaf

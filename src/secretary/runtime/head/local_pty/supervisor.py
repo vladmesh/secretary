@@ -22,8 +22,11 @@ addressable afterwards. It does four things and refuses to do a fifth:
     piece of work built on the surface above.
 
 The head's identity is not this process's business either. The head's command is wrapped by
-`with_pid_heartbeat`, so the record under `head.pid` is written by the head's own process and is
-the same launch identity `secretary.dispatch.watchdog` already reads.
+`with_pid_heartbeat` here and nowhere else — a caller hands this process the bare head command — so
+the record is written by the head's own process and is the same launch identity
+`secretary.dispatch.watchdog` already reads. It goes under `head.pid` in the run directory, or at
+the `pid_file` the launcher designated when the launcher reads the head's liveness at a path of its
+own (the dispatcher's watchdog heartbeat, secretary-1698).
 """
 
 from __future__ import annotations
@@ -174,6 +177,7 @@ class Supervisor:
         term: str = "xterm-256color",
         quiet_seconds: float = TURN_QUIET_SECONDS,
         delivery_seconds: float = protocol.INPUT_DELIVERY_SECONDS,
+        pid_file: str | os.PathLike[str] = "",
     ) -> None:
         self.run_dir = Path(run_dir)
         self.run_id = run_id
@@ -188,7 +192,7 @@ class Supervisor:
 
         self.socket_path = protocol.socket_path_for(self.run_dir)
         self.journal_path = self.run_dir / protocol.JOURNAL_NAME
-        self.pid_file = self.run_dir / protocol.PID_FILE_NAME
+        self.pid_file = Path(pid_file) if pid_file else self.run_dir / protocol.PID_FILE_NAME
 
         self._lock_fd = -1
         self._listener: socket.socket | None = None
@@ -1244,6 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quiet-seconds", type=float, default=TURN_QUIET_SECONDS)
     parser.add_argument("--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS)
     parser.add_argument(
+        "--pid-file",
+        default="",
+        help="where the head writes its launch identity; the run directory's head.pid when omitted",
+    )
+    parser.add_argument(
         "--daemonize",
         action="store_true",
         help=(
@@ -1277,6 +1286,7 @@ def main(argv: list[str] | None = None) -> int:
         term=args.term,
         quiet_seconds=args.quiet_seconds,
         delivery_seconds=args.delivery_seconds,
+        pid_file=args.pid_file,
     )
     try:
         supervisor.claim()
