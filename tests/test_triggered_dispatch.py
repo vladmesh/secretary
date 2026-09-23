@@ -579,52 +579,40 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         stop.assert_not_called()
         state.save_active_report.assert_not_called()
 
-    def test_an_agent_pinned_to_an_old_codex_id_still_resolves(self) -> None:
-        """The spec's last-resort head is a product-side id; the installation republished its own."""
+    def test_an_agent_spec_head_is_used_under_its_own_id(self) -> None:
+        """The spec's last-resort head is an ordinary id: returned as-is when the registry has it."""
         from secretary.runtime import heads as pipeline_heads
 
         registry = pipeline_heads.Registry(self.REGISTRY["resources"], self.REGISTRY["profiles"], {})
 
         with mock.patch.object(pipeline_heads, "load_registry", return_value=registry):
-            self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
+            self.assertEqual(dispatch._preferred_head("retro", {"head": "codex"}), "codex")
             self.assertIsNone(dispatch._preferred_head("retro", {}))
 
-    def test_a_service_head_pinned_to_an_old_codex_id_stays_in_family(self) -> None:
-        """The same registry a worker can meet: an old Codex id republished as a Claude profile.
+    def test_a_service_head_pinned_to_a_retired_id_fails_closed(self) -> None:
+        """secretary-1697: no alias table stands a retired id in for a tier of today's registry.
 
-        A service agent pinned to that id asked for Codex, so it reaches the interactive Codex
-        head this registry does publish — and when it publishes none, the dispatch is refused
-        rather than quietly rendered as some other family's launch command.
+        The dispatch is refused by name rather than rendered as whatever profile looks closest.
         """
         from secretary.runtime import heads as pipeline_heads
 
-        resources = self.REGISTRY["resources"]
-        with_codex = pipeline_heads.Registry(
-            resources,
+        tiers = pipeline_heads.Registry(
+            self.REGISTRY["resources"],
             {
-                "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-                "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
-            },
-            {},
-        )
-        claude_only = pipeline_heads.Registry(
-            resources,
-            {
-                "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+                "codex-terra-high": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+                "claude-opus-high": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
             },
             {},
         )
 
-        with mock.patch.object(pipeline_heads, "load_registry", return_value=with_codex):
-            self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
         with (
-            mock.patch.object(pipeline_heads, "load_registry", return_value=claude_only),
+            mock.patch.object(pipeline_heads, "load_registry", return_value=tiers),
             mock.patch.object(
                 dispatch, "_load_spec", return_value={"skill": "/retro", "head": "codex-terra"}
             ),
             mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
         ):
-            with self.assertRaises(pipeline_heads.HeadRegistryError):
+            with self.assertRaisesRegex(pipeline_heads.HeadRegistryError, "unknown head 'codex-terra'"):
                 dispatch._preferred_head("retro", {"head": "codex-terra"})
             with self.assertRaises(pipeline_heads.HeadRegistryError):
                 dispatch._launch_cmd("retro")

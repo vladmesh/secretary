@@ -1189,7 +1189,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(result.status, "changed")
             self.assertEqual(again.status, "unchanged")
             self.assertEqual(load_snapshot(instance), canonical_heads(context.product_root, instance))
-            self.assertEqual(load_snapshot(instance)["role_defaults"]["new_card"], "codex")
+            self.assertEqual(load_snapshot(instance)["role_defaults"]["new_card"], "claude-opus-medium")
 
     def test_head_registry_dry_run_reports_drift_without_writing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1377,15 +1377,11 @@ class UpgradeStepTests(unittest.TestCase):
             ],
             [],
         )
-        # A pinned model version is a spend decision that ages out of the product; the shipped
-        # profiles name a family or nothing at all.
+        # secretary-1697: the shipped registry is the five pipeline tiers, and the tiers are defined
+        # by their model pins; no other model is pinned.
         self.assertEqual(
-            [
-                name
-                for name, profile in canon["profiles"].items()
-                if any(char.isdigit() for char in str(profile.get("model", "")))
-            ],
-            [],
+            sorted({str(profile.get("model", "")) for profile in canon["profiles"].values()}),
+            ["gpt-5.6-terra", "gpt-6-sol", "opus"],
         )
 
     def test_missing_role_worktrees_are_recreated_from_product_head(self):
