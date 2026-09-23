@@ -74,8 +74,9 @@ nothing on the board during the run.
 - **Issues→Ready on other agents' cards is not your gate.** The transition is technically available to
   the role, but promoting proposals into the queue is a human decision: agents' proposals, including your
   own non-urgent ones, wait for the owner. A Product issue is not movable at all: it is the owner's
-  backlog record, and the board refuses the transition. Create your own urgent infrastructure tasks directly with
-  `task create --state ready` — that is not promoting an idea, it is a direct consequence of your watch.
+  backlog record, and the board refuses the transition. The board does not let the steward file
+  proposals in Issues, and a steward card in Ready must belong to an open sprint on that project
+  (`task create --state ready --sprint <ref>`); see "Act" below for what to do otherwise.
 - **The only stop line is judgement, not a numeric cap.** "I do not dare do this myself" → a card in
   Blocked with the analysis, and wait for a human. There is no cap on how deep you dig or how many
   actions you take in a run.
@@ -236,18 +237,20 @@ Investigation gives three outcomes, one per signal:
   process, workspace debris. Commit and push to this repository's default branch directly (see
   "Permissions" above) with an ordinary `git push`, no force, no secrets in the diff. Each such fix is
   its own meaningful commit.
-- **File a card.** An improvement that does not block the pipeline now → an **Issues** proposal
-  (`python3 -P -m secretary task create --role steward --state issues --project <project>
-  --type <code|research|infra> --title <...> --body-file <file>`). An urgent infrastructure task you cannot or should not fix in the
-  moment (it needs a bigger refactor, or the risk is higher than is reasonable to take without review) →
-  the **Ready** column with the same `task create --state ready`, straight into the workers' queue.
+- **File a card.** An urgent infrastructure task you cannot or should not fix in the moment (it needs a
+  bigger refactor, or the risk is higher than is reasonable to take without review), on a project with an
+  open sprint → `python3 -P -m secretary task create --role steward --state ready --sprint <ref>
+  --project <project> --type <code|research|infra> --title <...> --body-file <file>`, straight into the
+  workers' queue. The board refuses a steward card in Issues (`execution tasks cannot be created in
+  Issues`) and a Ready card with no open sprint (`task creation requires an open sprint`). Everything
+  else, including non-urgent improvements, goes into "Needs a human" in the report with the full
+  proposal, so the owner can file it.
 - **Escalate.** You cannot find the cause, or the fix needs a human decision (an architectural choice, a
   risk you are not prepared to take) → a card in **Blocked** with a full analysis of what happened and what
   is needed from a human. If the card already exists on the board (the Blocked card from the signal, or any
   other active one) use `secretary task move --role steward --ref <ref> --to blocked` and put the analysis in a
-  separate comment (step 3). If there is no card yet (you found the anomaly yourself), use
-  `task create --role steward --state issues --project <project> --type <...> --title <...>
-  --body-file <analysis>` and then `task move --to blocked --reason-file <why a human decision is needed>`.
+  separate comment (step 3). If there is no card yet (you found the anomaly yourself), put the full
+  analysis under "Needs a human" in the report; the report card itself goes to Blocked (step 5).
   Pulling an active in-progress or validate card out from under a live worker is a last resort (the
   dispatcher usually resolves it through its watchdog), but it is safe: the next dispatcher tick sees that
   the card went another way, stops the worker's terminal itself and cleans up its own record, while the
