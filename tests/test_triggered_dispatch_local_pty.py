@@ -37,7 +37,7 @@ from secretary.dispatch.watchdog import head_process_status
 from secretary.runtime import heads as pipeline_heads
 from triggered_agents.agents.pipeline import health as pipeline_health
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime import state as runtime_state
+from secretary.runtime import state as runtime_state
 from secretary.runtime.head import HeadCommand
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty.client import SupervisorClient

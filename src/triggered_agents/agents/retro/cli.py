@@ -31,7 +31,8 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol
 
-from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState, BoardUnavailable
+from secretary.runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState, BoardUnavailable
+
 from ..curator import discover, harvest
 from . import search_log
 
@@ -108,7 +109,7 @@ def cmd_precheck(retention: DoneRetention | None = None) -> int:
     """Exit 0 if there are new turns to review, PRECHECK_SKIP (100) to skip a clean run when nothing
     is new, PRECHECK_BOARD_UNREACHABLE (101) when the board never answered, so the gate re-attempts
     the run instead of spending it. Any other code means precheck crashed. An uncaught exception
-    exits 1, which the systemd gate treats as an error, not a skip. See runtime/state.py
+    exits 1, which the systemd gate treats as an error, not a skip. See secretary/runtime/state.py
     PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
         _cleanup_done(retention)

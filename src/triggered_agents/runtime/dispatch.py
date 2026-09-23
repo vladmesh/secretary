@@ -158,7 +158,7 @@ from secretary.runtime.head_runtime_backends import build_head_runtime, head_run
 from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from secretary.runtime.pane_host import Pane, SessionHost, safe_command_label, session_host
 from .production_telemetry import data_dir as _installation_data_dir
-from .state import AgentState
+from secretary.runtime.state import AgentState
 from secretary.runtime.tui_delivery import (
     TuiDeliveryError,
     deliver_interactive_prompt,

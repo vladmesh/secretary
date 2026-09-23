@@ -17,7 +17,7 @@ from tests.fakes.triggered_dispatch import FakeSessionHost
 from secretary.runtime import tui_delivery
 from secretary.runtime import codex_preflight
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime import state as runtime_state
+from secretary.runtime import state as runtime_state
 from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,

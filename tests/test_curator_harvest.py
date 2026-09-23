@@ -12,8 +12,8 @@ from unittest import mock
 
 from triggered_agents.agents.curator import cli
 from triggered_agents.agents.curator import harvest
-from triggered_agents.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP
-from triggered_agents.runtime.state import AgentState
+from secretary.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP
+from secretary.runtime.state import AgentState
 
 
 def claude(text: str) -> str:

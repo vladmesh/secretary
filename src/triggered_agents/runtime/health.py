@@ -33,9 +33,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.runtime.paths import component_enabled, configured_product_root
+from secretary.runtime.state import AgentState
 
 from . import production_telemetry
-from .state import AgentState
 
 _ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent
 # Units are the packaged ones under host.unit_prefix, not the decommissioned

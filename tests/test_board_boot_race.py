@@ -26,7 +26,7 @@ from unittest import mock
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import health
-from triggered_agents.runtime.state import (
+from secretary.runtime.state import (
     PRECHECK_BOARD_UNREACHABLE,
     PRECHECK_DEFERRED,
     AgentState,

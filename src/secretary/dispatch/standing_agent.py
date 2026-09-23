@@ -21,7 +21,7 @@ from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.state import BoardUnavailable
+from secretary.runtime.state import BoardUnavailable
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})
 

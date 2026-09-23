@@ -23,9 +23,9 @@ from datetime import UTC, datetime
 from typing import Protocol, TypedDict
 
 from secretary.runtime import shared_state
+from secretary.runtime.state import AgentState
 
 from ...runtime import production_telemetry
-from ...runtime.state import AgentState
 from ..pipeline import naming as pipeline_naming
 
 STATE = AgentState("steward")
@@ -87,7 +87,7 @@ def resolve_reader(reader: StewardSignalReader | None = None) -> StewardSignalRe
 
 # Both pipeline signals — unhealthy ticks and resource flips — are reached across a process
 # boundary through the production dispatcher's own data plane (runtime/production_telemetry.py),
-# never through AgentState("pipeline"): that resolves STATE_ROOT (runtime/state.py) per process,
+# never through AgentState("pipeline"): that resolves STATE_ROOT (secretary/runtime/state.py) per process,
 # and the steward's systemd unit runs in its own worktree with its own environment. A path that
 # can never exist there returns no hits, indistinguishable from "checked, nothing new" — the
 # blindness of triggered-agents-253, which secretary-833 found again on a worktree copy of

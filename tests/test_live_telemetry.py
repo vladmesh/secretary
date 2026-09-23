@@ -51,7 +51,7 @@ from tests.sql_backend_fixtures import card_store
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
 from triggered_agents.runtime import health, production_telemetry
-from triggered_agents.runtime.state import PRECHECK_SKIP, AgentState
+from secretary.runtime.state import PRECHECK_SKIP, AgentState
 
 
 class EmptyStewardReader:
@@ -1147,7 +1147,7 @@ class HealthAgentStateTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.state_root = Path(self.tmpdir.name) / "automation-state"
-        patcher = mock.patch("triggered_agents.runtime.state.STATE_ROOT", self.state_root)
+        patcher = mock.patch("secretary.runtime.state.STATE_ROOT", self.state_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         timer = mock.patch.object(health, "_timer_active", return_value=True)
@@ -1173,7 +1173,7 @@ class HealthAgentStateTests(unittest.TestCase):
         # TA_STATE is the same knob the units would use if they set one; health must follow it
         # rather than resolving a path of its own.
         elsewhere = Path(self.tmpdir.name) / "elsewhere"
-        with mock.patch("triggered_agents.runtime.state.STATE_ROOT", elsewhere):
+        with mock.patch("secretary.runtime.state.STATE_ROOT", elsewhere):
             state = AgentState("curator")
             state.ensure_dir()
             (state.dir / "runs.jsonl").write_text(

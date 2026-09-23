@@ -33,8 +33,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from secretary.runtime.redact import scrub_secrets
+from secretary.runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, BoardUnavailable
 
-from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, BoardUnavailable
 from . import signals
 
 STATE = signals.STATE
@@ -97,7 +97,7 @@ def cmd_precheck(reader: signals.StewardSignalReader | None = None) -> int:
     (Python exits 1) fall in the gate's error branch, so a dead precheck fails the unit instead of
     reading as a quiet hour. This removes the old 1-means-skip masking. 101 is
     its own branch because a board that is not listening yet says nothing about this agent's health:
-    the tick is deferred, not answered and not broken (secretary-964). See runtime/state.py
+    the tick is deferred, not answered and not broken (secretary-964). See secretary/runtime/state.py
     PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
         batch = _scan(reader)

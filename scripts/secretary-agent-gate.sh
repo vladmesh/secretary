@@ -6,7 +6,7 @@
 #
 # Exit-code protocol of the role launcher precheck (curator uses
 # `triggered_agents`; steward/retro use `secretary.dispatch.standing_agent`; see
-# each cli.py and runtime/state.py PRECHECK_SKIP):
+# each cli.py and secretary/runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
 #   100            -> deliberate skip (nothing changed / paused): no new skill dispatch, but still
 #                     run `dispatch --cleanup-only` (triggered-agents-445) so an ephemeral agent's

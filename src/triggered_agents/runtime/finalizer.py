@@ -14,7 +14,7 @@ import time
 from secretary.runtime import role_env
 
 from secretary.runtime.pane_host import SessionHost, session_host
-from .state import AgentState
+from secretary.runtime.state import AgentState
 
 
 def _dispatch_module():
