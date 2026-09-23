@@ -4,6 +4,7 @@
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_board_identity.py
+unit tests/test_agent_state_lock.py
 integration-board tests/test_audit_backend_canon.py
 integration-board tests/test_attempt_usage.py
 unit tests/test_attempt_usage_payload.py
