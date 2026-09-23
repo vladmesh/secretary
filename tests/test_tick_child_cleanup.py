@@ -3,9 +3,10 @@
 The production dispatcher unit sets ``KillMode=process`` so the local-pty heads a tick launches
 outlive it (secretary-1699). That also retires the control-group kill as the cleanup of anything
 else a tick left behind. A plain ``subprocess.run`` timeout kills only the direct child, so the
-children a tick waits on with a timeout — the host runner's ``bash -lc`` gate and adapter
-commands, the head-health probe's ``sh -c`` and instance/project Git with its remote helper — run
-through ``_proc.run_isolated`` in their own process group, and a timeout kills that whole group.
+children a tick waits on — the host runner's ``bash -lc`` gate and adapter commands, the
+head-health probe's ``sh -c`` and instance/project Git with its remote helper — run through
+``_proc.run_isolated`` in their own process group. When one returns, normally or by timeout,
+nothing it started is left in that group.
 """
 
 from __future__ import annotations
@@ -71,6 +72,13 @@ class TickChildCleanupTests(unittest.TestCase):
             readiness = head_health.run_probe("openai-sub", probe, time.time())
         self.assertEqual(readiness.status, "unknown")
         self.assertTrue(_gone(self.descendant()), "the probe's descendant outlived its timeout")
+
+    def test_a_command_that_succeeds_takes_its_background_child_with_it(self):
+        """An adapter setup that backgrounds work and exits 0: nothing it started outlives the call."""
+        script = f"sleep 60 </dev/null >/dev/null 2>&1 & echo $! > {self.pid_file}; echo done"
+        completed = _proc.run_isolated(["bash", "-c", script], timeout=30)
+        self.assertEqual((completed.returncode, completed.stdout), (0, "done\n"))
+        self.assertTrue(_gone(self.descendant()), "the background child outlived a successful return")
 
     def test_a_timed_out_git_takes_its_remote_helper_with_it(self):
         """`run_git` (managed project fetch/push, checkpoint push): Git's remote helper must die too."""

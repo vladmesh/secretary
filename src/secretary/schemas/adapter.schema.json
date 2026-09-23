@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "adapter.schema.json",
   "title": "Project adapter",
-  "description": "How the pipeline sets up, smoke-checks and validates a project (secretary-instance/adapters/<id>.yaml). Setup, smoke and local validation commands run in their own process group, which is killed on a timeout; a command that leaves that group (setsid, a daemon) is unsupported, and nothing sweeps what it leaves behind.",
+  "description": "How the pipeline sets up, smoke-checks and validates a project (secretary-instance/adapters/<id>.yaml). Setup, smoke and local validation commands run in their own process group: when a command returns, normally or by timeout, nothing it started is left in that group. A command that leaves the group (setsid, a daemon) is unsupported, and nothing sweeps what it leaves behind.",
   "type": "object",
   "additionalProperties": false,
   "required": ["setup", "smoke", "validation", "artifact_policy"],
