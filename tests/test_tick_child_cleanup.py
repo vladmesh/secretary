@@ -33,6 +33,11 @@ HANGING_REMOTE_HELPER = "#!/bin/sh\necho $$ > {pid_file}\nexec sleep 60\n"
 # A shell that leaves a long-lived descendant behind, records its pid, and then hangs on it.
 HANGING_SHELL = "sleep 60 & echo $! > {pid_file}; wait"
 
+# The gate's shell is a login shell: it reads the profile before it gets to record its descendant,
+# and on a loaded CI runner that has taken longer than half a second (secretary-1702), leaving no
+# pid to check. The timeout still fires on the hang; it only no longer races the shell's start.
+LOGIN_SHELL_TIMEOUT_SECONDS = 3.0
+
 
 def _gone(pid: int) -> bool:
     for _ in range(200):
@@ -58,7 +63,9 @@ class TickChildCleanupTests(unittest.TestCase):
         host = CommandHostRuntime(FakeCatalog(), Path(self.tmp.name), mode="real")
         command = HANGING_SHELL.format(pid_file=self.pid_file)
         with (
-            mock.patch.object(dispatcher_host_module, "HOST_COMMAND_TIMEOUT_SECONDS", 0.5),
+            mock.patch.object(
+                dispatcher_host_module, "HOST_COMMAND_TIMEOUT_SECONDS", LOGIN_SHELL_TIMEOUT_SECONDS
+            ),
             self.assertRaises(HostError) as caught,
         ):
             host.run_capture(["bash", "-lc", command], "local gate", cwd=Path(self.tmp.name))
