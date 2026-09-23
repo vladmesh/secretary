@@ -812,6 +812,32 @@ class ObserverRecordFenceStateTests(ObserverFenceFixture):
 
         self.assertEqual(fence["outcomes"][0]["observer_reason"], "observer_head_mismatch")
 
+    def test_a_redeclared_observer_replaces_the_head_instead_of_fencing_for_good(self) -> None:
+        """issue:c61deb40b2d2b0745f37: `sprint reopen --observer <other>` over a live record.
+
+        The fence holds the sprint for as long as the record names the old head, so the old head
+        is retired on the tick that sees the new declaration and the declared one comes up on the
+        next, the way a close and a reopen a tick apart already did it by hand.
+        """
+        self.declare(encode_observer(head_choice("claude-observer")))
+        self.runtime.production_tick()
+        self.assertEqual(load_observers(self.runtime.production_state.load())["sprint:1"].head, "claude-observer")
+
+        self.board.save_sprint_metadata("sprint:1", sprint_observer=encode_observer(head_choice("codex-observer")))
+        stopped = [
+            action
+            for action in self.runtime.production_tick()["actions"]
+            if action["step"] == "observer-reconcile"
+        ]
+        self.assertEqual([action["action"] for action in stopped], ["observer-stopped"])
+        self.assertEqual(stopped[0]["head"], "claude-observer")
+        self.assertNotIn("sprint:1", load_observers(self.runtime.production_state.load()))
+
+        self.runtime.production_tick()
+        self.assertEqual(load_observers(self.runtime.production_state.load())["sprint:1"].head, "codex-observer")
+        self.runtime.production_tick()
+        self.assertEqual(self.fence()["sprints"], set())
+
 
 class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
     """The fence with two sprints open at once: it holds one sprint's work, not the tick's.

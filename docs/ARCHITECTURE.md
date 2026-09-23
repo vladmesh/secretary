@@ -197,7 +197,10 @@ profile from the closed set `orca-legacy | local-pty` (absent means `orca-legacy
   a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
   frame is the live source for turn, admission and journal sequence; a bounded 64 KiB journal tail is
   the fallback after it exits. Uncertainty closes admission; confirmed process death never creates a
-  permanent lease.
+  permanent lease. A prompt the dispatcher hands over with its transport is an agent's prompt: the
+  runtime waits for the head to settle, types the line, sends Enter as a separate delivery and
+  reports `ok` only once the head's output shows a turn started. The dispatcher addresses a
+  supervised observer by its run, never through Orca's pane inventory.
 
 Mechanical scheduler units are `Type=oneshot` ticks with `KillMode=process`, so a supervised head
 outlives the tick. The next tick controls it through the runtime's identity-fenced drain/stop. The

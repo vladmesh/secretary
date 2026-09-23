@@ -36,6 +36,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from secretary import _proc
@@ -48,6 +49,7 @@ from secretary.dispatch.head_vitality import (
     snapshots_from_status,
 )
 from secretary.dispatch.head_vitality_episode import recovery_outlook
+from secretary.dispatch.observer import load_observers, observer_head_status
 from secretary.dispatch.review import (
     command_terminal_status,
     orca_workspace_inventory,
@@ -57,6 +59,11 @@ from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.tui import provider_progress_for_persisted_run
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
+from secretary.runtime.head import HeadRun, HeadRunError
+from secretary.runtime.head.identity import head_process_status
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from secretary.runtime.head_runtime_backends import build_head_runtime
+from secretary.runtime.local_pty_head import head_run_journal
 from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
@@ -200,6 +207,7 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
         for kind, role in _ROLES
         if record.owns_head(kind)
     ]
+    heads.extend(_supervised_observer_rows(runtime, payload, target, observed_at))
     return {
         "status": "ok",
         "step": "head-status",
@@ -651,3 +659,84 @@ def _episode_sentence(row: dict[str, Any]) -> str:
 
 def _normalised(path: str) -> str:
     return os.path.abspath(os.path.expanduser(str(path or ""))) if path else ""
+
+
+def _no_session() -> Any:
+    """A supervised head is held by no session manager, and a read of one never asks for it."""
+    raise HostError("a local-pty head has no session manager")
+
+
+#: How many of a supervised head's last journal records a row carries.
+JOURNAL_TAIL_RECORDS = 8
+
+
+def _supervised_observer_rows(
+    runtime: Any, payload: dict[str, Any], workspace: str, observed_at: float
+) -> list[dict[str, Any]]:
+    """A row for each sprint observer in this workspace that a local-pty supervisor holds.
+
+    Such a head owns no pane, so the pane inventory above never lists it, and the row is read from
+    what that backend keeps instead: the launch identity, the supervisor's own `status` answer and
+    the last records of the head's journal. Read-only like the rest of this module: `observe` asks
+    the supervisor one question and the journal is read from disk; nothing is delivered, drained or
+    stopped, and a channel that cannot answer is reported as not answering.
+    """
+    rows = []
+    for ref, record in sorted(load_observers(payload).items()):
+        if _normalised(record.workspace) != workspace:
+            continue
+        try:
+            run = HeadRun.from_json(record.head_run)
+        except (HeadRunError, TypeError, ValueError):
+            continue
+        if run.spec.runtime != LOCAL_PTY_RUNTIME:
+            continue
+        process = observer_head_status(record)
+        root = Path(runtime.data_dir) / "heads"
+        seen = build_head_runtime(
+            LOCAL_PTY_RUNTIME,
+            session=_no_session,
+            local_pty_root=lambda: root,
+            head_process_status=head_process_status,
+        ).observe(run)
+        status = seen.evidence if isinstance(seen.evidence, dict) else {}
+        try:
+            tail = [
+                {key: event[key] for key in ("seq", "kind", "at", "turn", "reason", "bytes", "subject") if key in event}
+                for event in head_run_journal(root / run.run_id)[-JOURNAL_TAIL_RECORDS:]
+            ]
+            journal = {"state": SourceAvailability.AVAILABLE.value, "tail": tail}
+        except OSError as exc:
+            tail = []
+            journal = {"state": SourceAvailability.UNAVAILABLE.value, "reason": str(exc)[:240], "tail": []}
+        last = tail[-1] if tail else {}
+        age = f"{max(0.0, observed_at - float(last['at'])):.0f}s ago" if last.get("at") else "never"
+        process_state = str(process.get("state") or "unknown")
+        turn = "open" if status.get("turn_open") else "closed" if status else "unread"
+        rows.append(
+            {
+                "ref": ref,
+                "kind": "observer",
+                "role": "observer",
+                "runtime": LOCAL_PTY_RUNTIME,
+                "run_id": run.run_id,
+                "head": record.head,
+                "observer_state": record.state,
+                "process": {"state": process_state, "pid": process.get("pid")},
+                "supervisor": {
+                    "status": seen.status,
+                    "reason": seen.reason,
+                    **{
+                        key: status[key]
+                        for key in ("alive", "turn_open", "turn", "output_bytes", "journal_seq", "draining", "stopping")
+                        if key in status
+                    },
+                },
+                "journal": journal,
+                "summary": (
+                    f"observer {ref}: local-pty run {run.run_id}, process {process_state}, turn {turn}, "
+                    f"last journal record {last.get('kind') or '(none)'} {age}"
+                ),
+            }
+        )
+    return rows
