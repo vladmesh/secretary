@@ -5,7 +5,8 @@ lines past a JSONL count). The watermark advances ONLY after the agent's durable
 is committed (two-phase), so a crash mid-run re-processes rather than silently dropping.
 
 Lock: one lockfile guards a run. Orca already serializes runs of one automation; this is
-a backstop against a manual run overlapping a scheduled one.
+a backstop against a manual run overlapping a scheduled one. It is an `flock`, so a killed
+run cannot keep it; the file records the holder's pid and start time for diagnostics.
 
 State root is `TA_STATE` or `~/secretary-data/automation-state`, then `/<agent>`.
 a watermark file.
@@ -13,13 +14,17 @@ a watermark file.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import sys
 import tempfile
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "secretary-data" / "automation-state")))
 
@@ -333,25 +338,146 @@ class AgentState:
 
     @contextmanager
     def lock(self) -> Iterator[None]:
-        """Exclusive run lock. Raises if another run of this agent holds it."""
+        """Exclusive run lock. Raises if another run of this agent holds it.
+
+        `flock` on the lock file is the mutex: the kernel drops it when the holder dies, so a
+        SIGKILLed run leaves a file but no lock. The pid/start record is diagnostics, and it still
+        refuses a live holder that took the lock without `flock` (the pre-flock bare-pid form).
+        Reclaiming a dead holder's file logs `lock-reclaimed`; a refusal logs `lock-refused`.
+        """
         self.ensure_dir()
+        fd = self._acquire_lockfile()
         try:
-            fd = os.open(self.lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            holder = (
-                self.lockfile.read_text(encoding="utf-8", errors="replace").strip()
-                if self.lockfile.is_file()
-                else "?"
-            )
-            raise SystemExit(
-                f"triggered_agents[{self.agent}]: another run holds the lock ({self.lockfile}, pid {holder})"
-            )
-        try:
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
             yield
         finally:
             try:
-                self.lockfile.unlink()
+                if _same_file(self.lockfile, fd):
+                    self.lockfile.unlink()
             except FileNotFoundError:
                 pass
+            finally:
+                os.close(fd)
+
+    def _acquire_lockfile(self) -> int:
+        for _ in range(_LOCK_ACQUIRE_ATTEMPTS):
+            fd = os.open(self.lockfile, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    self._refuse(_read_lock_record(fd))
+                # A releasing holder unlinks the path before closing; a lock on an unlinked
+                # inode guards nothing, so start over on whatever the path names now.
+                if not _same_file(self.lockfile, fd):
+                    os.close(fd)
+                    continue
+                record = _read_lock_record(fd)
+                if record.get("raw"):
+                    if _holder_alive(record, os.fstat(fd).st_mtime):
+                        self._refuse(record)
+                    self.log_run(
+                        "lock-reclaimed",
+                        stale_pid=record.get("pid"),
+                        recorded_start=record.get("start"),
+                        lock_age_s=round(time.time() - os.fstat(fd).st_mtime, 3),
+                        reclaimer_pid=os.getpid(),
+                    )
+                body = json.dumps(
+                    {"pid": os.getpid(), "start": _process_start(os.getpid()), "source": _lock_source()}
+                ).encode()
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, body, 0)
+                os.fsync(fd)
+                return fd
+            except BaseException:
+                with suppress(OSError):
+                    os.close(fd)
+                raise
+        raise SystemExit(f"triggered_agents[{self.agent}]: lock file keeps changing ({self.lockfile})")
+
+    def _refuse(self, record: dict) -> NoReturn:
+        holder = record.get("pid") if record.get("pid") is not None else (record.get("raw") or "?")
+        self.log_run("lock-refused", holder_pid=holder, recorded_start=record.get("start"))
+        raise SystemExit(
+            f"triggered_agents[{self.agent}]: another run holds the lock ({self.lockfile}, pid {holder})"
+        )
+
+
+_LOCK_ACQUIRE_ATTEMPTS = 8
+
+
+def _same_file(path: Path, fd: int) -> bool:
+    try:
+        on_path = os.stat(path)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(fd)
+    return (on_path.st_dev, on_path.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _read_lock_record(fd: int) -> dict:
+    """Parse a lock record: JSON `{"pid", "start", "source"}` or the legacy bare decimal pid."""
+    try:
+        raw = os.pread(fd, 4096, 0).decode("utf-8", errors="replace").strip()
+    except OSError:
+        raw = ""
+    record: dict = {"raw": raw}
+    if raw.isdigit():
+        record["pid"] = int(raw)
+        return record
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return record
+    if isinstance(parsed, dict) and isinstance(parsed.get("pid"), int):
+        record["pid"] = parsed["pid"]
+        if isinstance(parsed.get("start"), int):
+            record["start"] = parsed["start"]
+    return record
+
+
+def _holder_alive(record: dict, written_at: float) -> bool:
+    """Whether the recorded holder still runs: the pid exists and is the same process.
+
+    A recorded start time must match. The legacy form has none, so a process that started
+    after the lock file was written is a reused pid rather than the holder.
+    """
+    pid = record.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    start = _process_start(pid)
+    if "start" in record:
+        return start is None or start == record["start"]
+    started_at = _process_started_at(start)
+    return started_at is None or started_at <= written_at + 1
+
+
+def _process_start(pid: int) -> int | None:
+    """Start time of `pid` in clock ticks since boot (`/proc/<pid>/stat` field 22), if known."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat[stat.rindex(")") + 2 :].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _process_started_at(start: int | None) -> float | None:
+    if start is None:
+        return None
+    try:
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                return int(line.split()[1]) + start / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _lock_source() -> str:
+    return " ".join(sys.argv)[:200]
