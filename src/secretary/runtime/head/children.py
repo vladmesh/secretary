@@ -9,11 +9,12 @@ counters that prove they moved. Deciding what movement means belongs to
 ``head_vitality.VitalitySnapshot.from_child_activity`` and the episode reducer.
 
 The descendant set is built from one scan of ``/proc/[0-9]*/stat`` (parent pid is field 4), which
-works on every kernel, unlike ``/proc/<pid>/task/*/children`` (``CONFIG_PROC_CHILDREN``). Each
-descendant carries its start time (field 22, the pid-reuse discriminator), its cumulative CPU --
-``utime + stime + cutime + cstime``, so the CPU of short-lived grandchildren the descendant has
-already reaped still counts -- and, best effort, ``rchar + wchar`` from ``/proc/<pid>/io``, which
-also covers a test process that mostly waits on sockets.
+works on every kernel, unlike ``/proc/<pid>/task/*/children`` (``CONFIG_PROC_CHILDREN``). Movement
+is aggregated over EVERY descendant: cumulative CPU -- ``utime + stime + cutime + cstime``, so the CPU
+of short-lived grandchildren already reaped still counts, plus the head's own ``cutime + cstime`` --
+and, best effort, ``rchar + wchar`` from ``/proc/<pid>/io``, which also covers a test process that
+mostly waits on sockets. Only the per-process description (start time, the pid-reuse
+discriminator; counters; command line; output file) is bounded to ``DESCENDANT_LIMIT``.
 
 Every failure is an answer, never an exception: an unreadable ``/proc`` is ``unavailable``, and a
 process that exits mid-scan is simply not listed. Command lines leave this module already
@@ -29,9 +30,11 @@ from typing import Any
 
 from secretary.runtime.redact import scrub_secrets
 
-#: How many descendants one reading lists, newest first. A long-running tool command and its
-#: workers are the newest processes under a head; long-lived helpers (MCP servers) started with
-#: the head and are the oldest, so they are the ones a busy tree pushes out.
+#: How many descendants one reading DESCRIBES (command line, output file, per-process counters).
+#: It bounds only the metadata a reading carries; movement is counted over the whole tree through
+#: the ``total_cpu_ms``/``total_io`` aggregate (secretary-1692 round 2). Half the slots go to the
+#: newest descendants (the likely foreground command and its workers), half to the ones with the
+#: most cumulative CPU (an older command still grinding under newer idle helpers).
 DESCENDANT_LIMIT = 16
 #: Bound on one command line as read (before redaction) and as reported.
 COMMAND_READ_LIMIT = 4096
@@ -118,12 +121,16 @@ def _uptime_ticks(proc: Path, ticks: int) -> int:
 def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, Any]:
     """The live descendants of ``head_pid`` with their movement counters.
 
-    Answers ``{"state": "observed", "head_pid", "uptime_ticks", "descendants": [...]}`` where
-    each descendant is ``{"pid", "start", "cpu_ms", "io", "command", "output"}``, newest first and
-    at most ``DESCENDANT_LIMIT`` of them; zombies are not listed. ``uptime_ticks`` stamps the
-    reading on the same clock as ``start``, which is how a later reading tells a process born
-    after this one from an old one it simply did not list. Anything that prevents an answer is
-    ``{"state": "unavailable", "reason": ...}``.
+    Answers ``{"state": "observed", "head_pid", "uptime_ticks", "total_cpu_ms", "total_io",
+    "descendant_count", "descendants": [...]}``.
+
+    The totals are the movement measure and cover EVERY live descendant: summed
+    ``utime+stime+cutime+cstime`` plus the head's own ``cutime+cstime`` (so children the head has
+    already reaped still count), and summed ``rchar+wchar`` where readable. ``descendants`` is
+    only the described subset, at most ``DESCENDANT_LIMIT`` of them, each
+    ``{"pid", "start", "cpu_ms", "io", "command", "output"}``, newest first; zombies are neither
+    counted nor listed. ``uptime_ticks`` stamps the reading on the same clock as ``start``.
+    Anything that prevents an answer is ``{"state": "unavailable", "reason": ...}``.
     """
     try:
         pid = int(head_pid)
@@ -167,6 +174,14 @@ def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, 
             descendants.append(child)
             frontier.append(child)
     readings: list[dict[str, Any]] = []
+    total_ticks = 0
+    head_fields = stats.get(pid)
+    if head_fields is not None:
+        try:
+            total_ticks += int(head_fields[13]) + int(head_fields[14])
+        except ValueError:
+            pass
+    total_io = 0
     for child in descendants:
         fields = stats[child]
         if fields[0] in ("Z", "X", "x"):
@@ -176,11 +191,29 @@ def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, 
             start = int(fields[19])
         except ValueError:
             continue
-        readings.append({"pid": child, "start": start, "cpu_ms": cpu_ticks * 1000 // ticks})
-    readings.sort(key=lambda item: (item["start"], item["pid"]), reverse=True)
-    readings = readings[:DESCENDANT_LIMIT]
-    for item in readings:
-        item["io"] = _io_bytes(item["pid"], proc)
+        io = _io_bytes(child, proc)
+        total_ticks += cpu_ticks
+        total_io += io
+        readings.append({"pid": child, "start": start, "cpu_ms": cpu_ticks * 1000 // ticks, "io": io})
+    count = len(readings)
+    half = DESCENDANT_LIMIT // 2
+    newest = sorted(readings, key=lambda item: (item["start"], item["pid"]), reverse=True)
+    busiest = sorted(readings, key=lambda item: (item["cpu_ms"], item["start"]), reverse=True)
+    chosen: dict[int, dict[str, Any]] = {}
+    for item in [*newest[:half], *busiest]:
+        if len(chosen) >= DESCENDANT_LIMIT:
+            break
+        chosen.setdefault(item["pid"], item)
+    described = sorted(chosen.values(), key=lambda item: (item["start"], item["pid"]), reverse=True)
+    for item in described:
         item["command"] = _command(item["pid"], proc)
         item["output"] = _output_path(item["pid"], proc)
-    return {"state": "observed", "head_pid": pid, "uptime_ticks": uptime, "descendants": readings}
+    return {
+        "state": "observed",
+        "head_pid": pid,
+        "uptime_ticks": uptime,
+        "total_cpu_ms": total_ticks * 1000 // ticks,
+        "total_io": total_io,
+        "descendant_count": count,
+        "descendants": described,
+    }

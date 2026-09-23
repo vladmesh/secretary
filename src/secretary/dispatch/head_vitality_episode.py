@@ -264,9 +264,10 @@ class VitalityEpisode:
     # it, and the head's own advancement clears it.
     child_progress_at: float = 0.0
     child_activity_since: float = 0.0
-    # The last child reading's described descendant: its ``pid.start`` key, redacted bounded
-    # command line and redirected output file, and when it was read. Cleared by a reading that
-    # describes no live descendant; kept while the child source is not observed. A respawn tells
+    # The last child reading's described descendant: its ``m:``/``y:pid.start`` key (measured
+    # mover or youngest live descendant), redacted bounded command line and redirected output
+    # file, and when it was read. Cleared by a reading that saw no live descendant; kept while
+    # the child source is not observed. A respawn tells
     # the successor about this command.
     last_child_key: str = ""
     last_child_command: str = ""

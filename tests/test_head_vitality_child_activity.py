@@ -171,10 +171,35 @@ class ReducerTests(unittest.TestCase):
         )
         self.assertEqual(with_child.first_at(VitalityVerdict.SUSPECTED_STALL), 300.0)
         self.assertEqual(with_child.first_at(VitalityVerdict.CONFIRMED_STALL), 900.0)
-        # A child never seen moving looks exactly like an idle helper the head keeps alive, so it
-        # is not named to a successor either.
+        # A live child is named to a successor even though it never moved (round 2,
+        # BLOCKER-OMITTED-INTERRUPTED-COMMAND): with no mover, the youngest live descendant.
         assert with_child.episode is not None
-        self.assertEqual(with_child.episode.last_child_command, "")
+        self.assertEqual(
+            interrupted_command_note(with_child.episode, RUN_ID),
+            "The previous head was stopped while running: timeout 580 python -m pytest "
+            "tests/integration -k shard1 (its output was redirected to /tmp/shard1.log)",
+        )
+
+    def test_with_no_mover_the_youngest_live_descendant_is_named(self) -> None:
+        helper = dict(child(4000, pid=100, start=10), command="node mcp-server.js", output="")
+        tool = dict(child(10, pid=7000, start=950_000), command="sleep 3600", output="")
+        scenario = ChildScenario()
+        for step in range(0, 3):
+            scenario.tick(step * 60.0, child_evidence=evidence(helper, tool))
+        assert scenario.episode is not None
+        self.assertEqual(scenario.episode.last_child_command, "sleep 3600")
+        self.assertTrue(scenario.episode.last_child_key.startswith("y:"))
+
+    def test_a_measured_mover_is_preferred_over_a_younger_idle_process(self) -> None:
+        scenario = ChildScenario()
+        worker = dict(child(0, pid=5000, start=900_000), command="pytest -n 0")
+        idle = dict(child(5, pid=6000, start=950_000), command="sleep 3600", output="")
+        scenario.tick(0.0, child_evidence=evidence(worker, idle))
+        scenario.tick(60.0, child_evidence=evidence(dict(worker, cpu_ms=30_000), idle))
+        scenario.tick(120.0, child_evidence=evidence(dict(worker, cpu_ms=30_000), idle))
+        assert scenario.episode is not None
+        self.assertEqual(scenario.episode.last_child_command, "pytest -n 0")
+        self.assertTrue(scenario.episode.last_child_key.startswith("m:"))
 
     def test_a_child_that_worked_and_then_froze_stays_named_while_it_lives(self) -> None:
         scenario = ChildScenario()
@@ -343,15 +368,40 @@ class BuilderTests(unittest.TestCase):
         self.assertIs(second.progress, ProgressState.ADVANCING)
         self.assertIn("pytest", second.command)
 
-    def test_an_old_process_not_listed_before_does_not_count(self) -> None:
-        first = VitalitySnapshot.from_child_activity(evidence(uptime=1000), run_id=RUN_ID, observed_at=1.0)
+    def test_an_aggregate_that_goes_down_is_no_advancement(self) -> None:
+        """A descendant that died unreaped takes its CPU out of the tree: quiet, not an error."""
+        busy = dict(child(90_000), pid=5000)
+        other = dict(child(1_000), pid=6000, start=950_000)
+        first = VitalitySnapshot.from_child_activity(evidence(busy, other), run_id=RUN_ID, observed_at=1.0)
         second = VitalitySnapshot.from_child_activity(
-            evidence(child(90_000, start=500), uptime=2000),
+            evidence(dict(other, cpu_ms=1_400)),
             run_id=RUN_ID,
             previous_cursor=first.cursor or "",
             observed_at=2.0,
         )
         self.assertIs(second.progress, ProgressState.QUIET)
+        # And the next reading measures from the lower aggregate, not from the old one.
+        third = VitalitySnapshot.from_child_activity(
+            evidence(dict(other, cpu_ms=1_400 + CHILD_CPU_ADVANCE_MS)),
+            run_id=RUN_ID,
+            previous_cursor=second.cursor or "",
+            observed_at=3.0,
+        )
+        self.assertIs(third.progress, ProgressState.ADVANCING)
+
+    def test_movement_is_the_whole_tree_aggregate_not_the_listed_subset(self) -> None:
+        """An aggregate over processes the reading does not describe still counts."""
+        idle = dict(child(10), pid=6000, start=950_000)
+        first = VitalitySnapshot.from_child_activity(
+            dict(evidence(idle), total_cpu_ms=100_000, total_io=0), run_id=RUN_ID, observed_at=1.0
+        )
+        second = VitalitySnapshot.from_child_activity(
+            dict(evidence(idle), total_cpu_ms=100_000 + CHILD_CPU_ADVANCE_MS, total_io=0),
+            run_id=RUN_ID,
+            previous_cursor=first.cursor or "",
+            observed_at=2.0,
+        )
+        self.assertIs(second.progress, ProgressState.ADVANCING)
 
     def test_the_status_mapping_carries_the_child_source(self) -> None:
         snapshots = snapshots_from_status(
@@ -432,8 +482,76 @@ class RealProcessTests(unittest.TestCase):
         first, second = self._two_readings(head, 1.0)
         self.assertIs(first.progress, ProgressState.UNKNOWN)
         self.assertIs(second.progress, ProgressState.QUIET)
-        # Never seen moving, so it is not described: an idle helper looks the same.
-        self.assertEqual(second.child_key, "")
+        # Quiet, and still described: the youngest live descendant (round 2).
+        self.assertTrue(second.child_key.startswith("y:"))
+        self.assertIn("time.sleep(60)", second.command)
+
+    def test_an_older_busy_child_under_many_newer_idle_sleepers_is_advancing(self) -> None:
+        """Reviewer reproduction for BLOCKER-UNSEEN-WORKING-DESCENDANT: one busy loop started
+        first, then 17 idle sleepers; the busy one is older than every sleeper."""
+        code = (
+            "import subprocess, sys, time\n"
+            "busy = subprocess.Popen([sys.executable, '-c', 'while True: pass'])\n"
+            "time.sleep(0.3)\n"
+            "sleepers = [subprocess.Popen(['sleep', '60']) for _ in range(17)]\n"
+            "busy.wait()\n"
+        )
+        head = subprocess.Popen([sys.executable, "-c", code], cwd=self.tmp.name)
+
+        def stop() -> None:
+            for pid in [item["pid"] for item in read_head_children(head.pid).get("descendants", [])]:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+            subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False)
+            head.kill()
+            head.wait(timeout=10)
+
+        self.addCleanup(stop)
+        deadline = time.time() + 15
+        while time.time() < deadline and read_head_children(head.pid).get("descendant_count", 0) < 18:
+            time.sleep(0.05)
+        reading = read_head_children(head.pid)
+        self.assertEqual(reading["descendant_count"], 18)
+        self.assertLessEqual(len(reading["descendants"]), 16)
+        _first, second = self._two_readings(head, 1.2)
+        self.assertIs(second.progress, ProgressState.ADVANCING)
+        self.assertIn("while True", second.command)
+
+    def test_two_quiet_readings_of_a_sleeping_child_leave_a_respawn_note(self) -> None:
+        """Reviewer reproduction for BLOCKER-OMITTED-INTERRUPTED-COMMAND: a live ``sleep 3600``
+        that never crosses the noise floor, reduced to ConfirmedStall at 900 s."""
+        head = subprocess.Popen(
+            ["sh", "-c", "sleep 3600; true"], stderr=subprocess.DEVNULL, cwd=self.tmp.name
+        )
+        self.addCleanup(
+            lambda: (subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False), head.kill())
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline and not read_head_children(head.pid).get("descendants"):
+            time.sleep(0.05)
+        scenario_episode = None
+        cursor, key = "", ""
+        for now in (0.0, 60.0, 900.0):
+            snapshot = VitalitySnapshot.from_child_activity(
+                read_head_children(head.pid),
+                run_id=RUN_ID,
+                previous_cursor=cursor,
+                previous_key=key,
+                observed_at=now,
+            )
+            scenario_episode = reduce_vitality(
+                scenario_episode, [heartbeat(now), quiet_provider(now), snapshot], now, THRESHOLDS
+            )
+            cursor = scenario_episode.evidence_cursors.get(SnapshotSource.EXECUTION_CHILD.value, "")
+            key = scenario_episode.last_child_key
+        assert scenario_episode is not None
+        self.assertIs(scenario_episode.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(
+            interrupted_command_note(scenario_episode, RUN_ID),
+            "The previous head was stopped while running: sleep 3600",
+        )
 
     def test_a_head_without_children_and_a_gone_head(self) -> None:
         lonely = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

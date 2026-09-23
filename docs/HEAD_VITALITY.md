@@ -121,17 +121,19 @@ A head running one long foreground command is silent in its pane and provider jo
 command returns (secretary-1665: two integration shards, respawned at 968 s of strong quiet with the
 test child alive and on CPU). `command_terminal_status` therefore reads the descendants of the pid the
 heartbeat proved (`live-match` only) through `host.head_children` → `read_head_children`: one scan of
-`/proc/*/stat` builds the tree; each descendant carries its start time, cumulative CPU
-(`utime+stime+cutime+cstime`, so reaped grandchildren count) and `rchar+wchar` from `/proc/<pid>/io`,
-newest first, at most 16. Command lines are redacted (`runtime.redact.scrub_secrets`), flattened and
-bounded to 300 characters when read; the output file is named when `/proc/<pid>/fd/1` is a regular
-file.
+`/proc/*/stat` builds the tree. Movement is measured over the **whole** tree: `total_cpu_ms` sums
+`utime+stime+cutime+cstime` of every live descendant plus the head's own `cutime+cstime` (so children
+already reaped, by a descendant or by the head, still count), and `total_io` sums `rchar+wchar` where
+`/proc/<pid>/io` is readable. Only the described metadata is bounded: at most 16 descendants (half the
+newest, half the most CPU) carry start time, counters, a command line redacted with
+`runtime.redact.scrub_secrets`, flattened and bounded to 300 characters, and the output file when
+`/proc/<pid>/fd/1` is a regular file.
 
-The `execution_child` cursor is `c1:<uptime>;` plus `pid.start.cpu.io` for the newest descendants that
-fit 240 characters. A reading compares against it: a known `(pid, start)` contributes its counter
-deltas, a process born after the previous reading contributes its whole counters, and anything else
-contributes nothing. Advancement needs ≥ 500 ms CPU or ≥ 256 KiB IO summed per reading
-(`CHILD_CPU_ADVANCE_MS`, `CHILD_IO_ADVANCE_BYTES`), well above an idle MCP server or watcher.
+The `execution_child` cursor is `c2:<uptime>:<total_cpu>:<total_io>;` plus `pid.start.cpu.io` for as
+many described descendants as fit 240 characters, busiest first. A reading advances when the aggregate
+grew by ≥ 500 ms CPU or ≥ 256 KiB IO since the previous reading (`CHILD_CPU_ADVANCE_MS`,
+`CHILD_IO_ADVANCE_BYTES`); an aggregate that went down (a descendant died and nobody in the tree reaped
+it) is no advancement for that reading. The per-process entries only name the mover.
 
 The reducer fuses it separately from the head's own channels:
 
@@ -147,9 +149,12 @@ The reducer fuses it separately from the head's own channels:
   source is excluded from the strong set that selects the quiet, pid-only and dark arms.
 
 The episode keeps the last reading's described descendant (`last_child_key`, `last_child_command`,
-`last_child_output`, `last_child_at`): the busiest mover, or the previously described one while it
-still lives with frozen counters. A reading with no such descendant clears them; a tick without a child
-reading keeps them. A child never seen moving is not described (it looks like an idle helper).
+`last_child_output`, `last_child_at`). Any reading that saw a live descendant describes one: the
+busiest measured mover of this reading (key `m:`), else the mover already on file while it lives, else
+the youngest live descendant (key `y:`), which is the likeliest foreground tool command rather than a
+helper started with the session. A head with only old helpers gets the youngest helper named; the line
+is informational. A reading with no live descendant clears the fields; a tick without a child reading
+keeps them.
 
 On a wait-watchdog respawn (`_respawn_wait`, worker and reviewer) the successor's task document gets
 one section, `## Interrupted command`, with the line `The previous head was stopped while running:

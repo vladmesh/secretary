@@ -7,12 +7,15 @@ when that episode kept a child reading, and nothing new when it did not.
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
+from secretary.runtime.head.children import read_head_children
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 
 
@@ -54,6 +57,33 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
         # Transient: nothing about it lands on the durable record.
         payload = self.runtime.production_state.load()
         self.assertNotIn("respawn_interrupted_command", payload["records"]["secretary-510"])
+
+    def test_a_real_quiet_sleep_child_is_named_to_the_successor(self) -> None:
+        """Round 2 reproduction: the wait tick's own child readings of a live ``sleep 3600``
+        (never above the noise floor) are what the respawn names -- nothing injected."""
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("needs Linux /proc")
+        head = subprocess.Popen(["sh", "-c", "sleep 3600; true"], stderr=subprocess.DEVNULL)
+
+        def stop() -> None:
+            subprocess.run(["pkill", "-9", "-P", str(head.pid)], check=False)
+            head.kill()
+            head.wait(timeout=10)
+
+        self.addCleanup(stop)
+        deadline = time.time() + 10
+        while time.time() < deadline and not read_head_children(head.pid).get("descendants"):
+            time.sleep(0.05)
+        real_status = self.host.worker_status
+
+        def with_children(task, record):
+            status = real_status(task, record)
+            status["child_activity"] = read_head_children(head.pid)
+            return status
+
+        self.host.worker_status = with_children  # type: ignore[method-assign]
+        self._stall_to_the_respawn(command="")
+        self.assertIn("The previous head was stopped while running: sleep 3600", self._task_doc())
 
     def test_no_child_reading_means_nothing_new(self) -> None:
         self._stall_to_the_respawn(command="")
