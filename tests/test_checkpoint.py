@@ -1369,7 +1369,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
             ),
             mock.patch("secretary.state_repo.os.getuid", return_value=0),
             mock.patch("secretary.state_repo.pwd.getpwuid", return_value=SimpleNamespace(pw_name="runtime")),
-            mock.patch("secretary.state_repo.subprocess.run", side_effect=run_git),
+            mock.patch("secretary.state_repo._proc.run_isolated", side_effect=run_git),
         ):
             state = CheckpointPusher(self.instance).push()
 

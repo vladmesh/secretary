@@ -48,7 +48,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             with (
                 mock.patch("secretary.state_repo.os.getuid", return_value=0),
                 mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.git(instance, ["status", "--porcelain"], label="test")
 
@@ -70,7 +70,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             with (
                 mock.patch("secretary.state_repo.os.getuid", return_value=0),
                 mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(
                     instance,
@@ -91,7 +91,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             with (
                 mock.patch("secretary.state_repo.os.getuid", return_value=0),
                 mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(instance, ["push", "origin", "HEAD:main"], label="test")
 
@@ -111,7 +111,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
     def test_non_root_calls_git_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
-            with mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run:
+            with mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run:
                 state_repo.git(Path(tmp), ["status", "--porcelain"], label="test")
         self.assertEqual(run.call_args.args[0][0], "git")
 
@@ -139,7 +139,7 @@ class GitEnvironmentTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(Path(tmp), ["status", "--porcelain"], label="test")
         env = run.call_args.kwargs["env"]
@@ -156,7 +156,7 @@ class GitEnvironmentTests(unittest.TestCase):
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
                 mock.patch("secretary.state_repo.os.getuid", return_value=0),
                 mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.git(instance, ["status", "--porcelain"], label="test")
         command = run.call_args.args[0]

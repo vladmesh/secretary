@@ -3,9 +3,9 @@
 The production dispatcher unit sets ``KillMode=process`` so the local-pty heads a tick launches
 outlive it (secretary-1699). That also retires the control-group kill as the cleanup of anything
 else a tick left behind. A plain ``subprocess.run`` timeout kills only the direct child, so the
-two shell-running children of a tick — the host runner's ``bash -lc`` gate and adapter commands
-and the head-health probe's ``sh -c`` — now run in their own process group, and a timeout kills
-that whole group.
+children a tick waits on with a timeout — the host runner's ``bash -lc`` gate and adapter
+commands, the head-health probe's ``sh -c`` and instance/project Git with its remote helper — run
+through ``_proc.run_isolated`` in their own process group, and a timeout kills that whole group.
 """
 
 from __future__ import annotations
@@ -19,11 +19,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import _proc, head_health
+from secretary import _proc, head_health, state_repo
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.types import HostError
+from secretary.runtime import codex_preflight
 from tests.fakes.dispatcher import FakeCatalog
+
+# A remote helper Git forks into its own process group for `hang::` URLs: it records its pid and
+# hangs, as a `git-remote-https` stuck in a transport operation does.
+HANGING_REMOTE_HELPER = "#!/bin/sh\necho $$ > {pid_file}\nexec sleep 60\n"
 
 # A shell that leaves a long-lived descendant behind, records its pid, and then hangs on it.
 HANGING_SHELL = "sleep 60 & echo $! > {pid_file}; wait"
@@ -67,6 +72,80 @@ class TickChildCleanupTests(unittest.TestCase):
             readiness = head_health.run_probe("openai-sub", probe, time.time())
         self.assertEqual(readiness.status, "unknown")
         self.assertTrue(_gone(self.descendant()), "the probe's descendant outlived its timeout")
+
+    def test_a_timed_out_git_takes_its_remote_helper_with_it(self):
+        """`run_git` (managed project fetch/push, checkpoint push): Git's remote helper must die too."""
+        helper_dir = Path(self.tmp.name) / "bin"
+        helper_dir.mkdir()
+        helper = helper_dir / "git-remote-hang"
+        helper.write_text(HANGING_REMOTE_HELPER.format(pid_file=self.pid_file), encoding="utf-8")
+        helper.chmod(0o755)
+        path = f"{helper_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        with (
+            mock.patch.dict(os.environ, {"PATH": path}),
+            self.assertRaises(state_repo.StateRepoError) as caught,
+        ):
+            state_repo.run_git(Path(self.tmp.name), ["ls-remote", "hang::remote"], label="fetch", timeout=1)
+        self.assertIn("fetch failed", str(caught.exception))
+        self.assertIn("timed out", str(caught.exception))
+        self.assertTrue(_gone(self.descendant()), "Git's remote helper outlived the Git timeout")
+
+    def test_a_timed_out_codex_version_takes_the_native_binary_with_it(self):
+        """A codex launch preflight: the npm `codex` launcher spawns the native binary under it."""
+        codex = Path(self.tmp.name) / "codex"
+        codex.write_text(
+            "#!/bin/sh\n" + HANGING_SHELL.format(pid_file=self.pid_file) + "\n", encoding="utf-8"
+        )
+        codex.chmod(0o755)
+        with (
+            mock.patch.object(codex_preflight, "CODEX_VERSION_TIMEOUT_SECONDS", 0.5),
+            self.assertRaises(OSError) as caught,
+        ):
+            codex_preflight._codex_cli_identity(str(codex))
+        self.assertIn("cannot read Codex CLI version", str(caught.exception))
+        self.assertTrue(_gone(self.descendant()), "the codex launcher's child outlived its timeout")
+
+    def test_a_crossing_whose_group_cannot_be_signalled_still_returns_a_bounded_timeout(self):
+        """`runuser` as the group leader, and `killpg` refused (EPERM): no raise, no unbounded reap.
+
+        A root tick crosses to the runtime user through `runuser`, which keeps its child in the
+        group, and root may signal every member. EPERM is what a caller gets when it may signal no
+        member at all; the timeout must still come back as the same bounded Git error.
+        """
+        runuser_dir = Path(self.tmp.name) / "bin"
+        runuser_dir.mkdir()
+        runuser = runuser_dir / "runuser"
+        # Stands in for `runuser --user X -- env ... git ...`: drop everything up to `--`, exec the rest.
+        crossed = Path(self.tmp.name) / "crossed"
+        runuser.write_text(
+            f'#!/bin/sh\ntouch {crossed}\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
+            encoding="utf-8",
+        )
+        runuser.chmod(0o755)
+        path = f"{runuser_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        hanging_git = ["sh", "-c", HANGING_SHELL.format(pid_file=self.pid_file)]
+        started = time.monotonic()
+        with (
+            mock.patch.dict(os.environ, {"PATH": path}),
+            mock.patch("secretary.state_repo.os.getuid", return_value=0),
+            mock.patch("secretary.state_repo.pwd.getpwuid", return_value=mock.Mock(pw_name="runtime")),
+            mock.patch("secretary.state_repo.git_command", return_value=hanging_git),
+            mock.patch.object(_proc.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")),
+            mock.patch.object(_proc, "_REAP_GRACE_SECONDS", 0.5),
+            self.assertRaises(state_repo.StateRepoError) as caught,
+        ):
+            state_repo.run_git(
+                Path(self.tmp.name),
+                ["fetch"],
+                label="fetch",
+                timeout=0.5,
+                child=state_repo.GitChildIdentity(12345, 12345, "runtime"),
+            )
+        self.assertIn("timed out", str(caught.exception))
+        self.assertTrue(crossed.exists(), "the Git child did not cross through runuser")
+        # The member this caller could not signal is left running, never waited on.
+        self.descendant()
+        self.assertLess(time.monotonic() - started, 10)
 
     def test_a_descendant_that_left_the_group_cannot_hold_the_reap_open(self):
         """Only a `setsid` escapee survives the group kill; it may not turn the timeout unbounded."""
