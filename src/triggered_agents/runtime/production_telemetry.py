@@ -28,6 +28,7 @@ from pathlib import Path
 
 from secretary.config import ConfigError, DataDirError, load_config, validate
 from secretary.config import instance_data_dir as _configured_data_dir
+from secretary.head_health import resource_health_path as _resource_health_path
 from secretary.runtime.paths import default_instance_path
 
 DEFAULT_INSTANCE = default_instance_path()
@@ -108,7 +109,7 @@ def resource_health_path() -> Path:
     on instead of running its own paid probes. `TA_PRODUCTION_RESOURCE_HEALTH` overrides the file.
     """
     configured = os.environ.get("TA_PRODUCTION_RESOURCE_HEALTH")
-    return Path(configured) if configured else data_dir() / "dispatcher" / "resource_health.json"
+    return Path(configured) if configured else _resource_health_path(data_dir())
 
 
 def read_resource_status() -> dict[str, str] | None:

@@ -35,7 +35,7 @@ from unittest import mock
 
 from secretary.dispatch.watchdog import head_process_status
 from secretary.runtime import heads as pipeline_heads
-from triggered_agents.agents.pipeline import health as pipeline_health
+from secretary.head_health import HeadChoice, HeadReadiness
 from triggered_agents.runtime import dispatch
 from secretary.runtime import state as runtime_state
 from secretary.runtime.head import HeadCommand
@@ -258,8 +258,15 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             enter(mock.patch.object(dispatch, "CLAUDE_JSON", self.data_dir / "claude.json"))
             enter(mock.patch.object(dispatch, "render_head_command", self._rendered))
             enter(mock.patch.object(pipeline_heads, "load_registry", side_effect=self._reads(registry)))
-            enter(mock.patch.object(pipeline_health, "refresh", return_value={}))
-            enter(mock.patch.object(pipeline_health, "resolve_head", return_value=self.resolved))
+            enter(
+                mock.patch.object(
+                    dispatch,
+                    "resolve_head_chain",
+                    side_effect=lambda preferred, *_: HeadChoice(
+                        preferred, self.resolved, HeadReadiness("", "ready", "probe succeeded", 0.0)
+                    ),
+                )
+            )
             yield host
 
     def run_tick(self, registry, *, host=None) -> int:

@@ -6,12 +6,12 @@
 # choices or spend decisions.
 #
 # A resource is a shared account/limit a head draws from (probe is a health-check command for that
-# resource, run on a TTL by pipeline/health.py — red lives on the resource, every profile drawing
+# resource, run on a TTL by secretary.head_health — red lives on the resource, every profile drawing
 # from it inherits that redness). A profile names its resource, an adapter (which render_<adapter>
 # in heads.py turns role+prompt into a launch command), and an ordered fallback chain of other
 # profile ids walked at claim time when the preferred profile's resource is red or spent — by
-# health.resolve_head for the triggered agents, by the dispatcher's own resolver for cards. Both
-# walk it breadth-first and both stop at the same answer: nothing launchable in the chain means the
+# head_health.resolve_head_chain, for the triggered agents and for cards alike. It walks it
+# breadth-first and stops at one answer: nothing launchable in the chain means the
 # card is not claimed at all, rather than a head being started into a dead account.
 # [role_defaults] names the head each role runs on; every consumer — the dispatcher's worker,
 # reviewer and observer routing and the curator/retro/steward launch selection — reads that one
@@ -23,19 +23,19 @@
 
 [resources.claude-sub]
 # A Claude subscription reached through the OAuth-authenticated `claude` CLI — one account, no
-# per-profile credential. Probe: one real haiku token through that CLI (health.probe_claude_sub),
+# per-profile credential. Probe: one real haiku token through that CLI (resource_probe.probe_claude_sub),
 # red exactly during a subscription rate-limit or an API outage, free the rest of the time (once
-# per health.PROBE_TTL_S, not per tick).
+# per head_health.PROBE_TTL_SECONDS, not per tick).
 account = "claude-subscription"
-probe = "python3 -P -m triggered_agents.agents.pipeline.health --resource claude-sub"
+probe = "python3 -P -m secretary.runtime.resource_probe --resource claude-sub"
 
 [resources.openai-sub]
 # An OpenAI/ChatGPT subscription reached through the native `codex` CLI, mirroring claude-sub.
 # Authed once with `codex login` into the Orca-managed CODEX_HOME (heads.CODEX_HOME), which also
 # holds MCP, skills, hooks and the global agent instructions. Probe: one real `codex exec` token
-# through that home (health.probe_openai_sub).
+# through that home (resource_probe.probe_openai_sub).
 account = "openai-subscription"
-probe = "python3 -P -m triggered_agents.agents.pipeline.health --resource openai-sub"
+probe = "python3 -P -m secretary.runtime.resource_probe --resource openai-sub"
 
 # Claude heads. They are the fallback the codex heads below walk to, and since 2026-08-06 they
 # name the return chain too: a spent claude-sub sends a card to the codex head of comparable class

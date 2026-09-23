@@ -131,6 +131,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from secretary.runtime import claude_env
+from secretary.head_health import HeadHealth, resolve_head_chain
 from secretary.runtime.claude_sessions import claude_session_paths
 
 from . import finalizer, orca_rpc
@@ -359,7 +360,7 @@ def _pipeline_paused() -> bool:
     so a paused pipeline never spends a token on steward/curator/retro either: none of them carry
     an in-flight card of their own the way a worker/reviewer head does, so pause has no "let it
     finish its cycle" case here in either mode, soft or hard. Lazy import, same reason as
-    _reuse_head_is_red's own agents.pipeline.health import just below — this module is imported at
+    the lazy imports elsewhere in this module — this module is imported at
     process start by every agent, so a top-level import back into agents.pipeline would risk a
     circular import the first time either side changes its own imports. Any failure is a pause:
     dispatching while an operator's stop condition cannot be read is worse than deferring one tick.
@@ -431,6 +432,39 @@ def _preferred_head(agent: str, spec: dict, snapshot: RegistrySnapshot | None = 
     return registry.resolve(fallback) if fallback else fallback
 
 
+class _RegistryCatalog:
+    """The two questions `HeadHealth` asks of a head catalog, answered from a loaded registry."""
+
+    def __init__(self, registry: Any) -> None:
+        self.registry = registry
+
+    def head_profile(self, head: str) -> dict:
+        return self.registry.profile(head)
+
+    def resource(self, resource: str) -> dict:
+        return self.registry.resources[resource]
+
+
+def _head_health(registry: Any) -> HeadHealth:
+    """The installation's one resource-health cache, the one the production dispatcher probes into.
+
+    A standing agent reads readiness through the same `secretary.head_health` TTL cache and status
+    vocabulary as a card head, so a resource is probed once per window for both and "red" means
+    one thing: not `launch_allowed`. `unknown` stays launchable, as it is for cards.
+    """
+    return HeadHealth(_RegistryCatalog(registry), _installation_data_dir())
+
+
+def _head_fallback(registry: Any, head: str) -> list[str] | None:
+    """`head`'s fallback chain, or None when the registry does not describe it."""
+    from secretary.runtime.heads import HeadRegistryError
+
+    try:
+        return list(registry.profile(head).get("fallback") or [])
+    except HeadRegistryError:
+        return None
+
+
 def _reuse_head_is_red(agent: str, state: AgentState, snapshot: RegistrySnapshot | None = None) -> bool:
     """Whether the profile the idle terminal was ACTUALLY launched with is currently sitting on a
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
@@ -450,11 +484,7 @@ def _reuse_head_is_red(agent: str, state: AgentState, snapshot: RegistrySnapshot
         if not head:
             return False
         profile = state.load_head_profile() or head
-        from ..agents.pipeline import health as pipeline_health
-
-        statuses = pipeline_health.refresh(snapshot.registry)
-        resource = pipeline_health.resource_of(profile, snapshot.registry)
-        return resource is not None and statuses.get(resource, pipeline_health.GREEN) == pipeline_health.RED
+        return not _head_health(snapshot.registry).check(profile).launch_allowed
     except Exception:
         return False
 
@@ -503,10 +533,9 @@ def _resolve_launch(
     if not head or registry is None:
         return LaunchResolution(skill, None, None, DEFAULT_HEAD_RUNTIME)
     try:
-        from ..agents.pipeline import health as pipeline_health
-
-        statuses = pipeline_health.refresh(registry)
-        resolved = pipeline_health.resolve_head(head, statuses, registry) or head
+        health = _head_health(registry)
+        choice = resolve_head_chain(head, health.check, lambda pid: _head_fallback(registry, pid))
+        resolved = choice.head or head
         profile = registry.profile(resolved)
     except Exception:
         return LaunchResolution(skill, None, None, DEFAULT_HEAD_RUNTIME)
@@ -1460,7 +1489,7 @@ def _may_be_supervised(agent: str, snapshot: RegistrySnapshot | None = None) -> 
     supervised head has no entry in, and a tick must not ask them about one.
 
     So this is the cheap half of the same snapshot: the routed profile and everything reachable
-    from it through the fallback chain — the same set `health.resolve_head` chooses from, over the
+    from it through the fallback chain — the same set `resolve_head_chain` chooses from, over the
     same registry the resolution will use — with no resource probed. That is what makes `False`
     a safe answer to act on: a resolution over this snapshot picks from this closure and nothing
     else, so no resolution of this tick can name a supervisor after it. The tick is then left

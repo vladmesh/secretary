@@ -18,7 +18,7 @@ from unittest import mock
 from secretary.dispatch import pause as dispatcher_pause
 from secretary.runtime import launch_prefix, paths
 from secretary.runtime import role_env as runtime_role_env
-from triggered_agents.agents.pipeline import health
+from secretary.runtime import resource_probe as health
 
 
 class PortableDefaultTests(unittest.TestCase):

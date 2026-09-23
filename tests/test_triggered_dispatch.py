@@ -87,6 +87,9 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
             mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
             mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+            # The resource-health cache a resolution reads and fills is the installation's; this
+            # tick's is a throwaway one, never the live `<data>/dispatcher/resource_health.json`.
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=Path(self.tmp.name) / "data"),
             mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
         ]
 
@@ -355,6 +358,84 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.assertEqual(self._actions("steward"), ["dispatch-recovery", "reuse-delivery-unconfirmed"])
 
 
+class StandingHeadReadinessTests(unittest.TestCase):
+    """Reuse-head and resolve-head read `secretary.head_health`'s one cache and vocabulary.
+
+    The verdicts are planted in `<data>/dispatcher/resource_health.json` exactly as the production
+    dispatcher leaves them, so no probe runs: a fresh cache entry answers within the TTL.
+    """
+
+    REGISTRY = {
+        "resources": {
+            "claude-sub": {"account": "claude", "probe": "false"},
+            "openai-sub": {"account": "openai", "probe": "false"},
+        },
+        "profiles": {
+            "claude-high": {"resource": "claude-sub", "adapter": "claude", "fallback": ["codex"]},
+            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+        },
+        "role_defaults": {"steward": "claude-high"},
+    }
+
+    def setUp(self) -> None:
+        from secretary.runtime import heads as pipeline_heads
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data_dir = Path(tmp.name)
+        self.registry = pipeline_heads.Registry(
+            self.REGISTRY["resources"], self.REGISTRY["profiles"], self.REGISTRY["role_defaults"]
+        )
+        self.snapshot = dispatch.RegistrySnapshot(self.registry)
+        env = mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": str(self.data_dir)})
+        env.start()
+        self.addCleanup(env.stop)
+        spec = mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"})
+        spec.start()
+        self.addCleanup(spec.stop)
+
+    def plant(self, **statuses: str) -> None:
+        cache = {
+            resource.replace("_", "-"): {"resource": resource.replace("_", "-"), "status": status,
+                                         "reason": "planted", "checked_at": time.time()}
+            for resource, status in statuses.items()
+        }
+        path = self.data_dir / "dispatcher" / "resource_health.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache), encoding="utf-8")
+
+    def state(self, profile: str) -> mock.Mock:
+        state = mock.Mock()
+        state.load_head_profile.return_value = profile
+        return state
+
+    def test_reuse_is_red_only_when_the_launched_profile_is_not_launch_allowed(self) -> None:
+        for status, red in (("unauthenticated", True), ("exhausted", True), ("probe_broken", True),
+                            ("ready", False), ("unknown", False)):
+            with self.subTest(status):
+                self.plant(claude_sub=status, openai_sub="ready")
+                self.assertIs(
+                    dispatch._reuse_head_is_red("steward", self.state("claude-high"), self.snapshot), red
+                )
+
+    def test_reuse_reads_the_profile_the_terminal_was_launched_with(self) -> None:
+        self.plant(claude_sub="exhausted", openai_sub="ready")
+        self.assertFalse(dispatch._reuse_head_is_red("steward", self.state("codex"), self.snapshot))
+
+    def test_a_red_preferred_head_resolves_down_its_chain(self) -> None:
+        self.plant(claude_sub="unavailable", openai_sub="ready")
+        self.assertEqual(dispatch._resolve_launch("steward", snapshot=self.snapshot).profile, "codex")
+
+    def test_an_unknown_resource_keeps_the_preferred_head(self) -> None:
+        self.plant(claude_sub="unknown", openai_sub="ready")
+        self.assertEqual(dispatch._resolve_launch("steward", snapshot=self.snapshot).profile, "claude-high")
+
+    def test_nothing_launchable_keeps_the_preferred_head(self) -> None:
+        """As before: an all-red chain still launches the preferred profile rather than none."""
+        self.plant(claude_sub="unavailable", openai_sub="exhausted")
+        self.assertEqual(dispatch._resolve_launch("steward", snapshot=self.snapshot).profile, "claude-high")
+
+
 class TriggeredCodexHeadTests(unittest.TestCase):
     """A service head on Codex is an interactive session, brought up and then prompted.
 
@@ -382,14 +463,14 @@ class TriggeredCodexHeadTests(unittest.TestCase):
 
     def test_a_codex_service_head_is_launched_without_its_skill(self) -> None:
         from secretary.runtime import heads as pipeline_heads
-        from triggered_agents.agents.pipeline import health as pipeline_health
+        from secretary.head_health import HeadChoice, HeadReadiness
 
+        chosen = HeadChoice("codex", "codex", HeadReadiness("openai-sub", "ready", "probe succeeded", 0.0))
         with (
             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro"}),
             mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
             mock.patch.object(pipeline_heads, "load_registry", return_value=self.registry),
-            mock.patch.object(pipeline_health, "refresh", return_value={}),
-            mock.patch.object(pipeline_health, "resolve_head", return_value="codex"),
+            mock.patch.object(dispatch, "resolve_head_chain", return_value=chosen),
         ):
             skill, launch, profile, after_start, profile_data = dispatch._launch_cmd("retro")
 

@@ -31,10 +31,10 @@ LEGACY_FLAT_MODULES = frozenset(
 )
 
 # `triggered_agents` is the CLI of the three background agents, built on top of `secretary`: it may
-# import any `secretary` module, and no `secretary` module may import it back. The only mention of
-# the package left under `src/secretary` is the pair of resource-probe command strings in
-# heads.toml, which leave with the resource-health single writer (sprint:1455 fork #2).
-REMAINING_TRIGGERED_AGENTS_MENTIONS = frozenset({"runtime/heads.toml:30", "runtime/heads.toml:38"})
+# import any `secretary` module, and no `secretary` module may import it back. Since the
+# resource-health single writer (sprint:1455 fork #2, secretary-1690) moved the probes to
+# `secretary.runtime.resource_probe`, nothing under `src/secretary` names the package at all.
+REMAINING_TRIGGERED_AGENTS_MENTIONS: frozenset[str] = frozenset()
 
 
 def _imports_triggered_agents(relative: str, source: str) -> list[str]:
@@ -407,7 +407,8 @@ class SourceLayoutTests(unittest.TestCase):
         # The admitted direction is not a back edge.
         self.assertEqual(_imports_triggered_agents("src/secretary/x.py", "from secretary import tasks\n"), [])
 
-    def test_secretary_names_triggered_agents_only_in_the_remaining_probe_strings(self) -> None:
+    def test_secretary_never_names_triggered_agents(self) -> None:
+        """`grep -rn triggered_agents src/secretary` is empty: code, data and comments alike."""
         package = ROOT / "src" / "secretary"
         mentions: set[str] = set()
         for path in sorted(package.rglob("*")):
@@ -705,10 +706,19 @@ if __name__ == "__main__":
 # two entry points (issue:a45731709558936b7b6a, secretary-1683): each lived where its first caller
 # was, and the next caller copied rather than imported.
 ROLE_ENV_HOME = "secretary/runtime/role_env.py"
+# The one writer of `resource_health.json`, and the only module that may name the file: every reader
+# resolves it through `head_health.resource_health_path`.
+HEAD_HEALTH_HOME = "secretary/head_health.py"
+RESOURCE_HEALTH_FILE = "resource_health.json"
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
     "CODEX_EFFORTS": "secretary/runtime/head/command.py",
+    # The resource-health vocabulary. A second writer once kept its own GREEN/RED cache beside it
+    # (`triggered_agents/agents/pipeline/health.py`, gone in secretary-1690).
+    "LAUNCH_ALLOWED_STATUSES": HEAD_HEALTH_HOME,
+    "PROBE_BROKEN": HEAD_HEALTH_HOME,
+    "PROBE_TTL_SECONDS": HEAD_HEALTH_HOME,
 }
 SINGLE_HOME_FUNCTIONS = {
     "is_sensitive_env_name": ROLE_ENV_HOME,
@@ -720,6 +730,13 @@ SINGLE_HOME_FUNCTIONS = {
 def _is_sensitive_name_pattern(text: str) -> bool:
     """The name classifier's shape: credential words anchored between `_` or the string's ends."""
     return "(^|_)" in text and "(_|$)" in text and "TOKEN" in text.upper()
+
+
+def _names_resource_health_file(text: str) -> bool:
+    """A string that is the cache's file name or a path ending in it; prose that mentions it is not."""
+    return text == RESOURCE_HEALTH_FILE or (
+        text.endswith("/" + RESOURCE_HEALTH_FILE) and not any(ch.isspace() for ch in text)
+    )
 
 
 def _second_copies(sources: dict[str, str]) -> list[str]:
@@ -747,12 +764,20 @@ def _second_copies(sources: dict[str, str]) -> list[str]:
                 and path != ROLE_ENV_HOME
             ):
                 offenders.append(f"{path}:{node.lineno}: sensitive-name pattern")
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and _names_resource_health_file(node.value)
+                and path != HEAD_HEALTH_HOME
+            ):
+                offenders.append(f"{path}:{node.lineno}: resource-health file")
     return offenders
 
 
 class SingleHomeTests(unittest.TestCase):
-    """The role environment, the sensitive-name pattern, the Codex effort table and the board
-    transport each have one definition under `src/`; a second one anywhere fails here."""
+    """The role environment, the sensitive-name pattern, the Codex effort table, the board
+    transport and the resource-health cache (its file and its status vocabulary) each have one
+    definition under `src/`; a second one anywhere fails here."""
 
     def test_nothing_under_src_defines_a_second_copy(self) -> None:
         src = ROOT / "src"
@@ -777,6 +802,16 @@ class SingleHomeTests(unittest.TestCase):
                 "def is_sensitive_env_name(n):\n    return n\n",
             ),
             "CODEX_EFFORTS": ("secretary/dispatch/launcher.py", "CODEX_EFFORTS: dict = {}\n"),
+            "LAUNCH_ALLOWED_STATUSES": (
+                "triggered_agents/runtime/dispatch.py",
+                'LAUNCH_ALLOWED_STATUSES = frozenset({"green"})\n',
+            ),
+            "PROBE_TTL_SECONDS": ("secretary/runtime/resource_probe.py", "PROBE_TTL_SECONDS = 300\n"),
+            # The shape the deleted second writer had: its own cache file next to its own state.
+            "resource-health file": (
+                "triggered_agents/agents/pipeline/health.py",
+                'from pathlib import Path\nHEALTH_FILE = Path("state") / "resource_health.json"\n',
+            ),
             "def call_batch": (
                 "secretary/board/kanboard.py",
                 "class Client:\n    def call_batch(self, calls):\n        return []\n",
@@ -793,6 +828,12 @@ class SingleHomeTests(unittest.TestCase):
                 {
                     ROLE_ENV_HOME: 'ROLE_ALLOWLIST = {}\nSENSITIVE_ENV_NAME_RE = r"(^|_)(TOKEN)(_|$)"\n',
                     "secretary/board/sql_cards.py": "def call_batch(calls):\n    return []\n",
+                    HEAD_HEALTH_HOME: (
+                        'PROBE_BROKEN = "probe_broken"\n'
+                        'def resource_health_path(d):\n    return d / "dispatcher" / "resource_health.json"\n'
+                    ),
+                    # A reader that mentions the file in prose is not a writer.
+                    "triggered_agents/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
                 }
             ),
             [],
