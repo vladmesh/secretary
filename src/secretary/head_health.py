@@ -273,6 +273,15 @@ def resolve_head_chain(
     return HeadChoice(preferred, "", first, tuple(rejected))
 
 
+def resource_health_path(data_dir: Path) -> Path:
+    """The one resource-health cache of an installation: `<data_dir>/dispatcher/resource_health.json`.
+
+    `HeadHealth` is its only writer; readers (steward telemetry, doctor) resolve it here so that no
+    second module names the file and so none can grow a second copy of it.
+    """
+    return data_dir / "dispatcher" / "resource_health.json"
+
+
 class HeadHealth:
     """Store resource verdicts independently from the dispatcher attempt state.
 
@@ -284,7 +293,7 @@ class HeadHealth:
 
     def __init__(self, catalog: Any, data_dir: Path) -> None:
         self.catalog = catalog
-        self.path = data_dir / "dispatcher" / "resource_health.json"
+        self.path = resource_health_path(data_dir)
 
     def check(self, head: str) -> HeadReadiness:
         try:

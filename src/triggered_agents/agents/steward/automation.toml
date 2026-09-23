@@ -11,7 +11,7 @@ provider = "claude"
 reuse_session = true
 # Last resort only. The steward launches on `role_defaults.steward` in the selected head
 # registry — the same table the dispatcher routes worker, reviewer and observer through — and
-# runtime/dispatch.py resolves it through pipeline.health/heads the same way a worker head is
+# runtime/dispatch.py resolves it through secretary.head_health/heads the same way a worker head is
 # resolved at claim time, walking the profile's fallback chain when its resource is red. This
 # line answers only for a registry that routes the steward nowhere at all.
 head = "codex-high"

@@ -57,7 +57,7 @@ from secretary.projects.availability import ProjectAvailability
 from secretary.runtime import heads
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from triggered_agents.agents.pipeline import health
+from secretary.head_health import HeadReadiness, resolve_head_chain
 
 UNIT_PREFIX = "secretary-"
 
@@ -79,6 +79,22 @@ Description=Example service
 Type=oneshot
 ExecStart=/bin/true
 """
+
+
+def _resolve_with_red(preferred, red, registry):
+    """The head `resolve_head_chain` picks for `preferred` while resource `red` is not launchable."""
+
+    def readiness(pid):
+        resource = registry.profile(pid)["resource"]
+        return HeadReadiness(resource, "unavailable" if resource == red else "ready", "", 0.0)
+
+    def fallback(pid):
+        try:
+            return list(registry.profile(pid).get("fallback") or [])
+        except heads.HeadRegistryError:
+            return None
+
+    return resolve_head_chain(preferred, readiness, fallback).head or None
 
 
 def write_packaging(root: Path) -> Path:
@@ -1323,8 +1339,7 @@ class UpgradeStepTests(unittest.TestCase):
                 preferred = registry.role_default(role)
                 self.assertIsNotNone(preferred, f"{role} is routed nowhere")
                 for red in ("claude-sub", "openai-sub"):
-                    statuses = {red: health.RED}
-                    resolved = health.resolve_head(preferred, statuses, registry)
+                    resolved = _resolve_with_red(preferred, red, registry)
                     self.assertIsNotNone(resolved, f"{role} has no head with {red} red")
                     self.assertNotEqual(
                         registry.profile(resolved)["resource"],
@@ -1344,9 +1359,8 @@ class UpgradeStepTests(unittest.TestCase):
 
         for red in ("claude-sub", "openai-sub"):
             with self.subTest(red=red):
-                statuses = {red: health.RED}
-                worker = health.resolve_head(registry.role_default("new_card"), statuses, registry)
-                reviewer = health.resolve_head(registry.role_default("reviewer"), statuses, registry)
+                worker = _resolve_with_red(registry.role_default("new_card"), red, registry)
+                reviewer = _resolve_with_red(registry.role_default("reviewer"), red, registry)
                 self.assertIsNotNone(worker)
                 self.assertIsNotNone(reviewer)
                 self.assertNotEqual(worker, reviewer, "the review would be the worker's own")

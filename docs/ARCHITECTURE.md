@@ -23,9 +23,16 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   rest to the mechanical-role driver and the agents' deterministic helpers. It may import any
   `secretary` module; no `secretary` module imports it. `secretary` finds the agents' shipped
   `automation.toml` specs through the product manifest (`[tool.secretary] agent-specs` in
-  `pyproject.toml`), not by the package name. `tests/test_architecture.py` holds the one direction,
-  and the only remaining mentions of the package under `src/secretary` (the resource-probe strings
-  in `runtime/heads.toml`).
+  `pyproject.toml`), not by the package name. `tests/test_architecture.py` holds the one direction
+  and asserts that nothing under `src/secretary` names the package at all.
+- Resource health has one writer and one vocabulary: `secretary.head_health` runs each registry
+  resource's `probe` command, classifies it (`ready`, `unknown`, `probe_broken`, `unauthenticated`,
+  `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
+  300 s. The card dispatcher and the background agents' head resolution and warm-reuse check read
+  that one cache; a head is launchable when its status is `ready` or `unknown`. The shipped registry's
+  probes are `python3 -P -m secretary.runtime.resource_probe --resource <id>` (`claude-sub`,
+  `openai-sub`, `openrouter`): one cheap provider call, exit 0 healthy, 1 failed with one scrubbed
+  reason line on stderr, 2 for an id it has no probe for. It writes nothing.
 - `src/secretary/runtime` holds the head-runtime utilities both the pipeline and the background
   agents use (`paths`, `references`, `prompt_document`, `launch_prefix`, `shared_state`,
   `claude_sessions`, `claude_env`, `state`, ...). New shared runtime code goes here, not into
