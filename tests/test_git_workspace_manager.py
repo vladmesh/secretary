@@ -85,11 +85,15 @@ class _RecordingHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
+        if args and args[0] == "orca":
+            return subprocess.CompletedProcess(args, 0, "{}", "")
         return super()._run(args, label, cwd=cwd)
 
     def _run_json(self, args):  # type: ignore[override]
         self._record(args)
-        if args[:3] == ["orca", "worktree", "rm"]:
+        if args and args[0] == "orca":
+            # An allowed Orca call is answered here, never by a real CLI: the runner has none, and a
+            # developer's live Orca must not be asked about a temporary directory.
             return {}
         return super()._run_json(args)
 
@@ -315,6 +319,10 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.host.orca_allowed = True
         self.host.teardown(_record(str(self.orca_path)))
 
+        orca = [argv[:3] for argv in self.host.argvs if argv[0] == "orca"]
+        # Orca's own workspace stop first, then Orca's removal: the order `teardown` has always had.
+        self.assertEqual(orca[0], ["orca", "terminal", "stop"])
+        self.assertEqual(orca[-1], ["orca", "worktree", "rm"])
         self.assertIn(
             ["orca", "worktree", "rm", "--worktree", f"path:{self.orca_path}", "--force", "--json"],
             self.host.argvs,
