@@ -13,6 +13,7 @@ from typing import Any
 
 # One definition, beside the writer and the reader of the record it versions.
 from secretary.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION
+from secretary.runtime.head.identity import task_binding as launch_task
 
 
 def heartbeat_role(role: str) -> str:
@@ -23,11 +24,15 @@ def heartbeat_role(role: str) -> str:
 def task_binding(task_ref: Mapping[str, Any] | None, fallback: str = "") -> str:
     """A compact durable binding for the task a run was launched to serve."""
     if isinstance(task_ref, Mapping):
-        kind = str(task_ref.get("kind") or "")
-        ref = str(task_ref.get("ref") or "")
-        if kind and ref:
-            return f"{kind}:{ref}"
+        binding = launch_task(str(task_ref.get("kind") or ""), str(task_ref.get("ref") or ""))
+        if binding:
+            return binding
     return fallback
+
+
+def sprint_task(reference: str) -> str:
+    """An observer's binding for one sprint: `sprint:<ID>`, whether or not `reference` is prefixed."""
+    return launch_task("sprint", reference)
 
 
 def heartbeat_identity(

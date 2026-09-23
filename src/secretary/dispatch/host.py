@@ -61,7 +61,7 @@ from secretary.dispatch.gate_receipt import (
 from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
-from secretary.dispatch.heartbeat import heartbeat_identity
+from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.helpers import (
     _decision_record_line,
     _last_gate_red_body,
@@ -772,6 +772,28 @@ class DispatcherHeadTransport:
 _head_runtime_name = head_runtime_name
 
 
+def _runtime_writes_launch_identity(runtime: Any) -> bool:
+    """Whether this backend writes a head's launch-identity heartbeat itself.
+
+    Exactly one layer owns that writer for a head. On `orca-legacy` it is this dispatcher, which
+    wraps the command before the pane runs it; `local-pty`'s supervisor wraps the command it is
+    handed, so a command this dispatcher had wrapped as well `exec`s the inner writer, which exits,
+    and the head never runs (secretary-1698).
+    """
+    return bool(getattr(runtime, "writes_launch_identity", False))
+
+
+def _launch_command(runtime: Any, command: str, pid_file: str, identity: dict[str, str]) -> str:
+    """The command a head's backend is handed: wrapped by this dispatcher only when it owns the writer.
+
+    Either way the record lands at `pid_file` with `identity`: `start` is handed that `pid_file`,
+    and a backend that writes the identity itself spells it from the same run, role and task.
+    """
+    if _runtime_writes_launch_identity(runtime):
+        return command
+    return _with_pid_heartbeat(command, pid_file, identity=identity)
+
+
 def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
     """The run a record names at a workspace-scoped stop, or `None` when it names none.
 
@@ -1286,8 +1308,12 @@ class CommandHostRuntime:
                 "run": run,
                 "head_run": lifecycle_run.to_json(),
             }
-        # Drop a predecessor's pid before the new head can be read as this launch's liveness.
-        _clear_head_heartbeat(pid_file)
+        heartbeat_owner = self.head_runtime_for(lifecycle_run)
+        if not _runtime_writes_launch_identity(heartbeat_owner):
+            # Drop a predecessor's pid before the new head can be read as this launch's liveness. A
+            # runtime that writes the identity itself reads this file first, to refuse a bring-up
+            # over a live head of the same run, and the head it raises then replaces it.
+            _clear_head_heartbeat(pid_file)
         try:
             grant = memory_access.issue_grant(
                 lifecycle_run,
@@ -1308,7 +1334,7 @@ class CommandHostRuntime:
         lifecycle_run = self._open_head_pane(
             lifecycle_run,
             f"{reference} observer",
-            _with_pid_heartbeat(launch.command, pid_file, identity=heartbeat),
+            _launch_command(heartbeat_owner, launch.command, pid_file, heartbeat),
         )
         ingress = self._codex_provider_ingress(lifecycle_run)
         if ingress is not None:
@@ -1370,7 +1396,7 @@ class CommandHostRuntime:
                         pid_file=pid_file,
                         run=lifecycle_run,
                         role=OBSERVER_ROLE,
-                        task=f"sprint:{reference}",
+                        task=sprint_task(reference),
                         leaf=lifecycle_run.leaf,
                     )
                 except Exception as stop_exc:  # noqa: BLE001 - preserve cleanup failure evidence
@@ -1424,7 +1450,7 @@ class CommandHostRuntime:
             observer_run,
             OBSERVER_ROLE,
             pid_file=pid_file,
-            task=f"sprint:{getattr(record, 'sprint', '')}",
+            task=sprint_task(getattr(record, "sprint", "")),
             leaf=observer_leaf,
         )
         workspace = str(getattr(record, "workspace", "") or "")
@@ -1437,7 +1463,7 @@ class CommandHostRuntime:
                 pid_file,
                 run=observer_run,
                 role=OBSERVER_ROLE,
-                task=f"sprint:{getattr(record, 'sprint', '')}",
+                task=sprint_task(getattr(record, "sprint", "")),
                 leaf=observer_leaf,
             )
             return
@@ -1446,7 +1472,7 @@ class CommandHostRuntime:
             pid_file=pid_file,
             run=observer_run,
             role=OBSERVER_ROLE,
-            task=f"sprint:{getattr(record, 'sprint', '')}",
+            task=sprint_task(getattr(record, "sprint", "")),
             leaf=observer_leaf,
         )
         # Terminal stop alone cannot prove a heartbeat-wrapped head died: confirm before removing it.
@@ -1454,7 +1480,7 @@ class CommandHostRuntime:
             pid_file,
             run=observer_run,
             role=OBSERVER_ROLE,
-            task=f"sprint:{getattr(record, 'sprint', '')}",
+            task=sprint_task(getattr(record, "sprint", "")),
             leaf=observer_leaf,
         )
         self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"])
@@ -3116,9 +3142,13 @@ class CommandHostRuntime:
             except memory_access.MemoryAccessError as exc:
                 raise HostError(f"memory access binding could not be issued: {exc}") from None
             memory_identity = grant.launch_identity
-        if pid_file:
+        # The backend is the profile's, whatever adapter the command turns out to run.
+        heartbeat_owner = self.head_runtime_for(self._head_spec(head, ""))
+        if pid_file and not _runtime_writes_launch_identity(heartbeat_owner):
             # Drop any pid a previous launch in this workspace left behind, so a respawn cannot read
             # a dead predecessor's pid as this launch's liveness before the new head overwrites it.
+            # A runtime that writes the identity itself reads this file first, to refuse a bring-up
+            # over a live head of the same run, and the head it raises then replaces it.
             _clear_head_heartbeat(pid_file)
         command = os.environ.get(env_name)
         launch = HeadCommand(command) if command else None
@@ -3137,7 +3167,7 @@ class CommandHostRuntime:
             )
             command = launch.command
             if pid_file:
-                command = _with_pid_heartbeat(command, pid_file, identity=heartbeat)
+                command = _launch_command(heartbeat_owner, command, pid_file, heartbeat)
         adapter = (getattr(launch, "adapter", "") or "codex") if launch else "codex"
         ingress = self._codex_provider_ingress(preflight_run)
         subject = f"{role or 'head'}-launch"

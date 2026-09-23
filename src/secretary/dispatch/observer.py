@@ -53,6 +53,7 @@ from enum import Enum
 from typing import Any
 
 from secretary.codex_provider_events import CodexProviderSourceError
+from secretary.dispatch.heartbeat import sprint_task
 from secretary.dispatch.launch import merge_launch_head_run
 from secretary.dispatch.state import now_rfc3339, request_token
 from secretary.dispatch.tui import (
@@ -456,7 +457,7 @@ def observer_head_status(record: ObserverRecord) -> dict[str, Any]:
         record.pid_file or observer_pid_file(record.sprint),
         run=record.head_run,
         role="observer",
-        task=f"sprint:{record.sprint}",
+        task=sprint_task(record.sprint),
         leaf=record.leaf,
     )
 

@@ -166,11 +166,12 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from secretary.runtime.head import local_pty
+from secretary.runtime.head.identity import task_binding
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.operations import (
     HeadNudgeFailed,
@@ -535,6 +536,11 @@ class LocalPtyHeadRuntime:
     locks nothing of its own, so the per-head lock cannot simply replace this one.
     """
 
+    #: The supervisor wraps the head command in the launch-identity heartbeat, so a caller hands
+    #: `start` a bare command and at most the `pid_file` it will read. A caller that wrapped it too
+    #: would `exec` the inner writer and never run the head (secretary-1698).
+    writes_launch_identity = True
+
     def __init__(
         self,
         root: str | os.PathLike[str],
@@ -604,6 +610,7 @@ class LocalPtyHeadRuntime:
         quiet_seconds: float | None = None,
         delivery_seconds: float | None = None,
         env: Mapping[str, str] | None = None,
+        pid_file: str = "",
         **ignored: Any,
     ) -> StartReceipt:
         """Bring one head up under a supervisor of its own, and point it at its task.
@@ -622,6 +629,11 @@ class LocalPtyHeadRuntime:
         process whose activity is empty by construction and for which a head brought up a tick ago
         never existed. `_already_up` is the second witness, and it is the head's own launch identity
         on disk — the one fact about a head that outlives the process that started it.
+
+        `pid_file` is where the caller reads this head's liveness, when that is not the run
+        directory's `head.pid`: the dispatcher reads its watchdog heartbeat at a path it knew before
+        the head existed. The head writes its launch identity there, once, through the supervisor;
+        the command it is handed is the bare head command.
         """
         del title, ignored
         with self._lock:
@@ -648,16 +660,18 @@ class LocalPtyHeadRuntime:
                     workspace=workspace,
                     task_ref=task_ref,
                     role=role,
+                    pid_file=pid_file,
                 )
                 if already_up is not None:
                     return already_up
             identity = claimed or new_run_id()
+            designated = {"pid_file": pid_file} if pid_file else {}
             try:
                 handle = self._spawn(
                     root=self.root,
                     run_id=identity,
                     role=role or (run.role if run is not None else ""),
-                    task=task_ref.ref or task_ref.document,
+                    task=_binding_of(task_ref),
                     command=command,
                     cwd=workspace,
                     rows=rows,
@@ -665,6 +679,7 @@ class LocalPtyHeadRuntime:
                     quiet_seconds=quiet_seconds,
                     delivery_seconds=delivery_seconds,
                     env=env,
+                    **designated,
                 )
             except local_pty.LocalPtySpawnError as exc:
                 return StartReceipt(
@@ -1383,6 +1398,7 @@ class LocalPtyHeadRuntime:
         workspace: str,
         task_ref: TaskRef,
         role: str,
+        pid_file: str = "",
     ) -> StartReceipt | None:
         """The refusal of a bring-up over a head whose own launch identity says it is running.
 
@@ -1408,8 +1424,8 @@ class LocalPtyHeadRuntime:
         lock the supervisor takes and by its own `_refuse_a_second_head`, which reads the same
         record from inside the process that would be the second owner.
 
-        The record read here is the **canonical** one, `root/run_id/head.pid`, and never the
-        `pid_file` the caller handed in. A live head writes its launch identity where this backend
+        The record read first is the **canonical** one, `root/run_id/head.pid`, and never the
+        `pid_file` on the run the caller handed in. A live head writes its launch identity where this backend
         told it to write it, which is that path and only that path; the `pid_file` on the run a
         bring-up arrives with is the dispatcher's own watchdog heartbeat, at a workspace path the
         tick has just *cleared* (`DispatcherHost._launch` drops it before every launch so a
@@ -1422,6 +1438,13 @@ class LocalPtyHeadRuntime:
         honouring the caller's `pid_file`, because for those verbs it is the dispatcher's own
         identity contract about a head it is already tracking, not a question about whether one
         exists.
+
+        A bring-up that designates a `pid_file` to `start` is the other place this run's head can
+        have written its identity (secretary-1698): the head of an earlier bring-up with the same
+        designation wrote there and not under the run directory. So that file is read too, and a live
+        match in either refuses. The dispatcher no longer empties that file before a bring-up on this
+        backend, precisely so this read has something to find; a caller that did empty it is
+        answered by the canonical record alone, exactly as before.
         """
         subject = _with_pid_file(
             run
@@ -1436,8 +1459,14 @@ class LocalPtyHeadRuntime:
             "",
         )
         address = self._address(subject)
-        if address is None or not self._process_alive(address, subject):
+        if address is None:
             return None
+        if not self._process_alive(address, subject):
+            if not pid_file:
+                return None
+            address = replace(address, pid_file=Path(pid_file))
+            if not self._process_alive(address, subject):
+                return None
         return StartReceipt(
             status=HEAD_BUSY,
             run=run,
@@ -2406,7 +2435,12 @@ def _with_pid_file(run: HeadRun, pid_file: str) -> HeadRun:
 
 
 def _task_of(run: HeadRun) -> str:
-    return run.task_ref.ref or run.task_ref.document
+    return _binding_of(run.task_ref)
+
+
+def _binding_of(task_ref: TaskRef) -> str:
+    """The `task` this backend's heads write and are compared by: the product's one spelling."""
+    return task_binding(task_ref.kind, task_ref.ref)
 
 
 def _in_flight(status: Mapping[str, Any]) -> bool:

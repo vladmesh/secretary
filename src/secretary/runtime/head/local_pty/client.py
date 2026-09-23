@@ -108,8 +108,13 @@ def spawn_head(
     delivery_seconds: float | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float = SPAWN_TIMEOUT_SECONDS,
+    pid_file: str | os.PathLike[str] = "",
 ) -> HeadHandle:
-    """Bring one head up under a supervisor that outlives this process, and wait until it answers."""
+    """Bring one head up under a supervisor that outlives this process, and wait until it answers.
+
+    `pid_file` is where the head writes its launch identity when the launcher reads it somewhere
+    other than the run directory's `head.pid`; the supervisor is still the only writer of it.
+    """
     run_dir = protocol.run_dir_for(root, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir, 0o700)
@@ -152,6 +157,9 @@ def spawn_head(
         argv += ["--quiet-seconds", str(quiet_seconds)]
     if delivery_seconds is not None:
         argv += ["--delivery-seconds", str(delivery_seconds)]
+    identity_file = Path(pid_file).absolute() if pid_file else run_dir / protocol.PID_FILE_NAME
+    if pid_file:
+        argv += ["--pid-file", str(identity_file)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     with open(log_path, "ab", buffering=0) as log:
         intermediate = subprocess.Popen(
@@ -179,7 +187,12 @@ def spawn_head(
                 )
         result = read_events(journal_path)
         started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
-        if started and socket_path.exists() and _identity_written(run_dir, run_id) and _answers(socket_path):
+        if (
+            started
+            and socket_path.exists()
+            and _identity_written(identity_file, run_id)
+            and _answers(socket_path)
+        ):
             record = started[-1]
             return HeadHandle(
                 run_dir=run_dir,
@@ -188,7 +201,7 @@ def spawn_head(
                 task=task,
                 socket_path=socket_path,
                 journal_path=journal_path,
-                pid_file=run_dir / protocol.PID_FILE_NAME,
+                pid_file=identity_file,
                 supervisor_pid=int(record.get("supervisor_pid") or 0),
                 head_pid=int(record.get("head_pid") or 0),
             )
@@ -206,7 +219,7 @@ def spawn_head(
         time.sleep(_POLL_SECONDS)
 
 
-def _identity_written(run_dir: Path, run_id: str) -> bool:
+def _identity_written(pid_file: Path, run_id: str) -> bool:
     """Whether the head has published its own launch identity yet.
 
     The heartbeat is written by the head's shell before it `exec`s, so the supervisor's
@@ -215,7 +228,7 @@ def _identity_written(run_dir: Path, run_id: str) -> bool:
     not yet written.
     """
     try:
-        record = json.loads((run_dir / protocol.PID_FILE_NAME).read_text(encoding="utf-8"))
+        record = json.loads(pid_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     return isinstance(record, dict) and str(record.get("run_id") or "") == run_id
