@@ -1066,7 +1066,8 @@ class TaskWriter:
                 "a steward report requires research, a slug, no explicit reference and no sprint",
                 2,
             )
-        if role in PROPOSAL_CREATE_ROLES:
+        # A steward report was validated above; every other steward create is a proposal.
+        if role in PROPOSAL_CREATE_ROLES and not steward_report:
             if target != "issues":
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
         elif target == "issues":

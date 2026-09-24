@@ -35,11 +35,14 @@ CREATE_ROLES: frozenset[Role] = frozenset(
         Role.OBSERVER,
     }
 )
+# The steward is here too; its report card is the one create outside Issues it may make,
+# and `TaskWriter` names that exception explicitly.
 PROPOSAL_CREATE_ROLES: frozenset[Role] = frozenset(
     {
         Role.WORKER,
         Role.REVIEWER,
         Role.RETRO,
+        Role.STEWARD,
     }
 )
 EDIT_ROLES: frozenset[Role] = frozenset(
