@@ -51,8 +51,8 @@
     },
     "head": {
       "type": "object",
-      "description": "One head run the card recorded: its identity and liveness from the dispatcher record and the local-pty run directory, its launch configuration from the routing snapshot that recorded it, and what the CLI actually resolved from that run's latest `attempt.usage` occurrence. The resolved fields are null (and `resolved_models` empty) until a phase of the run finished, or for an occurrence written before `attempt.usage` carried them.",
-      "required": ["ref", "role", "run_id", "head", "current", "attempt", "adapter", "model", "model_source", "effort", "resolved_model", "resolved_models", "resolved_effort", "resolved_report_generation", "runtime", "local_pty", "state", "reason"],
+      "description": "One head run the card recorded: its identity and liveness from the dispatcher record and the run directory its supervisor kept, its launch configuration from the routing snapshot that recorded it, and what the CLI actually resolved from that run's latest `attempt.usage` occurrence. The resolved fields are null (and `resolved_models` empty) until a phase of the run finished, or for an occurrence written before `attempt.usage` carried them.",
+      "required": ["ref", "role", "run_id", "head", "current", "attempt", "adapter", "model", "model_source", "effort", "resolved_model", "resolved_models", "resolved_effort", "resolved_report_generation", "runtime", "state", "reason"],
       "properties": {
         "ref": {"type": "string"},
         "role": {"type": "string"},
@@ -69,7 +69,6 @@
         "resolved_effort": {"type": ["string", "null"]},
         "resolved_report_generation": {"type": ["integer", "null"]},
         "runtime": {"type": ["string", "null"]},
-        "local_pty": {"type": "boolean"},
         "state": {"enum": ["running", "finished", "unknown"]},
         "reason": {"type": "string"}
       }

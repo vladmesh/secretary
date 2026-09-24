@@ -3454,7 +3454,7 @@ def _observer_line(observer: dict[str, Any]) -> str:
     )
     return (
         _source_block(launch.get("source"), what="whether this sprint's observer is up")
-        + f'{said} <span class="launch state state-{escape(state)}" title="{escape(words)}">{escape(words.split(" — ")[0])}</span>'
+        + f'{said} <span class="launch state state-{escape(state)}">{escape(words)}</span>'
         + f'<div class="reason">{escape(str(launch.get("reason") or "no reason was recorded"))}</div>'
         + differs
         + heartbeat
