@@ -632,26 +632,20 @@ class SeamGrepTests(unittest.TestCase):
         )
 
     def test_a_workspace_stop_is_a_session_host_verb(self) -> None:
-        """Criterion 3: the dispatcher's by-worktree stop goes through the host like every
+        """Criterion 3: a by-worktree stop, where one is made, goes through the host like every
         other pane command. It stays a stop of the whole worktree — a caller that can no longer
         name a head — and is deliberately not `head_ops.stop`, which ends one named head.
 
-        Since secretary-1461 the call is spelled on the head runtime rather than on the session host
-        directly, because that boundary is where every session call for a head's life now lives. The
-        claim is unchanged and is asserted on both halves: the dispatcher makes the by-worktree stop
-        through the runtime, and the runtime makes it through the `SessionHost` verb.
-
-        Since secretary-1467 the runtime it is spelled on is named rather than defaulted, and the
-        dispatcher's two workspace-scoped cleanups reach it through one helper instead of making
-        the call apiece — a head that is not a legacy one is stopped through its own backend there,
-        and only the legacy and headless cases reach this verb.
+        The legacy backend still makes it through the `SessionHost` verb. The dispatcher no longer
+        makes it at all (secretary-1722): every head it holds is supervised and is stopped by its
+        own run, and a record whose head was an Orca pane is refused rather than torn down.
         """
         from secretary.runtime import orca_legacy_head
         from secretary.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))
         source = (REPO_ROOT / "src" / "secretary" / "dispatch" / "host.py").read_text(encoding="utf-8")
-        self.assertIn("self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)", source)
+        self.assertNotIn(".stop_workspace(workspace)", source)
         self.assertNotIn("head_ops.stop(", source)
         runtime_source = Path(orca_legacy_head.__file__).read_text(encoding="utf-8")
         self.assertIn("self.host.stop_workspace(workspace)", runtime_source)

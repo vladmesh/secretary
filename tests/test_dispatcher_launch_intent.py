@@ -96,7 +96,7 @@ from secretary.runtime.head.command import with_pid_heartbeat
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.prompt_document import NUDGE_MAX_BYTES
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
-from tests.dispatcher_fixtures import card_audit, ensure_attempt
+from tests.dispatcher_fixtures import SupervisedBackend, card_audit, ensure_attempt
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -3136,7 +3136,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_bring_up_that_could_not_hold_its_workspace_leaves_no_intent(self) -> None:
         """The intent names a workspace before the host answers, so the host must land on it.
 
-        A worktree created somewhere else is refused by `_create_workspace` and reaches the tick as
+        A worktree placed somewhere else is refused by `GitWorkspaceManager.create` and reaches the tick as
         an ordinary bring-up failure: nothing is running, so nothing may be adopted against a path
         that would send every later review, stop and teardown to the wrong checkout.
         """
@@ -3193,14 +3193,14 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
 
-    def test_leaf_stop_with_unreadable_inventory_and_no_heartbeat_keeps_the_record(self) -> None:
-        """A list failure is not evidence a leaf-scoped head vanished before its heartbeat exists."""
+    def test_a_stop_its_supervisor_will_not_confirm_keeps_the_record(self) -> None:
+        """A refused stop is not evidence the head is gone, whatever its heartbeat says."""
         self.tick()
         Path(pid_file_path("worker", REF)).unlink()
         self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real", audit=card_audit(self))  # type: ignore[arg-type]
-        real_host._run_json = mock.Mock(side_effect=HostError("orca terminal list unavailable"))
+        SupervisedBackend().install(real_host).stop_refusal = "the supervisor could not be reached"
 
         with mock.patch.object(self.host, "stop_head", real_host.stop_head):
             outcome = self.tick()
