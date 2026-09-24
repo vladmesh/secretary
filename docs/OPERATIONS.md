@@ -2372,6 +2372,6 @@ no lifecycle call, no rebinding, no harder probing.
 
 The web card page lists the card's heads under **Heads** (role, run id, state); each local-pty one links to
 `/tasks/<ref>/heads/<run_id>` (JSON: `/api/tasks/...`), a read-only view with no input or control: the terminal
-tail as redacted plain text (from the supervisor while it runs) and the journal tail. Orca is not used. When a
-supervisor lets go of a run it writes `<data_dir>/heads/<run_id>/output.tail`: the last 64 KiB of raw output,
-owner-only, atomic. A run that ended earlier has none and says "no transcript was kept for this run".
+tail as redacted plain text (live from the supervisor while its lock is held, else `output.tail`) and the journal
+tail. Orca is not used. A supervisor letting go of a run writes `<data_dir>/heads/<run_id>/output.tail` (last 64 KiB,
+owner-only, atomic; a same-id bring-up removes it). Without one: "no transcript was kept for this run".

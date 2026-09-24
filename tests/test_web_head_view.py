@@ -29,6 +29,7 @@ from tests.web_head_view_fixtures import (
     TOKEN,
     WORKER,
     HeadViewFixture,
+    _routing,
 )
 
 
@@ -185,13 +186,53 @@ class ASourceInAnyStateIsAPageTests(HeadViewFixture):
         self.assertIn("output is not answering", page)
         self.assertIn("the journal answered in part", page)
 
-    def test_a_socket_that_nobody_answers_is_the_supervisor_not_answering(self) -> None:
-        directory = self.run_dir(WORKER)
-        (directory / "head.sock").write_text("debris of a killed supervisor")
-        status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+    def hold_lock(self, directory) -> None:
+        """Hold the run's supervisor lock as a live supervisor does, so the run reads as running."""
+        import fcntl
+
+        fd = os.open(directory / "supervisor.lock", os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_a_running_head_whose_supervisor_does_not_answer_is_not_answering_never_a_file(self) -> None:
+        """Rule A: a held lock is read from the supervisor alone, whatever the run dir holds."""
+        directory = self.run_dir(WORKER, tail=b"STALE BYTES OF AN EARLIER INCARNATION\n")
+        self.hold_lock(directory)
+        for socket in ("debris", "absent"):
+            with self.subTest(socket=socket):
+                if socket == "debris":
+                    (directory / "head.sock").write_text("debris of a killed supervisor")
+                else:
+                    (directory / "head.sock").unlink(missing_ok=True)
+                status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+                self.assertEqual(status, 200)
+                self.assertIn("output is not answering", page)
+                self.assertIn("supervisor output could not be read", page)
+                self.assertNotIn("STALE BYTES", page)
+                document = json.loads(self.app().handle("GET", f"/api/tasks/{REF}/heads/{WORKER}").body)
+                self.assertEqual(document["transcript"]["state"], "unavailable")
+                self.assertNotIn("STALE BYTES", json.dumps(document))
+
+    def test_a_finished_head_reads_its_tail_and_never_asks_a_socket(self) -> None:
+        """Rule A: a free lock is read from `output.tail` alone; a socket file left there is not asked."""
+        directory = self.run_dir(WORKER, tail=b"its own last words\n")
+        (directory / "head.sock").write_text("debris")
+        with mock.patch.object(head_reads, "head_run_live_output", side_effect=AssertionError("asked")) as live:
+            status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+        self.assertEqual(status, 200)
+        self.assertIn("its own last words", page)
+        live.assert_not_called()
+
+    def test_a_lock_that_cannot_be_read_leaves_the_transcript_not_answering(self) -> None:
+        from secretary.runtime.local_pty_head import SupervisorLease
+
+        self.run_dir(WORKER, tail=b"a tail nobody may pick without knowing the state\n")
+        unreadable = SupervisorLease(lock_readable=False, error="Permission denied")
+        with mock.patch.object(head_reads, "head_run_supervisor_lease", return_value=unreadable):
+            status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
         self.assertEqual(status, 200)
         self.assertIn("output is not answering", page)
-        self.assertIn("supervisor output could not be read", page)
+        self.assertNotIn("a tail nobody may pick", page)
 
     def test_a_journal_that_is_not_a_file_and_a_lock_that_is_garbage_are_still_a_page(self) -> None:
         directory = self.root / WORKER
@@ -209,12 +250,91 @@ class ASourceInAnyStateIsAPageTests(HeadViewFixture):
             "head_run_supervisor_lease",
             "head_run_output_tail",
             "head_run_journal_tail",
-            "head_run_socket_present",
+            "head_run_live_output",
         ):
             with self.subTest(reader=name), mock.patch.object(head_reads, name, side_effect=RuntimeError("boom")):
                 for path in (f"/tasks/{REF}", f"/tasks/{REF}/heads/{WORKER}"):
                     status, _body = self.get(path)
                     self.assertEqual(status, 200, f"{path} with {name} raising")
+
+
+def _routing_of(run_id: str) -> dict[str, Any]:
+    return _routing(REF, (run_id, "worker", "claude-local-pty"))
+
+
+class HostileJournalValuesTests(HeadViewFixture):
+    """Rule B: no value a journal line can hold makes the page or the JSON route fail."""
+
+    HUGE = 10**400
+    CASES = (
+        ("at", 1e300),
+        ("at", -1),
+        ("at", 0),
+        ("at", True),
+        ("at", "x"),
+        ("at", []),
+        ("at", HUGE),
+        ("seq", HUGE),
+        # A digit string is read as its int by the substrate's own journal reader, so the hostile
+        # string is one that is not a number at all.
+        ("seq", "seven"),
+        ("turn", HUGE),
+        ("turn", "1"),
+        ("bytes", HUGE),
+        ("bytes", "12"),
+        ("kind", 5),
+        ("kind", {"nested": True}),
+        ("subject", ["a", "list"]),
+        ("subject", 3.5),
+    )
+
+    def test_each_hostile_value_is_a_page_and_a_document_with_the_journal_degraded(self) -> None:
+        for key, value in self.CASES:
+            with self.subTest(key=key, value=repr(value)[:40]):
+                run_id = f"{abs(hash((key, repr(value)))):032x}"[:32]
+                self.history[REF].append(_routing_of(run_id))
+                directory = self.run_dir(run_id, tail=b"fine\n")
+                record = {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "seq": 5,
+                    "kind": "turn.finished",
+                    "at": 1_790_000_000.0,
+                    "turn": 1,
+                    "reason": "quiet",
+                    key: value,
+                }
+                with open(directory / "journal.jsonl", "a", encoding="utf-8") as journal:
+                    journal.write(json.dumps(record) + "\n")
+                status, page = self.get(f"/tasks/{REF}/heads/{run_id}")
+                self.assertEqual(status, 200)
+                self.assertNotIn("could not be shown", page, "the layer, not the backstop, handled it")
+                response = self.app().handle("GET", f"/api/tasks/{REF}/heads/{run_id}")
+                self.assertEqual(response.status, 200)
+                journal_section = json.loads(response.body)["journal"]
+                self.assertEqual(journal_section["state"], "degraded")
+                for shown in journal_section["tail"]:
+                    self.assertTrue(set(shown) <= set(head_reads.JOURNAL_KEYS))
+                    if "at" in shown:
+                        self.assertTrue(0 < shown["at"] < 253402300800)
+
+    def test_the_normaliser_is_total(self) -> None:
+        for key, value in self.CASES:
+            with self.subTest(key=key, value=repr(value)[:40]):
+                record, lost = head_reads.journal_record({"seq": 1, "kind": "run.started", key: value})
+                self.assertNotIn(key, record)
+                self.assertEqual(lost, 1)
+        self.assertEqual(head_reads.journal_record(["not", "a", "record"]), ({}, 0))
+
+    def test_a_section_that_cannot_be_drawn_says_so_and_the_page_is_served(self) -> None:
+        from secretary.web import pages
+
+        self.run_dir(WORKER, tail=b"x\n")
+        for section in ("_head_header", "_transcript", "_head_journal"):
+            with self.subTest(section=section), mock.patch.object(pages, section, side_effect=RuntimeError("boom")):
+                status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+                self.assertEqual(status, 200)
+                self.assertIn("this section could not be shown (RuntimeError)", page)
 
 
 class NoOrcaOnThesePathsTests(HeadViewFixture):

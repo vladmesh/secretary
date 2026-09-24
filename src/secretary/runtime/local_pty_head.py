@@ -2981,11 +2981,6 @@ def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalR
     return local_pty.read_tail(Path(run_dir) / protocol.JOURNAL_NAME)
 
 
-def head_run_socket_present(run_dir: str | os.PathLike[str]) -> bool:
-    """Whether the run directory still holds a socket, which a supervisor removes when it lets go."""
-    return (Path(run_dir) / protocol.SOCKET_NAME).exists()
-
-
 def head_run_live_output(
     run_dir: str | os.PathLike[str],
     *,

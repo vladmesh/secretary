@@ -46,7 +46,6 @@ from secretary.runtime.local_pty_head import (
     head_run_journal_tail,
     head_run_live_output,
     head_run_output_tail,
-    head_run_socket_present,
     head_run_supervisor_lease,
 )
 from secretary.runtime.redact import scrub_secrets
@@ -162,7 +161,7 @@ def head_view(
         document["journal"] = {**_not_applicable(row["reason"]), "tail": []}
         return document
     run_dir = head_run_directory(root, head.run_id)
-    document["transcript"] = _transcript(run_dir, running=row["state"] == RUNNING)
+    document["transcript"] = _transcript(run_dir, state=row["state"])
     document["journal"] = _source("journal", lambda: _journal(run_dir), tail=[])
     return document
 
@@ -230,28 +229,28 @@ def _lease(root: Path, run_id: str) -> dict[str, Any]:
     return {"answered": True, "state": FINISHED, "reason": "no supervisor holds this run any more"}
 
 
-def _transcript(run_dir: Path, *, running: bool) -> dict[str, Any]:
-    """The end of the head's terminal output, from its supervisor or from what it left behind.
+def _transcript(run_dir: Path, *, state: str) -> dict[str, Any]:
+    """The end of the head's terminal output, from the one source the head's state names.
 
-    The supervisor is asked while its socket is there; what it answers is the freshest tail there
-    is. Otherwise, or when it does not answer, the tail it left in the run directory is read. A run
-    with neither says so: finished before supervisors kept a tail, or its supervisor was killed.
+    Decided by the supervisor lock and nothing else, never by trying one source and then another:
+    a held lock is a running head, and only its supervisor's live answer is its transcript -- the
+    run directory's tail, if any, belongs to no incarnation that is running. A free lock is a run
+    that ended, and only the tail its supervisor kept is its transcript. An unreadable lock says
+    nothing about which one this is, so the transcript is not answering.
     """
-    live: dict[str, Any] | None = None
-    if _source("socket", lambda: {"answered": True, "present": head_run_socket_present(run_dir)}).get(
-        "present"
-    ):
-        live = _source("supervisor output", lambda: _output(head_run_live_output(run_dir), "supervisor"))
-        if live["answered"]:
-            return live
-    kept = _source("output tail", lambda: _kept(run_dir))
-    if live is not None and not (kept["answered"] and kept["state"] != "not_kept"):
-        # The supervisor was there to ask and did not answer, and nothing was left behind yet:
-        # that is the supervisor's failure, not a run that kept nothing.
-        return {**live, "also": kept["reason"]}
-    if kept["answered"] and kept["state"] == "not_kept" and running:
-        return {**kept, "reason": "the head is running and its supervisor has no socket to ask"}
-    return kept
+    if state == RUNNING:
+        return _source(
+            "supervisor output", lambda: _output(head_run_live_output(run_dir), "supervisor")
+        )
+    if state == FINISHED:
+        return _source("output tail", lambda: _kept(run_dir))
+    return {
+        "answered": False,
+        "state": "unavailable",
+        "source": None,
+        "reason": "the supervisor lock could not be read, so whether this head is running is not known",
+        "text": "",
+    }
 
 
 def _kept(run_dir: Path) -> dict[str, Any]:
@@ -285,25 +284,14 @@ def _output(tail: Any, source: str) -> dict[str, Any]:
 
 
 def _journal(run_dir: Path) -> dict[str, Any]:
-    """The last records of the head's journal, through the whitelist, and what the read left out."""
+    """The last records of the head's journal, each through `journal_record`, and what was left out."""
     read = head_run_journal_tail(run_dir)
     tail = []
+    dropped = 0
     for event in read.events[-JOURNAL_TAIL_RECORDS:]:
-        record: dict[str, Any] = {}
-        for key in JOURNAL_KEYS:
-            if key not in event:
-                continue
-            value = event[key]
-            if key == "at":
-                value = _time(value)
-                if value is None:
-                    continue
-            elif isinstance(value, str):
-                value = scrub_secrets(value)[:400]
-            elif not (value is None or isinstance(value, (bool, int))):
-                value = _text(value)[:400]
-            record[key] = value
+        record, lost = journal_record(event)
         tail.append(record)
+        dropped += lost
     damage = []
     if read.malformed:
         damage.append(f"{read.malformed} malformed line(s) skipped")
@@ -311,6 +299,8 @@ def _journal(run_dir: Path) -> dict[str, Any]:
         damage.append("the final line is torn")
     if not read.ordered:
         damage.append("records are out of sequence")
+    if dropped:
+        damage.append(f"{dropped} field value(s) out of shape were left out")
     return {
         "answered": True,
         "state": "degraded" if damage else "available",
@@ -318,6 +308,47 @@ def _journal(run_dir: Path) -> dict[str, Any]:
         "partial": read.partial_head,
         "tail": tail,
     }
+
+
+#: The latest time `datetime.fromtimestamp(..., UTC)` renders: the start of the year 10000.
+_LAST_TIME = 253402300800.0
+#: The largest count a journal integer field may carry and still be shown: 2**53, the last integer a
+#: JSON reader in a browser holds exactly.
+_LAST_COUNT = 2**53
+_COUNTS = ("seq", "turn", "bytes")
+
+
+def journal_record(event: Any) -> tuple[dict[str, Any], int]:
+    """One journal record as the view shows it, and how many of its whitelisted values were dropped.
+
+    The one normaliser every record the view returns goes through, so the page and the JSON route
+    only ever hold values of the shape they expect: `at` a float the page can turn into a date
+    (0 < at < year 10000), `seq`, `turn` and `bytes` ints in 0..2**53, and `kind`, `reason` and
+    `subject` strings, scrubbed and bounded. A value of any other shape is left out and counted,
+    never passed on and never raised about.
+    """
+    record: dict[str, Any] = {}
+    lost = 0
+    source = event if isinstance(event, dict) else {}
+    for key in JOURNAL_KEYS:
+        if key not in source:
+            continue
+        value = source[key]
+        if key == "at":
+            kept: Any = _time(value)
+        elif key in _COUNTS:
+            kept = value if _count(value) else None
+        else:
+            kept = scrub_secrets(value)[:400] if isinstance(value, str) else None
+        if kept is None:
+            lost += value is not None
+            continue
+        record[key] = kept
+    return record, lost
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _LAST_COUNT
 
 
 def _not_applicable(reason: str) -> dict[str, Any]:
@@ -423,13 +454,14 @@ def _run_id(value: Any) -> str:
 
 
 def _time(value: Any) -> float | None:
+    """A time the page can render: a float with 0 < at < year 10000, or `None` for anything else."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
         seconds = float(value)
     except (OverflowError, ValueError):
         return None
-    return seconds if math.isfinite(seconds) and seconds > 0 else None
+    return seconds if math.isfinite(seconds) and 0 < seconds < _LAST_TIME else None
 
 
 def _text(value: Any) -> str:

@@ -1394,6 +1394,74 @@ class LocalPtySubstrateTests(unittest.TestCase):
                     self.assertEqual(len(kept), protocol.OUTPUT_TAIL_BYTES)
                     self.assertTrue(kept.endswith(b"last words"))
 
+    def test_a_bring_up_removes_the_last_incarnation_s_tail_before_its_run_started(self) -> None:
+        """Rule A of secretary-1703's round 3: a tail belongs to one incarnation only.
+
+        In-process and without a head: `start_head` is replaced by a pipe, so the one thing observed
+        is the order `_begin` does things in, under the lock `claim` took.
+        """
+        run_dir = self.root / "reused"
+        run_dir.mkdir()
+        (run_dir / protocol.OUTPUT_TAIL_NAME).write_bytes(b"the previous incarnation's last words")
+        supervisor = supervisor_module.Supervisor(
+            run_dir=run_dir, run_id="reused", role="worker", task="t", command="true"
+        )
+        supervisor.claim()
+        master, master_end = os.pipe()
+        wakeup, wakeup_end = os.pipe()
+        self.addCleanup(os.close, master_end)
+        self.addCleanup(os.close, wakeup_end)
+        seen: list[bool] = []
+        real_append = supervisor._append
+
+        def append(kind: str, **fields: object) -> dict:
+            if kind == RUN_STARTED:
+                seen.append((run_dir / protocol.OUTPUT_TAIL_NAME).exists())
+            return real_append(kind, **fields)
+
+        def start_head() -> int:
+            supervisor._master = master
+            return 0
+
+        def install_signals() -> None:
+            supervisor._wakeup_read = wakeup
+
+        with (
+            mock.patch.object(supervisor, "_append", append),
+            mock.patch.object(supervisor, "start_head", start_head),
+            mock.patch.object(supervisor, "_install_signals", install_signals),
+        ):
+            try:
+                supervisor._begin()
+            finally:
+                supervisor.started = False  # this incarnation printed nothing worth keeping
+                supervisor._shutdown()
+                os.close(wakeup)
+        self.assertEqual(seen, [False], "run.started was written beside the last incarnation's tail")
+        self.assertFalse((run_dir / protocol.OUTPUT_TAIL_NAME).exists())
+
+    def test_a_run_id_brought_up_again_keeps_only_its_own_tail(self) -> None:
+        first = self._start(run_id="again")
+        client = self._client(first)
+        self.assertTrue(client.send_input("first incarnation\n")["ok"])
+        self._await_output(client, b"ECHO first incarnation")
+        self.assertTrue(client.send_input("quit\n")["ok"])
+        self.assertIn(b"ECHO first incarnation", self._await_tail(first))
+
+        second = self._start(run_id="again")
+        self.assertEqual(len(second.events().of_kind(RUN_STARTED)), 2)
+        self.assertFalse(
+            (second.run_dir / protocol.OUTPUT_TAIL_NAME).exists(),
+            "a running incarnation has the previous one's tail beside it",
+        )
+        client = self._client(second)
+        self.assertTrue(client.send_input("second incarnation\n")["ok"])
+        self._await_output(client, b"ECHO second incarnation")
+        self.assertTrue(client.send_input("quit\n")["ok"])
+        kept = self._await_tail(second)
+        self.assertIn(b"ECHO second incarnation", kept)
+        self.assertNotIn(b"first incarnation", kept)
+
     def test_a_tail_that_cannot_be_written_does_not_keep_the_supervisor_from_letting_go(self) -> None:
         run_dir = self.root / "unwritable"
         run_dir.mkdir()

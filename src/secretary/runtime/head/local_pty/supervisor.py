@@ -432,7 +432,14 @@ class Supervisor:
             self._shutdown()
 
     def _begin(self) -> None:
-        """Bring the head up and say so, in the order a reader of the run directory needs."""
+        """Bring the head up and say so, in the order a reader of the run directory needs.
+
+        An output tail belongs to exactly one incarnation. A run id can be brought up again once
+        its head is dead, so the tail a previous incarnation left is removed here -- under the lock,
+        before anything of this incarnation is written -- and no reader can ever find it beside a
+        `run.started` it does not belong to.
+        """
+        (self.run_dir / protocol.OUTPUT_TAIL_NAME).unlink(missing_ok=True)
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
         self.start_head()

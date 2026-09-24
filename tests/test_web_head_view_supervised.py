@@ -80,8 +80,8 @@ class ARunningHeadAndThenAFinishedOneTests(HeadViewFixture):
         handle = self._start()
         client = handle.connect()
         self.addCleanup(client.close)
-        self.assertTrue(client.send_input("<script>x</script>\n")["ok"])
-        self.assertTrue(client.send_input(f"token {TOKEN}\n")["ok"])
+        # One delivery: the supervisor admits one at a time and refuses a second while one is in flight.
+        self.assertTrue(client.send_input(f"<script>x</script>\ntoken {TOKEN}\n")["ok"])
         self._await(
             lambda: b"ECHO token" in client.read_output()["bytes_data"],
             message="the head never echoed its input",
@@ -116,6 +116,43 @@ class ARunningHeadAndThenAFinishedOneTests(HeadViewFixture):
         self.assertIn("run.exited", [record.get("kind") for record in kept["journal"]["tail"]])
         self.assertNotIn(TOKEN, json.dumps(kept))
         self.assertNotIn(SECRET, json.dumps(kept))
+
+    def test_a_run_id_brought_up_again_is_never_shown_the_last_incarnation_s_tail(self) -> None:
+        """Rule A: same run id, a normal exit, a new incarnation whose socket fails while it runs."""
+        first = self._start()
+        client = first.connect()
+        self.addCleanup(client.close)
+        self.assertTrue(client.send_input("OLD-INCARNATION\nquit\n")["ok"])
+        self._await(lambda: not _alive(first.supervisor_pid), message="the first supervisor never let go")
+        self.assertIn("ECHO OLD-INCARNATION", self._document()["transcript"]["text"])
+
+        second = self._start()
+        self.assertFalse((second.run_dir / "output.tail").exists(), "the old tail outlived the bring-up")
+        client = second.connect()
+        self.addCleanup(client.close)
+        self.assertTrue(client.send_input("NEW-INCARNATION\n")["ok"])
+        self._await(
+            lambda: b"ECHO NEW-INCARNATION" in client.read_output()["bytes_data"],
+            message="the second head never echoed its input",
+        )
+        # The running head's address goes away while its supervisor still holds the lock.
+        second.socket_path.unlink()
+        running = self._document()
+        self.assertEqual(running["head"]["state"], head_reads.RUNNING)
+        self.assertFalse(running["transcript"]["answered"])
+        self.assertNotIn("OLD-INCARNATION", json.dumps(running))
+        status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+        self.assertEqual(status, 200)
+        self.assertIn("output is not answering", page)
+        self.assertNotIn("OLD-INCARNATION", page)
+
+        # Finished again: the tail shown is this incarnation's own.
+        self.assertTrue(client.send_input("quit\n")["ok"])
+        self._await(lambda: not _alive(second.supervisor_pid), message="the second supervisor never let go")
+        kept = self._document()
+        self.assertEqual(kept["transcript"]["source"], "output.tail")
+        self.assertIn("ECHO NEW-INCARNATION", kept["transcript"]["text"])
+        self.assertNotIn("OLD-INCARNATION", kept["transcript"]["text"])
 
 
 if __name__ == "__main__":  # pragma: no cover

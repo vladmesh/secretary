@@ -1941,17 +1941,46 @@ def head_view(document: dict[str, Any]) -> str:
     The output is the layer's plain text, already stripped of escape sequences and redacted, and it
     is escaped here like every other value: it is what a head printed, and a head may print markup.
     There is no form on this page and no script of its own.
+
+    The layer hands over normalised values only, and each section is still drawn under
+    `_shown`: whatever a head's run directory held, a section that cannot be drawn says so in its
+    own place and the rest of the page is served.
     """
     ref = str(document.get("ref") or "")
     run_id = str(document.get("run_id") or "")
     head = _mapping(document.get("head"))
     transcript = _mapping(document.get("transcript"))
     journal = _mapping(document.get("journal"))
+    card = f"/tasks/{quote(ref, safe='')}"
+    tail = journal.get("tail")
+    body = "\n".join(
+        [
+            _shown(lambda: _head_header(document, head, run_id)),
+            _panel("Terminal output", _shown(lambda: _transcript(transcript))),
+            _panel(
+                "Journal",
+                _shown(lambda: _head_journal(journal)),
+                count=(len(tail) if isinstance(tail, list) else 0) or None,
+            ),
+            f'<p><a href="{escape(card)}">back to {escape(ref or "the card")}</a></p>',
+        ]
+    )
+    return _page(f"Head {run_id}", body, nav="dashboard", crumbs=((ref, card), (run_id, "")))
+
+
+def _shown(draw: Callable[[], str]) -> str:
+    """One section of the head view, or the plain statement that it could not be drawn."""
+    try:
+        return draw()
+    except Exception as exc:  # noqa: BLE001 - a head's run directory is untrusted input
+        return f'<p class="unavailable"><b>this section could not be shown ({escape(type(exc).__name__)})</b></p>'
+
+
+def _head_header(document: dict[str, Any], head: dict[str, Any], run_id: str) -> str:
     chips = [_chip(str(head.get("role") or "head"))]
     if head.get("runtime"):
         chips.append(_chip(str(head.get("runtime"))))
-    card = f"/tasks/{quote(ref, safe='')}"
-    body = "\n".join(
+    return "\n".join(
         [
             '<div class="hero">',
             f"<h1>{escape(run_id or 'head')}</h1>",
@@ -1960,12 +1989,8 @@ def head_view(document: dict[str, Any]) -> str:
             f'<div class="title">{_state_cell(str(head.get("state") or "unknown"), str(head.get("reason") or ""))}</div>',
             "</div>",
             f'<p class="empty">{escape(str(document.get("read_only") or ""))}</p>',
-            _panel("Terminal output", _transcript(transcript)),
-            _panel("Journal", _head_journal(journal), count=len(journal.get("tail") or []) or None),
-            f'<p><a href="{escape(card)}">back to {escape(ref or "the card")}</a></p>',
         ]
     )
-    return _page(f"Head {run_id}", body, nav="dashboard", crumbs=((ref, card), (run_id, "")))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
