@@ -24,6 +24,7 @@ on the screen exactly as they typed it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -116,12 +117,37 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .age { color: var(--faint); font-size: .8rem; font-family: var(--mono); }
 .grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); gap: 1rem; align-items: start; }
 .grid > .col { display: grid; gap: 1rem; min-width: 0; }
-.dashboard-grid { grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr); }
-.compact-sprints { display: grid; gap: .55rem; }
-.compact-sprint { border-bottom: 1px solid var(--line); padding-bottom: .55rem; }
-.compact-sprint:last-child { border-bottom: 0; padding-bottom: 0; }
-.compact-sprint header { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
-.compact-sprint .goal { margin:.25rem 0; color:var(--muted); }
+.push { margin-left: auto; display: inline-flex; gap: .4rem; align-items: center; }
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.attention { display: flex; align-items: center; gap: .9rem; flex-wrap: wrap; margin-top: 1rem; padding: .6rem .9rem; border-radius: 6px; background: var(--warn-soft); color: var(--ink); }
+.attention > b { color: var(--warn); font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; }
+.attention > a { margin-left: auto; color: var(--warn); font-size: .85rem; }
+main > details.panel { margin-top: 1rem; }
+main > .unavailable { margin-top: 1rem; }
+details.drain > summary { list-style: none; cursor: pointer; padding: .3rem .7rem; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--muted); font-size: .85rem; }
+details.drain > summary::-webkit-details-marker { display: none; }
+details.drain[open] > summary { display: none; }
+.sprints-block { margin-top: 1.25rem; }
+.block-head { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .6rem; }
+.block-head .count { font: .8rem var(--mono); color: var(--muted); }
+.block-head .more { margin-left: auto; font-size: .85rem; }
+.compact-sprints { display: grid; grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr)); gap: 1rem; }
+@media (max-width: 600px) { .compact-sprints { grid-template-columns: minmax(0, 1fr); } }
+.compact-sprint { display: grid; gap: .7rem; align-content: start; padding: .9rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.compact-sprint header { display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; }
+.compact-sprint h3 a { font-family: var(--mono); font-size: .95rem; }
+.compact-sprint .goal { margin: 0; color: var(--muted); }
+.card-box { display: grid; gap: .35rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); }
+.card-line { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+.card-title { font-weight: 500; }
+.heads-line { display: flex; gap: .4rem; flex-wrap: wrap; }
+.budget-line { display: flex; align-items: center; gap: .6rem; font-size: .75rem; color: var(--faint); }
+.budget-line .track { position: relative; flex-grow: 1; height: 4px; border-radius: 999px; background: var(--raised); }
+.budget-line .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--ok); }
+.budget-line.signal .fill { background: var(--warn); }
+.budget-line.hard .fill { background: var(--bad); }
+.budget-line .mark { position: absolute; top: -3px; width: 1px; height: 10px; background: var(--warn); }
+.budget-line .mono { font-size: .72rem; white-space: nowrap; }
 .po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; min-width:0; max-width:100%; }
 .po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; min-width:0; max-width:100%; }
 .po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }
@@ -170,7 +196,8 @@ details.panel > .body { padding: .25rem .9rem .9rem; }
 
 /* the pipeline strip */
 .strip { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: .7rem .9rem; }
-.strip .facts { margin-left: auto; }
+.strip .push { gap: 1rem; }
+#pause-feedback-holder:has(> .feedback:empty) { display: none; }
 .light { display: inline-flex; align-items: center; gap: .45rem; padding: .3rem .7rem; border-radius: 999px; font-weight: 600; font-size: .85rem; border: 1px solid transparent; }
 .light::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
 .light-running, .light-ok { color: var(--ok); background: var(--ok-soft); }
@@ -227,6 +254,43 @@ table.kv tr + tr th { border-top: 1px solid var(--line); }
 .hero h1 { font-family: var(--mono); font-weight: 600; }
 .hero .title { font-size: 1.05rem; color: var(--ink); flex-basis: 100%; max-width: 70ch; }
 .hero .chips { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+.hero .age + .chips { flex-basis: 100%; }
+
+/* the sprint page */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .6rem; }
+.tile { display: grid; gap: .2rem; align-content: start; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); }
+.tile .label, .call .label, .because .label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+.tile .reason { font-size: .8rem; }
+.tile-ok { background: var(--ok-soft); border-color: transparent; } .tile-ok b { color: var(--ok); }
+.tile-warn { background: var(--warn-soft); border-color: transparent; } .tile-warn b { color: var(--warn); }
+.tile-bad { background: var(--bad-soft); border-color: transparent; } .tile-bad b { color: var(--bad); }
+.call { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: .9rem; padding: .55rem 0; }
+.call + .call { border-top: 1px solid var(--line); }
+.call .label { padding-top: .2rem; }
+details.reasons > summary { list-style: none; cursor: pointer; margin-top: .3rem; color: var(--accent); font-size: .8rem; font-weight: 500; }
+details.reasons > summary::-webkit-details-marker { display: none; }
+.because { display: grid; gap: .15rem; margin-top: .5rem; color: var(--muted); }
+details.more-actions { margin-top: .75rem; border-top: 1px solid var(--line); padding-top: .6rem; }
+details.more-actions > summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+details.more-actions form.act { margin-top: .6rem; }
+ul.refs { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: .35rem; }
+
+/* the card page */
+.doc { overflow-wrap: anywhere; min-width: 0; line-height: 1.6; }
+.doc > :first-child { margin-top: 0; }
+.doc p, .doc ul, .doc ol, .doc blockquote, .doc pre { margin: .45rem 0; }
+.doc h3, .doc h4, .doc h5, .doc h6 { margin: 1rem 0 .3rem; font-size: 1rem; font-weight: 600; }
+.doc ul, .doc ol { padding-left: 1.4rem; }
+.doc li + li { margin-top: .25rem; }
+.doc code { background: var(--raised); border-radius: 3px; padding: 0 .3em; }
+.doc pre { white-space: pre; overflow-x: auto; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; padding: .5rem .7rem; }
+.doc pre code { background: none; padding: 0; }
+.doc blockquote { border-left: 3px solid var(--line-strong); padding-left: .7rem; color: var(--muted); margin-inline: 0; }
+.task-text { max-width: 80ch; font-size: .95rem; }
+.heads.stacked { grid-template-columns: minmax(0, 1fr); gap: .35rem; }
+.head-facts { padding: 0 .1rem .4rem 1.2rem; font-size: .78rem; color: var(--muted); }
+.head-runs { margin: 0 0 .5rem; padding: 0 0 0 1.2rem; list-style: none; font-size: .78rem; color: var(--muted); }
+.head-runs li { padding: .15rem 0; border-top: 1px dashed var(--line); }
 
 /* forms and actions */
 form { margin: 0; }
@@ -254,12 +318,45 @@ form.act .hint { color: var(--faint); font-size: .78rem; margin: .4rem 0 0; }
 .filters a[aria-current="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .filters a:hover { text-decoration: none; color: var(--ink); }
 
-/* long text folds; the first line is the summary */
+/* long text: one copy of it, in the reading face, held to two lines until it is opened */
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 details.text > summary { list-style: none; cursor: pointer; color: var(--ink); }
 details.text > summary::-webkit-details-marker { display: none; }
-details.text > summary::after { content: " more"; color: var(--accent); font-size: .8rem; }
-details.text[open] > summary::after { content: " less"; }
-details.text > pre { margin-top: .4rem; }
+details.text > summary .prose { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+details.text[open] > summary .prose { display: block; -webkit-line-clamp: unset; line-clamp: none; }
+details.text > summary::after { content: "show more"; display: block; margin-top: .1rem; color: var(--accent); font-size: .8rem; font-weight: 500; }
+details.text[open] > summary::after { content: "show less"; }
+
+/* tabs: a radio per tab, so the page works with no script and a reload keeps nothing hidden */
+.tabs { position: relative; }
+.tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+.tabs > .tab-bar { display: flex; gap: 1.4rem; padding: 0 .9rem; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs > .tab-bar label { margin: 0; padding: .65rem 0; border-bottom: 2px solid transparent; color: var(--muted); font-size: .9rem; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.tabs > .tab-bar label:hover { color: var(--ink); }
+.tabs > .tab-bar .count { margin-left: .35rem; padding: 0 .4rem; border-radius: 999px; background: var(--raised); font: .72rem var(--mono); color: var(--muted); }
+.tabs > .tab-panel { display: none; padding: .75rem .9rem; min-width: 0; }
+.tabs > .tab-panel > * + * { margin-top: .6rem; }
+TAB_RULES
+
+/* a head: who runs a role, on which model, how hard it thinks, and whether it is alive */
+.heads { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .6rem; }
+.head { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); min-width: 0; }
+.head.idle { border-style: dashed; }
+.head .who { display: grid; min-width: 0; }
+.head .role { font-size: .74rem; color: var(--faint); }
+.head .model { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head .effort { margin-left: auto; display: grid; justify-items: end; gap: .15rem; font-size: .72rem; color: var(--muted); white-space: nowrap; }
+.pulse { width: .5rem; height: .5rem; border-radius: 50%; flex: none; background: var(--faint); }
+.pulse.live { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.pulse.lost { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.segs { display: inline-flex; gap: 2px; }
+.segs i { width: 5px; height: 9px; border-radius: 2px; background: var(--line-strong); }
+.segs i.on { background: var(--accent); }
+.segs.unset i { background: transparent; border: 1px solid var(--line-strong); }
+.head-chip { display: inline-flex; align-items: center; gap: .4rem; padding: .1rem .5rem; border: 1px solid var(--line); border-radius: 4px; background: var(--ground); font-size: .78rem; white-space: nowrap; }
+.head-chip .role { color: var(--faint); }
+.lead .head-chip { align-self: center; }
+.effort-cell { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--muted); white-space: nowrap; }
 pre.transcript { max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .5rem .7rem; }
 
 /* the transition timeline */
@@ -328,6 +425,22 @@ body { padding-bottom: var(--bar-height); }
 @media (max-width: 600px) { .statusbar .row { padding: 0 12px; gap: .8rem; } }
 @media (prefers-reduced-motion: no-preference) { .light::before { transition: background .2s; } }
 """
+
+#: How many tabs one strip may hold. The stylesheet has no counter for "the n-th radio shows the
+#: n-th panel", so the rule is written out once per position.
+MAX_TABS = 6
+
+STYLE = STYLE.replace(
+    "TAB_RULES",
+    "\n".join(
+        f".tabs > input:nth-of-type({n}):checked ~ .tab-bar label:nth-of-type({n}) "
+        "{ color: var(--ink); border-bottom-color: var(--accent); }\n"
+        f".tabs > input:nth-of-type({n}):focus-visible ~ .tab-bar label:nth-of-type({n}) "
+        "{ outline: 2px solid var(--accent); outline-offset: 2px; }\n"
+        f".tabs > input:nth-of-type({n}):checked ~ .tab-panel:nth-of-type({n}) {{ display: block; }}"
+        for n in range(1, MAX_TABS + 1)
+    ),
+)
 
 
 # -- the shell ----------------------------------------------------------------------------------
@@ -441,13 +554,11 @@ def _limits_bar() -> str:
 def _limits_bar_of(section: dict[str, Any] | None, *, doctor: dict[str, Any] | None = None) -> str:
     """The bar for one section, kept apart from where the section comes from so a test can hand one in.
 
-    Three things are never confused here, in the same way :func:`_limits_panel` keeps them apart on
-    the dashboard: a current reading, a reading that is not current, and no reading at all. Only the
+    Three things are never confused here, in the same way every section of a page keeps them
+    apart: a current reading, a reading that is not current, and no reading at all. Only the
     first draws a percentage, because a number on a bar is read as what is left *now*.
     """
-    document = (
-        section.get("document") if isinstance(section, dict) and section.get("available") else None
-    )
+    document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     document = document if isinstance(document, dict) else None
     if document is not None:
         refused = LIMITS_NOT_IN_READING
@@ -493,9 +604,7 @@ def _doctor_lamp(section: dict[str, Any] | None) -> str:
     It is a link from every page and not a panel on one, so the colour is never a dead end: what
     makes it red is one click away wherever a person happens to be.
     """
-    document = (
-        section.get("document") if isinstance(section, dict) and section.get("available") else None
-    )
+    document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     if not isinstance(document, dict):
         reason = (
             str(section.get("reason") or "installation health was not read")
@@ -532,11 +641,11 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
     if not windows:
         return (
             f'<span class="provider"><b>{shown}</b>'
-            f'{_bar_no_reading("this reading carried no usage window")}{old}</span>'
+            f"{_bar_no_reading('this reading carried no usage window')}{old}</span>"
         )
     drawn = "".join(
         f'<span class="window"><span class="win-name">{escape(str(window.get("name") or "window"))}</span>'
-        f'<b>{_percent(window.get("remaining_percent"))}</b>'
+        f"<b>{_percent(window.get('remaining_percent'))}</b>"
         f'<span class="dot">·</span>{_reset(window.get("resets_at"))}</span>'
         for window in windows
     )
@@ -846,31 +955,29 @@ def dashboard(
     """
     installation = snapshot.get("installation") or {}
     open_items = _sprint_items(sprints)
+    # Each fact is drawn once. The usage windows are the bottom bar's and the lamp is the doctor's
+    # colour on every page, so neither has a panel here; what this page adds is the problem itself,
+    # and only while there is one. `limits` is still accepted: the transport hands every page the
+    # same reads, and a caller is not told to stop reading what the bar draws.
+    del limits
     body = "\n".join(
-        [
+        part
+        for part in [
             '<div class="lead"><h1>Dashboard</h1>',
-            f'<span class="age">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span>',
-            '<label class="refresh"><input type="checkbox" id="auto-refresh" data-refresh-toggle> refresh every 30 s</label></div>',
+            f'<span class="age">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span></div>',
             '<section class="panel">',
-            _pipeline_strip(pause, installation),
+            _pipeline_strip(pause, installation, po=po),
             '<div class="body" id="pause-feedback-holder"><p id="pause-feedback" class="feedback"></p></div>',
             "</section>",
-            '<div class="grid dashboard-grid" style="margin-top:1rem">',
-            '<div class="col">',
-            _panel(
-                "Open sprints",
-                _open_sprints(sprints),
-                count=len(open_items) if open_items else None,
-                more='<a class="more" href="/sprints">all sprints</a>',
-            ),
-            "</div>",
-            '<div class="col">',
-            _panel("Usage limits", _limits_panel(limits)),
-            _panel("Doctor", _doctor_panel(installation)),
-            _panel("Server", _server_panel(installation), open_=False),
-            _po_indicator(po),
-            "</div></div>",
+            _attention(installation),
+            '<section class="sprints-block">',
+            '<header class="block-head"><h2>Open sprints</h2>'
+            + (f'<span class="count">{len(open_items)}</span>' if open_items else "")
+            + '<a class="more" href="/sprints">all sprints</a></header>',
+            _open_sprints(sprints),
+            "</section>",
         ]
+        if part
     )
     return _page("Dashboard", body, script=_ACTIONS_SCRIPT, nav="dashboard")
 
@@ -904,11 +1011,18 @@ PAUSE_WORDS: dict[str, tuple[str, str]] = {
 }
 
 
-def _pipeline_strip(section: dict[str, Any] | None, installation: dict[str, Any]) -> str:
-    """The first thing on the screen: is the pipeline running, and is the installation healthy."""
+def _pipeline_strip(
+    section: dict[str, Any] | None, installation: dict[str, Any], *, po: dict[str, Any] | None = None
+) -> str:
+    """The first thing on the screen: is the pipeline running, and how to stop it.
+
+    Health is not repeated here: the lamp on the bottom bar is its colour on every page, and the
+    dashboard names the problem itself under this strip while there is one. `installation` is kept
+    for the refused branch, which has nothing else to show.
+    """
     document, refused = _beside(section, what="whether the pipeline is paused")
     if document is None:
-        return f'<div class="strip">{refused}{_health_light(installation)}</div>'
+        return f'<div class="strip">{refused}{_po_indicator(po)}</div>'
     state = document.get("state") or {}
     paused = bool(state.get("paused"))
     mode = str(state.get("mode") or "") if paused else "running"
@@ -932,46 +1046,63 @@ def _pipeline_strip(section: dict[str, Any] | None, installation: dict[str, Any]
             '<button type="submit">Resume</button></form>'
         )
     else:
+        # Draining is rare and stops the pipeline, so it is one click further away than reading.
         action = (
+            '<details class="drain"><summary>Drain…</summary>'
             '<form class="pause inline" data-action="/api/pause/drain" data-confirm="Drain the pipeline? No '
             'new card is claimed until it is resumed; running heads keep working.">'
             '<input name="reason" id="drain-reason" placeholder="why" required size="26" aria-label="reason">'
-            '<button type="submit" class="danger">Drain</button></form>'
+            '<button type="submit" class="danger">Drain</button></form></details>'
         )
     return "\n".join(
         [
             '<div class="strip">',
             f'<span class="light light-{escape(colour)}" title="{escape(words)}">{escape(words.split(" — ")[0])}</span>',
-            action,
-            _health_light(installation),
             f'<span class="facts">{" · ".join(facts)}</span>',
+            f'<span class="push">{_po_indicator(po)}{action}</span>',
             "</div>",
             _source_block(state.get("source"), what="the pause flag"),
         ]
     )
 
 
-def _health_light(installation: dict[str, Any]) -> str:
+def _attention(installation: dict[str, Any]) -> str:
+    """The installation's problem, named under the strip while there is one, and nothing otherwise.
+
+    The lamp on the bottom bar already says the colour on every page; this is the sentence behind
+    it, where the operator is looking. Health that could not be read is not silence: it is the
+    marked block every unreadable source gets. The facts behind the verdict -- checkpoint, disk,
+    memory, load -- stay one click away in the collapsed installation panel.
+    """
     health = installation.get("health") or {}
     status = health.get("status")
-    if not isinstance(status, dict) or not status:
-        return '<span class="light light-unknown" title="health could not be read">health unknown</span>'
-    state = str(status.get("state") or "unknown")
-    problems = list(status.get("problems") or [])
-    colour = "ok" if state == "ok" else ("attention" if state == "attention" else "unknown")
-    suffix = f" · {len(problems)}" if problems else ""
-    return f'<span class="light light-{escape(colour)}" title="installation health">health {escape(state)}{escape(suffix)}</span>'
+    source = _source_block(health.get("source"), what="whether this installation is healthy")
+    parts = [source]
+    if isinstance(status, dict) and status:
+        problems = [str(item) for item in status.get("problems") or []]
+        if problems:
+            more = f' <span class="muted">and {len(problems) - 1} more</span>' if len(problems) > 1 else ""
+            parts.append(
+                '<section class="attention"><b>Needs attention</b>'
+                f"<span>{escape(problems[0])}{more}</span>"
+                '<a href="/doctor">open doctor →</a></section>'
+            )
+    elif (health.get("source") or {}).get("state") == "available":
+        parts.append('<p class="empty">the health collector answered with nothing.</p>')
+    parts.append(_panel("Installation", _health_panel(installation), open_=False))
+    return "\n".join(part for part in parts if part)
 
 
 def _health_panel(installation: dict[str, Any]) -> str:
-    """Health as the read layer summarizes it: the problems by name, then the facts."""
+    """Health as the read layer summarizes it: the problems by name, then the facts.
+
+    Whether the source answered at all is said once, above the panel, by :func:`_attention`.
+    """
     health = installation.get("health") or {}
     status = health.get("status")
-    parts = [_source_block(health.get("source"), what="whether this installation is healthy")]
+    parts: list[str] = []
     if not isinstance(status, dict) or not status:
-        if (health.get("source") or {}).get("state") == "available":
-            parts.append('<p class="empty">the health collector answered with nothing.</p>')
-        return "\n".join(part for part in parts if part)
+        return '<p class="empty">there is no health reading to show.</p>'
     problems = [str(item) for item in status.get("problems") or []]
     if problems:
         parts.append(
@@ -984,6 +1115,7 @@ def _health_panel(installation: dict[str, Any]) -> str:
     cards = status.get("cards") or {}
     dispatcher = status.get("dispatcher") or {}
     rows = [
+        ["instance", _or_dash(installation.get("name"))],
         [
             "checkpoint",
             f"{_or_dash(checkpoint.get('status'))}"
@@ -1022,74 +1154,6 @@ def _health_panel(installation: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _doctor_panel(installation: dict[str, Any]) -> str:
-    health = installation.get("health") or {}
-    status = health.get("status")
-    source = _source_block(health.get("source"), what="whether this installation is healthy")
-    if not isinstance(status, dict) or not status:
-        return source or '<p class="empty">doctor returned no status.</p>'
-    state = str(status.get("state") or "unknown")
-    problems = [str(problem) for problem in status.get("problems") or []]
-    tone = "ok" if state == "ok" else "attention" if problems else "unknown"
-    summary = f'{_chip("doctor " + state, tone)} <span class="muted">{escape(problems[0] if problems else "nothing needs attention")}</span>'
-    detail = _health_panel(installation)
-    return (
-        source
-        + f'<details class="text"><summary>{summary}</summary><div style="margin-top:.55rem">{detail}</div></details>'
-    )
-
-
-def _server_panel(installation: dict[str, Any]) -> str:
-    status = (installation.get("health") or {}).get("status") or {}
-    resources = status.get("resources") if isinstance(status, dict) else {}
-    resources = resources if isinstance(resources, dict) else {}
-    return _rows(
-        ["", ""],
-        [
-            ["memory free", _gib(resources.get("memory_available_bytes"))],
-            ["disk free", _gib(resources.get("disk_free_bytes"))],
-            ["load", _load(resources.get("load_average"))],
-            ["instance", _or_dash(installation.get("name"))],
-        ],
-    )
-
-
-def _limits_panel(section: dict[str, Any] | None) -> str:
-    """Provider windows, keeping stale and unavailable evidence visibly distinct."""
-    document, refused = _beside(section, what="provider usage limits")
-    if document is None:
-        return refused
-    providers = document.get("providers") or []
-    rows = []
-    for provider in providers:
-        if not isinstance(provider, dict):
-            continue
-        windows = provider.get("windows") or []
-        remaining = "<br>".join(
-            f"{escape(str(window.get('name') or 'window'))}: "
-            f"<b>{_percent(window.get('remaining_percent'))}</b> · {_reset(window.get('resets_at'))}"
-            for window in windows
-            if isinstance(window, dict)
-        )
-        status = str(provider.get("status") or "unavailable")
-        reason = escape(str(provider.get("reason") or ""))
-        age = provider.get("age_seconds")
-        note = f' <span class="chip chip-warn">{escape(status)}</span>' if status != "available" else ""
-        if age not in (None, 0, 0.0):
-            note += f' <span class="age">{_age(age)} old</span>'
-        if reason:
-            note += f'<div class="reason">{reason}</div>'
-        rows.append(
-            [
-                escape(str(provider.get("label") or provider.get("id") or "unknown")) + note,
-                remaining or "unavailable",
-            ]
-        )
-    return refused + (
-        _rows(["provider", "remaining"], rows) if rows else '<p class="empty">usage limits unavailable.</p>'
-    )
-
-
 def _gib(value: Any) -> str:
     try:
         return f"{float(value) / (1024**3):.1f} GiB"
@@ -1125,43 +1189,94 @@ def _open_sprints(section: dict[str, Any] | None) -> str:
 
 
 def _compact_sprint_card(item: dict[str, Any]) -> str:
+    """One open sprint as the dashboard shows it: the goal, the card in hand, who works it, the spend."""
     ref = str(item.get("ref") or "")
-    goal = _short(item.get("goal"), 150)
     projects = item.get("projects") if isinstance(item.get("projects"), list) else []
     project = ", ".join(str(value) for value in projects) or str(item.get("product") or "—")
     waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
-    current = item.get("current_task") if isinstance(item.get("current_task"), dict) else {}
-    stage = str(waiting.get("state") or current.get("state") or item.get("status") or "unknown")
+    stage = str(waiting.get("state") or item.get("status") or "unknown")
     attention = _chip("attention required", "warn") if stage in {"waiting", "blocked", "unknown"} else ""
-    return (
-        '<article class="compact-sprint"><header>'
-        f'<h3><a href="/sprints/{quote(ref)}">{escape(ref)}</a></h3>{_chip(project)}{_state_chip(stage)}{attention}'
-        f'</header><p class="goal">{escape(goal)}</p></article>'
-    )
-
-
-def _sprint_card(item: dict[str, Any]) -> str:
-    ref = str(item.get("ref") or "")
-    goal = str(item.get("goal") or "")
-    short = goal if len(goal) <= 240 else goal[:237].rstrip() + "…"
-    return "\n".join(
+    budget = item.get("budget") if isinstance(item.get("budget"), dict) else {}
+    heads = _sprint_heads(item, compact=True)
+    return "".join(
         [
-            '<article class="sprint-card">',
-            "<header>",
-            f'<h3><a href="/sprints/{quote(ref)}">{escape(ref)}</a></h3>',
-            _chip(str(item.get("product") or "—")),
-            _sprint_status_chip(item),
-            _waiting_chip(item),
-            "</header>",
-            '<div class="body">',
-            f'<p class="goal">{escape(short)}</p>',
-            _sprint_work(item),
-            _comment_form(
-                f"/api/sprints/{quote(ref)}/comment", f"sprint.{ref}", "Tell the observer something"
-            ),
-            "</div></article>",
+            '<article class="compact-sprint"><header>',
+            f'<h3><a href="/sprints/{quote(ref)}">{escape(ref)}</a></h3>{_chip(project)}',
+            f'<span class="push">{_waiting_chip(item)}{attention}</span></header>',
+            f'<p class="goal clamp">{escape(str(item.get("goal") or ""))}</p>',
+            _current_card_box(item),
+            f'<div class="heads-line">{heads}</div>' if heads else "",
+            _budget_line(budget) if budget else "",
+            "</article>",
         ]
     )
+
+
+#: The tone a gate state reads in, beside its own word.
+GATE_TONES: dict[str, str] = {"green": "ok", "red": "bad", "pending": "warn", "running": "accent"}
+
+
+def _current_card_box(item: dict[str, Any]) -> str:
+    """The card a sprint is on: where it stands, whether its gate passed, and what it is called."""
+    current = item.get("current_task") if isinstance(item.get("current_task"), dict) else {}
+    if isinstance(item.get("current_task"), str) and item.get("current_task"):
+        current = {"ref": item["current_task"], "live": None}
+    ref = str(current.get("ref") or "")
+    if not ref:
+        said = str(current.get("reason") or "the observer has cut no card for this sprint yet")
+        return f'<div class="card-box"><span class="empty">{escape(said)}</span></div>'
+    standing = item.get("current_card_state") if isinstance(item.get("current_card_state"), dict) else {}
+    checks = item.get("checks") if isinstance(item.get("checks"), dict) else {}
+    gate = checks.get("gate") if isinstance(checks.get("gate"), dict) else {}
+    gate_state = str(gate.get("state") or "")
+    gate_chip = (
+        f'<span title="{escape(str(checks.get("reason") or ""))}">{_chip("CI " + gate_state, GATE_TONES.get(gate_state, ""))}</span>'
+        if gate_state
+        else ""
+    )
+    title = str(standing.get("title") or "")
+    return (
+        f'<div class="card-box"><div class="card-line">{_card_standing(item)}{gate_chip}'
+        f'<span class="push">{_link(ref)}</span></div>'
+        + (f'<div class="card-title">{escape(title)}</div>' if title else "")
+        + "</div>"
+    )
+
+
+def _sprint_heads(item: dict[str, Any], *, compact: bool = False) -> str:
+    """The heads a sprint runs on -- observer, worker, reviewer -- each with its model and effort.
+
+    They are the read layer's `head_profiles`, joined against the registry there and not here. A
+    role that section leaves unset (a worker or reviewer the dispatcher picks per card) is not drawn:
+    its model is a card's fact, on the card page, and not one of the sprint's.
+    """
+    heads = _heads_of(item)
+    drawn = [
+        _head(role, heads[role], compact=compact)
+        for role in ("observer", "worker", "reviewer")
+        if role in heads
+    ]
+    if not drawn:
+        return ""
+    return "".join(drawn) if compact else f'<div class="heads">{"".join(drawn)}</div>'
+
+
+def _heads_of(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Each role's profile with its model and effort, and for the observer whether it is up.
+
+    Whether the observer is up is the launch's to say, laid over the profile, never the reverse.
+    """
+    profiles = item.get("head_profiles") if isinstance(item.get("head_profiles"), dict) else {}
+    heads = {
+        role: dict(profiles[role])
+        for role in ("observer", "worker", "reviewer")
+        if isinstance(profiles.get(role), dict) and profiles[role].get("profile")
+    }
+    observer = item.get("observer") if isinstance(item.get("observer"), dict) else {}
+    launch = observer.get("launch") if isinstance(observer.get("launch"), dict) else {}
+    if "observer" in heads and launch.get("state"):
+        heads["observer"]["state"] = launch["state"]
+    return heads
 
 
 def _sprint_status_chip(item: dict[str, Any]) -> str:
@@ -1182,91 +1297,6 @@ def _waiting_chip(item: dict[str, Any]) -> str:
     )
 
 
-def _sprint_work(item: dict[str, Any]) -> str:
-    """What a sprint is doing right now, from the sections the listing and the page both carry."""
-    rows: list[list[str]] = []
-    current = item.get("current_task") if isinstance(item.get("current_task"), dict) else {}
-    if isinstance(item.get("current_task"), str) and item.get("current_task"):
-        # The sprint row's own spelling: the reference alone, before the work read says more.
-        current = {"ref": item["current_task"], "live": None}
-    if current.get("ref"):
-        live = "" if current.get("live") is None else (" (live)" if current.get("live") else " (not live)")
-        rows.append(
-            ["current card", f'{_link(str(current["ref"]))}<span class="muted">{escape(live)}</span>']
-        )
-    elif current:
-        rows.append(
-            ["current card", f'<span class="empty">{escape(str(current.get("reason") or "none"))}</span>']
-        )
-    standing = _card_standing(item)
-    if standing:
-        rows.append(["card state", standing])
-    observer = item.get("observer") if isinstance(item.get("observer"), dict) else {}
-    launch = observer.get("launch") or {}
-    if launch:
-        state = str(launch.get("state") or "")
-        words = LAUNCH_WORDS.get(state, state or "unknown")
-        rows.append(
-            [
-                "observer",
-                f'{_or_dash((observer.get("declared") or {}).get("profile"))} — <span class="state state-{escape(state)}">{escape(words)}</span>',
-            ]
-        )
-    waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
-    if waiting:
-        rows.append(
-            [
-                "observer is",
-                f'<b>{escape(str(waiting.get("state") or "unknown"))}</b> <span class="reason">{escape(_short(waiting.get("reason"), 140))}</span>',
-            ]
-        )
-    checks = item.get("checks") if isinstance(item.get("checks"), dict) else {}
-    if checks:
-        gate = checks.get("gate") if isinstance(checks.get("gate"), dict) else {}
-        rows.append(
-            [
-                "checks",
-                f'<b>{escape(str(gate.get("state") or "—"))}</b> <span class="reason">{escape(_short(checks.get("reason"), 140))}</span>',
-            ]
-        )
-    budget = item.get("budget") if isinstance(item.get("budget"), dict) else {}
-    if budget:
-        rows.append(["budget", _budget(budget)])
-    cards = item.get("cards") if isinstance(item.get("cards"), dict) else {}
-    states = cards.get("states") if isinstance(cards.get("states"), dict) else {}
-    if states:
-        rows.append(
-            [
-                "cards",
-                " · ".join(
-                    f"{_state_chip(state)} " + ", ".join(_link(str(ref)) for ref in refs)
-                    for state, refs in sorted(states.items())
-                    if isinstance(refs, list) and refs
-                ),
-            ]
-        )
-    decision = item.get("decision") if isinstance(item.get("decision"), dict) else {}
-    entry = decision.get("entry") if isinstance(decision.get("entry"), dict) else {}
-    if entry:
-        freshness = (decision.get("freshness") or {}).get("value") or {}
-        stale = (
-            ""
-            if freshness.get("fresh", True)
-            else f' <span class="muted">(stale: {escape(str(freshness.get("error") or ""))})</span>'
-        )
-        rows.append(
-            [
-                "last decision",
-                f'{_long(entry.get("selected_step"), chars=140)}{stale}<div class="reason">{_long(entry.get("selected_why"), chars=140)}</div>',
-            ]
-        )
-        if entry.get("next_safe_step"):
-            rows.append(["next step", _long(entry.get("next_safe_step"), chars=140)])
-    if not rows:
-        return '<p class="empty">nothing about this sprint\'s work could be read.</p>'
-    return _rows(["", ""], rows)
-
-
 #: Said where a duration would be when the committed audit dates no transition of the current card.
 #: Words, and never a zero age: "0s" beside a board state reads as a card that moved as the page was
 #: drawn, which is the opposite of a card nothing has moved at all.
@@ -1276,8 +1306,8 @@ NO_TRANSITION_RECORDED = "no transition recorded"
 def _card_standing(item: dict[str, Any]) -> str:
     """Where a sprint's current card stands and how long it has stood there, drawn once.
 
-    Both surfaces that show it -- the row of `/sprints` and the work panel of `/sprints/{ref}` --
-    are this one function, so they cannot say it differently. The wording follows `_reset`: the
+    Every surface that shows it -- the row of `/sprints`, the dashboard's sprint card and the
+    "Now" panel of `/sprints/{ref}` -- is this one function, so they cannot say it differently. The wording follows `_reset`: the
     duration is what a reader wants in the text, and the exact ISO moment is the hover title of the
     element carrying it. An answer with no moment carries no title at all rather than a misleading
     one, and a sprint that has ended carries no duration at all: its card is where the sprint
@@ -1320,6 +1350,32 @@ def _budget(budget: dict[str, Any]) -> str:
         f'<span class="budget {colour}"><i style="width:{ratio * 100:.0f}%"></i></span> '
         f"{total} of {hard} (signal at {signal})"
         + (f' <span class="muted">— {spent}</span>' if spent else "")
+    )
+
+
+def _budget_line(budget: dict[str, Any]) -> str:
+    """The card budget as a thin secondary line: how much of it is spent, and where the signal is.
+
+    It is a spend, not progress -- a sprint that is going in circles fills it faster than one that
+    is going well -- so it is drawn small and quiet, under whatever says how far the work got.
+    """
+    total = int(budget.get("total") or 0)
+    thresholds = budget.get("thresholds") or {}
+    hard = int(thresholds.get("hard") or 0)
+    signal = int(thresholds.get("signal") or 0)
+    ratio = min(1.0, total / hard) if hard else 0.0
+    colour = "hard" if budget.get("hard_reached") else ("signal" if budget.get("signal_reached") else "")
+    mark = f'<i class="mark" style="left:{signal / hard * 100:.0f}%"></i>' if hard and signal else ""
+    by_type = budget.get("by_type") or {}
+    spent = ", ".join(
+        f"{escape(str(kind))} {escape(str(count))}" for kind, count in sorted(by_type.items()) if count
+    )
+    words = f"{total} / {hard} cards · signal {signal}" + (f" · {spent}" if spent else "")
+    return (
+        f'<div class="budget-line {colour}" title="card budget: a spend, not progress">'
+        '<span class="label">budget</span>'
+        f'<span class="track"><i class="fill" style="width:{ratio * 100:.1f}%"></i>{mark}</span>'
+        f'<span class="mono">{words}</span></div>'
     )
 
 
@@ -1398,9 +1454,7 @@ def doctor(section: dict[str, Any] | None) -> str:
     which is said as itself, with the reason, rather than drawn as an empty list. An unreadable
     installation showing "nothing is wrong" is the one failure this page exists to prevent.
     """
-    document = (
-        section.get("document") if isinstance(section, dict) and section.get("available") else None
-    )
+    document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     if not isinstance(document, dict):
         reason = (
             str(section.get("reason") or "installation health was not read")
@@ -1423,7 +1477,7 @@ def doctor(section: dict[str, Any] | None) -> str:
     if not document.get("readable"):
         parts.append(
             '<p class="unavailable"><b>this installation\'s health could not be read.</b> '
-            f'{escape(str(document.get("reason") or "no reason was recorded"))}<br>'
+            f"{escape(str(document.get('reason') or 'no reason was recorded'))}<br>"
             "An unread installation is not a healthy one, so this is red and not green.</p>"
         )
     if isinstance(document.get("source"), dict):
@@ -1467,7 +1521,7 @@ def _doctor_list(problems: list[dict[str, Any]]) -> str:
     """One problem per line: the code it is known by, then the sentence a person reads."""
     rows = [
         [
-            f'<code>{escape(str(problem.get("code") or "—"))}</code>',
+            f"<code>{escape(str(problem.get('code') or '—'))}</code>",
             escape(str(problem.get("message") or "")),
         ]
         for problem in problems
@@ -1770,22 +1824,6 @@ def _task_table(items: list[dict[str, Any]]) -> str:
     )
 
 
-def _agent_table(items: list[dict[str, Any]], *, with_ref: bool) -> str:
-    headers = (["card", "project"] if with_ref else []) + ["role", "state", "head"]
-    rows = []
-    for item in items:
-        row = []
-        if with_ref:
-            row += [_link(str(item.get("ref") or "")), _or_dash(item.get("project"))]
-        row += [
-            escape(str(item.get("role") or "")),
-            _state_cell(str(item.get("state") or "unknown"), str(item.get("reason") or "")),
-            _or_dash(item.get("head")),
-        ]
-        rows.append(row)
-    return _rows(headers, rows)
-
-
 def _start_form(projects: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> str:
     if not projects:
         return '<p class="empty">no registered project, so there is nothing to start a run in.</p>'
@@ -1817,82 +1855,78 @@ def _start_form(projects: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> 
 
 
 def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
-    """Criterion 3: state, recent events, the worker's and reviewer's output, and the result."""
+    """Criterion 3: state, recent events, the worker's and reviewer's output, and the result.
+
+    The card is read as a task first: its title is the heading and its full text -- what the
+    observer asked for -- is the first tab, because that is what nobody could see before. Each fact
+    is drawn once: the chips under the title are the card's state, and the side panel carries only
+    what they do not.
+    """
     ref = str(snapshot.get("ref") or "")
     card = snapshot.get("card") or {}
     value = card.get("value") or {}
     project = snapshot.get("project") or {}
     events = snapshot.get("events") or {}
     agents = snapshot.get("agents") or {}
-    agent_items = list(agents.get("items") or [])
-    heads = snapshot.get("heads") or {}
-    head_items = [item for item in heads.get("items") or [] if isinstance(item, dict)]
     chips = [_state_chip(value.get("state"))] if value else []
     if project.get("id") or value.get("project"):
         chips.append(_chip(str(project.get("id") or value.get("project"))))
-    if value.get("claimed_by"):
-        chips.append(_chip(f"claimed by {value.get('claimed_by')}", "accent"))
+    routing = value.get("routing") if isinstance(value.get("routing"), dict) else {}
+    kind = " · ".join(str(part) for part in (value.get("type"), routing.get("complexity")) if part)
+    if kind:
+        chips.append(_chip(kind))
     event_items = list(events.get("items") or [])
+    sprint_ref = str(value.get("sprint") or "")
+    crumbs: tuple[tuple[str, str], ...] = ((ref, ""),)
+    if sprint_ref:
+        crumbs = ((sprint_ref, f"/sprints/{quote(sprint_ref)}"), (ref, ""))
+    title = str(value.get("title") or "")
     body = "\n".join(
         [
             '<div class="hero">',
-            f"<h1>{escape(ref)}</h1>",
-            f'<div class="chips">{"".join(chips)}</div>',
+            f"<h1>{escape(title)}</h1>" if title else f"<h1>{escape(ref)}</h1>",
             f'<span class="age" style="margin-left:auto">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span>',
-            (f'<p class="title">{escape(_short(value.get("title"), 160))}</p>' if value.get("title") else ""),
+            f'<div class="chips">{"".join(chips)}</div>',
             "</div>",
+            _source_block(card.get("source"), what="what this card is"),
             '<div class="grid">',
             '<div class="col">',
-            _panel(
-                "Transitions",
-                _source_block(events.get("source"), what="this card's history") + _timeline(event_items),
+            '<section class="panel">',
+            _tabs(
+                f"card-{ref}",
+                [
+                    ("Task", _task_text(card.get("value")), None),
+                    ("Work", _work(snapshot.get("work") or {}), None),
+                    (
+                        "Timeline",
+                        _source_block(events.get("source"), what="this card's history")
+                        + _timeline(event_items),
+                        None,
+                    ),
+                    (
+                        "Raw events",
+                        _events(event_items) + '<p id="events-notice"></p>',
+                        len(event_items) or None,
+                    ),
+                ],
             ),
-            _panel("Work", _work(snapshot.get("work") or {})),
-            _panel(
-                "Every event",
-                _events(event_items) + '<p id="events-notice"></p>',
-                count=len(event_items) or None,
-                open_=False,
-            ),
+            "</section>",
             "</div>",
             '<div class="col">',
+            _panel("Heads", _card_heads_panel(ref, snapshot.get("heads") or {}, agents)),
             _panel(
                 "Card",
-                _source_block(card.get("source"), what="what this card is")
-                + _card(card.get("value"), project),
+                _card(card.get("value"), project) + _attempt(snapshot.get("attempt") or {}),
             ),
             _panel(
-                "Agents",
-                _section(
-                    agents.get("source"),
-                    agent_items,
-                    what="which agents are working this card",
-                    empty="the dispatcher holds no head for this card.",
-                    table=_agent_table(agent_items, with_ref=False),
-                ),
-                count=len(agent_items) or None,
-            ),
-            _panel(
-                "Heads",
-                _section(
-                    heads.get("source"),
-                    head_items,
-                    what="which heads this card has run",
-                    empty="this card has run no head yet.",
-                    table=_head_table(ref, head_items),
-                ),
-                count=len(head_items) or None,
-            ),
-            _panel(
-                "Owner's actions",
+                "Tell the head working this card",
                 _comment_form(
                     f"/api/tasks/{quote(ref)}/comment",
                     f"card.{ref}",
-                    "Tell the head working this card something",
+                    "A comment the head reads on its next turn",
                 )
-                + _move_form(ref),
+                + f'<details class="more-actions"><summary>Move this card…</summary>{_move_form(ref)}</details>',
             ),
-            _panel("Attempt", _attempt(snapshot.get("attempt") or {}), open_=False),
             _panel("Product runs", _runs(ref, runs), open_=False),
             "</div></div>",
         ]
@@ -1903,32 +1937,117 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
         f"Card {ref}",
         body,
         script=script + _ACTIONS_SCRIPT,
-        nav="dashboard",
-        crumbs=((ref, ""),),
+        nav="sprints" if sprint_ref else "dashboard",
+        crumbs=crumbs,
     )
 
 
-def _head_table(ref: str, items: list[dict[str, Any]]) -> str:
-    """The card's heads: role, run id, state, and a link to the view of each local-pty one."""
-    rows = []
-    for item in items:
-        run_id = str(item.get("run_id") or "")
-        if item.get("local_pty"):
-            run = f'<a class="ref" href="{escape(_head_href(ref, run_id))}">{escape(run_id)}</a>'
-        else:
-            run = f"<code>{escape(run_id)}</code>"
-        role = escape(str(item.get("role") or ""))
-        if item.get("current"):
-            role += ' <span class="age">(current)</span>'
-        rows.append(
-            [
-                role,
-                run,
-                _state_cell(str(item.get("state") or "unknown"), str(item.get("reason") or "")),
-                _or_dash(item.get("head")),
-            ]
-        )
-    return _rows(["role", "run", "state", "head"], rows)
+def _task_text(card: dict[str, Any] | None) -> str:
+    """The task as the observer wrote it: the card's description, rendered from its Markdown."""
+    if card is None:
+        return '<p class="empty">no card was read, so there is no task to show.</p>'
+    text = str(card.get("description") or "")
+    if not text.strip():
+        return '<p class="empty">this card carries no description beyond its title.</p>'
+    return f'<article class="doc task-text">{markdown.render(text)}</article>'
+
+
+def _card_heads_panel(ref: str, heads: dict[str, Any], agents: dict[str, Any]) -> str:
+    """Every head run the card recorded, by role: the latest run large, the runs before it beneath.
+
+    `heads` is the read layer's one row per run: launch configuration, what the run reported, and
+    whether a local-pty supervisor still holds it. `agents` is the dispatcher's view of the process
+    behind the current run of each role, joined by run id (by role when the run is not named), and
+    it decides the pulse: a run the dispatcher no longer holds is drawn from what its row says.
+    """
+    runs = [item for item in heads.get("items") or [] if isinstance(item, dict)]
+    live = {
+        str(item.get("run_id") or item.get("role") or ""): item
+        for item in agents.get("items") or []
+        if isinstance(item, dict)
+    }
+    by_role: dict[str, list[dict[str, Any]]] = {}
+    for item in runs:
+        by_role.setdefault(str(item.get("role") or "head"), []).append(item)
+    known = {str(item.get("run_id") or "") for item in runs}
+    for key, item in live.items():
+        # A process the dispatcher holds under no run the card recorded: drawn from what it says.
+        if key not in known:
+            by_role.setdefault(str(item.get("role") or "head"), []).append(item)
+    parts = [
+        _source_block(heads.get("source"), what="which heads this card has run"),
+        _source_block(agents.get("source"), what="which agents are working this card"),
+    ]
+    if not by_role:
+        if (heads.get("source") or {}).get("state") == "available":
+            parts.append('<p class="empty">this card has run no head yet.</p>')
+        return "\n".join(part for part in parts if part)
+    drawn = []
+    for role in sorted(by_role, key=lambda role: ROLE_ORDER.get(role, len(ROLE_ORDER))):
+        *earlier, latest = by_role[role]
+        process = live.get(str(latest.get("run_id") or ""))
+        if process is None and latest.get("current"):
+            process = live.get(role)
+        # The process decides the pulse; the run's own reason (a legacy runtime, a lock that could
+        # not be read) stays beside it, because it is what the run said and the process cannot.
+        row = {**latest, "state": process.get("state") if process else latest.get("state")}
+        if process and process.get("reason"):
+            row["process_reason"] = process["reason"]
+        drawn.append(_head(role, row) + _head_facts(ref, row))
+        if earlier:
+            drawn.append(
+                '<ul class="head-runs">'
+                + "".join(f"<li>{_head_run(ref, run)}</li>" for run in reversed(earlier))
+                + "</ul>"
+            )
+    parts.append('<div class="heads stacked">' + "".join(drawn) + "</div>")
+    return "\n".join(part for part in parts if part)
+
+
+#: Roles in the order a card page lists them; a role not here comes after.
+ROLE_ORDER = {"worker": 0, "reviewer": 1}
+
+
+def _head_facts(ref: str, item: dict[str, Any]) -> str:
+    """The line under a head: the exact model id, the profile, the run, and why its state is what it is."""
+    facts = []
+    if item.get("resolved_model"):
+        facts.append(f'<span class="ref">{escape(str(item["resolved_model"]))}</span>')
+    if item.get("head"):
+        facts.append(f'profile <span class="ref">{escape(str(item["head"]))}</span>')
+    if item.get("run_id"):
+        facts.append(_head_run_ref(ref, item))
+    reasons = [str(item.get(key) or "") for key in ("process_reason", "reason")]
+    return (
+        f'<div class="head-facts">{" · ".join(facts)}'
+        + "".join(f'<div class="reason">{escape(reason)}</div>' for reason in reasons if reason)
+        + "</div>"
+    )
+
+
+def _head_run(ref: str, run: dict[str, Any]) -> str:
+    """An earlier run of a role, one line: the model it ran on, its effort, the run and its state."""
+    name, said = _head_model(run)
+    attempt = run.get("attempt")
+    parts = [
+        f'<span title="{escape(said)}">{escape(name)}</span>',
+        f'<span class="effort-cell">{_effort(_head_effort(run))}</span>',
+        _head_run_ref(ref, run),
+    ]
+    if isinstance(attempt, int):
+        parts.insert(0, f'<span class="age">attempt {attempt}</span>')
+    state = str(run.get("state") or "")
+    if state and state != "unknown":
+        parts.append(f'<span class="age">{escape(state)}</span>')
+    return " · ".join(parts)
+
+
+def _head_run_ref(ref: str, run: dict[str, Any]) -> str:
+    """The run id, as a link to its transcript when a local-pty supervisor kept one."""
+    run_id = str(run.get("run_id") or "")
+    if run.get("local_pty"):
+        return f'<a class="ref" href="{escape(_head_href(ref, run_id))}">{escape(run_id)}</a>'
+    return f'<span class="ref">{escape(run_id)}</span>'
 
 
 def _head_href(ref: str, run_id: str) -> str:
@@ -2005,12 +2124,14 @@ def _transcript(section: dict[str, Any]) -> str:
     if not section.get("answered"):
         also = f" ({section['also']})" if section.get("also") else ""
         return (
-            "<p class=\"unavailable\"><b>the head's output is not answering:</b> "
+            '<p class="unavailable"><b>the head\'s output is not answering:</b> '
             f"{escape(reason or 'no reason was recorded')}{escape(also)}</p>"
         )
     if section.get("state") == "not_kept":
         return f'<p class="empty">{escape(reason)}</p>'
-    source = "its supervisor, live" if section.get("source") == "supervisor" else "the tail its supervisor kept"
+    source = (
+        "its supervisor, live" if section.get("source") == "supervisor" else "the tail its supervisor kept"
+    )
     shown = f"the last {section.get('bytes') or 0} bytes"
     total = section.get("total_bytes")
     if isinstance(total, int) and not isinstance(total, bool):
@@ -2018,8 +2139,14 @@ def _transcript(section: dict[str, Any]) -> str:
     elif section.get("truncated"):
         shown += " (earlier output was not kept)"
     text = str(section.get("text") or "")
-    output = f'<pre class="transcript">{escape(text)}</pre>' if text else '<p class="empty">the head printed nothing.</p>'
-    return f'<p class="age">from {escape(source)}: {escape(shown)}, as plain text, secrets redacted</p>{output}'
+    output = (
+        f'<pre class="transcript">{escape(text)}</pre>'
+        if text
+        else '<p class="empty">the head printed nothing.</p>'
+    )
+    return (
+        f'<p class="age">from {escape(source)}: {escape(shown)}, as plain text, secrets redacted</p>{output}'
+    )
 
 
 def _head_journal(section: dict[str, Any]) -> str:
@@ -2033,7 +2160,9 @@ def _head_journal(section: dict[str, Any]) -> str:
             f"{escape(str(section.get('reason') or 'no reason was recorded'))}</p>"
         )
     elif section.get("reason"):
-        parts.append(f'<p class="unavailable"><b>the journal answered in part:</b> {escape(str(section["reason"]))}</p>')
+        parts.append(
+            f'<p class="unavailable"><b>the journal answered in part:</b> {escape(str(section["reason"]))}</p>'
+        )
     tail = [record for record in section.get("tail") or [] if isinstance(record, dict)]
     rows = []
     for record in tail:
@@ -2062,19 +2191,21 @@ def _head_journal(section: dict[str, Any]) -> str:
 
 
 def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
+    """What the chips over the title do not say: who claimed it, where it works, when it moved."""
     if card is None:
         return '<p class="empty">no card was read, so there is nothing to show here.</p>'
     registered = "registered" if project.get("registered") else "not registered on this installation"
     rows = [
-        ["title", _or_dash(card.get("title"))],
-        ["state", f'<span class="state">{_or_dash(card.get("state"))}</span>'],
         [
             "project",
             f'{_or_dash(project.get("id") or card.get("project"))} <span class="age">({escape(registered)})</span>',
         ],
         ["claimed by", _or_dash(card.get("claimed_by"))],
+        ["created", _or_dash(card.get("created_at"))],
         ["updated", _or_dash(card.get("updated_at"))],
     ]
+    if card.get("blocked_by"):
+        rows.append(["blocked by", _or_dash(card.get("blocked_by"))])
     return _rows(["", ""], rows)
 
 
@@ -2090,7 +2221,7 @@ def _attempt(attempt: dict[str, Any]) -> str:
         _rows(
             ["", ""],
             [
-                ["state", _or_dash(value.get("state"))],
+                ["dispatcher record", _or_dash(value.get("state"))],
                 [
                     "attempt",
                     f"{_or_dash(value.get('attempt_id'))} (round {_or_dash(value.get('attempt_round'))})",
@@ -2248,15 +2379,151 @@ def _event(item: dict[str, Any]) -> str:
 
 
 def _long(text: Any, *, chars: int = 160) -> str:
-    """Long text folded to its first line, opened on a click. Short text is shown as it is."""
-    value = str(text or "")
-    if not value.strip():
+    """Long text held to two lines, opened in place on a click. Short text is shown as it is.
+
+    The text is in the page exactly once. The fold used to repeat the first line as its summary and
+    then print the whole text again below it, in the code face; a reader saw the opening sentence
+    twice and the prose as if it were a log. Now the one copy is the summary, clamped by the
+    stylesheet until the disclosure opens, so opening it only lets the same block grow.
+    """
+    value = str(text or "").strip()
+    if not value:
         return '<span class="empty">—</span>'
-    first = value.strip().splitlines()[0]
-    if len(value) <= chars and "\n" not in value.strip():
-        return f"<pre>{escape(value)}</pre>"
-    head = first if len(first) <= chars else first[: chars - 1].rstrip() + "…"
-    return f'<details class="text"><summary>{escape(head)}</summary><pre>{escape(value)}</pre></details>'
+    if len(value) <= chars and "\n" not in value:
+        return f'<span class="prose">{escape(value)}</span>'
+    return f'<details class="text"><summary><span class="prose">{escape(value)}</span></summary></details>'
+
+
+def _tabs(name: str, tabs: list[tuple[str, str, Any]]) -> str:
+    """A strip of tabs over panels: `(label, body, count)` each, the first one shown.
+
+    Radios and labels rather than a script: every panel is in the markup, so a search, a reader
+    with scripts off and a test all see what the page holds. `name` keeps two strips on one page
+    apart. A strip holds at most :data:`MAX_TABS` tabs; a longer list is a page to rethink.
+    """
+    if len(tabs) > MAX_TABS:
+        raise ValueError(f"a tab strip holds at most {MAX_TABS} tabs, not {len(tabs)}")
+    radios = "".join(
+        f'<input type="radio" name="tabs-{escape(name)}" id="tab-{escape(name)}-{index}"'
+        f"{' checked' if index == 0 else ''}>"
+        for index in range(len(tabs))
+    )
+    labels = "".join(
+        f'<label for="tab-{escape(name)}-{index}">{escape(label)}'
+        + ("" if count is None else f'<span class="count">{escape(str(count))}</span>')
+        + "</label>"
+        for index, (label, _body, count) in enumerate(tabs)
+    )
+    panels = "".join(f'<section class="tab-panel">{body}</section>' for _label, body, _count in tabs)
+    return f'<div class="tabs">{radios}<div class="tab-bar" role="presentation">{labels}</div>{panels}</div>'
+
+
+#: Effort as a count of lit bars. `extra` is Codex's older spelling of `xhigh`; anything else a
+#: profile says is shown as its own word beside empty bars rather than guessed onto the scale.
+EFFORT_BARS: dict[str, int] = {
+    "minimal": 1,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "xhigh": 4,
+    "extra": 4,
+    "max": 5,
+}
+#: How many bars the scale has.
+EFFORT_SCALE = 5
+#: The efforts that mean "no flag was passed": the CLI's own default decides.
+EFFORT_DEFAULT = {"", "default", "none"}
+
+
+def _model_name(model: Any) -> str:
+    """A model id as people say it: `claude-opus-5-5` is Opus 5.5, `gpt-6-sol` is GPT-6 Sol.
+
+    Only ids of a shape it recognises are renamed, and only by moving their own parts around; an
+    alias (`opus`) or an id of any other shape is returned as it is, because a name made up here
+    would claim a version nobody recorded.
+    """
+    value = str(model or "").strip()
+    claude = re.fullmatch(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?", value)
+    if claude:
+        family, major, minor = claude.groups()
+        return f"{family.title()} {major}{'.' + minor if minor else ''}"
+    gpt = re.fullmatch(r"gpt-(\d+(?:\.\d+)?)(?:-([a-z]+))?", value)
+    if gpt:
+        version, variant = gpt.groups()
+        return f"GPT-{version}{' ' + variant.title() if variant else ''}"
+    return value
+
+
+def _effort(effort: Any) -> str:
+    """The effort as bars and a word. No flag passed is hollow bars and says so, never zero."""
+    word = str(effort or "").strip().lower()
+    if word in EFFORT_DEFAULT:
+        bars = "".join("<i></i>" for _ in range(EFFORT_SCALE))
+        return f'<span class="segs unset" aria-hidden="true">{bars}</span><span>CLI default</span>'
+    lit = EFFORT_BARS.get(word, 0)
+    bars = "".join(f"<i{' class="on"' if index < lit else ''}></i>" for index in range(EFFORT_SCALE))
+    shown = "xhigh" if word == "extra" else word
+    return f'<span class="segs" aria-hidden="true">{bars}</span><span>{escape(shown)}</span>'
+
+
+def _head_model(head: dict[str, Any]) -> tuple[str, str]:
+    """What to call a head's model, and the hover title saying where that name came from."""
+    resolved = str(head.get("resolved_model") or "")
+    configured = str(head.get("model") or "")
+    if resolved:
+        said = f"{resolved} (the model that answered)"
+        if configured and configured != resolved:
+            said += f"; configured as {configured}"
+        return _model_name(resolved), said
+    if configured:
+        return _model_name(configured), f"{configured} (configured; no run has reported its model yet)"
+    return "unknown model", "neither the profile nor a run recorded a model"
+
+
+#: A head's liveness as the pulse beside it: a live process, one that was lost, or neither known.
+PULSE_OF: dict[str, str] = {
+    "running": "live",
+    "live": "live",
+    "process_failed": "lost",
+    "stopped": "lost",
+    "lost": "lost",
+}
+
+
+def _head_effort(head: dict[str, Any]) -> Any:
+    """The effort a run reported, else the one it was configured with -- the same rule as the model."""
+    return head.get("resolved_effort") or head.get("effort")
+
+
+def _head(role: str, head: dict[str, Any] | None, *, compact: bool = False) -> str:
+    """One head: the role, the model that runs it, its effort, and whether its process is alive.
+
+    `head` carries what the read layer says about it -- `profile`, `adapter`, `model`,
+    `resolved_model`, `effort`, `state` -- and nothing here fills a gap: a head with no model is
+    called an unknown model, not the likeliest one.
+    """
+    head = head or {}
+    name, said = _head_model(head)
+    profile = str(head.get("profile") or head.get("head") or "")
+    adapter = str(head.get("adapter") or "")
+    state = str(head.get("state") or "")
+    title = " · ".join(
+        part for part in (profile and f"profile {profile}", said, state and f"state {state}") if part
+    )
+    if compact:
+        return (
+            f'<span class="head-chip" title="{escape(title)}"><span class="role">{escape(role)}</span>'
+            f"<b>{escape(name)}</b>{_effort(_head_effort(head))}</span>"
+        )
+    pulse = PULSE_OF.get(state, "")
+    idle = "" if pulse == "live" else " idle"
+    who = " · ".join(part for part in (role, adapter, "" if pulse else state) if part)
+    return (
+        f'<div class="head{idle}" title="{escape(title)}">'
+        f'<span class="pulse {pulse}" aria-label="{escape(state or "state unknown")}"></span>'
+        f'<span class="who"><span class="role">{escape(who)}</span><span class="model">{escape(name)}</span></span>'
+        f'<span class="effort">{_effort(_head_effort(head))}</span></div>'
+    )
 
 
 #: The event kinds whose `data.body` is a record somebody wrote about the card: what a transition
@@ -2930,7 +3197,13 @@ if (product) { product.addEventListener('change', narrow); narrow(); }
 
 
 def sprint(document: dict[str, Any]) -> str:
-    """One sprint: what it was opened with, what it pinned, and whether its observer is up."""
+    """One sprint: what it is after, the card in hand, who works it, and what the observer decided.
+
+    Each fact is drawn once. The status, the product and whether the observer is working are the
+    header's chips and are not repeated in a panel; the current card is the "Now" panel's and is not
+    listed again among the cards; the resume's decision and next step are the "Observer's call"
+    and the resume tab carries only what that panel does not.
+    """
     ref = str(document.get("ref") or "")
     sprint_section = document.get("sprint") or {}
     value = sprint_section.get("value")
@@ -2956,34 +3229,28 @@ def sprint(document: dict[str, Any]) -> str:
                 else ""
             ),
             "</div>",
+            _source_block(sprint_section.get("source"), what="what this sprint is"),
             '<div class="grid">',
             '<div class="col">',
-            _panel("Work", _sprint_work(work)),
-            _panel(
-                "Definition of done",
-                f"<pre>{escape(str((value or {}).get('definition_of_done') or ''))}</pre>"
-                if value
-                else '<p class="empty">no sprint was read.</p>',
-                open_=False,
-            ),
-            _panel("The observer's last resume", _resume((value or {}).get("resume")), open_=False),
+            _panel("Now", _sprint_now(work, observer)),
+            _panel("Observer's call", _observer_call(work), more=_recorded_at(work)),
+            f'<section class="panel">{_sprint_tabs(ref, value, work)}</section>',
             "</div>",
             '<div class="col">',
+            _panel("Sprint", _sprint_fields(value, observer)),
             _panel(
-                "Sprint",
-                _source_block(sprint_section.get("source"), what="what this sprint is")
-                + _sprint_fields(value),
-            ),
-            _panel(
-                "Observer",
-                _observer_section(observer) + _executor_section((value or {}).get("executors") or {}),
-            ),
-            _panel(
-                "Owner's actions",
+                "Tell the observer",
                 _comment_form(
-                    f"/api/sprints/{quote(ref)}/comment", f"sprint.{ref}", "Tell the observer something"
+                    f"/api/sprints/{quote(ref)}/comment",
+                    f"sprint.{ref}",
+                    "A comment the observer reads on its next wake",
                 )
-                + (_close_form(ref) if is_open else ""),
+                + (
+                    '<details class="more-actions"><summary>More actions</summary>'
+                    f"{_close_form(ref)}</details>"
+                    if is_open
+                    else ""
+                ),
             ),
             "</div></div>",
         ]
@@ -2998,18 +3265,151 @@ def sprint(document: dict[str, Any]) -> str:
     )
 
 
-def _sprint_fields(value: dict[str, Any] | None) -> str:
+def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:
+    """The card in hand, whether its gate passed, what the dispatcher holds, who works it, the spend."""
+    parts = [_current_card_box(work)]
+    tiles = []
+    checks = work.get("checks") if isinstance(work.get("checks"), dict) else {}
+    if checks:
+        gate = checks.get("gate") if isinstance(checks.get("gate"), dict) else {}
+        state = str(gate.get("state") or checks.get("state") or "unknown")
+        tone = GATE_TONES.get(state, "ok" if state == "green" else "warn" if state == "not_green" else "")
+        tiles.append(_tile("CI gate", state.replace("_", " "), str(checks.get("reason") or ""), tone))
+    waiting = work.get("waiting") if isinstance(work.get("waiting"), dict) else {}
+    if waiting:
+        tiles.append(
+            _tile("Observer is", str(waiting.get("state") or "unknown"), str(waiting.get("reason") or ""))
+        )
+    if tiles:
+        parts.append(f'<div class="tiles">{"".join(tiles)}</div>')
+    heads = _sprint_heads({**work, "observer": observer})
+    if heads:
+        parts.append(heads)
+    budget = work.get("budget") if isinstance(work.get("budget"), dict) else {}
+    if budget:
+        parts.append(_budget_line(budget))
+    return "\n".join(parts)
+
+
+def _tile(label: str, value: str, reason: str, tone: str = "") -> str:
+    """One fact in a small box: what it is, its value in a word, and the sentence behind it."""
+    return (
+        f'<div class="tile{" tile-" + tone if tone else ""}"><span class="label">{escape(label)}</span>'
+        f'<b>{escape(value)}</b><span class="reason">{escape(reason)}</span></div>'
+    )
+
+
+def _recorded_at(work: dict[str, Any]) -> str:
+    decision = work.get("decision") if isinstance(work.get("decision"), dict) else {}
+    entry = decision.get("entry") if isinstance(decision.get("entry"), dict) else {}
+    when = str(entry.get("recorded_at") or "")
+    return (
+        f'<span class="age more" title="{escape(when)}">{escape(when[11:19] or when)}</span>' if when else ""
+    )
+
+
+def _observer_call(work: dict[str, Any]) -> str:
+    """The observer's last decision in prose, its reasons one click away, and the next step."""
+    decision = work.get("decision") if isinstance(work.get("decision"), dict) else {}
+    entry = decision.get("entry") if isinstance(decision.get("entry"), dict) else {}
+    if not entry:
+        return '<p class="empty">the observer has recorded no decision for this sprint yet.</p>'
+    freshness = (decision.get("freshness") or {}).get("value") or {}
+    stale = (
+        ""
+        if freshness.get("fresh", True)
+        else f'<p class="reason">stale: {escape(str(freshness.get("error") or ""))}</p>'
+    )
+    reasons = "".join(
+        f'<div class="because"><span class="label">{escape(label)}</span><span class="prose">{escape(str(entry[key]))}</span></div>'
+        for key, label in (("selected_why", "why"), ("rejected_alternatives", "rejected"))
+        if entry.get(key)
+    )
+    rows = [
+        '<div class="call"><span class="label">decision</span><div>'
+        f'<span class="prose">{escape(str(entry.get("selected_step") or ""))}</span>{stale}'
+        + (
+            f'<details class="reasons"><summary>why · rejected alternatives</summary>{reasons}</details>'
+            if reasons
+            else ""
+        )
+        + "</div></div>"
+    ]
+    if entry.get("next_safe_step"):
+        rows.append(
+            f'<div class="call"><span class="label">next step</span><div>{_long(entry.get("next_safe_step"), chars=200)}</div></div>'
+        )
+    return "".join(rows)
+
+
+#: The resume fields the "Observer's call" panel already shows, and so the resume tab leaves out.
+CALL_FIELDS = {"selected_step", "selected_why", "rejected_alternatives", "next_safe_step", "recorded_at"}
+
+
+def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -> str:
+    """What is worth a look but not always: the cards, the Definition of Done, the resume, the issues."""
+    if value is None:
+        return '<div class="body"><p class="empty">no sprint was read, so there is nothing to show here.</p></div>'
+    cards = work.get("cards") if isinstance(work.get("cards"), dict) else {}
+    states = cards.get("states") if isinstance(cards.get("states"), dict) else {}
+    listed = [
+        (state, str(card))
+        for state, refs in sorted(states.items())
+        if isinstance(refs, list)
+        for card in refs
+    ]
+    card_rows = (
+        _rows(["", ""], [[_state_chip(state), _link(card)] for state, card in listed])
+        if listed
+        else '<p class="empty">the observer has cut no card for this sprint yet.</p>'
+    )
+    dod = str(value.get("definition_of_done") or "")
+    dod_body = (
+        f'<div class="doc">{markdown.render(dod)}</div>'
+        if dod.strip()
+        else '<p class="empty">this sprint has no Definition of Done.</p>'
+    )
+    resume = value.get("resume") if isinstance(value.get("resume"), dict) else {}
+    # The call's fields are left out only when the call panel drew them, from the journal's decision.
+    decision = work.get("decision") if isinstance(work.get("decision"), dict) else {}
+    shown = CALL_FIELDS if isinstance(decision.get("entry"), dict) and decision["entry"] else set()
+    kept = {name: text for name, text in resume.items() if name not in shown}
+    resume_body = (
+        _rows(
+            ["", ""],
+            [[escape(str(name).replace("_", " ")), _long(kept[name], chars=300)] for name in sorted(kept)],
+        )
+        if kept
+        else '<p class="empty">the observer has recorded nothing beyond its decision and next step.</p>'
+    )
+    issues = [str(one) for one in value.get("issues") or [] if str(one)]
+    issue_body = (
+        '<ul class="refs">' + "".join(f'<li class="ref">{escape(one)}</li>' for one in issues) + "</ul>"
+        if issues
+        else '<p class="empty">this sprint declares no issue.</p>'
+    )
+    return _tabs(
+        f"sprint-{ref}",
+        [
+            ("Cards", card_rows, len(listed) or None),
+            ("Definition of done", dod_body, None),
+            ("Last resume", resume_body, None),
+            ("Issues", issue_body, len(issues) or None),
+        ],
+    )
+
+
+def _sprint_fields(value: dict[str, Any] | None, observer: dict[str, Any]) -> str:
+    """What the sprint was opened on, and where its observer stands -- the facts no chip carries."""
     if value is None:
         return '<p class="empty">no sprint was read, so there is nothing to show here.</p>'
     return _rows(
         ["", ""],
         [
-            ["reference", f'<span class="ref">{_or_dash(value.get("ref"))}</span>'],
-            ["status", _sprint_status_chip(value)],
-            ["product", _or_dash(value.get("product"))],
-            ["issues", _listed(value.get("issues"), "this sprint declares no issue")],
             ["projects", _listed(value.get("reservations"), "this sprint reserves no project")],
             ["repositories", _listed(value.get("repositories"), "this sprint names no repository")],
+            ["observer", _observer_line(observer)],
+            *_executor_rows(value.get("executors") or {}),
         ],
     )
 
@@ -3021,15 +3421,19 @@ def _listed(values: Any, empty: str) -> str:
     return ", ".join(escape(one) for one in items)
 
 
-def _observer_section(observer: dict[str, Any]) -> str:
-    """The declared observer, and separately whether one is up. Two sources, said apart."""
+def _observer_line(observer: dict[str, Any]) -> str:
+    """The declared observer, and separately whether one is up. Two sources, said apart.
+
+    The head the dispatcher holds is named only when it is not the declared one: the same profile
+    printed three times said nothing the first one had not.
+    """
     declared = observer.get("declared") or {}
     launch = observer.get("launch") or {}
     state = str(launch.get("state") or "")
     words = LAUNCH_WORDS.get(state, "this launch state is one this page does not know")
     profile = declared.get("profile")
     if profile:
-        said = escape(str(profile))
+        said = f'<span class="ref">{escape(str(profile))}</span>'
     elif declared.get("state") == "malformed":
         said = '<span class="empty">this sprint carries an observer value that is not one of the known forms</span>'
     elif (declared.get("value") or {}).get("kind") == "none":
@@ -3037,25 +3441,27 @@ def _observer_section(observer: dict[str, Any]) -> str:
     else:
         said = '<span class="empty">the row of this sprint carries no observer field</span>'
     record = launch.get("record") or {}
-    rows = [
-        ["declared observer", said],
-        [
-            "state",
-            (
-                f'<span class="launch state state-{escape(state)}">{escape(words)}</span>'
-                f'<div class="reason">{escape(str(launch.get("reason") or "no reason was recorded"))}</div>'
-            ),
-        ],
-    ]
-    if record:
-        rows.append(["the head the dispatcher holds", _or_dash(record.get("head"))])
-        rows.append(["its heartbeat", _or_dash(record.get("heartbeat_state"))])
-    return _source_block(launch.get("source"), what="whether this sprint's observer is up") + _rows(
-        ["", ""], rows
+    held = str(record.get("head") or "")
+    differs = (
+        f'<div class="reason">the dispatcher holds <span class="ref">{escape(held)}</span>, not the declared head</div>'
+        if held and profile and held != str(profile)
+        else ""
+    )
+    heartbeat = (
+        f'<div class="reason">heartbeat {escape(str(record.get("heartbeat_state")))}</div>'
+        if record.get("heartbeat_state")
+        else ""
+    )
+    return (
+        _source_block(launch.get("source"), what="whether this sprint's observer is up")
+        + f'{said} <span class="launch state state-{escape(state)}" title="{escape(words)}">{escape(words.split(" — ")[0])}</span>'
+        + f'<div class="reason">{escape(str(launch.get("reason") or "no reason was recorded"))}</div>'
+        + differs
+        + heartbeat
     )
 
 
-def _executor_section(executors: dict[str, Any]) -> str:
+def _executor_rows(executors: dict[str, Any]) -> list[list[str]]:
     """Both roles, always, and each in the state it is really in.
 
     A role nobody pinned is not a blank cell: it is the observer's to choose, which is a decision
@@ -3072,21 +3478,7 @@ def _executor_section(executors: dict[str, Any]) -> str:
         else:
             said = escape(EXECUTOR_CHOICE)
         rows.append([escape(role), said])
-    return _rows(["role", "which head runs it"], rows)
-
-
-def _current_task(value: dict[str, Any] | None) -> str:
-    current = (value or {}).get("current_task")
-    if not current:
-        return '<p class="empty">the observer has cut no card for this sprint yet.</p>'
-    return f"<p>{_link(str(current))}</p>"
-
-
-def _resume(resume: Any) -> str:
-    if not isinstance(resume, dict) or not resume:
-        return '<p class="empty">the observer has recorded no resume for this sprint yet.</p>'
-    rows = [[escape(str(name).replace("_", " ")), _long(resume[name], chars=200)] for name in sorted(resume)]
-    return _rows(["", ""], rows)
+    return rows
 
 
 # -- the PO head ----------------------------------------------------------------------------------
@@ -3110,11 +3502,9 @@ def _po_indicator(section: dict[str, Any] | None) -> str:
     if section is None:
         return ""
     if not section.get("available"):
-        body = '<a href="/po">PO head</a> <span class="empty">— running turns could not be counted</span>'
-    else:
-        count = int((section.get("document") or {}).get("running") or 0)
-        body = f'<a href="/po" id="po-indicator">{count} PO turn{"" if count == 1 else "s"} running</a>'
-    return _panel("Product owner", body)
+        return '<span class="facts"><a href="/po">PO head</a> <span class="empty">— running turns could not be counted</span></span>'
+    count = int((section.get("document") or {}).get("running") or 0)
+    return f'<span class="facts"><a href="/po" id="po-indicator">{count} PO turn{"" if count == 1 else "s"} running</a></span>'
 
 
 def po_login(message: str) -> str:
@@ -3183,8 +3573,8 @@ def po_page(
                 f"{_po_first_message(item.get('first_message'))}</a>"
             ),
             _or_dash(item.get("last_activity_at")),
-            _or_dash(item.get("cli")),
-            _or_dash(item.get("model")),
+            _po_model_cell(item),
+            f'<span class="effort-cell">{_effort(item.get("effort"))}</span>',
         ]
         if closed:
             row.append(_or_dash(item.get("closed_at")))
@@ -3198,12 +3588,12 @@ def po_page(
             row.append(_po_close_form(session_id))
         rows.append(row)
     if closed:
-        headers = ["session", "last activity", "cli", "model", "closed at", "id"]
+        headers = ["session", "last activity", "model", "effort", "closed at", "id"]
         empty = '<p class="empty">no closed PO session</p>'
         title = "Closed sessions"
         more = '<a class="more" href="/po">open sessions</a>'
     else:
-        headers = ["session", "last activity", "cli", "model", "state", "turn", "id", ""]
+        headers = ["session", "last activity", "model", "effort", "state", "turn", "id", ""]
         empty = '<p class="empty">no PO session yet</p>'
         title = "Sessions"
         more = (
@@ -3221,7 +3611,12 @@ def po_page(
             _panel(title, table, count=len(sessions) if sessions else None, more=more),
             "</div>",
             '<div class="col">',
-            _panel("New session", _po_new_session_form(models, request_id=request_id, submitted=submitted)),
+            _panel(
+                "New session",
+                _po_new_session_form(
+                    models, overview.get("efforts") or {}, request_id=request_id, submitted=submitted
+                ),
+            ),
             "</div></div>",
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
@@ -3238,10 +3633,10 @@ def _po_close_form(session_id: str) -> str:
 
 
 def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str:
-    """Open another session from the one being read, with this session's CLI and model.
+    """Open another session from the one being read, with this session's CLI, model and effort.
 
-    It is the `/po` form's own route and its own three fields (`POST /po/sessions` with a request id,
-    a CLI and a model), reduced to hidden inputs: there is no second way of creating a session, and
+    It is the `/po` form's own route and its own fields (`POST /po/sessions` with a request id, a CLI,
+    a model and an effort), reduced to hidden inputs: there is no second way of creating a session, and
     nothing about the session being read changes. The pair is copied from that session because it is
     the pair the owner chose; an installation that no longer offers it refuses the create the way the
     `/po` form's does, on `/po`, with the list of what it does offer to pick from.
@@ -3258,6 +3653,7 @@ def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str
         f'<input type="hidden" name="request_id" value="{escape(request_id)}-new-session">'
         f'<input type="hidden" name="cli" value="{escape(cli)}">'
         f'<input type="hidden" name="model" value="{escape(model)}">'
+        f'<input type="hidden" name="effort" value="{escape(str(session.get("effort") or "default"))}">'
         '<button class="quiet" type="submit">new session</button></form>'
     )
 
@@ -3276,12 +3672,37 @@ def _po_first_message(text: Any) -> str:
     return escape(words)
 
 
-def _po_new_session_form(models: dict[str, Any], *, request_id: str, submitted: dict[str, Any]) -> str:
+def _po_head(session: dict[str, Any]) -> dict[str, Any]:
+    """A PO session as a head: the model its last turn reported, else the one it was opened with."""
+    return {
+        "model": session.get("model"),
+        "resolved_model": session.get("resolved_model"),
+        "effort": session.get("effort"),
+    }
+
+
+def _po_model_cell(item: dict[str, Any]) -> str:
+    """The model a session runs, as people say it, with the CLI and the exact id under it."""
+    name, said = _head_model(_po_head(item))
+    return (
+        f'<span title="{escape(said)}"><b>{escape(name)}</b>'
+        f'<div class="age">{escape(str(item.get("cli") or ""))} · {escape(str(item.get("resolved_model") or item.get("model") or ""))}</div></span>'
+    )
+
+
+def _po_new_session_form(
+    models: dict[str, Any],
+    efforts: dict[str, Any] | None = None,
+    *,
+    request_id: str,
+    submitted: dict[str, Any],
+) -> str:
     offered = [(cli, list(values or [])) for cli, values in models.items() if values]
     if not offered:
         return '<p class="empty">this installation offers no model for a PO session</p>'
     chosen_cli = str(submitted.get("cli") or offered[0][0])
     chosen_model = str(submitted.get("model") or "")
+    chosen_effort = str(submitted.get("effort") or "default")
     listed = dict(offered).get(chosen_cli) or []
     if chosen_model not in listed and listed:
         # The first model a CLI lists is its preselected one; the script does the same on a CLI change.
@@ -3300,12 +3721,28 @@ def _po_new_session_form(models: dict[str, Any], *, request_id: str, submitted: 
         + "</optgroup>"
         for cli, values in offered
     )
+    # `default` passes no effort flag, so the CLI decides; it is offered whatever the list says.
+    effort_groups = "".join(
+        f'<optgroup label="{escape(cli)}">'
+        + "".join(
+            f'<option value="{escape(effort)}" data-cli="{escape(cli)}"'
+            f"{_selected(cli == chosen_cli and effort == chosen_effort)}>"
+            f"{escape('CLI default' if effort == 'default' else effort)}</option>"
+            for effort in [
+                "default",
+                *[str(value) for value in (efforts or {}).get(cli) or [] if str(value) != "default"],
+            ]
+        )
+        + "</optgroup>"
+        for cli, _ in offered
+    )
     return "\n".join(
         [
             '<form class="sprint" id="po-new" method="post" action="/po/sessions">',
             f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
             f'<div class="field"><label for="po-cli">CLI</label> <select id="po-cli" name="cli">{cli_options}</select></div>',
             f'<div class="field"><label for="po-model">model</label> <select id="po-model" name="model">{groups}</select></div>',
+            f'<div class="field"><label for="po-effort">reasoning effort</label> <select id="po-effort" name="effort">{effort_groups}</select></div>',
             '<button type="submit">new session</button>',
             "</form>",
         ]
@@ -3376,18 +3813,15 @@ def po_session(
         ]
     )
     head = " · ".join(
-        escape(str(value))
-        for value in (
-            session.get("cli"),
-            session.get("model"),
-            session.get("created_at"),
-            session.get("state"),
-        )
-        if value
+        escape(str(value)) for value in (session.get("created_at"), session.get("state")) if value
     )
     body = "\n".join(
         [
-            f'<div class="lead"><h1>PO session {escape(session_id[:8])}</h1><span class="age">{head}</span></div>',
+            (
+                f'<div class="lead"><h1>PO session {escape(session_id[:8])}</h1>'
+                f"{_head('PO · ' + str(session.get('cli') or ''), _po_head(session), compact=True)}"
+                f'<span class="age">{head}</span></div>'
+            ),
             _po_refusal(refusal, refused),
             (
                 f'<p class="po-closed">closed {escape(str(session.get("closed_at") or ""))} '
@@ -3395,7 +3829,9 @@ def po_session(
                 if closed
                 else ""
             ),
-            controls if closed else _panel("Send", message + controls + '<p class="feedback" id="po-status"></p>'),
+            controls
+            if closed
+            else _panel("Send", message + controls + '<p class="feedback" id="po-status"></p>'),
             _panel("Feed", feed, more='<a class="more" href="/po">all sessions</a>'),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
@@ -3441,7 +3877,7 @@ def _po_turn_mark(turn: dict[str, Any]) -> str:
 
 
 _PO_FORM_SCRIPT = """
-// Narrow the model select to the chosen CLI. Without this every model stays listed and the server
+// Narrow the model and effort selects to the chosen CLI. Without this every model stays listed and the server
 // still refuses a pair it does not offer.
 const cli = document.getElementById('po-cli');
 const model = document.getElementById('po-model');
@@ -3455,6 +3891,19 @@ function narrowModels() {
     if (owned && first === null) first = option;
   }
   const current = model.selectedOptions[0];
+  if ((!current || current.disabled) && first) first.selected = true;
+  narrow(document.getElementById('po-effort'));
+}
+function narrow(select) {
+  if (!cli || !select) return;
+  let first = null;
+  for (const option of select.querySelectorAll('option')) {
+    const owned = option.dataset.cli === cli.value;
+    option.hidden = !owned;
+    option.disabled = !owned;
+    if (owned && first === null) first = option;
+  }
+  const current = select.selectedOptions[0];
   if ((!current || current.disabled) && first) first.selected = true;
 }
 if (cli) { cli.addEventListener('change', narrowModels); narrowModels(); }

@@ -386,7 +386,8 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn('data-action="/api/pause/drain"', page)
         self.assertIn("sprint:7", page)
         self.assertIn("attention required", page)
-        self.assertIn("Usage limits", page)
+        # Usage windows are the bottom bar's alone: the dashboard draws no second copy of them.
+        self.assertNotIn("Usage limits", page)
         # The chat placeholder became the PO indicator (secretary-1631); an app built without the PO
         # layers draws no PO panel at all.
         self.assertNotIn("Chat — coming later", page)
@@ -661,11 +662,102 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("worker report:done", page)
         self.assertIn("worker report", page)
         self.assertIn("report:done", page)
-        # The long body is folded to its first line and opened on a click, never cut.
-        self.assertIn('<details class="text"><summary>Done the thing.', page)
+        # The long body is held to two lines and opened in place, never cut and never printed twice.
+        self.assertIn('<details class="text"><summary><span class="prose">Done the thing.', page)
+        self.assertNotIn("<pre>Done the thing.", page)
         self.assertIn("Details follow", page)
         # The card page asks for the whole timeline, not the API's short tail.
         self.assertEqual(self.reads.calls[-1][1]["events"], 200)
+
+    def card_page(self, value: dict, agents: list | None = None, heads: list | None = None) -> str:
+        self.reads = Recording(
+            task_snapshot={
+                "ref": "secretary-9",
+                "observed_at": "2026-09-13T12:40:00Z",
+                "card": {"source": available(), "value": value},
+                "project": {"id": "secretary", "registered": True},
+                "attempt": {},
+                "agents": {"source": available(), "items": agents or []},
+                "heads": {"source": available(), "items": heads or []},
+                "work": {},
+                "events": {"source": available(), "items": [], "next_cursor": "c"},
+            }
+        )
+        return self.text(self.get("/tasks/secretary-9"))
+
+    def test_the_card_page_opens_on_the_whole_task_rendered_from_its_markdown(self) -> None:
+        page = self.card_page(
+            {
+                "title": "Guard escalation on QA routing",
+                "state": "in_progress",
+                "project": "secretary",
+                "sprint": "sprint:7",
+                "description": "# Goal\n\nMake it wait.\n\n# Acceptance criteria\n\n- a `service` test\n- no new loop",
+            }
+        )
+        self.assertIn("<h1>Guard escalation on QA routing</h1>", page)
+        self.assertIn('<label for="tab-card-secretary-9-0">Task</label>', page)
+        self.assertIn('id="tab-card-secretary-9-0" checked', page)
+        self.assertIn("<h3>Acceptance criteria</h3>", page)
+        self.assertIn("<code>service</code>", page)
+        # The card is filed under its sprint in the crumbs.
+        self.assertIn('<a href="/sprints/sprint%3A7">sprint:7</a>', page)
+
+    def test_a_card_without_a_description_says_so(self) -> None:
+        page = self.card_page({"title": "t", "state": "ready", "project": "secretary"})
+        self.assertIn("this card carries no description beyond its title", page)
+
+    def test_the_heads_panel_names_the_model_and_the_effort(self) -> None:
+        """The latest run of a role is the chip; the process behind it gives the pulse; earlier runs are a line each."""
+        page = self.card_page(
+            {"title": "t", "state": "in_progress", "project": "secretary"},
+            agents=[
+                {"role": "worker", "run_id": "run-2", "state": "running", "reason": "a live process matches"}
+            ],
+            heads=[
+                {
+                    "role": "worker",
+                    "run_id": "run-1",
+                    "head": "claude-opus",
+                    "current": False,
+                    "attempt": 1,
+                    "model": "opus",
+                    "resolved_model": "claude-sonnet-5",
+                    "effort": "medium",
+                    "resolved_effort": "medium",
+                    "runtime": "local-pty",
+                    "local_pty": True,
+                    "state": "finished",
+                    "reason": "no supervisor holds this run any more",
+                },
+                {
+                    "role": "worker",
+                    "run_id": "run-2",
+                    "head": "claude-opus",
+                    "current": True,
+                    "attempt": 2,
+                    "model": "opus",
+                    "resolved_model": "claude-opus-5-5",
+                    "effort": "high",
+                    "resolved_effort": "high",
+                    "runtime": "local-pty",
+                    "local_pty": True,
+                    "state": "running",
+                    "reason": "a supervisor holds this run",
+                },
+            ],
+        )
+        self.assertIn('<span class="model">Opus 5.5</span>', page)
+        self.assertIn("<span>high</span>", page)
+        self.assertIn('<span class="ref">claude-opus-5-5</span>', page)
+        self.assertIn('class="pulse live"', page)
+        self.assertIn("a live process matches", page)
+        self.assertIn('href="/tasks/secretary-9/heads/run-2"', page)
+        # The earlier run is one line under the chip, with its own model and its own link.
+        self.assertIn('<ul class="head-runs">', page)
+        self.assertIn("Sonnet 5", page)
+        self.assertIn('href="/tasks/secretary-9/heads/run-1"', page)
+        self.assertIn('<span class="age">attempt 1</span>', page)
         self.assertEqual(self.get("/tasks/secretary-9", "events=7").status, 200)
         self.assertEqual(self.reads.calls[-1][1]["events"], 7)
 
