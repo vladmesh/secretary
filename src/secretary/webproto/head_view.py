@@ -16,6 +16,15 @@ reviewer runs the dispatcher record holds for it now, and every `launch_id` its 
 so a path is only ever built from a run id the card recorded -- never from what a request carried.
 A local-pty run directory whose journal says it belongs to another card is not read either.
 
+**What a run says about itself.** The same two events are the one record of what a head was and
+what it ran on: the `routing` snapshot of its launch carries the configuration (`head`, `adapter`,
+`model` as configured, `model_source`, `effort`, `attempt`), and the `attempt.usage` occurrences of
+that same `launch_id` carry what the provider journal says the CLI resolved (`resolved_model`,
+`resolved_models`, `resolved_effort`; :mod:`secretary.runtime.provider_models`). A row joins them
+by run id, so a model resolved for one launch is never shown beside another, and a retained worker
+resumed for a second round stays one row. Neither fills a gap: an occurrence written before the
+resolved fields existed reads as unknown, and a head with no configured model is one the CLI picked.
+
 **What is shown is untrusted.** A head's terminal output is whatever the head printed, so it is
 turned into plain text here -- escape sequences removed, carriage returns and backspaces applied --
 and passed through `secretary.runtime.redact` before any page or document carries it. The page
@@ -32,10 +41,11 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from secretary.routing_journal import MODEL_UNKNOWN, RoutingHeadSnapshot
 from secretary.runtime.head import HeadRun, HeadRunError, TaskRefError
 from secretary.runtime.head_runtime_backends import head_runtime_name
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
@@ -89,13 +99,63 @@ class RecordedHead:
     runtime: str = ""
     #: Whether the dispatcher record still holds this run's head identity for the card.
     current: bool = False
+    #: The attempt the routing journal launched this run in; `None` when only the record names it.
+    attempt: int | None = None
+    #: The launch configuration from the routing snapshot: what the head was asked to run on.
+    adapter: str = ""
+    model: str = ""
+    model_source: str = MODEL_UNKNOWN
+    effort: str = ""
+    #: What the provider journal says this run actually resolved, from its latest `attempt.usage`
+    #: occurrence by report generation; empty until a phase of the run finished, and for an
+    #: occurrence written before the fields existed.
+    resolved_model: str = ""
+    resolved_models: tuple[str, ...] = ()
+    resolved_effort: str = ""
+    resolved_report_generation: int | None = None
+
+    def launched(self, snapshot: RoutingHeadSnapshot, attempt: int | None) -> RecordedHead:
+        """This run with its launch configuration, from the routing snapshot that recorded it."""
+        return replace(
+            self,
+            role=snapshot.role or self.role,
+            head=snapshot.head or self.head,
+            attempt=attempt if attempt is not None else self.attempt,
+            adapter=snapshot.adapter,
+            model=snapshot.model,
+            model_source=snapshot.model_source,
+            effort=snapshot.effort,
+        )
+
+    def resolved(self, occurrence: dict[str, Any]) -> RecordedHead:
+        """This run with what one `attempt.usage` occurrence says it ran, if it is the latest."""
+        generation = occurrence.get("report_generation")
+        if not isinstance(generation, int) or isinstance(generation, bool):
+            return self
+        if self.resolved_report_generation is not None and self.resolved_report_generation > generation:
+            return self
+        models = occurrence.get("resolved_models")
+        return replace(
+            self,
+            role=self.role or _text(occurrence.get("role")),
+            head=self.head or _text(occurrence.get("head")),
+            attempt=self.attempt if self.attempt is not None else _attempt(occurrence.get("attempt")),
+            resolved_model=_text(occurrence.get("resolved_model")),
+            resolved_models=tuple(item for item in models if isinstance(item, str))
+            if isinstance(models, list)
+            else (),
+            resolved_effort=_text(occurrence.get("resolved_effort")),
+            resolved_report_generation=generation,
+        )
 
 
 def recorded_heads(record: Any, history: Iterable[dict[str, Any]] | None) -> list[RecordedHead]:
     """The card's head runs, oldest first: its history's, then the dispatcher's current ones.
 
     `record` is the card's `DispatcherRecord` or `None`; `history` is the card's committed records
-    as `kind` and `data`. A run both name is one row, carrying the runtime the durable run says.
+    as `kind` and `data`. A run both name is one row, carrying the runtime the durable run says. A
+    `routing` event gives a run its launch configuration; an `attempt.usage` event of the same run
+    gives it what it resolved.
     """
     found: dict[str, RecordedHead] = {}
     for event in history or ():
@@ -103,15 +163,25 @@ def recorded_heads(record: Any, history: Iterable[dict[str, Any]] | None) -> lis
         if not isinstance(data, dict):
             continue
         kind = event.get("kind")
-        heads = data.get("heads") if kind == _ROUTING else [data] if kind == _USAGE else []
-        for head in heads if isinstance(heads, list) else []:
-            if not isinstance(head, dict):
-                continue
-            run_id = _run_id(head.get("launch_id"))
-            if run_id and run_id not in found:
-                found[run_id] = RecordedHead(
-                    run_id=run_id, role=_text(head.get("role")), head=_text(head.get("head"))
-                )
+        if kind == _ROUTING:
+            attempt = _attempt(data.get("attempt"))
+            heads = data.get("heads")
+            for head in heads if isinstance(heads, list) else []:
+                if not isinstance(head, dict):
+                    continue
+                run_id = _run_id(head.get("launch_id"))
+                if not run_id:
+                    continue
+                snapshot = RoutingHeadSnapshot.from_json(head)
+                found[run_id] = (
+                    found.get(run_id) or RecordedHead(run_id=run_id, role=snapshot.role)
+                ).launched(snapshot, attempt)
+        elif kind == _USAGE:
+            run_id = _run_id(data.get("launch_id"))
+            if run_id:
+                found[run_id] = (
+                    found.get(run_id) or RecordedHead(run_id=run_id, role=_text(data.get("role")))
+                ).resolved(data)
     if record is not None:
         for kind, role in _ROLES:
             raw = record.review_head_run if kind == "review" else record.worker_head_run
@@ -119,15 +189,19 @@ def recorded_heads(record: Any, history: Iterable[dict[str, Any]] | None) -> lis
             if not run_id:
                 continue
             profile = (record.review_head if kind == "review" else record.head) or ""
-            earlier = found.pop(run_id, None)
-            found[run_id] = RecordedHead(
-                run_id=run_id,
+            earlier = found.pop(run_id, None) or RecordedHead(run_id=run_id, role=role)
+            found[run_id] = replace(
+                earlier,
                 role=role,
-                head=profile or (earlier.head if earlier else ""),
+                head=profile or earlier.head,
                 runtime=_runtime_of(raw),
                 current=record.owns_head(kind),
             )
     return list(found.values())
+
+
+def _attempt(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def head_rows(ref: str, heads: list[RecordedHead], root: Path) -> list[dict[str, Any]]:
@@ -177,6 +251,15 @@ def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
         "run_id": head.run_id,
         "head": head.head or None,
         "current": head.current,
+        "attempt": head.attempt,
+        "adapter": head.adapter or None,
+        "model": head.model or None,
+        "model_source": head.model_source,
+        "effort": head.effort or None,
+        "resolved_model": head.resolved_model or None,
+        "resolved_models": list(head.resolved_models),
+        "resolved_effort": head.resolved_effort or None,
+        "resolved_report_generation": head.resolved_report_generation,
         "runtime": head.runtime or None,
         "local_pty": False,
         "state": UNKNOWN,

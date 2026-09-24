@@ -383,7 +383,8 @@
         "cards",
         "degraded_cards",
         "checks",
-        "waiting"
+        "waiting",
+        "head_profiles"
       ],
       "properties": {
         "current_task": {
@@ -422,6 +423,7 @@
           "required": [
             "source",
             "card",
+            "title",
             "state",
             "since",
             "age_seconds",
@@ -438,6 +440,13 @@
                 "null"
               ],
               "description": "Which card the answer is about, carried wherever the sprint row answered -- a subject, never a claim about where the card stands."
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The card's title as the same Pipeline listing entry holds it, or null when the listing holds no such card or the section could not answer."
             },
             "state": {
               "type": [
@@ -621,6 +630,30 @@
                 "string",
                 "null"
               ]
+            }
+          }
+        },
+        "head_profiles": {
+          "type": "object",
+          "description": "The head profile each role of this sprint runs on, joined against the installed head registry so a page does not join it itself. Null per role only when the section could not answer.",
+          "required": [
+            "source",
+            "observer",
+            "worker",
+            "reviewer"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "observer": {
+              "$ref": "#/$defs/head_profile"
+            },
+            "worker": {
+              "$ref": "#/$defs/head_profile"
+            },
+            "reviewer": {
+              "$ref": "#/$defs/head_profile"
             }
           }
         }
@@ -1869,6 +1902,64 @@
       "properties": {
         "source": {
           "$ref": "#/$defs/source"
+        }
+      }
+    },
+    "head_profile": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "profile",
+        "via",
+        "registered",
+        "label",
+        "adapter",
+        "model",
+        "effort"
+      ],
+      "properties": {
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The head profile id, or null when the role names none."
+        },
+        "via": {
+          "type": "string",
+          "description": "Where the profile came from: `launched` (the observer record's head), `declared` (the row's observer), `pinned` (the row's executor pin); with no profile, `none` (a sprint without an observer), `undeclared`, `unset` (the dispatcher picks per card) or `malformed`."
+        },
+        "registered": {
+          "type": "boolean",
+          "description": "Whether the installed head registry still describes the profile; false leaves the four fields below null."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The model the profile configures (an alias such as `opus`, or null when the CLI picks). What a CLI resolved it to is known per card only (web-read task `heads`)."
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The reasoning effort the profile configures."
         }
       }
     }
