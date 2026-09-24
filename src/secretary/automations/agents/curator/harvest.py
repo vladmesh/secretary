@@ -32,6 +32,10 @@ class PendingError(ValueError):
     pass
 
 
+class LegacyPendingError(PendingError):
+    """The pending file is not a versioned record at all (a pre-version-3 or foreign format)."""
+
+
 def selector(project: str | None) -> str:
     """Normalize the explicit all-backlog selector used in signed pending records."""
     return project or "all"
@@ -362,6 +366,14 @@ def pending_record(batch, identity, base, project=None):
     }
 
 
+def write_pending(st, record) -> None:
+    """Atomically publish the fact-bearing record that a later `advance` consumes."""
+    st.ensure_dir()
+    tmp = st.pending_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(st.pending_file)
+
+
 def read_pending(st, identity=None, project=None):
     identity = identity or current_identity()
     try:
@@ -369,7 +381,7 @@ def read_pending(st, identity=None, project=None):
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PendingError("curator pending record is unreadable") from exc
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
-        raise PendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
+        raise LegacyPendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
     if record.get("identity") != identity:
         raise PendingError("curator pending record belongs to a different run identity")
     batch, base = record.get("batch"), record.get("base")

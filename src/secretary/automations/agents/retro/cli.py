@@ -15,8 +15,13 @@ Flow the agent follows each run:
      `retro log-proposal --ref <card reference> [--ref <card reference> ...]`.
   3. `python3 -P -m secretary automations retro advance`  -> moves the watermark past step 1.
 
-Two-phase like the curator: a crash before the proposals are filed re-harvests instead of
-dropping turns. `harvest --json` emits the structured batch; `sessions` lists discovered sources;
+Two-phase like the curator, and through the curator's own API: harvest publishes the versioned,
+identity-bound pending record (`harvest.pending_record` / `harvest.write_pending`), advance reads it
+with `harvest.read_pending`, so a crash before the proposals are filed replays the same batch instead
+of dropping turns. A scan with no turns to judge settles its cursors at once and leaves nothing
+pending. A flat pre-version pending file (only an old retro harvest wrote one) is renamed aside to
+`pending.legacy-<UTC>.json` with a runs.jsonl warning and its sources are simply harvested again; any
+other refused pending record fails closed. `harvest --json` emits the structured batch; `sessions` lists discovered sources;
 `status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when nothing is new, so the
 systemd gate can skip the run without spinning up a head.
 
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -65,12 +71,71 @@ def _cleanup_done(retention: DoneRetention | None = None) -> dict:
     return {"closed_refs": refs, "closed_count": len(refs)}
 
 
-def cmd_harvest(as_json: bool, retention: DoneRetention | None = None) -> int:
-    cleanup = _cleanup_done(retention)
+def _legacy_pending(identity: dict) -> bool:
+    """Whether the pending file is there and refused only for not being a versioned record."""
+    if not STATE.pending_file.is_file():
+        return False
+    try:
+        harvest.read_pending(STATE, identity)
+    except harvest.LegacyPendingError:
+        return True
+    except harvest.PendingError:
+        # Unreadable, foreign identity, invalid batch: the caller's own read fails closed on it.
+        return False
+    return False
+
+
+def _set_aside_legacy_pending(identity: dict) -> None:
+    """Rename a legacy flat pending file aside, never delete it, and harvest its sources again.
+
+    Its sources were never advanced past, so re-reading them loses nothing; the retro skill checks
+    existing Issues before it proposes, so a re-reviewed turn does not breed a duplicate card.
+    """
+    if not _legacy_pending(identity):
+        return
     with STATE.lock():
-        batch = harvest.harvest(STATE)
-        STATE.ensure_dir()
-        STATE.pending_file.write_text(json.dumps(batch["pending"], ensure_ascii=False), encoding="utf-8")
+        if not _legacy_pending(identity):
+            return
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        target = STATE.pending_file.with_name(f"pending.legacy-{stamp}.json")
+        suffix = 1
+        while target.exists():
+            target = STATE.pending_file.with_name(f"pending.legacy-{stamp}-{suffix}.json")
+            suffix += 1
+        try:
+            STATE.pending_file.rename(target)
+        except OSError as exc:
+            raise harvest.PendingError(f"retro could not set the legacy pending record aside: {exc}") from exc
+    STATE.log_run("pending-set-aside", level="warning", reason="legacy", file=str(target))
+    print(f"retro: warning: legacy pending record set aside as {target}; its sources are harvested again", file=sys.stderr)
+
+
+def _harvest_batch(identity: dict) -> dict:
+    """Replay the pending record, or publish a fresh fact-bearing one; the caller holds the lock."""
+    if STATE.pending_file.is_file():
+        return harvest.harvest(STATE, identity)
+    batch = harvest.harvest(STATE, identity)
+    base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
+    record = harvest.pending_record(batch, identity, base)
+    if batch["sessions"] or batch["memory"]:
+        harvest.write_pending(STATE, record)
+    elif batch["pending"]:
+        # Nothing to judge, only scan cursors: settle them now. A record with no fact-bearing
+        # input is refused by read_pending, so publishing one would wedge the next tick.
+        harvest.advance(STATE, record, identity)
+    return batch
+
+
+def cmd_harvest(as_json: bool, retention: DoneRetention | None = None) -> int:
+    try:
+        identity = harvest.current_identity()
+        _set_aside_legacy_pending(identity)
+        cleanup = _cleanup_done(retention)
+        with STATE.lock():
+            batch = _harvest_batch(identity)
+    except harvest.PendingError as exc:
+        print(f"retro: {exc}", file=sys.stderr)
+        return 1
     since, until = _batch_window(batch)
     log = search_log.tail(since, until)
     if as_json:
@@ -93,15 +158,22 @@ def cmd_harvest(as_json: bool, retention: DoneRetention | None = None) -> int:
 
 
 def cmd_advance() -> int:
-    if not STATE.pending_file.is_file():
-        print("retro: nothing to advance (run harvest first)", file=sys.stderr)
+    try:
+        identity = harvest.current_identity()
+        _set_aside_legacy_pending(identity)
+        with STATE.lock():
+            if not STATE.pending_file.is_file():
+                # A harvest with no turns to judge already settled its cursors.
+                print("retro: nothing pending to advance", file=sys.stderr)
+                return 0
+            record = harvest.read_pending(STATE, identity)
+            harvest.advance(STATE, record, identity)
+            STATE.pending_file.unlink()
+    except harvest.PendingError as exc:
+        print(f"retro: {exc}", file=sys.stderr)
         return 1
-    pending = json.loads(STATE.pending_file.read_text(encoding="utf-8"))
-    with STATE.lock():
-        harvest.advance(STATE, pending)
-        STATE.pending_file.unlink()
     STATE.log_run("advance")
-    print(f"retro: watermark advanced for {len(pending)} source(s)")
+    print(f"retro: watermark advanced for {len(record['batch']['pending'])} source(s)")
     return 0
 
 
@@ -112,14 +184,22 @@ def cmd_precheck(retention: DoneRetention | None = None) -> int:
     exits 1, which the systemd gate treats as an error, not a skip. See secretary/runtime/state.py
     PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
+        identity = harvest.current_identity()
+        _set_aside_legacy_pending(identity)
         _cleanup_done(retention)
-        batch = harvest.harvest(STATE)
+        batch = harvest.harvest(STATE, identity)
     except BoardUnavailable as e:
         # Not retro's failure and not a clean tick: the day's run has not happened yet. Logged so
         # the loss is visible in runs.jsonl instead of only as a stale "last healthy tick".
         STATE.log_run("precheck", result="board-unreachable", error=str(e))
         print(f"retro: board unreachable, run deferred: {e}", file=sys.stderr)
         return PRECHECK_BOARD_UNREACHABLE
+    except harvest.PendingError as e:
+        # A pending record refused for any reason but being legacy stays for the operator; exit 1
+        # is the gate's error branch, not a skip.
+        STATE.log_run("precheck", result="pending-refused", error=str(e))
+        print(f"retro: {e}", file=sys.stderr)
+        return 1
     if batch["sessions"]:
         STATE.log_run("precheck", result="change")
         return 0

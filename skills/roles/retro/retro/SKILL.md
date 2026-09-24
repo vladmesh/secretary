@@ -50,8 +50,10 @@ Run it from your own workspace (the run's starting working directory is the retr
 into other repositories: the code and the watermark are taken from the workspace. The helper returns a
 redacted batch (secrets already stripped) of new turns since the last watermark, plus the tail of the memory
 search log over the batch's time window, so you can judge whether a `memory_search` happened near an answer.
-"No new turns" means there is no work, but still go through to step 5 (`advance`). The helper does NOT move
-the watermark yet.
+"No new turns" means there is no work, but still go through to step 5 (`advance`); it answers that nothing is
+pending. The helper does NOT move the watermark past the turns it hands you: it keeps them in a pending record,
+and repeating `harvest` before `advance` returns that same batch. Do not edit or delete the pending file; if
+`harvest` or `advance` refuses it, stop and let the operator resolve it.
 
 ### 2. Judge
 
