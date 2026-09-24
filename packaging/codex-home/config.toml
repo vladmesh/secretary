@@ -3,7 +3,7 @@ model_reasoning_effort = "medium"
 
 # The `[mcp_servers.po_memory]` PO-bridge entry is not packaged: it names the installation's bridge
 # executable and data dir, and Codex refuses an MCP table without `command` or `url`. Seeding
-# (`installation.provision_codex_home`) appends it below with `memory.client_config.reconcile_codex`,
-# and the upgrade's `memory-clients` step keeps it current. A pipeline head's
+# (`memory.client_config.seed_codex_home`, from install and both the `codex-home` and `memory-clients`
+# upgrade steps) appends it below, and the `memory-clients` step keeps it current. A pipeline head's
 # `-c mcp_servers.po_memory.enabled=false` needs it there: on a home without it, that override
 # creates a table with no transport and Codex refuses every command.

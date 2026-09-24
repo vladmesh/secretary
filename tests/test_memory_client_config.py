@@ -100,9 +100,13 @@ class MemoryClientConfigTests(unittest.TestCase):
             0,
         )
 
-    def test_reconcile_clients_reaches_the_data_dir_home_once_it_is_seeded(self) -> None:
+    def test_reconcile_clients_reaches_the_data_dir_home_once_it_exists(self) -> None:
         runtime_home = self.root / "home"
         data_home = self.data_dir / "codex-home"
+        packaged = self.root / "product" / "packaging" / "codex-home"
+        packaged.mkdir(parents=True)
+        (packaged / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+        (packaged / "config.toml").write_text('model = "packaged"\n', encoding="utf-8")
 
         result = reconcile_clients(self.root / "product", runtime_home, self.data_dir)
         self.assertFalse(result.codex_data_dir)
@@ -117,6 +121,8 @@ class MemoryClientConfigTests(unittest.TestCase):
         payload = tomllib.loads((data_home / "config.toml").read_text(encoding="utf-8"))
         self.assertEqual(payload["model"], "operator-choice")
         self.assertEqual(payload["mcp_servers"]["po_memory"]["command"], str(self.command))
+        # The packaged file the home lacked is seeded copy-once next to the operator's config.
+        self.assertEqual((data_home / "AGENTS.md").read_text(encoding="utf-8"), "agents\n")
 
     def test_dry_run_reports_without_writing(self) -> None:
         path = self.root / ".codex" / "config.toml"
