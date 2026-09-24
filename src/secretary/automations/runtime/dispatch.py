@@ -1557,6 +1557,22 @@ def _local_pty_runtime() -> Any:
 #: backend. A stop names its initiator, and this is the one this driver makes.
 HANDOVER_INITIATOR = "triggered-agent-dispatch"
 HANDOVER_REASON = "this role's resolved profile now names another backend"
+FAILED_BRING_UP_REASON = "this tick's bring-up failed, so the head it raised is nobody's"
+
+
+@dataclass(frozen=True)
+class _StandingPromptTransport:
+    """What a standing head's skill prompt is handed to the supervised backend with.
+
+    The supervised backend owns the delivery — settle, type, submit on its own, confirm a turn —
+    and reads only one thing off a caller's transport: the `before_send` hook a suspended head is
+    resumed through. A standing head is never suspended, so it carries none.
+    """
+
+    before_send: Callable[[], Any] | None = None
+
+
+_STANDING_PROMPT_TRANSPORT = _StandingPromptTransport()
 
 
 def _hand_over_backend(
@@ -1810,7 +1826,9 @@ def _supervised_bring_up(
     run = _standing_memory_run(agent, spec, ws, run_id)
     # An adapter that takes its prompt on its command line is launched with it, as it is on a pane;
     # one that starts with an empty composer is pointed at its skill across the same boundary that
-    # raised it. Neither shape touches a terminal API.
+    # raised it. Neither shape touches a terminal API. The transport is what makes that pointer an
+    # agent's prompt rather than a bare line: settled, typed, submitted on its own and confirmed by
+    # a turn starting, exactly as a card head's launch prompt is (secretary-1717).
     pointer = NudgePointer.line(_codex_skill_prompt(cmd.skill)) if cmd.prompt_after_start else None
     receipt = runtime.start(
         spec,
@@ -1819,6 +1837,7 @@ def _supervised_bring_up(
         command=f"/bin/sh -c {shlex.quote(_memory_heartbeat(run, _memory_bound_launch(agent, run, cmd.launch)))}",
         title=f"triggered-agent:{agent}",
         pointer=pointer,
+        transport=_STANDING_PROMPT_TRANSPORT if pointer is not None else None,
         run_id=run_id,
         role=agent,
         run=run,
@@ -1840,8 +1859,29 @@ def _supervised_bring_up(
         print(f"dispatch[{agent}]: head {run_id} is still up ({refusal}) — no dispatch")
         return 0
     if not receipt.ok:
+        # Nothing of a failed bring-up is recorded as this role's head. A prompt that was typed and
+        # never started a turn has already been stopped by `start`; a head its stop would not
+        # confirm is asked once more here, because an unrecorded live head is one no later tick
+        # would ever end. Either way the tick fails, and the unit records it.
+        if receipt.status == HEAD_ALIVE and receipt.run is not None:
+            stopped = runtime.stop(
+                receipt.run,
+                StopInitiator(actor=HANDOVER_INITIATOR, reason=FAILED_BRING_UP_REASON),
+            )
+            if not stopped.ok:
+                print(
+                    f"dispatch[{agent}]: the head {receipt.run.run_id} this tick failed to point at "
+                    f"its skill would not confirm it stopped ({stopped.reason or stopped.status})"
+                )
         failure = LocalPtyDispatchError(receipt.reason or receipt.status)
         reports.failed(cmd, failure)
+        state.log_run(
+            event,
+            action="supervised-start-failed",
+            result="error",
+            reference=cmd.card_ref,
+            error=receipt.reason or receipt.status,
+        )
         raise failure
     live = receipt.run
     state.save_head_run(live.to_json())

@@ -38,7 +38,7 @@ from secretary.automations.runtime import dispatch
 from secretary.dispatch.watchdog import head_process_status
 from secretary.head_health import HeadChoice, HeadReadiness
 from secretary.runtime import heads as pipeline_heads
-from secretary.runtime import role_env
+from secretary.runtime import local_pty_head, role_env
 from secretary.runtime import state as runtime_state
 from secretary.runtime.head import HeadCommand, render_head_command
 from secretary.runtime.head.local_pty import protocol
@@ -52,6 +52,11 @@ REPO = Path(__file__).resolve().parents[1]
 #: witness that can say a skill delivered across the boundary actually reached the head.
 LINE_READER = REPO / "tests" / "fixtures" / "local_pty_line_reader.py"
 HEAD_COMMAND = f"{sys.executable} -u {LINE_READER} --pause 0 --idle 0.2"
+#: A head that keeps a composer the way Codex's TUI does: a line typed into it is echoed and kept,
+#: and only a carriage return of its own sends it (secretary-1702). This is the head an adapter
+#: that takes its prompt after start is, and the only one that can tell a skill that was typed from
+#: a skill that was submitted (secretary-1717).
+FAKE_TUI = REPO / "tests" / "fixtures" / "local_pty_fake_tui.py"
 
 
 def _alive(pid: int) -> bool:
@@ -176,6 +181,9 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         self.addCleanup(self._reap_everything)
         self.state = runtime_state.AgentState(self.AGENT, self.state_root / self.AGENT)
         self.prompt_after_start = False
+        #: Flags for the composer head a prompt-after-start profile is rendered as.
+        self.tui_flags: tuple[str, ...] = ()
+        self.submitted_file = self.data_dir / "submitted.jsonl"
         #: Which profile this tick's health resolution lands on. Named per test because a launch
         #: diverted onto another profile is one of the cases the choice has to survive.
         self.resolved = "head"
@@ -201,7 +209,12 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         profile and its `runtime` — still comes from the real registry through the real
         `_launch_cmd`; only the program the head runs is this fixture.
         """
-        return HeadCommand(HEAD_COMMAND, prompt_after_start=self.prompt_after_start, adapter="claude")
+        if self.prompt_after_start:
+            command = " ".join(
+                [sys.executable, "-u", str(FAKE_TUI), str(self.submitted_file), *self.tui_flags]
+            )
+            return HeadCommand(command, prompt_after_start=True, adapter="codex")
+        return HeadCommand(HEAD_COMMAND, prompt_after_start=False, adapter="claude")
 
     def _reads(self, registry):
         """What each `load_registry()` of this tick answers, and how many it took.
@@ -260,6 +273,12 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             enter(mock.patch.object(dispatch, "CLAUDE_JSON", self.data_dir / "claude.json"))
             enter(mock.patch.object(dispatch, "render_head_command", self._rendered))
             enter(mock.patch.object(pipeline_heads, "load_registry", side_effect=self._reads(registry)))
+            # The composer head settles in well under a second; the production waits are sized for
+            # a real agent starting its MCP servers.
+            enter(mock.patch.object(local_pty_head, "PROMPT_QUIET_SECONDS", 0.5))
+            enter(mock.patch.object(local_pty_head, "PROMPT_POLL_SECONDS", 0.05))
+            enter(mock.patch.object(local_pty_head, "PROMPT_FIRST_OUTPUT_SECONDS", 2.0))
+            enter(mock.patch.object(local_pty_head, "SUBMIT_CONFIRM_SECONDS", 3.0))
             enter(
                 mock.patch.object(
                     dispatch,
@@ -305,6 +324,13 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             return int((run_dir / protocol.SUPERVISOR_PID_NAME).read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             return 0
+
+    def submitted(self) -> list[str]:
+        """What the composer head was asked to do: each prompt a carriage return actually sent."""
+        if not self.submitted_file.is_file():
+            return []
+        lines = self.submitted_file.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line)["submitted"].strip() for line in lines if line]
 
     def head_output(self, run_dir: Path) -> str:
         """What the head has printed, read straight from its own supervisor.
@@ -488,11 +514,7 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
             self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
         self.assertEqual(made, [], "the supervised tick reached Orca's session store")
-        run_dir = self.run_dirs()[0]
-        self.await_(
-            lambda: "$retro " in self.head_output(run_dir),
-            message="the head never reported the skill its own terminal handed it",
-        )
+        self.assertEqual(self.submitted(), ["$retro"], "the head was never asked to run its skill")
 
     def test_a_publication_mid_tick_is_not_read_by_the_tick_it_lands_in(self) -> None:
         """The one reading is the tick's whole answer, and the tick is a pane tick end to end.
@@ -659,11 +681,7 @@ class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
                 stack.enter_context(patch)
             self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
-        run_dir = self.run_dirs()[0]
-        self.await_(
-            lambda: "$retro " in self.head_output(run_dir),
-            message="the head never reported the skill its own terminal handed it",
-        )
+        self.assertEqual(self.submitted(), ["$retro"], "the head was never asked to run its skill")
 
     def test_a_head_whose_command_carries_its_prompt_is_not_typed_at(self) -> None:
         """The claude shape: the prompt is on the command line, exactly as it is on a pane.
@@ -677,6 +695,51 @@ class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
         run_dir = self.run_dirs()[0]
         self.await_(lambda: "UP" in self.head_output(run_dir), message="the head never started")
         self.assertNotIn("$retro", self.head_output(run_dir))
+
+
+class StandingPromptSubmitTests(MechanicalRoleBackendTestCase):
+    """secretary-1717: a prompt-after-start skill is submitted and its turn confirmed, or the tick fails.
+
+    The curator on a Codex local-pty profile had `$curate` typed into its composer and never sent,
+    and was then recorded as the role's working head, so every later tick was a
+    `supervised-busy-skip head_already_up` over a head that had never been asked to do anything.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.prompt_after_start = True
+
+    def test_the_skill_is_submitted_on_its_own_and_a_turn_is_confirmed(self) -> None:
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(self.submitted(), ["$retro"], "the skill was typed into the composer and never sent")
+        self.assertEqual(self.actions(), ["supervised-started"])
+        record = self.state.load_head_run()
+        self.assertIsNotNone(record)
+        self.assertEqual(record["run_id"], self.run_dirs()[0].name)
+
+    def test_a_skill_the_head_never_takes_fails_the_tick_and_records_no_head(self) -> None:
+        self.tui_flags = ("--deaf-enter",)
+
+        with self.assertRaises(dispatch.LocalPtyDispatchError) as caught:
+            self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME))
+
+        self.assertIn(local_pty_head.DELIVER_NOT_SUBMITTED, str(caught.exception))
+        self.assertEqual(self.submitted(), [])
+        self.assertIsNone(self.state.load_head_run(), "a head that never took its skill was recorded as up")
+        self.assertEqual(self.actions(), ["supervised-start-failed"])
+        (run_dir,) = self.run_dirs()
+        self.await_(
+            lambda: head_process_status(str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
+            message="the head that never took its skill was left running",
+        )
+
+        # The next tick is a fresh bring-up, not a busy skip over the head that was never used.
+        self.tui_flags = ()
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(self.actions(), ["supervised-start-failed", "supervised-started"])
+        self.assertEqual(self.submitted(), ["$retro"])
 
 
 class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
@@ -711,9 +774,8 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         """Criterion 5, on the precondition secretary-1468 put in front of the spawn."""
         self.prompt_after_start = True
         run_dir = self.raise_one()
-        self.await_(lambda: "$retro " in self.head_output(run_dir))
+        self.assertEqual(self.submitted(), ["$retro"])
         head, supervisor = self.head_pid(run_dir), self.supervisor_pid(run_dir)
-        delivered = self.head_output(run_dir).count("$retro ")
 
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
@@ -723,9 +785,7 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
             (head, supervisor),
             "the live head was replaced",
         )
-        self.assertEqual(
-            self.head_output(run_dir).count("$retro "), delivered, "the busy head was sent a second skill"
-        )
+        self.assertEqual(self.submitted(), ["$retro"], "the busy head was sent a second skill")
         self.assertEqual(self.actions(), ["supervised-started", "supervised-busy-skip"])
         self.assertEqual(
             self.events()[-1]["error"],
