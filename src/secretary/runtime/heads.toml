@@ -49,9 +49,9 @@ probe = "python3 -P -m secretary.runtime.resource_probe --resource openai-sub"
 # generated installation snapshot says it too; the one-shot `codex exec` head is gone from the
 # product (secretary-1173), and a profile naming it is refused when the registry is validated.
 #
-# Every tier says `runtime = "orca-legacy"` explicitly: a profile that names no runtime is a
-# `local-pty` head (runtime/head_runtimes.py, DEFAULT_HEAD_RUNTIME), and these stay Orca panes
-# until A20 (docs/HEAD_RUNTIME.md) so a fresh install runs exactly as it did before that default.
+# Every tier says `runtime = "orca-legacy"` explicitly: a profile that names no runtime is held by
+# this product's own supervisor (DEFAULT_HEAD_RUNTIME in runtime/head_runtimes.py), and these stay
+# Orca panes until A20 (docs/HEAD_RUNTIME.md), so a fresh install runs exactly as it did before.
 
 [profiles.codex-terra-high]
 resource = "openai-sub"
