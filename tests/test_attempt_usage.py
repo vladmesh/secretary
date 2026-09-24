@@ -686,6 +686,68 @@ class SourceCollectionTests(unittest.TestCase):
                 self.assertIs(result.outcome, AttemptUsageOutcome.USAGE_ABSENT)
                 self.assertEqual(result.skipped_records, 0)
 
+    def test_the_journal_names_the_models_that_actually_ran_in_order_of_last_use(self) -> None:
+        """`opus` is what the head asked for; the journal is the only record of what it resolved to."""
+        claude = write_jsonl(
+            self.root / "claude.jsonl",
+            [
+                claude_assistant("msg_1", input_tokens=1, output_tokens=1)
+                | {
+                    "effort": "medium",
+                    "message": {
+                        "id": "msg_1",
+                        "model": "claude-opus-5-5",
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                },
+                claude_assistant("msg_2", input_tokens=1, output_tokens=1)
+                | {
+                    "effort": "high",
+                    "message": {
+                        "id": "msg_2",
+                        "model": "claude-fable-5-1",
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                },
+                claude_assistant("msg_3", input_tokens=1, output_tokens=1)
+                | {
+                    "effort": "high",
+                    "message": {
+                        "id": "msg_3",
+                        "model": "claude-opus-5-5",
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                },
+                {"type": "assistant", "message": {"id": "msg_4", "model": "<synthetic>"}},
+            ],
+        )
+        codex = write_jsonl(
+            self.root / "codex.jsonl",
+            [
+                {"type": "turn_context", "payload": {"model": "gpt-5.6-terra", "effort": "xhigh"}},
+                codex_token_count(input_tokens=10, output_tokens=2),
+            ],
+        )
+
+        read_claude = collect_usage(adapter="claude", source=bound_claude_source(claude))
+        read_codex = collect_usage(adapter="codex", source=bound_codex_source(codex))
+
+        self.assertEqual(read_claude.models.models, ("claude-fable-5-1", "claude-opus-5-5"))
+        self.assertEqual(read_claude.models.model, "claude-opus-5-5")
+        self.assertEqual(read_claude.models.effort, "high")
+        self.assertEqual((read_codex.models.models, read_codex.models.effort), (("gpt-5.6-terra",), "xhigh"))
+
+    def test_a_journal_with_no_usage_record_still_names_its_model(self) -> None:
+        path = write_jsonl(
+            self.root / "quiet.jsonl",
+            [{"type": "turn_context", "payload": {"model": "gpt-5.6-sol", "reasoning_effort": "low"}}],
+        )
+
+        result = collect_usage(adapter="codex", source=bound_codex_source(path))
+
+        self.assertIs(result.outcome, AttemptUsageOutcome.USAGE_ABSENT)
+        self.assertEqual((result.models.model, result.models.effort), ("gpt-5.6-sol", "low"))
+
     def test_a_declared_usage_record_with_the_wrong_schema_is_malformed_not_absent(self) -> None:
         """A provider schema change reads as a broken record, never as a phase that cost nothing."""
         for adapter, source, record in (
@@ -998,6 +1060,29 @@ class AttemptUsageEventTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 usage_event(**{field: value})
 
+    def test_the_resolved_model_fields_are_optional_and_checked_when_present(self) -> None:
+        """An occurrence written before them reads unchanged; a new one states all three coherently."""
+        self.assertNotIn("resolved_model", usage_event().data)
+        resolved = usage_event(
+            resolved_model="gpt-5.6-terra",
+            resolved_models=["gpt-5.6-sol", "gpt-5.6-terra"],
+            resolved_effort="high",
+        )
+        self.assertEqual(Event.from_record(resolved.to_record("request-1")), resolved)
+        for overrides in (
+            {
+                "resolved_model": "gpt-5.6-sol",
+                "resolved_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+                "resolved_effort": "",
+            },
+            {"resolved_model": "", "resolved_models": ["a", "a"], "resolved_effort": ""},
+            {"resolved_model": "", "resolved_models": [""], "resolved_effort": ""},
+            {"resolved_model": "a"},
+            {"resolved_model": "", "resolved_models": [], "resolved_effort": None},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                usage_event(**overrides)
+
     def test_the_other_event_kinds_are_untouched_by_the_new_validation(self) -> None:
         """Historical records must keep reading exactly as they did."""
         moved = Event(
@@ -1267,6 +1352,34 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "reasoning": 128,
             },
         )
+
+    def test_the_occurrence_carries_the_model_and_effort_the_cli_resolved(self) -> None:
+        self.claude_worker()
+        self.start_dispatcher()
+        self.tick()
+        journal = write_jsonl(
+            self.data_dir / "sessions" / "worker-1.jsonl",
+            [
+                claude_assistant("msg_1", input_tokens=9, output_tokens=12)
+                | {
+                    "effort": "xhigh",
+                    "message": {
+                        "id": "msg_1",
+                        "model": "claude-opus-5-5",
+                        "usage": {"input_tokens": 9, "output_tokens": 12},
+                    },
+                },
+            ],
+        )
+        self.bind_source("worker", journal, adapter="claude")
+        self._report_done()
+
+        self.assertEqual(self.tick()["to"], "validate")
+
+        usage = self.usage_events()[0]
+        self.assertEqual(usage["resolved_model"], "claude-opus-5-5")
+        self.assertEqual(usage["resolved_models"], ["claude-opus-5-5"])
+        self.assertEqual(usage["resolved_effort"], "xhigh")
 
     def test_a_replayed_report_and_a_re_entered_tick_keep_one_occurrence(self) -> None:
         """Recovery re-reads a session that has moved on; the phase still has one account."""

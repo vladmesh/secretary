@@ -30,6 +30,10 @@ predecessor *occurrence* is not absence of one predecessor *dimension*, and neit
 zero. What a phase cannot own it owns as ``null``, while the session total it did read stays on the
 occurrence so the phase after it has a boundary to subtract from again.
 
+The same records name the model and reasoning effort the CLI actually resolved
+(:mod:`secretary.runtime.provider_models`), which the occurrence carries beside the configured
+``model``: the alias `opus` is what the head asked for, `claude-opus-5-5` is what ran.
+
 Nothing here reads report or verdict prose, and nothing here decides anything: every failure is a
 named degraded outcome, never an exception the caller has to survive.
 """
@@ -46,6 +50,11 @@ from secretary.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase
 from secretary.board.events import AttemptUsageOccurrence
 from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome, EventKind
 from secretary.board.roles import Role
+from secretary.runtime.provider_models import (
+    ProviderModels,
+    claude_session_models,
+    codex_session_models,
+)
 
 CODEX_ADAPTER = "codex"
 CLAUDE_ADAPTER = "claude"
@@ -144,6 +153,9 @@ class UsageCollection:
     # The boundary this phase started from: zero for a session nobody has accounted for yet, and
     # null for a dimension whose starting point no predecessor occurrence actually recorded.
     baseline: TokenTotals = field(default_factory=TokenTotals)
+    # What the journal says actually ran, read from the same records whatever the token outcome:
+    # a journal holding no usable usage record can still name its model.
+    models: ProviderModels = field(default_factory=ProviderModels)
 
     @property
     def collected(self) -> bool:
@@ -407,6 +419,7 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
         )
     aggregate = codex_usage if adapter == CODEX_ADAPTER else claude_usage
     session = aggregate(records)
+    models = (codex_session_models if adapter == CODEX_ADAPTER else claude_session_models)(records)
     skipped = unparsed + session.invalid
     if session.records:
         return UsageCollection(
@@ -415,6 +428,7 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
             records=session.records,
             skipped_records=skipped,
             session_totals=session.totals,
+            models=models,
         )
     if session.invalid:
         return UsageCollection(
@@ -425,6 +439,7 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
             ),
             source_kind=kind,
             skipped_records=skipped,
+            models=models,
         )
     if unparsed and not records:
         return UsageCollection(
@@ -432,12 +447,14 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
             detail=f"{unparsed} {adapter} session record(s) could not be parsed and none were usable",
             source_kind=kind,
             skipped_records=skipped,
+            models=models,
         )
     return UsageCollection(
         AttemptUsageOutcome.USAGE_ABSENT,
         detail=f"{adapter} session journal carries no usage record for this phase",
         source_kind=kind,
         skipped_records=skipped,
+        models=models,
     )
 
 
@@ -601,6 +618,9 @@ def attempt_usage_data(
         tokens=TokenAccount.from_data(collection.tokens.to_json()),
         session_totals=TokenAccount.from_data(collection.session_totals.to_json()),
         phase_baseline=TokenAccount.from_data(collection.baseline.to_json()),
+        resolved_model=collection.models.model,
+        resolved_models=collection.models.models,
+        resolved_effort=collection.models.effort,
     )
     return payload.to_data()
 
