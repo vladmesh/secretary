@@ -443,6 +443,36 @@ class FailClosedTests(MechanicalRoleBackendTestCase):
         self.assertIn("terminal_handle.json", events[0]["error"])
         self.assertIn("terminal_handle.json", err.getvalue())
 
+    def test_a_pane_record_fences_by_existence_whatever_it_holds(self) -> None:
+        """The fence is the file, not its parsed handle: an empty file, unreadable JSON and JSON
+        with no `handle` all read as no handle through `AgentState`, and all still refuse."""
+        for label, content in (
+            ("empty", ""),
+            ("unreadable", "{ not json"),
+            ("no handle", json.dumps({"created_at": 1.0})),
+        ):
+            with self.subTest(label):
+                self.state.dir.mkdir(parents=True, exist_ok=True)
+                self.state.terminal_handle_file.write_text(content, encoding="utf-8")
+                self.assertIsNone(self.state.load_terminal_handle(), "the shape parses to a handle")
+                runs = self.state.dir / "runs.jsonl"
+                runs.unlink(missing_ok=True)
+                err = io.StringIO()
+
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(
+                        self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), dispatch.REFUSED_EXIT
+                    )
+
+                self.assertEqual(self.run_dirs(), [], "a head was raised beside a recorded pane")
+                self.assertEqual(
+                    self.state.terminal_handle_file.read_text(encoding="utf-8"), content, "the record was changed"
+                )
+                events = self.events()
+                self.assertEqual([event["action"] for event in events], [dispatch.SUPERVISED_OWNER_CONFLICT])
+                self.assertEqual(events[0]["result"], "error")
+                self.assertIn("terminal_handle.json", err.getvalue())
+
     def test_cleanup_only_is_a_no_op_for_every_agent(self) -> None:
         """The gate still passes `--cleanup-only` on a precheck skip; it touches nothing at all."""
         for agent in ("curator", "retro", "steward"):
@@ -715,46 +745,52 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
 
 
 class BackendHandoverTests(MechanicalRoleBackendTestCase):
-    """The hand-back from a supervised head: its role's resolution stops naming a supervisor.
+    """A supervised head whose role's resolution stops naming a supervisor is left alone.
 
     Publishing a profile that names another runtime for a role whose head is already up used to
-    hand the role to a pane. There is no pane any more, so that tick fails closed — and it still
-    stops the supervised head first, across the boundary that raised it, because nothing would
-    ever stop a head its role no longer resolves to. It never raises a second head.
+    hand the role to a pane by stopping that head. There is no pane any more, so a stop would hand
+    the role to nothing and could end a working head mid-turn over a momentarily unreadable
+    registry. A failed-closed tick changes nothing: the head finishes under its own supervisor, its
+    record stands, and the next tick with a usable profile finds it through that record.
     """
 
     def refused_tick(self, registry) -> int:
         with contextlib.redirect_stderr(io.StringIO()):
             return self.run_tick(registry)
 
-    def test_a_supervised_head_is_stopped_when_its_role_stops_naming_a_supervisor(self) -> None:
-        """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
+    def test_a_live_supervised_head_is_untouched_when_its_role_stops_naming_a_supervisor(self) -> None:
+        """`local-pty -> orca-legacy`: nothing is raised and nothing is stopped."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
         head, supervisor = self.head_pid(run_dir), self.supervisor_pid(run_dir)
+        record = self.state.load_head_run()
         self.assertTrue(_alive(head), "the first tick raised no live head")
 
-        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
+        with mock.patch.object(
+            dispatch, "_local_pty_runtime", side_effect=AssertionError("a failed-closed tick asked for a supervisor")
+        ):
+            self.assertEqual(
+                self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT
+            )
 
-        self.await_(
-            lambda: not _alive(head),
-            message="the supervised head outlived the tick that stopped naming a supervisor",
-        )
-        self.await_(lambda: not _alive(supervisor), soft=True)
-        self.assertIsNone(self.state.load_head_run(), "the supervised head is still recorded as the owner")
-        self.assertIsNone(self.state.load_terminal_handle(), "the tick recorded a pane")
-        self.assertIsNone(self.state.load_active_report(), "the tick left a report card behind")
-        self.assertEqual(self.actions(), ["supervised-started", "owner-stopped", dispatch.NO_SUPERVISED_HEAD])
+        self.assertTrue(_alive(head), "a failed-closed tick stopped the role's live head")
+        self.assertTrue(_alive(supervisor), "a failed-closed tick stopped the head's supervisor")
+        self.assertEqual(self.state.load_head_run(), record, "a failed-closed tick changed the head's record")
+        self.assertEqual(self.run_dirs(), [run_dir], "a failed-closed tick raised another head")
+        self.assertEqual(self.actions(), ["supervised-started", dispatch.NO_SUPERVISED_HEAD])
 
-        # The next tick has nothing to stop and still raises nothing.
-        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
+        # A later tick with a usable profile finds the head through its record, as it always has.
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
-        self.assertEqual(self.run_dirs(), [run_dir], "a failed-closed tick raised another supervised head")
-        self.assertEqual(self.actions()[-1], dispatch.NO_SUPERVISED_HEAD)
+        self.assertEqual(self.run_dirs(), [run_dir])
+        self.assertEqual(self.actions()[-1], "supervised-busy-skip")
 
-    def test_a_supervised_head_that_has_already_ended_is_forgotten_without_a_stop(self) -> None:
+    def test_a_supervised_head_that_has_already_ended_is_left_recorded(self) -> None:
+        """A failed-closed tick does not tidy up either: the record of a dead head stays, and the
+        next usable tick's bring-up over it is the ordinary one."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
+        record = self.state.load_head_run()
         dead = self.head_pid(run_dir)
         _kill(self.supervisor_pid(run_dir))
         _kill(dead, group=True)
@@ -766,26 +802,8 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
 
         self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self.assertIsNone(self.state.load_head_run())
-        self.assertEqual(self.actions(), ["supervised-started", "owner-gone", dispatch.NO_SUPERVISED_HEAD])
-
-    def test_a_head_that_will_not_confirm_it_stopped_stays_recorded(self) -> None:
-        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
-        record = self.state.load_head_run()
-        refusing = mock.Mock()
-        refusing.observe.return_value = mock.Mock(status="alive", ok=True, reason="")
-        refusing.stop.return_value = mock.Mock(ok=False, status="alive", reason="stop not confirmed")
-
-        with mock.patch.object(dispatch, "_local_pty_runtime", return_value=refusing):
-            self.assertEqual(
-                self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT
-            )
-
-        self.assertEqual(self.state.load_head_run(), record, "the owner was forgotten unconfirmed")
-        refusing.start.assert_not_called()
-        self.assertEqual(
-            self.actions(), ["supervised-started", "owner-stop-failed", dispatch.NO_SUPERVISED_HEAD]
-        )
+        self.assertEqual(self.state.load_head_run(), record)
+        self.assertEqual(self.actions(), ["supervised-started", dispatch.NO_SUPERVISED_HEAD])
 
 
 class StewardBoard:
@@ -838,9 +856,8 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
     launches, and records in `active_report.json` which head is writing which card. Everything
     below is about what a tick owes that card.
 
-    A stopped head's card is nobody else's to finish, so it is closed as part of stopping its
-    writer, before the record naming that writer is forgotten. And a tick that raises nothing
-    creates no card of its own: the refusal is decided before a command is built.
+    A tick that raises nothing creates no card of its own, because the refusal is decided before a
+    command is built. It also closes none it finds: the card a live head is writing is that head's.
     """
 
     AGENT = "steward"
@@ -901,28 +918,36 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertIsNone(self.state.load_active_report())
         self.assertEqual(self.actions(), ["dispatch-release", dispatch.NO_SUPERVISED_HEAD])
 
-    def test_a_supervised_head_is_stopped_with_its_report(self) -> None:
-        """`local-pty -> orca-legacy`: the head is stopped across the boundary that raised it, and
-        the card it was writing is closed with it."""
+    def test_a_live_supervised_head_keeps_its_report_on_a_failed_closed_tick(self) -> None:
+        """`local-pty -> orca-legacy`: the head, its record and the card it is writing all stay."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
         head = self.head_pid(run_dir)
         self.assertTrue(_alive(head), "the first tick raised no live head")
         standing = self._standing_report()
+        active = self.state.load_active_report()
+        record = self.state.load_head_run()
 
         self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
         self.assertEqual(len(self.board.cards), 1, "the failed-closed tick created a report card of its own")
-        self.assertEqual(
-            self.board.in_progress(), [], "the card the stopped head was writing was left In progress"
-        )
-        self.assertIn((self.AGENT, standing, "Done"), self.board.moves)
-        self.assertIsNone(self.state.load_active_report())
-        self.await_(lambda: not _alive(head), message="the supervised head outlived the tick that stopped it")
-        self.assertIsNone(self.state.load_head_run())
-        self.assertEqual(
-            self.actions()[-3:], ["owner-report-release", "owner-stopped", dispatch.NO_SUPERVISED_HEAD]
-        )
+        self.assertEqual(self.board.in_progress(), [standing], "the live head's report was closed")
+        self.assertEqual(self.board.moves, [])
+        self.assertEqual(self.state.load_active_report(), active)
+        self.assertEqual(self.state.load_head_run(), record)
+        self.assertTrue(_alive(head), "the failed-closed tick stopped the live head")
+        self.assertEqual(self.actions()[-1], dispatch.NO_SUPERVISED_HEAD)
+        self.assertNotIn("owner-report-release", self.actions())
+
+    def test_a_failed_closed_tick_leaves_even_an_ownerless_report_alone(self) -> None:
+        """A refused tick holds still: a report whose writer is not recorded anywhere is the next
+        ordinary tick's to close, not this one's."""
+        self.state.save_active_report("secretary-report-9", "run-9")
+
+        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
+
+        self.assertEqual(self.state.load_active_report()["reference"], "secretary-report-9")
+        self.assertEqual(self.actions(), [dispatch.NO_SUPERVISED_HEAD])
 
     def test_a_working_supervised_head_keeps_the_report_it_is_writing(self) -> None:
         """The busy-skip dispatches nothing and stops nothing: the head that is up is the one

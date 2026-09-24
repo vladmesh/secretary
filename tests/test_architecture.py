@@ -136,19 +136,43 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
     return found
 
 
+#: The modules whose calls start a process, and the calls of theirs that do (`os.exec*` and
+#: `os.spawn*` by prefix). A string argument of one of these is a command, whatever else it is.
+PROCESS_MODULES = frozenset({"subprocess", "os", "shutil", "asyncio"})
+PROCESS_CALLS = frozenset(
+    {
+        "run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+        "system", "popen", "which", "create_subprocess_exec", "create_subprocess_shell",
+    }
+)
+
+
+def _is_orca_command(text: str) -> bool:
+    """A command string that is `orca` / `orca-cli`, or whose first word is (a path to) either."""
+    words = text.split()
+    return bool(words) and Path(words[0]).name in ORCA_BINARIES
+
+
 def _runs_orca(node: ast.AST) -> bool:
-    """An argument vector or shell command whose program is the `orca` / `orca-cli` binary."""
+    """An argument vector or command string whose program is the `orca` / `orca-cli` binary."""
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
         first = node.elts[0]
-        return (
-            isinstance(first, ast.Constant)
-            and isinstance(first.value, str)
-            and Path(first.value).name in ORCA_BINARIES
-        )
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        words = node.value.split()
-        return bool(words) and len(words) > 1 and Path(words[0]).name in ORCA_BINARIES
-    return False
+        return isinstance(first, ast.Constant) and isinstance(first.value, str) and _is_orca_command(first.value)
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and _is_orca_command(node.value)
+
+
+def _starts_a_process(call: ast.Call) -> bool:
+    """Whether a call is one of the process-starting calls, by name and, when dotted, by module."""
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        name = func.attr
+        if not (isinstance(func.value, ast.Name) and func.value.id in PROCESS_MODULES):
+            return False
+    elif isinstance(func, ast.Name):
+        name = func.id
+    else:
+        return False
+    return name in PROCESS_CALLS or name.startswith(("exec", "spawn"))
 
 
 def _automations_orca_routes(relative: str, source: str) -> list[str]:
@@ -165,15 +189,10 @@ def _automations_orca_routes(relative: str, source: str) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if _names(node.value, PANE_HOST_MODULE) or node.value.endswith("." + ORCA_RPC_NAME):
                 offenders.add(f"{relative}:{node.lineno}: names {node.value}")
-        if isinstance(node, ast.Call):
+        if isinstance(node, ast.Call) and _starts_a_process(node):
             called = [*node.args, *(keyword.value for keyword in node.keywords)]
             if any(_runs_orca(argument) for argument in called):
                 offenders.add(f"{relative}:{node.lineno}: runs the orca binary")
-            name = getattr(node.func, "attr", getattr(node.func, "id", ""))
-            if name == "which" and any(
-                isinstance(argument, ast.Constant) and argument.value in ORCA_BINARIES for argument in node.args
-            ):
-                offenders.add(f"{relative}:{node.lineno}: looks up the orca binary")
         if isinstance(node, (ast.List, ast.Tuple)) and _runs_orca(node):
             offenders.add(f"{relative}:{node.lineno}: builds an orca argument vector")
     return sorted(offenders)
@@ -204,6 +223,13 @@ class AutomationsReachNoOrcaTests(unittest.TestCase):
             "from .orca_rpc import call\n",
             "import secretary.automations.runtime.orca_rpc as rpc\n",
             "import importlib\nimportlib.import_module('secretary.runtime.pane_host')\n",
+            "import subprocess\nsubprocess.run('orca')\n",
+            "import subprocess\nsubprocess.run(['orca'])\n",
+            "import subprocess\nsubprocess.run('orca-cli')\n",
+            "import os\nos.system('orca')\n",
+            "import os\nos.execvp('orca', ['orca'])\n",
+            "import os\nos.spawnlp(os.P_WAIT, 'orca-cli', 'orca-cli')\n",
+            "from subprocess import check_output\ncheck_output(args='orca terminal list', shell=True)\n",
             "import subprocess\nsubprocess.run(['orca', 'terminal', 'list', '--json'])\n",
             "import subprocess\nsubprocess.run(('/usr/local/bin/orca-cli', 'status'))\n",
             "import os\nos.system('orca terminal stop --worktree x')\n",
@@ -220,6 +246,9 @@ class AutomationsReachNoOrcaTests(unittest.TestCase):
             "from pathlib import Path\nROOT = Path.home() / 'orca' / 'workspaces'\n",
             "from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME\n",
             "import subprocess\nsubprocess.run(['git', 'status'])\n",
+            # A string "orca" handed to a call that starts no process is not a command.
+            "import os\nROOT = os.path.join(os.path.expanduser('~'), 'orca', 'workspaces')\n",
+            "import subprocess\nsubprocess.run(['ls', 'orca'])\n",
         ):
             with self.subTest(source=source):
                 self.assertEqual(_automations_orca_routes(planted, source), [])

@@ -27,14 +27,19 @@ what is left to delete once it has (A20).
 A standing agent's tick with no usable `local-pty` profile fails closed (secretary-1720): it starts
 no head and never falls back to a pane. The causes are: the registry would not load, no profile is
 routed to the role, the profile will not make a `HeadSpec`, its command will not render, or it names
-a runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The tick creates no
-steward report card, stops a supervised head an earlier tick raised for that role, and exits 1.
+a runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The tick changes
+nothing else: it creates no steward report card, stops no head, leaves `head_run.json` and
+`active_report.json` as they are and closes no report, and exits 1. A head an earlier tick raised
+finishes its turn under its own supervisor; the next tick with a usable profile finds it through
+`head_run.json` (busy-skip, or a bring-up over a head that has ended).
 To see the reason, read the last entry of `automation-state/<agent>/runs.jsonl` (under
 `TA_STATE`, by default `~/secretary-data/automation-state`): `action="no-supervised-head"`,
 `result="error"`, the cause in `error`. The unit's journal (`journalctl -u secretary-<agent>.service`)
 has the same reason on stderr. A `terminal_handle.json` left in the agent's state by the pane
-backend is refused the same way (`action="supervised-owner-conflict"`, exit 1): the tick never
-deletes it and never raises a head beside it. Remove it once that pane is confirmed gone. Pinned by `tests/test_automations_dispatch_local_pty.py` (`FailClosedTests`).
+backend is refused the same way (`action="supervised-owner-conflict"`, exit 1) whenever the file
+exists, even empty, unreadable or without a `handle`: the tick never deletes it and never raises a
+head beside it. Remove it once that pane is confirmed gone. Pinned by
+`tests/test_automations_dispatch_local_pty.py` (`FailClosedTests`).
 
 ## `local-pty` parity criteria
 

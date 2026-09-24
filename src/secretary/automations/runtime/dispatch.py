@@ -32,24 +32,24 @@ cannot make the tick act on two different registries.
 
 The head outlives the tick that raised it; `AgentState.save_head_run` is what a later tick reaches
 it through, and handing that record back to `start` is what makes a bring-up over a head that is
-still working a refusal (`HEAD_BUSY`) rather than a second head. A failed-closed tick that finds
-such a head recorded stops it across the same `HeadRuntime` boundary that raised it before it
-records its own refusal (`_stop_supervised_owner`): the role's resolution no longer names a
-supervisor, so the head that one raised is not this role's any more. A stop that cannot be
-confirmed leaves the record standing.
+still working a refusal (`HEAD_BUSY`) rather than a second head. A failed-closed tick changes
+nothing: it raises no head and stops none, leaves `head_run.json` and `active_report.json` as they
+are and closes no report. A head an earlier tick raised finishes its turn under its own supervisor,
+and the next tick with a usable profile finds it through `head_run.json` as usual.
 
 One role, one owner of its head. A `terminal_handle.json` left over from the retired pane backend
-still names a pane as this role's owner. This driver never deletes it and never raises a head
-beside it: the tick refuses with `action="supervised-owner-conflict"` and exits 1 until an operator
-has confirmed that pane is gone and removed the file.
+names a pane as this role's owner. The fence is the file's existence, not its parsed content, so an
+empty, unreadable or handle-less record fences too. This driver never deletes it and never raises a
+head beside it: the tick refuses with `action="supervised-owner-conflict"` and exits 1 until an
+operator has confirmed that pane is gone and removed the file.
 
 A report card belongs to a head, so stopping the head is what closes it. The steward's report card
 is created by the render of the skill that names it and is written by the head that render is
 launched with; `active_report.json` is which card that is and which head has it. That card, and the
 card a tick built but never handed to a head, are one tick-long obligation with one place that
 discharges it: `_TickReports`, entered by `run()` around the whole tick, so every terminal path of
-`_tick` — bring-up, busy-skip, the stop of a standing owner, every fail-closed bail, every raise —
-leaves through it.
+`_tick` — bring-up, busy-skip, every fail-closed bail, every raise — leaves through it. A refused
+tick holds still: it discharges nothing standing, not even an ownerless report.
 """
 
 from __future__ import annotations
@@ -74,10 +74,8 @@ from secretary.runtime.codex_preflight import (
 from secretary.runtime.head import (
     HEAD_ALIVE,
     HEAD_BUSY,
-    HEAD_GONE,
     STANDING_BINDING,
     HeadRun,
-    HeadRunError,
     HeadSpec,
     NudgePointer,
     StopInitiator,
@@ -570,13 +568,10 @@ def _release_standing_report(
     *,
     report_board: StewardReportBoard | None = None,
 ) -> None:
-    """Close the steward report card the head this tick has just stopped was writing.
+    """Close the steward report card in `active_report.json` whose writer is no longer recorded.
 
-    The card in `active_report.json` belongs to the head recorded as this role's owner, not to
-    the tick that finds it: whoever ends that head inherits its report. Nobody is going to write
-    it now, so it is closed with the reason its writer was stopped — and closed here, while the
-    record naming that writer still stands, because a record forgotten first leaves a card in
-    progress that no later tick can even tell was orphaned.
+    The card belongs to the head recorded as this role's owner, not to the tick that finds it.
+    With no such head left, nobody is going to write it, so it is closed with the reason.
 
     Nothing for a role with no reporting contract: only a steward dispatch ever records a
     reference here, so for curator and retro this reads an empty record and returns.
@@ -632,6 +627,8 @@ class _TickReports:
         #: a command carrying one exists.
         self.cmd: DispatchCommand | None = None
         self.settled = True
+        #: Set by a refused tick: it leaves every standing record and report as it found them.
+        self.hold_still = False
 
     def __enter__(self) -> _TickReports:
         return self
@@ -695,28 +692,22 @@ class _TickReports:
         )
         self.settled = True
 
-    def owner_stopped(self, note: str) -> None:
-        """The head that owned the standing report has just been stopped by this tick.
-
-        Called by `_stop_supervised_owner` between the moment its stop is confirmed and the moment
-        the record naming that head is forgotten, which is the only order in which the card can still be
-        matched to the head that was writing it.
-        """
-        _release_standing_report(self.state, self.event, note, report_board=self.report_board)
-
     def _close_an_orphan(self) -> None:
-        """The backstop under both of the above: a report with no owner left anywhere.
+        """The backstop under the above: a report with no owner left anywhere.
 
         `active_report.json` names a card and its writer at once, and the writer of a live head is
         recorded in `head_run.json` — or, left over from the retired pane backend and never removed
-        by this driver, `terminal_handle.json`. A tick that ends with a report standing and neither
-        record standing has removed that card's writer without closing it, whatever branch did so,
-        and the card is closed here rather than left in progress for a later tick to overwrite.
+        by this driver, `terminal_handle.json`, which counts whenever the file exists. A tick that
+        ends with a report standing and neither record standing has lost that card's writer, and the
+        card is closed here rather than left in progress for a later tick to overwrite. A refused
+        tick (`hold_still`) skips this: it changes nothing it found.
         """
+        if self.hold_still:
+            return
         try:
             if self.state.load_active_report() is None:
                 return
-            if self.state.load_terminal_handle() is not None:
+            if self.state.terminal_handle_file.exists():
                 return
             if self.state.load_head_run() is not None:
                 return
@@ -776,7 +767,6 @@ def _local_pty_runtime() -> Any:
 #: Who ended a head this driver was holding. A stop names its initiator, and this is the one this
 #: driver makes.
 HANDOVER_INITIATOR = "triggered-agent-dispatch"
-HANDOVER_REASON = "this role's resolution no longer names a supervised head"
 FAILED_BRING_UP_REASON = "this tick's bring-up failed, so the head it raised is nobody's"
 
 
@@ -796,69 +786,6 @@ class _StandingPromptTransport:
 _STANDING_PROMPT_TRANSPORT = _StandingPromptTransport()
 
 
-def _stop_supervised_owner(agent: str, state: AgentState, event: str, reports: _TickReports) -> None:
-    """End the supervised head recorded as this role's owner, on a tick that will raise none.
-
-    A failed-closed tick's resolution no longer names a supervisor, so a head an earlier tick raised
-    under one is not this role's head any more, and nothing later would ever stop it. It is stopped
-    across the same `HeadRuntime` boundary that raised it, and the report it was writing is closed
-    before the record naming it is forgotten. No head is raised and no skill is delivered here.
-
-    Fail-closed in both of its uncertain answers: a record that will not make a run, and a backend
-    that cannot say what became of the head it names, both leave the record standing. A head that
-    has already ended is forgotten without a stop. Every outcome is its own `runs.jsonl` entry; the
-    tick's own refusal is recorded afterwards by `_fail_closed`.
-    """
-    record = state.load_head_run()
-    if record is None:
-        return
-    try:
-        run = HeadRun.from_json(record)
-    except (HeadRunError, ValueError, TypeError) as exc:
-        state.log_run(event, action="owner-unreadable", result="error", error=str(exc))
-        print(f"dispatch[{agent}]: the record of this role's supervised head does not name a run ({exc})")
-        return
-    runtime = _local_pty_runtime()
-    seen = runtime.observe(run)
-    if seen.status == HEAD_GONE:
-        # The head ended on its own: there is no live owner to stop. The report it may have been
-        # writing is closed by the tick's own end, which sees it has no owner left.
-        state.save_head_run(None)
-        state.log_run(event, action="owner-gone", reference=run.run_id)
-        return
-    if not seen.ok and seen.status != HEAD_ALIVE:
-        state.log_run(
-            event,
-            action="owner-unreadable",
-            result="error",
-            reference=run.run_id,
-            error=seen.reason or seen.status,
-        )
-        print(
-            f"dispatch[{agent}]: the backend holding this role's head cannot say whether it is "
-            f"up ({seen.reason or seen.status}) — leaving it recorded"
-        )
-        return
-    receipt = runtime.stop(run, StopInitiator(actor=HANDOVER_INITIATOR, reason=HANDOVER_REASON))
-    if not receipt.ok:
-        state.log_run(
-            event,
-            action="owner-stop-failed",
-            result="error",
-            reference=run.run_id,
-            error=receipt.reason or receipt.status,
-        )
-        print(f"dispatch[{agent}]: the supervised head {run.run_id} would not confirm it stopped")
-        return
-    reports.owner_stopped(
-        "this role's resolution no longer names a supervised head, so the head that was writing "
-        "this report was stopped and the report is closed unwritten.",
-    )
-    state.save_head_run(None)
-    state.log_run(event, action="owner-stopped", reference=run.run_id)
-    print(f"dispatch[{agent}]: stopped the supervised head {run.run_id} this role no longer resolves to")
-
-
 def _fail_closed(
     agent: str, state: AgentState, event: str, reports: _TickReports, refusal: NoSupervisedHead
 ) -> int:
@@ -866,10 +793,11 @@ def _fail_closed(
 
     One `runs.jsonl` entry — `action="no-supervised-head"`, `result="error"` and the specific
     cause — and the same reason on stderr, and a nonzero exit, which the systemd unit records as a
-    failed run. A supervised head a previous tick raised is stopped first (`_stop_supervised_owner`).
-    The tick created no report card of its own: the refusal is decided before one is built.
+    failed run. Nothing else changes: no head is raised or stopped, `head_run.json` and
+    `active_report.json` stay as they are and no report is closed. The tick created no report card
+    of its own: the refusal is decided before one is built.
     """
-    _stop_supervised_owner(agent, state, event, reports)
+    reports.hold_still = True
     state.log_run(event, action=NO_SUPERVISED_HEAD, result="error", error=refusal.reason)
     print(f"dispatch[{agent}]: no supervised head to raise — {refusal.reason}", file=sys.stderr)
     return REFUSED_EXIT
@@ -1034,11 +962,13 @@ def _tick(
         resolution = _resolve_launch(agent, variant, registry)
     except NoSupervisedHead as refusal:
         return _fail_closed(agent, state, event, reports, refusal)
-    if state.load_terminal_handle() is not None:
+    if state.terminal_handle_file.exists():
         # `terminal_handle.json` is the retired pane backend's record of this role's head. This
         # driver cannot reach a pane to confirm it is gone and never deletes the record, so it
         # raises nothing beside it: two live heads for one role is the one outcome it may not
-        # produce. An operator removes the file once that pane is confirmed gone.
+        # produce. Existence is the fence: an empty, unreadable or handle-less record still says
+        # a pane may be up. An operator removes the file once that pane is confirmed gone.
+        reports.hold_still = True
         reason = (
             "a pane is still recorded as this role's head (terminal_handle.json); "
             "remove it once that pane is confirmed gone"
