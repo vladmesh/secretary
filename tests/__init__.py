@@ -34,7 +34,7 @@ its own for the whole run, before any test module is imported.
 ``tests/test_hermetic_codex.py`` proves it.
 
 The live pipeline's state dir needs the same treatment, and needs it early.
-``triggered_agents.agents.pipeline.state`` resolves ``STATE`` at import time,
+``secretary.automations.agents.pipeline.state`` resolves ``STATE`` at import time,
 and ``agents.pipeline.pause`` binds ``PAUSE_FILE`` off it, so by the time any
 test body runs the pause path is already fixed. Left at its default that path
 is the live ``<workspaces>/secretary/pipeline/state/pipeline`` of the machine
@@ -140,7 +140,7 @@ os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
 atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
 
 # The throwaway pipeline state dir described above, claimed before any test module
-# -- and therefore before `triggered_agents.agents.pipeline.state` -- is imported,
+# -- and therefore before `secretary.automations.agents.pipeline.state` -- is imported,
 # because that module binds `STATE` (and through it `pause.PAUSE_FILE`) to whatever
 # `resolve_pipeline_state_dir()` answers at import time. Set unconditionally, for
 # the same reason as TA_CODEX_HOME above: an ambient TA_PIPELINE_STATE_DIR

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.retro import search_log
+from secretary.automations.agents.retro import search_log
 
 
 class RetroSearchLogTests(unittest.TestCase):

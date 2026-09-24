@@ -469,7 +469,6 @@ class InstallationTests(unittest.TestCase):
             )
             child_source = root / "child-source"
             shutil.copytree(Path.cwd() / "src" / "secretary", child_source / "secretary")
-            shutil.copytree(Path.cwd() / "src" / "triggered_agents", child_source / "triggered_agents")
             for staged in (child_source, *child_source.rglob("*")):
                 mode = staged.stat().st_mode & 0o777
                 staged.chmod(mode | (0o055 if staged.is_dir() else 0o044))

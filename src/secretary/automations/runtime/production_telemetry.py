@@ -54,7 +54,7 @@ def instance_file() -> Path:
 def instance_host_configuration() -> tuple[dict | None, str | None]:
     """The validated host section of this process's instance, or a safe diagnostic.
 
-    The only permitted ``triggered_agents`` back edge to Secretary is this runtime boundary.  The
+    The only permitted ``secretary.automations`` edge into the rest of Secretary is this runtime boundary.  The
     dispatcher-state reader and health command both need the same installation identity, so keep
     configuration parsing here rather than letting a role reach into the importing checkout.
     """

@@ -17,7 +17,7 @@ head = "codex-sol-high"
 # staleness threshold, a resource health flip, a worker/reviewer workspace on disk with no
 # in-flight card). Gated in the systemd unit. The steward's whole reason to exist is post-merge self-
 # modification safety-netting, not a frequent LLM-cost sweep — a quiet tick costs nothing.
-precheck = "python3 -P -m triggered_agents steward precheck"
+precheck = "python3 -P -m secretary automations steward precheck"
 
 [systemd]
 # The only scheduler; the unit itself is packaged as

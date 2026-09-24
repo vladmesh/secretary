@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.automations.agents.curator import discover
 from secretary.dispatch.state import request_token
-from triggered_agents.agents.curator import discover
 
 
 class ClaudeProjectDirectoryTests(unittest.TestCase):

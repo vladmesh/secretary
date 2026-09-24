@@ -122,7 +122,7 @@ files = [
     "src/secretary/runtime/head/local_pty/journal.py",
     "src/secretary/runtime/head/local_pty/protocol.py",
     "src/secretary/runtime/head/local_pty/supervisor.py",
-    "src/triggered_agents/composition.py",
+    "src/secretary/automations/composition.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true
@@ -134,7 +134,7 @@ show_error_codes = true
 [tool.coverage.run]
 branch = true
 relative_files = true
-source = ["src/secretary", "src/triggered_agents"]
+source = ["src/secretary"]
 
 [project]
 name = "secretary"
@@ -192,17 +192,17 @@ secretary = "secretary.cli:main"
 secretary-memory-mcp = "secretary.memory_service:main"
 secretary-memory-po-bridge = "secretary.memory.po_bridge:main"
 secretary-memory-reindex = "secretary.memory_reindex:main"
-triggered-agents = "triggered_agents.composition:main"
 
 [tool.secretary]
 # Where this product ships its background agents' `<agent>/automation.toml` specs. `secretary`
 # reads the location from here (automations, role worktrees) rather than naming the agents'
-# package: that package is built on top of `secretary`, never the other way round.
-agent-specs = "src/triggered_agents/agents"
+# package: `secretary.automations` is built on top of the rest of `secretary`, never the other
+# way round.
+agent-specs = "src/secretary/automations/agents"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["secretary*", "triggered_agents*"]
+include = ["secretary*"]
 
 [tool.setuptools.package-data]
 "secretary.schemas" = ["*.json"]
@@ -210,7 +210,7 @@ include = ["secretary*", "triggered_agents*"]
 # they ship with the package rather than only existing in the checkout.
 "secretary.board.migrations" = ["script.py.mako", "versions/*.py"]
 "secretary.runtime" = ["heads.toml"]
-"triggered_agents.agents.curator" = ["*.toml"]
-"triggered_agents.agents.pipeline" = ["*.toml"]
-"triggered_agents.agents.retro" = ["*.toml"]
-"triggered_agents.agents.steward" = ["*.toml"]
+"secretary.automations.agents.curator" = ["*.toml"]
+"secretary.automations.agents.pipeline" = ["*.toml"]
+"secretary.automations.agents.retro" = ["*.toml"]
+"secretary.automations.agents.steward" = ["*.toml"]

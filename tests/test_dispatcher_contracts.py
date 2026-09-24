@@ -35,6 +35,7 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary import upgrade
+from secretary.automations.runtime import dispatch
 from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
 from secretary.dispatch import claim as dispatcher_claim
 from secretary.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
@@ -83,14 +84,13 @@ from secretary.runtime.head_runtimes import (
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
 )
+from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from secretary.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 from secretary.runtime.role_env import observer_binding
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.retired_board import legacy_runtime_lines
-from triggered_agents.runtime import dispatch
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
-from secretary.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -1110,11 +1110,11 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                     self.assertIn(str(workspace.resolve()), trusted)
                     self.assertIn('trust_level = "trusted"', trusted)
 
-    def test_the_preflight_is_shared_with_the_triggered_agents_launcher(self) -> None:
+    def test_the_preflight_is_shared_with_the_automations_launcher(self) -> None:
         """One implementation reachable from both sides, and the dependency direction that forces
-        where it lives: `triggered_agents` may not import `secretary` back."""
+        where it lives: the runtime module imports nothing else of `secretary`."""
+        from secretary.automations.runtime import dispatch as ta_dispatch
         from secretary.runtime import codex_preflight
-        from triggered_agents.runtime import dispatch as ta_dispatch
 
         self.assertIs(
             dispatcher_launcher._preflight_codex_workspace, codex_preflight.ensure_codex_workspace_trusted
@@ -1306,8 +1306,11 @@ class ShippedRegistryTiersTests(unittest.TestCase):
         )
 
     def test_shipped_automation_specs_name_shipped_tiers(self) -> None:
-        agents = Path(upgrade.running_product_root()) / "src" / "triggered_agents" / "agents"
-        for spec in sorted(agents.glob("*/automation.toml")):
+        agents = upgrade.agents_root(Path(upgrade.running_product_root()))
+        assert agents is not None
+        specs = sorted(agents.glob("*/automation.toml"))
+        self.assertTrue(specs, agents)
+        for spec in specs:
             head = tomllib.loads(spec.read_text(encoding="utf-8")).get("head")
             if head is None:
                 continue

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shlex
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +126,12 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "automations":
+        # The background agents own their argv, help and output: hand it over untouched, before
+        # this parser can claim `--help` or reject an agent's own flags.
+        return run_automations(argv[1:])
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -135,6 +142,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
     return handler(args)
+
+
+def run_automations(argv: list[str]) -> int:
+    """`secretary automations <agent> <cmd> [args]`: the background agents' one entry.
+
+    Imported on demand, so no other command pays for the agents' board wiring; the composition
+    root answers with the agents' own exit protocol (0/100/101/102) and output.
+    """
+    from secretary.automations.composition import main as automations_main
+
+    return automations_main(list(argv))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,6 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_run_subcommands(subparsers)
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
+    automations = subparsers.add_parser(
+        "automations",
+        add_help=False,
+        help="run a background agent's helpers: automations <agent> <cmd> [args]",
+    )
+    automations.add_argument("argv", nargs=argparse.REMAINDER)
+    automations.set_defaults(handler=lambda args: run_automations(args.argv))
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)

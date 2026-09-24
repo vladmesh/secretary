@@ -15,16 +15,18 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 
 - `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
-  packages: `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`, `schemas`, `web`,
-  `webfront`, `webproto`.
-- `src/triggered_agents` is the CLI of the three background agents (curator, steward, retro), built
-  on top of `secretary`. `python3 -P -m triggered_agents <agent> <cmd>` is their one entry: its
-  composition root (`triggered_agents.composition`) injects Secretary's board ports and hands the
-  rest to the mechanical-role driver and the agents' deterministic helpers. It may import any
-  `secretary` module; no `secretary` module imports it. `secretary` finds the agents' shipped
-  `automation.toml` specs through the product manifest (`[tool.secretary] agent-specs` in
-  `pyproject.toml`), not by the package name. `tests/test_architecture.py` holds the one direction
-  and asserts that nothing under `src/secretary` names the package at all.
+  packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
+  `schemas`, `web`, `webfront`, `webproto`.
+- `src/secretary/automations` is the three background agents (curator, steward, retro), built on top
+  of the rest of `secretary`. `python3 -P -m secretary automations <agent> <cmd>` is their one entry:
+  `secretary.cli` hands the argv untouched to the composition root
+  (`secretary.automations.composition`), which injects Secretary's board ports and hands the rest to
+  the mechanical-role driver and the agents' deterministic helpers. The package may import any
+  `secretary` module; no other `secretary` module imports it, except the on-demand import behind the
+  `automations` subcommand in `secretary.cli`. `secretary` finds the agents' shipped `automation.toml`
+  specs through the product manifest (`[tool.secretary] agent-specs` in `pyproject.toml`), not by the
+  package name. `tests/test_architecture.py` holds the one direction and keeps the retired top-level
+  `triggered_agents` package (historical name, removed in sprint:1459) from coming back.
 - The packaged systemd timers are the only schedule owner of the background agents. Secretary
   manages no Orca automations: `upgrade` neither creates nor deletes them, and ones left on a live
   host by older upgrades stay Orca's state until Orca itself is removed (A20).
@@ -39,7 +41,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 - `src/secretary/runtime` holds the head-runtime utilities both the pipeline and the background
   agents use (`paths`, `references`, `prompt_document`, `launch_prefix`, `shared_state`,
   `claude_sessions`, `claude_env`, `state`, ...). New shared runtime code goes here, not into
-  `triggered_agents`.
+  `secretary.automations`.
 
 The target package layout is feature-first. Modules move there one feature at a time, keeping
 compatibility imports where an installed command depends on an old path:
@@ -182,7 +184,7 @@ writes one budget event per source event. At the hard limit the sprint becomes `
 removes the live head without touching claimed cards. The sprint's resume entry is structured
 metadata; its freshness is computed against card audit.
 
-Standing agents: curator, steward and retro all enter `python3 -P -m triggered_agents`. Its
+Standing agents: curator, steward and retro all enter `python3 -P -m secretary automations`. Its
 composition root supplies task-backed ports for steward signals and reports and for retro Done
 retention; curator needs none. The generic triggered-agent runtime owns only the port interfaces.
 

@@ -17,6 +17,7 @@ from unittest import mock
 
 from secretary import state_repo, status, upgrade
 from secretary.config import DataDirError
+from secretary.head_health import HeadReadiness, resolve_head_chain
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
     PRODUCT_ORIGIN,
@@ -48,7 +49,6 @@ from secretary.projects.availability import ProjectAvailability
 from secretary.runtime import heads
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from secretary.head_health import HeadReadiness, resolve_head_chain
 
 UNIT_PREFIX = "secretary-"
 
@@ -1266,11 +1266,11 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "src" / "triggered_agents" / "agents" / "curator"
+            agent = product / "src" / "secretary" / "automations" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             (product / "pyproject.toml").write_text(
-                '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+                '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
             )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
@@ -1298,11 +1298,11 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "src" / "triggered_agents" / "agents" / "curator"
+            agent = product / "src" / "secretary" / "automations" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             (product / "pyproject.toml").write_text(
-                '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+                '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
             )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
@@ -1750,7 +1750,7 @@ class CommandSurfaceTests(unittest.TestCase):
 
 class HealthUnitNameTests(unittest.TestCase):
     def test_agents_map_to_the_packaged_units_not_the_retired_ta_names(self):
-        from triggered_agents.runtime import health
+        from secretary.automations.runtime import health
 
         self.assertEqual(health.timer_unit("curator"), "secretary-curator.timer")
         self.assertEqual(health.timer_unit("steward"), "secretary-steward.timer")
@@ -1758,8 +1758,8 @@ class HealthUnitNameTests(unittest.TestCase):
         self.assertEqual(health.timer_unit("pipeline"), "secretary-dispatcher-production.timer")
 
     def test_every_checked_unit_is_one_the_product_ships(self):
-        from triggered_agents.__main__ import HEALTH_COMPONENTS
-        from triggered_agents.runtime import health
+        from secretary.automations.__main__ import HEALTH_COMPONENTS
+        from secretary.automations.runtime import health
 
         shipped = {
             unit.name

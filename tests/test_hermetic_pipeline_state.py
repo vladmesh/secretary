@@ -1,6 +1,6 @@
 """The unit suite reads its own pipeline state dir, never the live installation's.
 
-`triggered_agents.agents.pipeline.state` resolves `STATE` at import time and
+`secretary.automations.agents.pipeline.state` resolves `STATE` at import time and
 `agents.pipeline.pause` binds `PAUSE_FILE` off it, so the pause path every
 triggered-dispatch test runs against is fixed before the first test body. If that path
 is the live `<workspaces>/secretary/pipeline/state/pipeline`, an operator holding a
@@ -26,13 +26,13 @@ from pathlib import Path
 from unittest import mock
 
 import tests
+from secretary.automations.agents.pipeline import pause as pipeline_pause
+from secretary.automations.agents.pipeline import state as pipeline_state
+from secretary.automations.runtime import dispatch
 from secretary.runtime import shared_state
-from tests.fakes.triggered_dispatch import FakeSessionHost
-from triggered_agents.agents.pipeline import pause as pipeline_pause
-from triggered_agents.agents.pipeline import state as pipeline_state
-from triggered_agents.runtime import dispatch
 from secretary.runtime import state as runtime_state
 from secretary.runtime.pane_host import Pane
+from tests.fakes.triggered_dispatch import FakeSessionHost
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,7 +84,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
             )
             probe = (
                 "import json, tests\n"
-                "from triggered_agents.agents.pipeline import pause\n"
+                "from secretary.automations.agents.pipeline import pause\n"
                 "print(json.dumps({'paused': pause.is_paused(), 'file': str(pause.PAUSE_FILE)}))\n"
             )
             done = subprocess.run(
@@ -111,7 +111,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
 
 class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
     """The behavioural half: a hard freeze sitting in a production-like state directory cannot
-    make a triggered-dispatch test skip. Same scaffolding as tests/test_triggered_dispatch.py's
+    make a triggered-dispatch test skip. Same scaffolding as tests/test_automations_dispatch.py's
     warm-reuse case, so a regression shows up as "paused" where "reused" is expected."""
 
     def setUp(self) -> None:
@@ -151,7 +151,7 @@ class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
                 mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
                 mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
                 mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
-                mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
+                mock.patch("secretary.automations.runtime.dispatch.time.sleep"),
                 mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]),
             ):
                 self.assertEqual(dispatch.run("retro", host=host), 0)

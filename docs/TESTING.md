@@ -51,7 +51,7 @@ and after each suite; a green suite requires identical snapshots. Evidence keeps
 and at most ten changed-status entries.
 
 Each suite also uploads raw coverage `coverage.<suite>` as `ci-coverage-<suite>-<sha>` (line and branch
-coverage of `src/secretary` and `src/triggered_agents`; coverage is a CI-only dependency). The
+coverage of `src/secretary`, the background agents' `secretary.automations` included; coverage is a CI-only dependency). The
 aggregate step rejects missing, malformed or uncombinable data as an infrastructure failure and
 publishes `ci-coverage-combined-<sha>` with `combined-coverage.json` (per-file executed/missing/excluded
 lines and branches and the branch summary; coverage.py's per-function and per-class regions, which restate

@@ -202,7 +202,7 @@ UNIT_PATH_DIRECTORIES = (
 SRC = Path(__file__).resolve().parents[1] / "src"
 # A probe that reaches no provider and answers exactly the question the real one dies on: can the
 # interpreter this command resolves to import the product at all.
-IMPORT_PROBE = 'python3 -P -c "import triggered_agents"'
+IMPORT_PROBE = 'python3 -P -c "import secretary.automations"'
 
 
 def _interpreter(directory: Path, *, pythonpath: Path | None) -> Path:
@@ -211,7 +211,7 @@ def _interpreter(directory: Path, *, pythonpath: Path | None) -> Path:
     Both run this process's own interpreter, so the test says nothing about the developer's venv;
     what separates them is whether the product is on their import path. `-S` keeps site-packages
     out of both, and `-E` keeps the suite's own PYTHONPATH out of the system one, so "can it import
-    triggered_agents" has the same answer on every machine.
+    secretary.automations" has the same answer on every machine.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "python3"

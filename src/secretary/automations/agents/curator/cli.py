@@ -1,14 +1,14 @@
 """curator agent — deterministic helpers the curator skill drives via Bash.
 
 Flow the agent follows each run:
-  1. `python3 -m triggered_agents curator harvest [--project <canonical-id|unknown|review:po>]`  -> redacted batch (markdown) of new
+  1. `python3 -P -m secretary automations curator harvest [--project <canonical-id|unknown|review:po>]`  -> redacted batch (markdown) of new
                                      Claude/Hermes/Codex session turns and changed
                                      personal-memory files on stdout, and a fact-bearing,
                                      identity-bound pending batch cached on disk. Cursor-only
                                      scans advance before the command returns.
   2. agent extracts durable facts, dedups via memory_search, writes each accepted fact
-     through `python3 -m triggered_agents curator memory-write`.
-  3. `python3 -m triggered_agents curator advance [--project <canonical-id|unknown|review:po>]`  -> moves the watermark past step 1.
+     through `python3 -P -m secretary automations curator memory-write`.
+  3. `python3 -P -m secretary automations curator advance [--project <canonical-id|unknown|review:po>]`  -> moves the watermark past step 1.
 
 An operator can settle an already-reviewed project backlog without running the curator:
 `backlog --project ID --json` emits a metadata-only cutoff identity, and `baseline` accepts that
@@ -379,7 +379,7 @@ def cmd_status() -> int:
 def cmd_memory_write(argv: list[str]) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(prog="python3 -m triggered_agents curator memory-write")
+    parser = argparse.ArgumentParser(prog="python3 -P -m secretary automations curator memory-write")
     parser.add_argument("--instance", default=str(default_secretary_instance()))
     parser.add_argument("--data-dir")
     parser.add_argument("--actor", required=True)
@@ -439,7 +439,7 @@ def main(argv=None) -> int:
     if cmd in {"harvest", "advance", "backlog"}:
         import argparse
 
-        parser = argparse.ArgumentParser(prog=f"python3 -m triggered_agents curator {cmd}")
+        parser = argparse.ArgumentParser(prog=f"python3 -P -m secretary automations curator {cmd}")
         parser.add_argument("--project")
         if cmd in {"harvest", "backlog"}:
             parser.add_argument("--json", action="store_true")
@@ -452,7 +452,7 @@ def main(argv=None) -> int:
     if cmd == "baseline":
         import argparse
 
-        parser = argparse.ArgumentParser(prog="python3 -m triggered_agents curator baseline")
+        parser = argparse.ArgumentParser(prog="python3 -P -m secretary automations curator baseline")
         parser.add_argument("--project", required=True)
         parser.add_argument("--actor", required=True)
         parser.add_argument("--reason", required=True)

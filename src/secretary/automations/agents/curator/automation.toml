@@ -15,7 +15,7 @@ ephemeral = true
 # registry that routes the curator nowhere at all.
 head = "codex-sol-medium"
 # Skip the run when no session has new turns since the watermark. Gated in the systemd unit.
-precheck = "python3 -P -m triggered_agents curator precheck"
+precheck = "python3 -P -m secretary automations curator precheck"
 
 [systemd]
 # The only scheduler; packaged as secretary-<name>.timer.

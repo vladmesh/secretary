@@ -1,4 +1,4 @@
-"""Composition root of the three background agents: ``python3 -P -m triggered_agents``.
+"""Composition root of the three background agents: ``python3 -P -m secretary automations``.
 
 Every entry — the systemd gate, an Orca precheck, a manual run — comes through here. Curator
 needs no board port and is passed straight on; steward and retro get Secretary's canonical
@@ -14,6 +14,11 @@ import sys
 from pathlib import Path
 from typing import cast
 
+from secretary.automations import __main__ as triggered_main
+from secretary.automations.agents.retro import cli as retro_cli
+from secretary.automations.agents.steward import cli as steward_cli
+from secretary.automations.agents.steward.signals import StewardSignalReader
+from secretary.automations.runtime import dispatch
 from secretary.board.backend import card_client
 from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
@@ -21,11 +26,6 @@ from secretary.config import instance_data_dir
 from secretary.runtime.paths import default_instance_path
 from secretary.runtime.state import BoardUnavailable
 from secretary.tasks import TaskError, TaskReader, TaskWriter
-from triggered_agents import __main__ as triggered_main
-from triggered_agents.agents.retro import cli as retro_cli
-from triggered_agents.agents.steward import cli as steward_cli
-from triggered_agents.agents.steward.signals import StewardSignalReader
-from triggered_agents.runtime import dispatch
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})
 

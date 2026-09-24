@@ -130,11 +130,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from secretary.runtime import claude_env
 from secretary.head_health import HeadHealth, resolve_head_chain
+from secretary.runtime import claude_env
 from secretary.runtime.claude_sessions import claude_session_paths
-
-from . import finalizer, orca_rpc
 from secretary.runtime.codex_preflight import (
     CodexPreflightError,
     preflight_codex_launch,
@@ -158,7 +156,6 @@ from secretary.runtime.head.identity import head_process_status
 from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
 from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from secretary.runtime.pane_host import Pane, SessionHost, safe_command_label, session_host
-from .production_telemetry import data_dir as _installation_data_dir
 from secretary.runtime.state import AgentState
 from secretary.runtime.tui_delivery import (
     TuiDeliveryError,
@@ -166,7 +163,10 @@ from secretary.runtime.tui_delivery import (
     read_pane_text,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+from . import finalizer, orca_rpc
+from .production_telemetry import data_dir as _installation_data_dir
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))  # busy + this quiet = stuck
 IDLE_PROBE_MS = 2500  # tui-idle satisfied within this = idle; timeout = busy
@@ -350,7 +350,7 @@ def _workspace(agent: str) -> str:
 
 def _load_spec(agent: str) -> dict:
     return tomllib.loads(
-        (_REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml").read_text()
+        (_REPO_ROOT / "src" / "secretary" / "automations" / "agents" / agent / "automation.toml").read_text()
     )
 
 

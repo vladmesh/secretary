@@ -229,7 +229,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         runtime_component_modules = {
             "tests/test_local_pty_supervisor.py",
             "tests/test_local_pty_head_runtime.py",
-            "tests/test_triggered_dispatch_local_pty.py",
+            "tests/test_automations_dispatch_local_pty.py",
             "tests/test_runtime_deadline_contract.py",
         }
         grouped = load_manifest(root)
@@ -579,7 +579,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             changed = json.loads((output / CHANGED_LINES_JSON_NAME).read_text(encoding="utf-8"))
 
         self.assertEqual(combined["candidate_sha"], CANDIDATE_SHA)
-        self.assertEqual(combined["source_roots"], ["src/secretary", "src/triggered_agents"])
+        self.assertEqual(combined["source_roots"], ["src/secretary"])
         self.assertIn("executed_branches", combined["coverage"]["files"]["src/secretary/example.py"])
         self.assertEqual(
             combined_text,
@@ -653,7 +653,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("[tool.coverage.run]", config)
         self.assertIn("branch = true", config)
         self.assertIn("relative_files = true", config)
-        self.assertIn('source = ["src/secretary", "src/triggered_agents"]', config)
+        self.assertIn('source = ["src/secretary"]', config)
         self.assertNotIn("fail_under", config)
 
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:

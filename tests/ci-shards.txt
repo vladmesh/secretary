@@ -27,6 +27,7 @@ integration-board tests/test_po_runner.py
 integration-board tests/test_web_po_operations.py
 integration-board tests/test_product_issues_sql_backend.py
 packaging tests/test_bootstrap.py
+packaging tests/test_automations_live_window.py
 unit tests/test_broad_check.py
 unit tests/test_broad_suite.py
 unit tests/test_candidate_history.py
@@ -123,6 +124,7 @@ unit tests/test_dispatcher_runtime_isolation.py
 integration-dispatcher tests/test_dispatcher_audit_backend.py
 unit tests/test_runtime_provenance.py
 unit tests/test_role_skills.py
+unit tests/test_skill_commands.py
 unit tests/test_po_workspace.py
 unit tests/test_schemas.py
 integration-recovery tests/test_secret_recover.py
@@ -157,13 +159,13 @@ integration-board tests/test_web_run_protocol.py
 integration-board tests/test_web_sprint_protocol.py
 integration-board tests/test_web_sprint_transport.py
 integration-board tests/test_sprint_user_path.py
-integration-heads tests/test_triggered_agents_composition.py
+integration-heads tests/test_automations_composition.py
 unit tests/test_task_commands.py
 unit tests/test_task_routing.py
 integration-board tests/test_tasks.py
 integration-board tests/test_tasks_sql_backend.py
-integration-heads tests/test_triggered_dispatch.py
-runtime-component tests/test_triggered_dispatch_local_pty.py
+integration-heads tests/test_automations_dispatch.py
+runtime-component tests/test_automations_dispatch_local_pty.py
 packaging tests/test_upgrade.py
 integration-board tests/test_reslice_seed.py
 unit tests/test_web_front.py

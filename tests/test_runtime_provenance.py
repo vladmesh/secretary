@@ -13,12 +13,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.automations.agents.steward import signals as steward_signals
+from secretary.automations.runtime import health, production_telemetry
 from secretary.cli import main as secretary_main
 from secretary.dispatch.production import record_tick_telemetry
 from secretary.dispatch.runtime_provenance import ProductionRuntime
 from secretary.runtime.role_env import runtime_env
-from triggered_agents.agents.steward import signals as steward_signals
-from triggered_agents.runtime import health, production_telemetry
 from secretary.runtime.state import AgentState
 
 PREFLIGHT = Path(__file__).parents[1] / "src" / "secretary" / "dispatch" / "runtime_preflight.py"

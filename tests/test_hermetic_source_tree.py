@@ -34,7 +34,7 @@ import unittest
 from pathlib import Path
 
 import secretary
-import triggered_agents
+import secretary.automations
 
 #: The checkout this test file belongs to: the parent of the `tests/` package.
 CHECKOUT = Path(__file__).resolve().parent.parent
@@ -71,8 +71,8 @@ class HermeticSourceTreeTests(unittest.TestCase):
     def test_the_suite_imported_secretary_from_this_checkout(self) -> None:
         self._assert_imported_from_this_checkout(secretary, "secretary")
 
-    def test_the_suite_imported_triggered_agents_from_this_checkout(self) -> None:
-        self._assert_imported_from_this_checkout(triggered_agents, "triggered_agents")
+    def test_the_suite_imported_the_background_agents_from_this_checkout(self) -> None:
+        self._assert_imported_from_this_checkout(secretary.automations, "secretary/automations")
 
     def test_the_checkout_this_guard_measures_against_is_the_one_holding_the_tests(self) -> None:
         """Guard the guard: if `tests/` ever moves, the comparison above must not go dead.
@@ -82,7 +82,7 @@ class HermeticSourceTreeTests(unittest.TestCase):
         """
         self.assertTrue((CHECKOUT / "tests" / "__init__.py").is_file(), CHECKOUT)
         self.assertTrue((CHECKOUT / "src" / "secretary").is_dir(), CHECKOUT)
-        self.assertTrue((CHECKOUT / "src" / "triggered_agents").is_dir(), CHECKOUT)
+        self.assertTrue((CHECKOUT / "src" / "secretary" / "automations").is_dir(), CHECKOUT)
 
 
 if __name__ == "__main__":

@@ -2140,22 +2140,22 @@ successfully without dispatch or cleanup.
 
 ### Project baseline settlement
 
-`python3 -P -m triggered_agents curator baseline` settles existing curator input without running the
+`python3 -P -m secretary automations curator baseline` settles existing curator input without running the
 curator, changing its schedule or writing facts. It takes one registered canonical project id or
 `review:po`, an explicit actor, a non-empty one-line reason, and exactly one evidence identity:
 
 ```bash
-python3 -P -m triggered_agents curator backlog --project PROJECT --json
-python3 -P -m triggered_agents curator baseline \
+python3 -P -m secretary automations curator backlog --project PROJECT --json
+python3 -P -m secretary automations curator baseline \
   --project PROJECT --actor OPERATOR --reason 'reviewed historical backlog' --cutoff-id CUTOFF_ID
 
 # The same audited flow settles manually reviewed multi-project observer input.
-python3 -P -m triggered_agents curator backlog --project review:po --json
-python3 -P -m triggered_agents curator baseline \
+python3 -P -m secretary automations curator backlog --project review:po --json
+python3 -P -m secretary automations curator baseline \
   --project review:po --actor OPERATOR --reason 'reviewed multi-project observer backlog' --cutoff-id CUTOFF_ID
 
 # Or settle the exact fact-bearing pending batch already returned by `harvest --json`.
-python3 -P -m triggered_agents curator baseline \
+python3 -P -m secretary automations curator baseline \
   --project PROJECT --actor OPERATOR --reason 'approved pending batch' --batch-id BATCH_ID
 ```
 
@@ -2167,7 +2167,7 @@ its `batch_id` is the alternative evidence. A baseline never accepts the all-bac
 bypass a pending record, and rejects a foreign, ambiguous, mismatched, malformed or stale source before
 state changes.
 
-The callable API is `triggered_agents.agents.curator.cli.baseline_settlement` with the same required
+The callable API is `secretary.automations.agents.curator.cli.baseline_settlement` with the same required
 `project`, `actor`, `reason` and exactly one of `cutoff_id` or `batch_id`, under the same
 cursor-settlement lock. The transition writes the watermark, removes the selected pending record when
 settling that batch, and appends to `baseline-audit.ndjson` in the curator state directory, rolling back

@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from triggered_agents.agents.retro import cli as retro_cli
-from triggered_agents.agents.steward import cli as steward_cli
-from triggered_agents.runtime import health
+from secretary.automations.agents.retro import cli as retro_cli
+from secretary.automations.agents.steward import cli as steward_cli
+from secretary.automations.runtime import health
 from secretary.runtime.state import (
     PRECHECK_BOARD_UNREACHABLE,
     PRECHECK_DEFERRED,
@@ -155,10 +155,7 @@ class GateTests(unittest.TestCase):
     def make_product(self, root: Path) -> Path:
         """Build a fake checkout whose required dependency exists only in its venv."""
         source = root / "src"
-        for package in (
-            source / "triggered_agents" / "runtime",
-            source / "secretary" / "runtime",
-        ):
+        for package in (source / "secretary" / "runtime",):
             package.mkdir(parents=True)
             current = package
             while current != source:
@@ -212,8 +209,15 @@ class GateTests(unittest.TestCase):
             "    print('ran: -m ' + module + ' ' + ' '.join([agent, command, *rest]))\n"
             "\n"
         )
-        (source / "triggered_agents" / "__main__.py").write_text(
-            target + "if __name__ == '__main__':\n    main('triggered_agents')\n", encoding="utf-8"
+        # `python3 -m secretary automations <agent> <cmd>`: the product CLI hands the rest over.
+        (source / "secretary" / "__main__.py").write_text(
+            target
+            + "if __name__ == '__main__':\n"
+            + "    if sys.argv[1:2] != ['automations']:\n"
+            + "        raise SystemExit(2)\n"
+            + "    del sys.argv[1]\n"
+            + "    main('secretary automations')\n",
+            encoding="utf-8",
         )
 
         venv.EnvBuilder(with_pip=False).create(root / ".venv")
@@ -325,12 +329,12 @@ class GateTests(unittest.TestCase):
         self.assertIn("settlement busy, tick deferred", result.stderr)
         self.assertNotIn("ran:", result.stdout)
 
-    def test_gate_routes_every_agent_through_the_one_triggered_agents_entry(self):
+    def test_gate_routes_every_agent_through_the_one_automations_entry(self):
         for agent in ("curator", "retro", "steward"):
             with self.subTest(agent):
                 result = self.run_gate([0], agent=agent)
                 self.assertEqual(result.returncode, 0)
-                self.assertIn(f"-m triggered_agents {agent} dispatch", result.stdout)
+                self.assertIn(f"-m secretary automations {agent} dispatch", result.stdout)
                 self.assertNotIn("secretary.dispatch", result.stdout)
                 self.assert_selected_venv(result, self.product)
 
@@ -338,7 +342,7 @@ class GateTests(unittest.TestCase):
         result = self.run_gate([], agent="steward", variant="deep-sweep")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.attempts, 0)
-        self.assertIn("-m triggered_agents steward dispatch deep-sweep", result.stdout)
+        self.assertIn("-m secretary automations steward dispatch deep-sweep", result.stdout)
         self.assert_selected_venv(result, self.product)
 
     def test_curator_enters_and_leaves_role_env_with_the_selected_venv_not_ambient_python(self):
