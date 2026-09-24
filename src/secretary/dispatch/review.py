@@ -230,12 +230,12 @@ def review_infrastructure_failure(
 def worktree_panes(host: Any, workspace: str) -> list[Any]:
     """One worktree's pane inventory, for a caller whose decision depends on reading it.
 
-    The dispatcher runtime keeps its own inventory seam; a read-only observer holding nothing but
-    the JSON transport gets the public Orca adapter. Both reach a refusal the same way, as a
-    `HostError`, because an inventory that could not be read is not an empty worktree and neither
-    caller may turn that difference into a missing pane.
+    The dispatcher host keeps its own inventory seam (`workspace_panes`, empty: its heads own no
+    pane); a read-only observer holding nothing but the JSON transport gets the public Orca adapter.
+    Both reach a refusal the same way, as a `HostError`, because an inventory that could not be read
+    is not an empty worktree and neither caller may turn that difference into a missing pane.
     """
-    inventory = getattr(host, "_worktree_terminals_or_raise", None)
+    inventory = getattr(host, "workspace_panes", None)
     if callable(inventory):
         return list(inventory(workspace))
     return orca_worktree_panes(host._run_json, workspace)

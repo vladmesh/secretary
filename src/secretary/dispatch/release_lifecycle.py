@@ -373,6 +373,8 @@ def release_effect(
     except HostError as exc:
         # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
         # prevents Done so the next tick cannot repeatedly run an already-failed release path.
+        # The move carries no decision: a release decision moves a card to Done and nowhere else,
+        # so the board refuses a Blocked move that names it, and the card would stay in Assessment.
         return block_merge_path(runtime,
             task,
             record,
@@ -383,7 +385,6 @@ def release_effect(
             reason=f"release cleanup refused: {scrub_host_output(str(exc))}",
             step=step,
             outcome="release cleanup refused",
-            decision=decision,
         )
     attempt_accounting.terminal_effect(runtime, 
         task,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 def accepted_transport_run(
@@ -18,11 +19,12 @@ def accepted_transport_run(
 
     These suites are not asserting the provider boundary itself.  Supplying this explicit fixture
     keeps a missing schema from being implicitly treated as an allow while preserving the focused
-    transport contract under test.
+    transport contract under test. Its spec is the one a profile resolves to, on the one runtime
+    (`CommandHostRuntime.preflight_codex_run` builds it from the profile).
     """
     return HeadRun(
         run_id=run_id,
-        spec=HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra"),
+        spec=HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra", runtime=LOCAL_PTY_RUNTIME),
         workspace=workspace,
         task_ref=task_ref,
         role=role,

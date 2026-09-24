@@ -51,6 +51,7 @@ from tests.fakes.observer import (
     STALE_HANDLE_WAIT_FAILURE,
     TIMEOUT_WAIT_FAILURE,
 )
+from tests.dispatcher_fixtures import SupervisedBackend
 from tests.fanout_fixtures import accepted_transport_run
 from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
@@ -462,43 +463,16 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
         self.assertTrue(any(command[2] == "send" for command in calls))
 
-    def test_tui_launch_waits_then_sends_initial_prompt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
-
-            handle = host._launch(
-                str(workspace),
-                "title",
-                "codex",
-                "TASK.md",
-                role="worker",
-                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-            )
-
-        self.assertEqual(handle.handle, "term-tui")
-        create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
-        wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
-        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
-        self.assertLess(create_i, wait_i)
-        self.assertLess(wait_i, send_i)
-        self.assertEqual(host.calls[wait_i][host.calls[wait_i].index("--terminal") + 1], "term-tui")
-        self.assertIn("Read TASK.md", host.calls[send_i][host.calls[send_i].index("--text") + 1])
-        # Nothing selected the interactive shape: the launcher was asked for a Codex head and
-        # there is no other kind to ask for.
-        self.assertEqual(host.catalog.heads, ["codex"])
-
     def test_a_card_still_carrying_exec_is_launched_and_prompted_the_same_way(self) -> None:
         """The route a restored or long-lived card takes: legacy `codex_launch_mode` on the card.
 
-        It reaches the bring-up exactly as it is stored and changes nothing. The pane is waited
-        for and the prompt is delivered into it, which is the one Codex bring-up there is.
+        It reaches the bring-up exactly as it is stored and changes nothing. The head is started
+        and handed its prompt, which is the one Codex bring-up there is.
         """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
+            host = RecordingTuiHost(workspace)
 
             host._launch(
                 str(workspace),
@@ -510,13 +484,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 task={"ref": "secretary-1173", "routing": {"codex_launch_mode": "exec"}},
             )
 
-        create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
-        wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
-        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
-        self.assertLess(create_i, wait_i)
-        self.assertLess(wait_i, send_i)
-        launched = host.calls[create_i][host.calls[create_i].index("--command") + 1]
-        self.assertNotIn("codex exec", launched)
+        [start] = host.backend.starts
+        self.assertNotIn("codex exec", str(start["command"]))
+        self.assertIsNotNone(start["pointer"], "the prompt is delivered after the head is up")
+        self.assertEqual(len(host.backend.deliveries), 1)
+        # Nothing selected the interactive shape: the launcher was asked for a Codex head and
+        # there is no other kind to ask for.
+        self.assertEqual(host.catalog.heads, ["codex"])
 
     def test_tui_launch_delivers_short_pointer_not_task_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -524,7 +498,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             (workspace / "TASK.md").write_text(
                 "full spec body that must not be delivered\n", encoding="utf-8"
             )
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
+            host = RecordingTuiHost(workspace)
 
             host._launch(
                 str(workspace),
@@ -536,148 +510,9 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 launch_prompt="The full task is in TASK.md. Read it first.",
             )
 
-        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
-        delivered = host.calls[send_i][host.calls[send_i].index("--text") + 1]
-        self.assertEqual(
-            delivered,
-            "\x1b[200~The full task is in TASK.md. Read it first.\x1b[201~",
-        )
-        self.assertNotIn("full spec body", delivered)
-
-    def test_tui_delivery_resends_enter_when_the_pane_did_not_take_the_prompt(self) -> None:
-        """A Codex launch is delivered by the shared path, and re-entered the same way.
-
-        Orca says the pane took nothing \u2014 here the update dialog that swallows the first Enter \u2014
-        and the composer is holding the payload the send wrote, so the Enter alone is re-entered
-        and the delivery is confirmed by this role's own criterion, its turn having started.
-
-        The first screen is the pane before the send: the delivery fingerprints the composer there
-        so that the one it reads afterwards can be compared against it rather than against
-        emptiness, which a TUI's own hint text is not.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(
-                workspace,
-                [
-                    {"terminal": {"tail": ["\u203a"]}},
-                    {"terminal": {"tail": ["\u203a [Pasted Content 13 chars]"]}},
-                    {"terminal": {"tail": ["\u203a [Pasted Content 13 chars]"]}},
-                    {"terminal": {"tail": ["thinking"]}},
-                ],
-                waits=[
-                    {"wait": {"satisfied": True}},
-                    {"wait": {"satisfied": True}},
-                    {"wait": {"satisfied": False, "blockedReason": "codex-update-prompt"}},
-                ],
-            )
-
-            with (
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            ):
-                host._launch(
-                    str(workspace),
-                    "title",
-                    "codex",
-                    "TASK.md",
-                    role="worker",
-                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                )
-
-        sends = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
-        self.assertEqual(len(sends), 3)
-        self.assertEqual(
-            sends[0][sends[0].index("--text") + 1],
-            "\x1b[200~Read TASK.md\n\x1b[201~",
-        )
-        self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
-        self.assertIn("--enter", sends[1])
-        self.assertEqual(sends[2][sends[2].index("--text") + 1], "")
-        self.assertIn("--enter", sends[2])
-
-    def test_tui_delivery_failure_closes_terminal(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
-
-            with (
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1),
-                self.assertRaises(HostError),
-            ):
-                host._launch(
-                    str(workspace),
-                    "title",
-                    "codex",
-                    "TASK.md",
-                    role="worker",
-                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                )
-
-        self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
-
-    def test_tui_wait_failure_closes_terminal(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            host = RecordingTuiHost(workspace, [], fail_ops={"wait"})
-
-            with self.assertRaises(HostError):
-                host._launch(
-                    str(workspace),
-                    "title",
-                    "codex",
-                    "TASK.md",
-                    role="worker",
-                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                )
-
-        self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
-
-    def test_tui_delivery_accepts_codex_session_user_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
-            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
-            sessions = Path(tmp) / "sessions" / "2099" / "01" / "02"
-            sessions.mkdir(parents=True)
-            (sessions / "session.jsonl").write_text(
-                "\n".join(
-                    [
-                        json.dumps({"type": "session_meta", "payload": {"cwd": str(workspace.resolve())}}),
-                        json.dumps(
-                            {
-                                "type": "event_msg",
-                                "timestamp": "2099-01-02T03:04:05Z",
-                                "payload": {"type": "user_message"},
-                            }
-                        ),
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["idle"]}}])
-
-            with (
-                mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            ):
-                handle = host._launch(
-                    str(workspace),
-                    "title",
-                    "codex",
-                    "TASK.md",
-                    role="worker",
-                    env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                )
-
-        self.assertEqual(handle.handle, "term-tui")
-        self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
+        [(_run, pointer, _subject)] = host.backend.deliveries
+        self.assertEqual(pointer.text, "The full task is in TASK.md. Read it first.")
+        self.assertNotIn("full spec body", pointer.text)
 
 
 class CodexUserTurnRecordTests(unittest.TestCase):
@@ -1032,46 +867,17 @@ class TuiCatalog:
 
 
 class RecordingTuiHost(CommandHostRuntime):
-    def __init__(
-        self,
-        root: Path,
-        reads: list[dict],
-        *,
-        fail_ops: set[str] | None = None,
-        waits: list[dict] | None = None,
-    ) -> None:
+    """A real host whose TUI heads are raised on a recording supervised backend."""
+
+    def __init__(self, root: Path) -> None:
         self.catalog = TuiCatalog()
         super().__init__(self.catalog, root, mode="real")  # type: ignore[arg-type]
         self.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
-        self.calls: list[list[str]] = []
-        self.reads = list(reads)
-        # What Orca answers each `terminal wait`, the last one repeating. The default is a pane it
-        # calls ready, which is how a prompt that was not taken looks.
-        self.waits = list(waits or [])
-        self.fail_ops = fail_ops or set()
+        self.backend = SupervisedBackend().install(self)
 
     def _require_workspace_environment(self, workspace: str) -> None:
         """TUI transport fixtures exercise delivery and run no candidate command."""
         return None
-
-    def _next(self, answers: list[dict], default: dict) -> dict:
-        if not answers:
-            return default
-        return answers.pop(0) if len(answers) > 1 else answers[0]
-
-    def _run_json(self, args: list[str]) -> dict:
-        self.calls.append(args)
-        if args[:3] == ["orca", "terminal", "create"]:
-            return {"terminal": {"handle": "term-tui"}}
-        if args[:3] == ["orca", "terminal", "wait"] and "wait" in self.fail_ops:
-            raise HostError("terminal wait failed")
-        if args[:3] == ["orca", "terminal", "send"] and "send" in self.fail_ops:
-            raise HostError("terminal send failed")
-        if args[:3] == ["orca", "terminal", "wait"]:
-            return self._next(self.waits, {})
-        if args[:3] == ["orca", "terminal", "read"]:
-            return self._next(self.reads, {"terminal": {"tail": []}})
-        return {}
 
 
 class ScriptedPane:

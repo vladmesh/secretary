@@ -159,7 +159,7 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
             self._inventory[workspace] = orca_workspace_inventory(self._run_json, workspace)
         return self._inventory[workspace]
 
-    def _worktree_terminals_or_raise(self, workspace: str) -> list[Any]:
+    def workspace_panes(self, workspace: str) -> list[Any]:
         # The seam `command_terminal_status` finds by name, answered from the same single reading:
         # the head axis and the pane axis of one row cannot then disagree about which ptys existed.
         return list(self.workspace_inventory(workspace).panes)

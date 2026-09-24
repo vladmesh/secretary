@@ -2713,15 +2713,14 @@ def _write_launch_intent(
     """Fix this launch on disk before the host is called. Returns the failure, or None on success.
 
     The workspace and pid file are asked of the host rather than taken from its answer: they are
-    path arithmetic over the sprint reference and the head's runtime, and the answer is exactly what
-    a tick that dies mid-launch never sees. The intent also says the workspace may become a
-    registered worktree (Orca's or git's, by its path), which outlives the launch, and the stop is
-    what gives it back.
+    path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
+    mid-launch never sees. The intent also says the workspace may become a registered git
+    worktree, which outlives the launch, and the stop is what gives it back.
     """
     previous = record.to_json()
     now = time.time()
     try:
-        workspace = record.workspace or str(runtime.host.observer_workspace(ref, head))
+        workspace = record.workspace or str(runtime.host.observer_workspace(ref))
         pid_file = record.pid_file or str(runtime.host.observer_pid_file(ref))
     except Exception as exc:
         # Without the workspace the head could not be found again, and without the pid file its

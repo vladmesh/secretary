@@ -23,8 +23,6 @@ from secretary.dispatch.state import (
     DispatcherRecord,
 )
 from secretary.dispatch.types import (
-    STOPPED_BY_OPERATOR,
-    STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
@@ -36,7 +34,6 @@ from secretary.dispatch.types import (
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatch.types import (
     HeadLaunchAborted,
-    HeadPaneNotReady,
     review_pane_label,
 )
 from secretary.dispatch.watchdog import (
@@ -52,7 +49,6 @@ from secretary.dispatch.worker_lifecycle import (
     head_run_binding,
 )
 from secretary.runtime.prompt_document import (
-    NUDGE_FILE_MODE,
     NUDGE_MAX_BYTES,
     PromptDocumentError,
 )
@@ -60,6 +56,8 @@ from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
+    SupervisedBackend,
+    supervised_run,
     write_heartbeat,
 )
 from tests.dispatcher_fixtures import (
@@ -72,18 +70,13 @@ from tests.fakes.dispatcher import (
     FakePusher,
     dispatcher_seed,
 )
-from tests.fanout_fixtures import accepted_transport_run
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard, card_store
-from secretary.runtime.agent_prompt_transport import (
-    BRACKETED_PASTE_END,
-    BRACKETED_PASTE_START,
-)
+from secretary.runtime.head import HEAD_BUSY, DeliverReceipt
 from secretary.runtime.head import operations as head_ops
 from secretary.runtime.head import (
     with_pid_heartbeat,
 )
-from secretary.runtime.pane_host import PaneSplitSourceMissing
 from secretary.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 
@@ -314,37 +307,14 @@ class PidHeartbeatTests(unittest.TestCase):
 
 
 class NudgingReviewHost(RecordingReviewHost):
-    """A bring-up whose pane answers reads, so its launch delivery runs end to end.
-
-    The screen is what the confirmation criterion falls back to when no provider session file
-    names this workspace, which is every test workspace: a codex pane painting `working` above its
-    composer marker is a head that took its turn.
+    """A bring-up whose heads take their prompt after they are up, so the launch delivery runs.
 
     Either role's launch runs through it. Both are nudged at a task document — the reviewer at its
     review, the worker at the TASK.md in its checkout — and the rule under test is the same rule.
     """
 
-    def __init__(self, root: Path, *, screen: str = "working\n› ", **kwargs) -> None:
+    def __init__(self, root: Path, **kwargs) -> None:
         super().__init__(root, catalog=PromptAfterStartCatalog(), **kwargs)
-        self.screen = screen
-
-    def _run_json(self, args: list[str]) -> dict:
-        if args[:3] == ["orca", "terminal", "read"]:
-            self.calls.append(args)
-            return {"terminal": {"tail": self.screen.splitlines(), "nextCursor": "1"}}
-        return super()._run_json(args)
-
-    def sends(self) -> list[str]:
-        return [
-            call[call.index("--text") + 1] for call in self.calls if call[:3] == ["orca", "terminal", "send"]
-        ]
-
-    def closed_panes(self) -> list[str]:
-        return [
-            call[call.index("--terminal") + 1]
-            for call in self.calls
-            if call[:3] == ["orca", "terminal", "close"]
-        ]
 
 
 class ReviewNudgeDeliveryTests(unittest.TestCase):
@@ -352,8 +322,8 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     A ~12 KiB review typed into a Codex pane is what produced 24 consecutive
     `payload-left-in-composer` failures on `codegen-orchestrator-1165` and stopped two products.
-    The rule that replaces it: the input channel carries only bounded pointers, content lives in a
-    file, and a delivery classification never decides the fate of a pane.
+    The rule that replaces it: the input channel carries only bounded pointers, and content lives in
+    a file. What the head's backend is handed is the pointer (`SupervisedBackend` records it).
     """
 
     # An ESC, a bracketed-paste terminator and the CRLF the board's web form submits — all of it
@@ -385,7 +355,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         return DispatcherRecord(
             worker="secretary-1409-w",
             workspace=str(self.workspace),
-            handle="term-worker",
+            handle="run:worker-1409",
             head="codex",
             review_head="codex-reviewer",
             attempt_id="attempt-1",
@@ -393,14 +363,9 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             review_baseline=0,
             state="review_starting",
             claimed_at=0.0,
-        )
-
-    def _bounded_delivery(self):
-        return mock.patch.multiple(
-            "secretary.runtime.tui_delivery",
-            TUI_DELIVERY_TIMEOUT_S=0.05,
-            TUI_DELIVERY_POLL_S=0.01,
-            TUI_DELIVERY_RESEND_GRACE_S=0,
+            worker_head_run=supervised_run(
+                "worker-1409", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1409")
+            ),
         )
 
     def _document_of(self, host: NudgingReviewHost) -> Path:
@@ -413,34 +378,27 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             if path.is_file() and not path.relative_to(self.workspace).is_relative_to(".secretary-task-env")
         }
 
-    def test_the_pane_receives_a_bounded_pointer_and_never_the_review(self) -> None:
+    def test_the_head_receives_a_bounded_pointer_and_never_the_review(self) -> None:
         host = NudgingReviewHost(self.root)
 
-        with self._bounded_delivery():
-            host.start_review(self.task, self._record())
+        host.start_review(self.task, self._record())
 
         document = self._document_of(host)
-        body = next(text for text in host.sends() if text)
-        # The transport's bracketed-paste frame is the only escape in the write; what it wraps is
-        # the nudge, and that is the thing the ceiling and the one-line rule are about.
-        self.assertTrue(body.startswith(BRACKETED_PASTE_START) and body.endswith(BRACKETED_PASTE_END))
-        nudge = body[len(BRACKETED_PASTE_START) : -len(BRACKETED_PASTE_END)]
+        [nudge] = host.pointers()
         self.assertLessEqual(len(nudge.encode("utf-8")), NUDGE_MAX_BYTES)
-        self.assertEqual(nudge.splitlines(), [nudge], "the pane is given one line")
+        self.assertEqual(nudge.splitlines(), [nudge], "the head is given one line")
         self.assertNotIn("\x1b", nudge)
         self.assertIn(str(document), nudge)
         self.assertTrue(document.is_absolute())
-        # The review itself never reaches a terminal write, hostile bytes included.
-        written = "".join(host.sends())
-        self.assertNotIn("\r", written)
-        self.assertNotIn("BLOCKER-", written, "the review prompt's own text stayed on disk")
-        self.assertNotIn("terminator", written)
+        # The review itself never reaches the head's input, hostile bytes included.
+        self.assertNotIn("\r", nudge)
+        self.assertNotIn("BLOCKER-", nudge, "the review prompt's own text stayed on disk")
+        self.assertNotIn("terminator", nudge)
 
     def test_the_document_holds_the_whole_review_outside_the_checkout(self) -> None:
         host = NudgingReviewHost(self.root)
 
-        with self._bounded_delivery():
-            host.start_review(self.task, self._record())
+        host.start_review(self.task, self._record())
 
         document = self._document_of(host)
         body = document.read_text(encoding="utf-8")
@@ -470,8 +428,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         before = self._checkout_contents()
         host = NudgingReviewHost(self.root)
 
-        with self._bounded_delivery():
-            host.start_review(self.task, self._record())
+        host.start_review(self.task, self._record())
 
         self.assertEqual(self._checkout_contents(), before)
         self.assertTrue((self.workspace / ".secretary-task-env" / "owner.json").is_file())
@@ -479,19 +436,17 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
     def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
         """The pointer always names the round's current task, so a retry cannot review a stale one."""
         host = NudgingReviewHost(self.root)
-        with self._bounded_delivery():
-            host.start_review(self.task, self._record())
-        first = list(host.sends())
+        host.start_review(self.task, self._record())
+        first = list(host.pointers())
 
         self.task["description"] = "the card was edited between attempts"
-        with self._bounded_delivery():
-            host.start_review(self.task, self._record())
+        host.start_review(self.task, self._record())
 
         document = self._document_of(host)
         self.assertIn("the card was edited between attempts", document.read_text(encoding="utf-8"))
         self.assertEqual(
-            [text for text in host.sends() if text],
-            [text for text in first if text] * 2,
+            host.pointers(),
+            first * 2,
             "the same path is nudged again rather than a second document being written",
         )
         self.assertEqual(sorted(path.name for path in document.parent.iterdir()), ["review-0.md"])
@@ -501,54 +456,20 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         record = self._record()
         record.review_baseline = 1
 
-        with self._bounded_delivery():
-            host.start_review(self.task, record)
+        host.start_review(self.task, record)
 
         self.assertTrue(host._prompt_document_path("review", self.task["ref"], 1).is_file())
         self.assertFalse(self._document_of(host).exists())
 
-    def test_an_unconfirmed_nudge_leaves_the_pane_open_for_the_next_tick(self) -> None:
-        """The invariant: no pane is closed on the strength of a delivery classification.
-
-        That classification called 24 delivered prompts failures on the canary, and closing the
-        pane behind it killed a reviewer that had the task in hand. The bring-up hands the pane
-        back instead, with what the boundary saw, and the launch intent settles it next tick.
-        """
-        host = NudgingReviewHost(self.root, screen="idle\n› ")
-
-        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted) as caught:
-            host.start_review(self.task, self._record())
-
-        self.assertEqual(host.closed_panes(), [], "the reviewer pane survives an unconfirmed nudge")
-        self.assertEqual(caught.exception.handle, "term-review")
-        self.assertEqual(caught.exception.leaf, "leaf-review")
-        evidence = caught.exception.evidence
-        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
-        self.assertEqual(evidence["document_path"], str(self._document_of(host)))
-        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
-        self.assertTrue(evidence["submit_count"], "the submits are counted, the text is not kept")
-        self.assertNotIn("terminator", json.dumps(evidence), "no prompt text in the telemetry")
-
-    def test_a_busy_readiness_wait_keeps_the_live_reviewer_run_and_pane(self) -> None:
-        """A 60s `tui-idle` timeout is evidence the reviewer pane is working, not absent."""
+    def test_a_retained_reviewer_is_nudged_again_as_the_exact_run_its_intent_names(self) -> None:
+        """A bring-up whose head is up and did not take its prompt keeps the head, and the next
+        tick's retry is delivered to that same run at the same document, never to a replacement."""
         host = NudgingReviewHost(self.root)
-        host.wait_answer = HostError(
-            "orca terminal wait --terminal term-review --for tui-idle --timeout-ms 60000 "
-            'failed: {"error":{"code":"timeout","message":"timeout"}}'
-        )
+        host.backend.start_failure = head_ops.HeadSpawnAborted("the prompt did not start a turn", run=None)  # type: ignore[arg-type]
 
         with self.assertRaises(HeadLaunchAborted) as caught:
             host.start_review(self.task, self._record())
-
-        evidence = caught.exception.evidence
-        self.assertEqual(evidence["readiness_state"], "busy")
-        self.assertEqual(evidence["reason"], "readiness-busy")
-        self.assertEqual((caught.exception.handle, caught.exception.leaf), ("term-review", "leaf-review"))
-        self.assertEqual(host.closed_panes(), [], "a busy reviewer is never closed or replaced")
-        self.assertNotIn("close", host.ops(), "the worker remains owned until review is settled")
-
-        # The later retry addresses the exact run and document nudge, rather than splitting a
-        # replacement reviewer or moving into the worker-freeze adoption path first.
+        self.assertEqual(host.backend.stops, [], "a head that is up is never stopped here")
         intent = {
             "role": "review",
             "workspace": str(self.workspace),
@@ -557,14 +478,14 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             "pid_file": caught.exception.pid_file,
             "head_run": dict(caught.exception.head_run),
         }
-        host.wait_answer = {"wait": {"condition": "tui-idle", "satisfied": True}}
-        with self._bounded_delivery():
-            retried = host.nudge_review_delivery(self.task, self._record(), intent)
 
+        retried = host.nudge_review_delivery(self.task, self._record(), intent)
+
+        [(run, pointer, _subject)] = host.backend.deliveries
+        self.assertEqual(run.run_id, caught.exception.head_run["run_id"])
         self.assertEqual(retried["head_run"]["run_id"], caught.exception.head_run["run_id"])
-        self.assertEqual(retried["handle"], "term-review")
-        self.assertTrue(retried["delivery_evidence"]["turn_confirmed"])
-        self.assertEqual(host.closed_panes(), [], "retry never closes the retained reviewer pane")
+        self.assertIn(str(self._document_of(host)), pointer.text)
+        self.assertEqual(host.backend.stops, [])
 
     def test_a_document_that_cannot_be_written_stops_the_bring_up_before_any_pane(self) -> None:
         """An unprompted reviewer would sit at its prompt forever; the caller's infrastructure
@@ -581,7 +502,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             host.start_review(self.task, self._record())
 
         self.assertIn("task document could not be prepared", str(caught.exception))
-        self.assertEqual(host.ops(), [], "no pane is opened for a head with nothing to read")
+        self.assertEqual(host.backend.starts, [], "no head is started with nothing to read")
 
 
 class WorkerNudgeDeliveryTests(unittest.TestCase):
@@ -594,6 +515,9 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
     its prompt and begun work: the transcripts they left behind are the proof they were healthy.
     What made the classification wrong is fixed elsewhere in this card; what this class fixes is
     that a wrong classification could carry that verdict at all.
+
+    A bring-up whose head is up and did not take its prompt is handed back as `HeadLaunchAborted`
+    (`tests.test_dispatcher_launch_intent`); what is held here is why that is safe.
     """
 
     def setUp(self) -> None:
@@ -633,77 +557,38 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
             claimed_at=0.0,
         )
 
-    def _bounded_delivery(self):
-        return mock.patch.multiple(
-            "secretary.runtime.tui_delivery",
-            TUI_DELIVERY_TIMEOUT_S=0.05,
-            TUI_DELIVERY_POLL_S=0.01,
-            TUI_DELIVERY_RESEND_GRACE_S=0,
-        )
-
-    def test_an_unconfirmed_worker_nudge_leaves_the_pane_and_the_intent(self) -> None:
-        """Symmetric to `ReviewNudgeDeliveryTests`: no pane dies of a delivery classification.
-
-        The pane is handed back inside `HeadLaunchAborted`, which is what keeps the caller's launch
-        intent on disk; the next tick then adopts that head or stops it by its own retained
-        identity, with the cleanup recorded as the initiator.
-        """
-        host = NudgingReviewHost(self.root, screen="idle\n› ")
-        host.audit = self.card_audit
-
-        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted) as caught:
-            host.restart_worker(self.task, self._record())
-
-        self.assertEqual(host.closed_panes(), [], "the worker pane survives an unconfirmed nudge")
-        self.assertEqual(caught.exception.handle, "term-created")
-        self.assertEqual(caught.exception.workspace, str(self.workspace))
-        evidence = caught.exception.evidence
-        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
-        self.assertEqual(evidence["document_path"], str(self.workspace / "TASK.md"))
-        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
-        self.assertTrue(evidence["submit_count"], "the submits are counted, the text is not kept")
-        self.assertNotIn("terminator", json.dumps(evidence), "no prompt text in the telemetry")
-
     def test_the_task_the_head_was_pointed_at_is_on_disk_whatever_the_classification_said(
         self,
     ) -> None:
-        """Why not closing it is safe: the pointer named a file, and the file is there.
+        """Why not stopping it is safe: the pointer named a file, and the file is there.
 
         A head that took the nudge has its whole task; a head that did not can be nudged again at
-        the same path next tick. Nothing about the round depends on the pane having answered.
+        the same path next tick. Nothing about the round depends on the head having answered.
         """
-        host = NudgingReviewHost(self.root, screen="idle\n› ")
+        host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
+        host.backend.start_failure = head_ops.HeadSpawnAborted("the prompt did not start a turn", run=None)  # type: ignore[arg-type]
 
-        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted):
+        with self.assertRaises(HeadLaunchAborted) as caught:
             host.restart_worker(self.task, self._record())
 
+        self.assertEqual(caught.exception.workspace, str(self.workspace))
+        self.assertEqual(host.backend.stops, [], "the worker survives an unconfirmed nudge")
         body = (self.workspace / "TASK.md").read_text(encoding="utf-8")
         self.assertIn("secretary-1410", body)
         self.assertIn("\x1b[201~ terminator", body, "the card reaches the head unmodified")
-        nudge = next(text for text in host.sends() if text)
-        self.assertNotIn("terminator", nudge, "the pane got the pointer, not the card")
-
-    def test_a_confirmed_worker_nudge_reports_the_document_it_pointed_at(self) -> None:
-        host = NudgingReviewHost(self.root, screen="working\n› ")
-        host.audit = self.card_audit
-
-        with self._bounded_delivery():
-            launched = host.restart_worker(self.task, self._record())
-
-        self.assertEqual(host.closed_panes(), [])
-        self.assertEqual(launched.delivery_evidence["document_path"], str(self.workspace / "TASK.md"))
-        self.assertEqual(launched.delivery_evidence["delivery_mode"], NUDGE_FILE_MODE)
+        [start] = host.backend.starts
+        self.assertNotIn("terminator", start["pointer"].text, "the head got the pointer, not the card")
+        self.assertEqual(start["pointer"].document, str(self.workspace / "TASK.md"))
 
 
 class WorkerLifecycleTests(unittest.TestCase):
     """secretary-1412: the production worker path runs on `spawn` / `nudge` / `stop`.
 
-    The three operations own the head's life now, and the dispatcher's job is what only it can do:
-    render the command, confirm a provider turn, prove a process is gone, and say who is ending a
-    head. What is asserted here is that the worker really does travel through them — one run
-    identity from bring-up to stop, a pane re-found by its leaf rather than by a handle Orca may
-    have aliased, and an initiator that is on the record afterwards and survives being written down.
+    The head's backend owns its life (`local-pty` since secretary-1722), and the dispatcher's job is
+    what only it can do: render the command, write the document, hand over the pointer, and say who
+    is ending a head. What is asserted here is one run identity from bring-up to stop, and an
+    initiator that is on the record afterwards and survives being written down.
     """
 
     def setUp(self) -> None:
@@ -744,25 +629,17 @@ class WorkerLifecycleTests(unittest.TestCase):
             setattr(record, name, value)
         return record
 
-    def _bounded_delivery(self):
-        return mock.patch.multiple(
-            "secretary.runtime.tui_delivery",
-            TUI_DELIVERY_TIMEOUT_S=0.05,
-            TUI_DELIVERY_POLL_S=0.01,
-            TUI_DELIVERY_RESEND_GRACE_S=0,
-        )
-
     def test_a_worker_bring_up_hands_back_the_run_that_head_is(self) -> None:
-        host = NudgingReviewHost(self.root, screen="working\n› ")
+        host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
 
-        with self._bounded_delivery():
-            launched = host.restart_worker(self.task, self._record())
+        launched = host.restart_worker(self.task, self._record())
 
         run = launched.head_run
         self.assertTrue(run["run_id"], "the head has an identity of its own")
         self.assertEqual(run["lifecycle"], "working", "it was given its task")
         self.assertEqual(run["handle"], launched.handle)
+        self.assertEqual(run["head_runtime"], "local-pty")
         self.assertEqual(
             run["task_ref"],
             {
@@ -772,57 +649,53 @@ class WorkerLifecycleTests(unittest.TestCase):
             },
         )
         self.assertEqual(run["spec"]["adapter"], "codex")
+        [start] = host.backend.starts
+        self.assertEqual(start["workspace"], str(self.workspace))
 
-    def test_the_worker_report_prompt_goes_to_the_pane_the_leaf_names_now(self) -> None:
-        """The reincarnation case, on the production nudge: the handle moved, the head did not."""
-        host = NudgingReviewHost(self.root, screen="working\n› ")
-        host.audit = self.card_audit
-        host.terminals = [{"handle": "term-alias", "leafId": "leaf-worker", "connected": True}]
+    def _running_worker(self, **fields) -> DispatcherRecord:
+        """A worker the record holds a live `local-pty` run of, with its heartbeat answering."""
         record = self._record(
-            worker_leaf="leaf-worker",
-            report_generation=2,
             worker_pid_file=str(self.root / "w.pid"),
             worker_run={"adapter": "codex", "codex_mode": "tui"},
+            **fields,
         )
-        # The heartbeat of a worker that is running: a report prompt is refused over any other.
-        record.worker_head_run = head_ops.HeadRun(
-            run_id="worker-report-prompt-run",
-            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+        record.worker_head_run = supervised_run(
+            "worker-running-run",
             workspace=str(self.workspace),
             task_ref=head_ops.TaskRef.card(self.task["ref"]),
             handle=record.handle,
-            leaf=record.worker_leaf,
             pid_file=record.worker_pid_file,
-        ).to_json()
+        )
         PidHeartbeatTests.write_heartbeat(
             Path(record.worker_pid_file),
             os.getpid(),
             identity=run_heartbeat_identity(record.worker_head_run, role="worker"),
         )
         (self.workspace / "TASK.md").write_text("task\n", encoding="utf-8")
+        return record
 
-        with self._bounded_delivery():
-            host.prompt_worker_report(self.task, record)
+    def test_the_worker_report_prompt_goes_to_the_run_the_record_names(self) -> None:
+        host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
+        record = self._running_worker(report_generation=2)
 
-        sent = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
-        self.assertTrue(sent, "the prompt was delivered")
-        for call in sent:
-            self.assertEqual(call[call.index("--terminal") + 1], "term-alias")
-        self.assertEqual(record.worker_head_run["handle"], "term-alias")
+        host.prompt_worker_report(self.task, record)
+
+        [(run, pointer, subject)] = host.backend.deliveries
+        self.assertEqual(run.run_id, "worker-running-run")
+        self.assertEqual(subject, "worker-report")
+        self.assertIn("generation 2", pointer.text)
+        self.assertEqual(record.worker_head_run["run_id"], "worker-running-run")
         self.assertEqual(record.worker_head_run["lifecycle"], "working")
 
     def test_a_busy_continuation_wait_does_not_signal_the_retained_worker(self) -> None:
-        """The signal is inside the shared delivery path, after its readiness wait."""
+        """The signal is the delivery's own pre-send step, which a busy head never reaches."""
         host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
-        host.wait_answer = HostError(
-            'orca terminal wait --for tui-idle --timeout-ms 60000 failed: {"error":{"code":"timeout"}}'
+        host.backend.deliver_refusal = DeliverReceipt(
+            status=HEAD_BUSY, reason="the head is in a turn", evidence={"readiness_state": "busy"}
         )
-        pid_file = self.root / "retained.pid"
-        record = self._record(
-            worker_leaf="leaf-worker",
-            worker_pid_file=str(pid_file),
-            worker_run={"adapter": "codex", "codex_mode": "tui"},
+        record = self._running_worker(
             report_generation=2,
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -831,15 +704,6 @@ class WorkerLifecycleTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
-        record.worker_head_run = head_ops.HeadRun(
-            run_id="retained-busy-run",
-            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
-            workspace=str(self.workspace),
-            task_ref=head_ops.TaskRef.card(self.task["ref"]),
-            handle=record.handle,
-            leaf=record.worker_leaf,
-            pid_file=str(pid_file),
-        ).to_json()
 
         with (
             mock.patch.object(
@@ -854,105 +718,40 @@ class WorkerLifecycleTests(unittest.TestCase):
                 },
             ),
             mock.patch.object(host, "_signal_head") as signal_head,
-            self.assertRaises(HostError) as raised,
+            self.assertRaises(HostError),
         ):
             host.resume_worker(self.task, record)
 
-        evidence = raised.exception.evidence
-        self.assertEqual(evidence.readiness_state, "busy")
-        self.assertEqual(evidence.reason, "readiness-busy")
         signal_head.assert_not_called()
-        self.assertEqual(host.sends(), [])
-        self.assertEqual(record.worker_head_run["run_id"], "retained-busy-run")
+        self.assertEqual(host.backend.deliveries, [])
+        self.assertEqual(record.worker_head_run["run_id"], "worker-running-run")
 
     def test_a_stopped_worker_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
         host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
-        record = self._record(worker_leaf="leaf-worker")
+        record = self._running_worker()
 
         host.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
 
+        self.assertEqual(host.backend.stops, [("worker-running-run", STOPPED_BY_REVIEW_FREEZE)])
         self.assertEqual(record.worker_head_run["lifecycle"], "exited")
         self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_FREEZE)
         restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
         self.assertEqual(restarted.worker_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_FREEZE)
 
-    def test_a_stop_that_is_refused_still_names_its_initiator(self) -> None:
-        """The dispatcher may die between the two; the record must not lose who was ending this."""
-        host = NudgingReviewHost(self.root, fail_ops={"close"})
-        host.audit = self.card_audit
-        record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(self.root / "w.pid"))
-        Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
-
-        with (
-            mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
-            mock.patch.object(host, "_signal_head", lambda *a: None),
-            self.assertRaises(HostError),
-        ):
-            host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
-
-        self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
-        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_OPERATOR)
-
-    def test_a_live_foreign_worker_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
-        host = RecordingReviewHost(self.root)
-        host.audit = self.card_audit
-        pid_file = self.root / "foreign-worker.pid"
-        record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(pid_file))
-        record.worker_head_run = head_ops.HeadRun(
-            run_id="worker-owned-run",
-            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
-            workspace=str(self.workspace),
-            task_ref=head_ops.TaskRef.card(self.task["ref"]),
-            handle=record.handle,
-            leaf=record.worker_leaf,
-            pid_file=str(pid_file),
-        ).to_json()
-        stored_run = json.loads(json.dumps(record.worker_head_run))
-        foreign = subprocess.Popen(["sleep", "5"])
-
-        def reap_foreign() -> None:
-            if foreign.poll() is None:
-                foreign.terminate()
-            foreign.wait()
-
-        self.addCleanup(reap_foreign)
-        PidHeartbeatTests.write_heartbeat(
-            pid_file,
-            foreign.pid,
-            identity=heartbeat_identity(
-                run_id="foreign-worker-run",
-                role="worker",
-                task=f"card:{self.task['ref']}",
-                leaf=record.worker_leaf,
-            ),
-        )
-
-        with (
-            mock.patch.object(host, "_signal_head") as signal_head,
-            self.assertRaisesRegex(HostError, "mismatching launch identity"),
-        ):
-            host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
-
-        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
-        self.assertNotIn("close", host.ops())
-        signal_head.assert_not_called()
-        self.assertIsNone(foreign.poll())
-        self.assertEqual(record.worker_head_run, stored_run, "a foreign process is never attributed")
-
     def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
-        host = NudgingReviewHost(self.root, screen="working\n› ")
+        host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
         record = self._record()
 
-        with self._bounded_delivery():
-            launched = host.restart_worker(self.task, record)
+        launched = host.restart_worker(self.task, record)
         record.worker_head_run = dict(launched.head_run)
         record.handle = launched.handle
         record.worker_leaf = launched.leaf
 
         host.stop_head(record, "worker", STOPPED_BY_REPLACEMENT)
 
+        self.assertEqual(host.backend.stops, [(launched.head_run["run_id"], STOPPED_BY_REPLACEMENT)])
         self.assertEqual(record.worker_head_run["run_id"], launched.head_run["run_id"])
         self.assertEqual(record.worker_head_run["lifecycle"], "exited")
 
@@ -962,10 +761,9 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     The reviewer is the head this dispatcher stops from the most places, and until it had a durable
     run of its own every one of those stops left the same record behind: a reviewer that was simply
-    gone. What is asserted here is the run — one identity from bring-up to stop, re-addressed by its
-    leaf rather than by a handle Orca may have aliased, an initiator written down before the pane is
-    touched and still there when the stop is refused — and the one thing the reviewer's stop must
-    keep doing differently: closing its own split leaf and nothing else in the worker's worktree.
+    gone. What is asserted here is the run — one identity from bring-up to stop, with its initiator
+    written down — and the one thing the reviewer's stop must keep doing differently: ending the
+    reviewer and nothing else in the worker's worktree.
     """
 
     def setUp(self) -> None:
@@ -992,7 +790,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
         record = DispatcherRecord(
             worker="secretary-1414-w",
             workspace=str(self.workspace),
-            handle="term-worker",
+            handle="run:worker-1414",
             head="codex",
             review_head="codex-reviewer",
             attempt_id="attempt-1",
@@ -1000,6 +798,9 @@ class ReviewerLifecycleTests(unittest.TestCase):
             review_baseline=0,
             state="reviewing",
             claimed_at=0.0,
+            worker_head_run=supervised_run(
+                "worker-1414", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1414")
+            ),
         )
         for name, value in fields.items():
             setattr(record, name, value)
@@ -1010,10 +811,11 @@ class ReviewerLifecycleTests(unittest.TestCase):
         run = {
             "run_id": "run-reviewer-1",
             "spec": {"profile_id": "codex-reviewer", "adapter": "codex"},
+            "head_runtime": "local-pty",
             "workspace": str(self.workspace),
             "task_ref": {"kind": "card", "ref": "secretary-1414", "document": ""},
-            "handle": "term-review-create",
-            "leaf": "leaf-review",
+            "handle": "run:run-reviewer-1",
+            "leaf": "",
             "pid_file": "",
             "lifecycle": "working",
             "stopped_by": {},
@@ -1021,20 +823,11 @@ class ReviewerLifecycleTests(unittest.TestCase):
         run.update(fields)
         return run
 
-    def _bounded_delivery(self):
-        return mock.patch.multiple(
-            "secretary.runtime.tui_delivery",
-            TUI_DELIVERY_TIMEOUT_S=0.05,
-            TUI_DELIVERY_POLL_S=0.01,
-            TUI_DELIVERY_RESEND_GRACE_S=0,
-        )
-
     def test_a_reviewer_bring_up_hands_back_the_run_that_head_is(self) -> None:
-        host = NudgingReviewHost(self.root, screen="working\n› ")
+        host = NudgingReviewHost(self.root)
         host.audit = self.card_audit
 
-        with self._bounded_delivery():
-            launch = host.start_review(self.task, self._record())
+        launch = host.start_review(self.task, self._record())
 
         run = launch.head_run
         self.assertTrue(run["run_id"], "the reviewer has an identity of its own")
@@ -1043,329 +836,56 @@ class ReviewerLifecycleTests(unittest.TestCase):
         self.assertEqual(run["leaf"], launch.leaf)
         self.assertEqual(run["spec"]["profile_id"], "codex-reviewer")
         self.assertEqual(run["task_ref"]["ref"], "secretary-1414")
-
-    def test_the_reviewer_stop_addresses_the_head_its_leaf_names_now(self) -> None:
-        """The reincarnation case: the leaf is where it was, the handle now names another pane.
-
-        Closing the recorded handle here would close a stranger's pane and leave the reviewer
-        running, which is the failure the run's stable leaf exists to prevent.
-        """
-        host = RecordingReviewHost(
-            self.root,
-            terminals=[
-                # Orca handed the reviewer's create-time handle to a different pty.
-                {"handle": "term-review-create", "leafId": "leaf-stranger", "connected": True},
-                {"handle": "term-review-alias", "leafId": "leaf-review", "connected": True},
-            ],
-        )
-        record = self._record(
-            handle="",
-            review_handle="term-review-create",
-            review_leaf="leaf-review",
-            review_head_run=self._stored_run(),
-        )
-
-        host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
-
-        closed = [
-            call[call.index("--terminal") + 1]
-            for call in host.calls
-            if call[:3] == ["orca", "terminal", "close"]
-        ]
-        self.assertEqual(closed, ["term-review-alias"], "the stop addressed the head, not a pane")
-        self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1", "same head, readdressed")
-        self.assertEqual(record.review_head_run["lifecycle"], "exited")
+        # A second head in the worker's own checkout, never a workspace of its own.
+        [start] = host.backend.starts
+        self.assertEqual(start["workspace"], str(self.workspace))
+        self.assertEqual(start["title"], review_pane_label("secretary-1414"))
+        self.assertFalse([call for call in host.calls if "worktree" in call and "add" in call])
 
     def test_a_stopped_reviewer_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
         host = RecordingReviewHost(self.root)
         host.audit = self.card_audit
-        record = self._record(review_handle="term-review", review_head_run=self._stored_run(leaf=""))
+        record = self._record(review_handle="run:run-reviewer-1", review_head_run=self._stored_run())
 
         host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
 
+        self.assertEqual(host.backend.stops, [("run-reviewer-1", STOPPED_BY_REVIEW_VERDICT)])
         self.assertEqual(record.review_head_run["lifecycle"], "exited")
         self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_VERDICT)
         restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
         self.assertEqual(restarted.review_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_VERDICT)
 
-    def test_a_refused_reviewer_stop_is_continued_rather_than_begun_again(self) -> None:
-        """The stop the dispatcher could not finish: `commit` runs before the pane is touched, so
-        the record is in `finishing` with its initiator, and the next tick continues that stop."""
-        host = RecordingReviewHost(self.root, fail_ops={"close"})
-        host.audit = self.card_audit
-        record = self._record(
-            handle="",
-            review_handle="term-review",
-            review_pid_file=str(self.root / "review.pid"),
-            review_head_run=self._stored_run(leaf="", pid_file=str(self.root / "review.pid")),
-        )
-        # A reviewer whose heartbeat still answers: the close was refused and nothing here can say
-        # the head is gone, which is the stop that has to survive to the next tick.
-        Path(record.review_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
-
-        with (
-            mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
-            mock.patch.object(host, "_signal_head", lambda *a: None),
-            self.assertRaises(HostError),
-        ):
-            host.stop_review(record, STOPPED_BY_WATCHDOG)
-
-        self.assertEqual(record.review_head_run["lifecycle"], "finishing")
-        self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
-
-        # The next tick, through another path with another actor. It continues this stop: same
-        # run, and the actor that began it is the one the record keeps.
-        host.fail_ops = set()
-        record.review_pid_file = ""
-        record.review_head_run = json.loads(json.dumps(record.review_head_run))
-        host.stop_review(record, STOPPED_BY_RECONCILIATION)
-
-        self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1")
-        self.assertEqual(record.review_head_run["lifecycle"], "exited")
-        self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
-
-    def test_a_live_foreign_reviewer_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
+    def test_a_refused_reviewer_stop_reaches_the_caller_and_is_not_recorded_as_exited(self) -> None:
         host = RecordingReviewHost(self.root)
         host.audit = self.card_audit
-        pid_file = self.root / "foreign-reviewer.pid"
-        record = self._record(
-            review_handle="term-review",
-            review_leaf="leaf-review",
-            review_pid_file=str(pid_file),
-            review_head_run=self._stored_run(
-                handle="term-review",
-                leaf="leaf-review",
-                pid_file=str(pid_file),
-            ),
-        )
-        stored_run = json.loads(json.dumps(record.review_head_run))
-        foreign = subprocess.Popen(["sleep", "5"])
+        host.backend.stop_refusal = "the head's process outlived the stop it was sent"
+        record = self._record(review_handle="run:run-reviewer-1", review_head_run=self._stored_run())
 
-        def reap_foreign() -> None:
-            if foreign.poll() is None:
-                foreign.terminate()
-            foreign.wait()
-
-        self.addCleanup(reap_foreign)
-        PidHeartbeatTests.write_heartbeat(
-            pid_file,
-            foreign.pid,
-            identity=heartbeat_identity(
-                run_id="foreign-reviewer-run",
-                role="reviewer",
-                task=f"card:{self.task['ref']}",
-                leaf=record.review_leaf,
-            ),
-        )
-
-        with (
-            mock.patch.object(host, "_signal_head") as signal_head,
-            self.assertRaisesRegex(HostError, "mismatching launch identity"),
-        ):
+        with self.assertRaisesRegex(HostError, "outlived the stop"):
             host.stop_review(record, STOPPED_BY_WATCHDOG)
 
-        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
-        self.assertNotIn("close", host.ops())
-        signal_head.assert_not_called()
-        self.assertIsNone(foreign.poll())
-        self.assertEqual(record.review_head_run, stored_run, "a foreign process is never attributed")
+        self.assertEqual(host.backend.stops, [("run-reviewer-1", STOPPED_BY_WATCHDOG)])
+        self.assertNotEqual(record.review_head_run["lifecycle"], "exited")
 
     def test_stopping_the_reviewer_leaves_the_workers_checkout_alone(self) -> None:
-        """The split-leaf semantics, which this card moves onto the operations without changing.
-
-        A red verdict hands the worktree back to the worker moments later. A reviewer stop that
-        reached for the workspace would take the checkout's own terminals down with it, and the
-        worker the card is about to resume would be the head that lost them.
-        """
-        host = RecordingReviewHost(
-            self.root,
-            terminals=[
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-                {"handle": "term-review", "leafId": "leaf-review", "connected": True},
-            ],
+        """A red verdict hands the worktree back to the worker moments later. A reviewer stop that
+        reached for the workspace would take the worker the card is about to resume with it."""
+        host = RecordingReviewHost(self.root)
+        worker_run = supervised_run(
+            "run-worker-1", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1414")
         )
         record = self._record(
-            handle="term-worker",
-            worker_leaf="leaf-worker",
-            review_handle="term-review",
-            review_leaf="leaf-review",
-            review_head_run=self._stored_run(handle="term-review"),
+            handle="run:run-worker-1",
+            worker_head_run=worker_run,
+            review_handle="run:run-reviewer-1",
+            review_head_run=self._stored_run(),
         )
 
         host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
 
-        closed = [
-            call[call.index("--terminal") + 1]
-            for call in host.calls
-            if call[:3] == ["orca", "terminal", "close"]
-        ]
-        self.assertEqual(closed, ["term-review"], "only the reviewer's own pane was closed")
-        self.assertNotIn("stop", host.ops(), "the worker's worktree was never stopped")
-        self.assertEqual(record.worker_head_run, {}, "the worker's own run was not touched")
-
-
-class ScriptedWaitHost(CommandHostRuntime):
-    """CommandHostRuntime whose Orca answers each `terminal wait` from a script.
-
-    The first answer is the delivery's own wait for the pane; the second is the readiness question
-    the bring-up asks about the pane it is about to close. An entry that is an exception is raised,
-    which is how the real CLI reports a condition it could not satisfy.
-    """
-
-    def __init__(self, root: Path, *, waits: list) -> None:
-        super().__init__(PromptAfterStartCatalog(), root, mode="real")  # type: ignore[arg-type]
-        self.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
-        self.waits = list(waits)
-        self.ops: list[str] = []
-        self.closed: list[str] = []
-
-    def _run_json(self, args: list[str]) -> dict:
-        op = args[2] if args[:2] == ["orca", "terminal"] else ""
-        self.ops.append(op)
-        if op == "wait":
-            answer = self.waits.pop(0)
-            if isinstance(answer, Exception):
-                raise answer
-            return answer
-        if op == "create":
-            return {"terminal": {"handle": "term-head"}}
-        if op == "close":
-            self.closed.append(args[args.index("--terminal") + 1])
-        if op == "list":
-            return {"terminals": []}
-        return {}
-
-    def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    def _require_workspace_environment(self, workspace: str) -> None:
-        """Readiness fixtures exercise terminal transport and run no candidate command."""
-        return None
-
-
-class LaunchPaneReadinessTests(unittest.TestCase):
-    """secretary-1163: a bring-up classifies the pane that would not take its launch prompt.
-
-    Orca answers readiness in three states and the bring-up path used none of them: every refused
-    delivery came back as one undifferentiated failure, and the card went to Blocked for a codex
-    update dialog that would have been gone a minute later.
-    """
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.root = Path(self.tmpdir.name)
-        self.workspace = self.root / "ws"
-        self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
-        self.task = {
-            "ref": "secretary-1163",
-            "project": "secretary",
-            "description": "spec",
-            "workspace": {"base_branch": "main"},
-            "routing": {},
-        }
-
-    def _launch(self, host: ScriptedWaitHost):
-        return host._launch(
-            str(self.workspace),
-            "secretary-1163 worker",
-            "codex",
-            "TASK.md",
-            role="worker",
-            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-            launch_prompt="go",
-            task=self.task,
-        )
-
-    def _refused(self, body: dict) -> HostError:
-        """A `terminal wait` the CLI exited non-zero on, carrying the body Orca printed with it."""
-        return HostError(
-            "orca terminal wait --terminal term-head --for tui-idle --timeout-ms 60000 failed: "
-            + json.dumps(body)
-        )
-
-    def test_a_pane_held_in_a_dialog_is_a_deferrable_failure(self) -> None:
-        """The canary's own failure: codex came up behind its update prompt, so the launch prompt
-        went nowhere and the pane never reached idle."""
-        blocked = {
-            "wait": {
-                "condition": "tui-idle",
-                "satisfied": False,
-                "status": "running",
-                "blockedReason": "codex-update-prompt",
-            }
-        }
-        host = ScriptedWaitHost(self.root, waits=[self._refused(blocked), blocked])
-
-        with self.assertRaises(HeadPaneNotReady) as caught:
-            self._launch(host)
-
-        self.assertEqual(caught.exception.readiness, "blocked")
-        self.assertEqual(caught.exception.pane, "term-head")
-        self.assertIn("held in a dialog", str(caught.exception))
-        self.assertIn("codex-update-prompt", str(caught.exception))
-        self.assertEqual(host.closed, ["term-head"], "a deferred launch leaves no pane behind")
-
-    def test_a_working_pane_is_a_deferrable_failure(self) -> None:
-        busy = {"wait": {"condition": "tui-idle", "satisfied": False, "status": "running"}}
-        host = ScriptedWaitHost(self.root, waits=[self._refused(busy), busy])
-
-        with self.assertRaises(HeadPaneNotReady) as caught:
-            self._launch(host)
-
-        self.assertEqual(caught.exception.readiness, "busy")
-        self.assertIn("busy", str(caught.exception))
-
-    def test_a_pane_that_cannot_be_probed_stays_an_ordinary_failure(self) -> None:
-        """A probe nobody answers is not a busy pane. Deferring on it would park the card on a
-        readiness that can never arrive, so it keeps the failure path it always had."""
-        host = ScriptedWaitHost(
-            self.root,
-            waits=[
-                HostError("orca terminal wait failed: connection refused"),
-                HostError("orca terminal wait failed: connection refused"),
-            ],
-        )
-
-        with self.assertRaises(HostError) as caught:
-            self._launch(host)
-
-        self.assertNotIsInstance(caught.exception, HeadPaneNotReady)
-        self.assertEqual(host.closed, ["term-head"])
-
-    def test_a_pane_that_went_ready_after_the_failure_stays_an_ordinary_failure(self) -> None:
-        """The delivery failed and the pane is idle: nothing is holding it, so there is nothing to
-        wait for and the failure is about the delivery itself."""
-        host = ScriptedWaitHost(
-            self.root,
-            waits=[
-                self._refused({"wait": {"condition": "tui-idle", "satisfied": False}}),
-                {"wait": {"condition": "tui-idle", "satisfied": True}},
-            ],
-        )
-
-        with self.assertRaises(HostError) as caught:
-            self._launch(host)
-
-        self.assertNotIsInstance(caught.exception, HeadPaneNotReady)
-
-    def test_a_pane_that_will_not_close_still_outranks_its_readiness(self) -> None:
-        """A head that may still be running is the worse ambiguity: the caller has to keep its
-        launch intent for it, which a deferred relaunch would throw away."""
-        blocked = {"wait": {"satisfied": False, "blockedReason": "codex-update-prompt"}}
-
-        class RefusingHost(ScriptedWaitHost):
-            def _run_json(self, args: list[str]) -> dict:
-                if args[:3] == ["orca", "terminal", "close"]:
-                    raise HostError("orca terminal close failed: tab_not_found")
-                return super()._run_json(args)
-
-        host = RefusingHost(self.root, waits=[self._refused(blocked), blocked])
-
-        with self.assertRaises(HeadLaunchAborted):
-            self._launch(host)
+        self.assertEqual(host.backend.stops, [("run-reviewer-1", STOPPED_BY_REVIEW_VERDICT)])
+        self.assertEqual(record.worker_head_run, worker_run, "the worker's own run was not touched")
+        self.assertFalse([call for call in host.calls if "worktree" in call], "the worktree was not touched")
 
 
 class ReviewLivenessTests(unittest.TestCase):
@@ -2522,30 +2042,16 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertTrue((state_dir / "pause.json").is_file())
 
 
-class _SelectorNotFoundHost(CommandHostRuntime):
-    """Stubs the orca CLI to answer `selector_not_found` for a terminal stop, as it does for a
-    workspace already removed out from under the dispatcher."""
-
-    def __init__(self, root: Path, *, reply: str = "selector_not_found") -> None:
-        super().__init__(FakeCatalog(), root, mode="real")  # type: ignore[arg-type]
-        self.calls: list[list[str]] = []
-        self._reply = reply
-
-    def _run_json(self, args: list[str]) -> dict:
-        self.calls.append(args)
-        if args[:3] == ["orca", "terminal", "stop"]:
-            raise HostError(self._reply)
-        return {}
-
-
 class CommandHostStopWorkspaceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
+        self.host = CommandHostRuntime(FakeCatalog(), self.root, mode="real")  # type: ignore[arg-type]
+        self.backend = SupervisedBackend().install(self.host)
         self.record = DispatcherRecord(
             worker="secretary-997-w1",
-            workspace=str(self.root / "workspaces" / "secretary-997"),
+            workspace=str(self.root / "workspaces" / "secretary" / "secretary-997-w1"),
             handle="",
             head="head",
             review_head="review-head",
@@ -2556,32 +2062,19 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
             claimed_at=0.0,
         )
 
-    def test_a_worktree_orca_no_longer_knows_reads_as_already_stopped(self) -> None:
-        host = _SelectorNotFoundHost(self.root)
-
-        host.stop_workspace(self.record)  # must not raise
-
-        self.assertTrue(any(call[:3] == ["orca", "terminal", "stop"] for call in host.calls))
-
-    def test_any_other_stop_refusal_still_raises(self) -> None:
-        host = _SelectorNotFoundHost(self.root, reply="orca terminal stop failed")
-
-        with self.assertRaises(HostError):
-            host.stop_workspace(self.record)
-
     def test_a_live_foreign_heartbeat_fences_a_workspace_before_its_first_stop(self) -> None:
-        host = _SelectorNotFoundHost(self.root)
         pid_file = self.root / "foreign-workspace.pid"
         self.record.worker_pid_file = str(pid_file)
         self.record.worker_leaf = "leaf-worker"
-        self.record.worker_head_run = head_ops.HeadRun(
-            run_id="workspace-owned-run",
-            spec=head_ops.HeadSpec(profile_id="head", adapter="unknown"),
+        self.record.worker_head_run = supervised_run(
+            "workspace-owned-run",
+            profile="head",
+            adapter="unknown",
             workspace=self.record.workspace,
             task_ref=head_ops.TaskRef.card("secretary-997"),
             leaf=self.record.worker_leaf,
             pid_file=str(pid_file),
-        ).to_json()
+        )
         foreign = subprocess.Popen(["sleep", "5"])
 
         def reap_foreign() -> None:
@@ -2602,18 +2095,18 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(host, "_signal_head") as signal_head,
+            mock.patch.object(self.host, "_signal_head") as signal_head,
             self.assertRaisesRegex(HostError, "mismatching launch identity"),
         ):
-            host.stop_workspace(self.record)
+            self.host.stop_workspace(self.record)
 
-        self.assertFalse(host.calls, "the workspace stop is fenced before Orca is called")
+        self.assertEqual(self.backend.stops, [], "the workspace stop is fenced before any head is stopped")
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
 
 
 class ReviewPaneTests(unittest.TestCase):
-    """secretary-651: the reviewer runs in a visible split pane of the worker's own worktree."""
+    """secretary-651: the reviewer runs beside the worker, in the worker's own worktree."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -2631,11 +2124,11 @@ class ReviewPaneTests(unittest.TestCase):
             "routing": {},
         }
 
-    def _record(self, handle: str = "term-worker") -> DispatcherRecord:
-        return DispatcherRecord(
+    def _record(self) -> DispatcherRecord:
+        record = DispatcherRecord(
             worker="secretary-651-w",
             workspace=str(self.workspace),
-            handle=handle,
+            handle="run:worker-651",
             head="codex",
             review_head="codex-reviewer",
             attempt_id="attempt-1",
@@ -2644,182 +2137,27 @@ class ReviewPaneTests(unittest.TestCase):
             state="review_starting",
             claimed_at=0.0,
         )
-
-    def test_reviewer_is_split_off_the_worker_pane_and_gets_its_leaf_from_inventory(self) -> None:
-        """Real `terminal split --json` omits paneKey, so the fresh inventory supplies its leaf."""
-        host = RecordingReviewHost(self.root)
-
-        launch = host.start_review(self.task, self._record())
-
-        split = host.call_for("split")
-        self.assertEqual(split[split.index("--terminal") + 1], "term-worker")
-        self.assertIn("--command", split)
-        rename = host.call_for("rename")
-        self.assertEqual(rename[rename.index("--terminal") + 1], "term-review")
-        self.assertEqual(rename[rename.index("--title") + 1], review_pane_label("secretary-651"))
-        self.assertEqual(launch.handle, "term-review")
-        self.assertEqual(launch.leaf, "leaf-review")
-        self.assertEqual(launch.commit, "deadbeefcafe0000")
-        self.assertNotIn("create", host.ops(), "the reviewer must not open its own terminal tab")
-        self.assertFalse(
-            [call for call in host.calls if "worktree" in call and "create" in call],
-            "the reviewer must reuse the worker's worktree, never make its own",
+        record.worker_head_run = supervised_run(
+            "worker-651", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-651")
         )
+        return record
 
-    def test_split_uses_pane_key_directly_when_the_backend_supplies_one(self) -> None:
-        host = RecordingReviewHost(self.root, split_pane_key="tab-1:leaf-from-reply")
-
-        launch = host.start_review(self.task, self._record())
-
-        self.assertEqual(launch.leaf, "leaf-from-reply")
-        self.assertEqual(host.ops().count("list"), 2, "the split safety inventory is mandatory")
-
-    def test_reviewer_pane_carries_the_reference_and_the_role(self) -> None:
-        host = RecordingReviewHost(self.root)
-
-        host.start_review(self.task, self._record())
-
-        label = host.call_for("rename")[host.call_for("rename").index("--title") + 1]
-        self.assertIn("secretary-651", label)
-        self.assertIn("reviewer", label)
-
-    def test_worker_pane_is_shut_down_once_the_reviewer_is_up(self) -> None:
+    def test_the_worker_is_shut_down_once_the_reviewer_is_up(self) -> None:
         """Nothing else stops the worker head from editing the checkout mid-review."""
         host = RecordingReviewHost(self.root)
 
-        host.start_review(self.task, self._record())
-
-        closed = host.call_for("close")
-        self.assertEqual(closed[closed.index("--terminal") + 1], "term-worker")
-        self.assertLess(host.ops().index("split"), host.ops().index("close"), "split needs a live pane")
-
-    def test_reviewer_falls_back_to_its_own_terminal_without_a_live_pane(self) -> None:
-        """A worktree whose panes all died still has to get its card reviewed; a background
-        terminal is less visible than a split but better than a card parked forever."""
-        host = RecordingReviewHost(self.root, terminals=[])
-
-        launch = host.start_review(self.task, self._record(handle=""))
-
-        self.assertEqual(launch.handle, "term-created")
-        self.assertEqual(launch.leaf, "leaf-created")
-        self.assertNotIn("split", host.ops())
-
-    def test_reviewer_falls_back_when_connected_anchor_is_not_split_capable(self) -> None:
-        """An addressable PTY may outlive its renderer node; that cannot park review forever."""
-        host = RecordingReviewHost(self.root, split_source_missing=True)
-
         launch = host.start_review(self.task, self._record())
 
-        self.assertEqual(launch.handle, "term-created")
-        self.assertEqual(launch.leaf, "leaf-created")
-        self.assertEqual(host.ops().count("split"), 1)
-        self.assertEqual(host.ops().count("create"), 1)
-        self.assertLess(host.ops().index("create"), host.ops().index("close"))
-        self.assertEqual(launch.fallback_reason, "terminal_split_source_not_found")
+        [start] = host.backend.starts
+        self.assertEqual(start["role"], "reviewer")
+        self.assertEqual(host.backend.stops, [("worker-651", STOPPED_BY_REVIEW_FREEZE)])
+        self.assertEqual(launch.commit, "deadbeefcafe0000")
 
-    def test_reviewer_does_not_fall_back_when_the_split_left_a_pane(self) -> None:
-        host = RecordingReviewHost(self.root, split_source_missing=True, split_source_missing_after_open=True)
-
-        with self.assertRaises(PaneSplitSourceMissing):
-            host.start_review(self.task, self._record())
-
-        self.assertEqual(host.ops().count("split"), 1)
-        self.assertNotIn("create", host.ops())
-        self.assertNotIn("close", host.ops(), "a failed reviewer must not kill the worker head")
-
-    def test_create_terminal_returns_the_leaf_from_its_pane_key(self) -> None:
+    def test_a_reviewer_that_did_not_come_up_leaves_the_worker_alone(self) -> None:
         host = RecordingReviewHost(self.root)
-        run = head_ops.HeadRun(
-            run_id=head_ops.new_run_id(),
-            spec=head_ops.HeadSpec(profile_id="worker", adapter="codex"),
-            workspace=str(self.workspace),
-            task_ref=head_ops.TaskRef.standing("worker"),
-        )
-
-        pane = host._open_head_pane(run, "worker", "run-worker")
-
-        self.assertEqual((pane.handle, pane.leaf), ("term-created", "leaf-created"))
-
-    def test_worker_leaf_selects_the_split_anchor_after_handle_aliasing(self) -> None:
-        host = RecordingReviewHost(
-            self.root,
-            terminals=[
-                {"handle": "term-alias", "leafId": "leaf-worker", "connected": True},
-                {"handle": "term-other", "leafId": "leaf-other", "connected": True},
-            ],
-        )
-        record = self._record(handle="term-create")
-        record.worker_leaf = "leaf-worker"
-
-        host.start_review(self.task, record)
-
-        split = host.call_for("split")
-        self.assertEqual(split[split.index("--terminal") + 1], "term-alias")
-
-    def test_leaf_resolves_the_current_alias_for_worker_and_reviewer_stop(self) -> None:
-        host = RecordingReviewHost(
-            self.root,
-            terminals=[
-                {"handle": "term-worker-alias", "leafId": "leaf-worker", "connected": True},
-                {"handle": "term-review-alias", "leafId": "leaf-review", "connected": True},
-            ],
-        )
-        record = self._record(handle="term-worker-create")
-        record.worker_leaf = "leaf-worker"
-        record.review_handle = "term-review-create"
-        record.review_leaf = "leaf-review"
-
-        host.stop_head(record, "worker")
-        host.stop_review(record)
-
-        closed = [
-            call[call.index("--terminal") + 1]
-            for call in host.calls
-            if call[:3] == ["orca", "terminal", "close"]
-        ]
-        self.assertEqual(closed, ["term-worker-alias", "term-review-alias"])
-
-    def test_dead_worker_pane_is_not_used_as_the_split_anchor(self) -> None:
-        host = RecordingReviewHost(
-            self.root,
-            terminals=[
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": False},
-                {"handle": "term-other", "leafId": "leaf-other", "connected": True},
-            ],
-        )
-
-        host.start_review(self.task, self._record())
-
-        split = host.call_for("split")
-        self.assertEqual(split[split.index("--terminal") + 1], "term-other")
-
-    def test_split_failure_raises_and_leaves_the_worker_pane_alone(self) -> None:
-        host = RecordingReviewHost(self.root, fail_ops={"split"})
+        host.backend.start_failure = head_ops.HeadSpawnFailed("the reviewer never started")
 
         with self.assertRaises(HostError):
             host.start_review(self.task, self._record())
 
-        self.assertNotIn("close", host.ops(), "a failed reviewer must not kill the worker head")
-
-    def test_label_failure_closes_the_new_pane(self) -> None:
-        """Half a bring-up is worse than none: an unlabelled pane is indistinguishable from the
-        worker's, and the card would go to Blocked with a live reviewer still running in it."""
-        host = RecordingReviewHost(self.root, fail_ops={"rename"})
-
-        with self.assertRaises(HostError):
-            host.start_review(self.task, self._record())
-
-        closed = host.call_for("close")
-        self.assertEqual(closed[closed.index("--terminal") + 1], "term-review")
-
-    def test_stop_review_closes_only_the_reviewer_pane(self) -> None:
-        host = RecordingReviewHost(self.root)
-        record = self._record()
-        record.review_handle = "term-review"
-
-        host.stop_review(record)
-
-        self.assertEqual(host.ops(), ["close"])
-        self.assertEqual(
-            host.call_for("close")[host.call_for("close").index("--terminal") + 1], "term-review"
-        )
+        self.assertEqual(host.backend.stops, [], "a failed reviewer must not kill the worker head")

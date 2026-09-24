@@ -30,6 +30,32 @@ class HostError(Exception):
         self.bring_up_cause = bring_up_cause
 
 
+#: `secretary.dispatch.launch.CAUSE_WORKSPACE_CONTRACT`, spelled here because `launch` imports this
+#: module: a legacy record is this card's own contract failing, never a host to retry.
+_LEGACY_RECORD_BRING_UP_CAUSE = "workspace_contract"
+
+
+class LegacyDispatcherRecord(HostError):
+    """A dispatcher record written while heads were Orca panes reached a verb that would act on it.
+
+    One typed refusal for every verb — launch, deliver, stop and tear down — against a record whose
+    workspace is an Orca worktree rather than a git worktree the host owns, or whose head run is a
+    legacy record (`head_runtime_backends.is_legacy_record`). The record stays readable; nothing is
+    launched into it, delivered to it, stopped through a pane or re-placed. The message names the
+    record, so the card that carries it goes Blocked with a reason a human can act on.
+    """
+
+    def __init__(self, subject: str, reason: str, *, verb: str) -> None:
+        super().__init__(
+            f"legacy dispatcher record: refused to {verb} {subject}: {reason}; it was written while "
+            "heads ran in Orca panes, which this dispatcher no longer drives",
+            bring_up_cause=_LEGACY_RECORD_BRING_UP_CAUSE,
+        )
+        self.subject = subject
+        self.reason = reason
+        self.verb = verb
+
+
 class GateTransportError(HostError):
     """The gate could not reach its backend, so no verdict was received at all.
 
