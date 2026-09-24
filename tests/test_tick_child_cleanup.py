@@ -34,9 +34,18 @@ HANGING_REMOTE_HELPER = "#!/bin/sh\necho $$ > {pid_file}\nexec sleep 60\n"
 HANGING_SHELL = "sleep 60 & echo $! > {pid_file}; wait"
 
 # The gate's shell is a login shell: it reads the profile before it gets to record its descendant,
-# and on a loaded CI runner that has taken longer than half a second (secretary-1702), leaving no
-# pid to check. The timeout still fires on the hang; it only no longer races the shell's start.
-LOGIN_SHELL_TIMEOUT_SECONDS = 3.0
+# and on a CI runner that has taken longer than 0.5 s (secretary-1702) and than 3 s (secretary-1703).
+# So the timeout is started once the descendant is recorded, and this is how long that may take.
+DESCENDANT_RECORDED_SECONDS = 60.0
+# How long the shell then hangs before the timeout fires on it.
+LOGIN_SHELL_TIMEOUT_SECONDS = 0.5
+
+
+def _recorded(pid_file: Path) -> bool:
+    try:
+        return pid_file.read_text(encoding="utf-8").strip().isdigit()
+    except OSError:
+        return False
 
 
 def _gone(pid: int) -> bool:
@@ -59,16 +68,34 @@ class TickChildCleanupTests(unittest.TestCase):
         return pid
 
     def test_a_timed_out_host_shell_takes_its_descendants_with_it(self):
-        """The local gate's `bash -lc` and adapter setup: the test processes under the shell die."""
+        """The local gate's `bash -lc` and adapter setup: the test processes under the shell die.
+
+        The timeout's clock starts once the shell has recorded its descendant, not when the shell
+        was started. A login shell reads the runner's profile first, and on CI that has outlasted
+        0.5 s (secretary-1702) and then 3 s (secretary-1703), so a clock started at the spawn
+        raced the profile and killed the shell before it had a descendant to check. The wait
+        before the clock starts is bounded; after it, the real timeout path runs unchanged: the
+        pump's own deadline, the group kill, `TimeoutExpired` and the host's `HostError`.
+        """
         host = CommandHostRuntime(FakeCatalog(), Path(self.tmp.name), mode="real")
         command = HANGING_SHELL.format(pid_file=self.pid_file)
+        pump_timeout = _proc._Pump.until_leader_exits
+        given: list[float | None] = []
+
+        def once_the_descendant_is_recorded(pump, timeout):
+            given.append(timeout)
+            deadline = time.monotonic() + DESCENDANT_RECORDED_SECONDS
+            while time.monotonic() < deadline and not _recorded(self.pid_file):
+                time.sleep(0.01)
+            return pump_timeout(pump, LOGIN_SHELL_TIMEOUT_SECONDS)
+
         with (
-            mock.patch.object(
-                dispatcher_host_module, "HOST_COMMAND_TIMEOUT_SECONDS", LOGIN_SHELL_TIMEOUT_SECONDS
-            ),
+            mock.patch.object(dispatcher_host_module, "HOST_COMMAND_TIMEOUT_SECONDS", 7.0),
+            mock.patch.object(_proc._Pump, "until_leader_exits", once_the_descendant_is_recorded),
             self.assertRaises(HostError) as caught,
         ):
             host.run_capture(["bash", "-lc", command], "local gate", cwd=Path(self.tmp.name))
+        self.assertEqual(given, [7.0], "the host's own timeout is what the child is bounded by")
         self.assertIn("timed out", str(caught.exception))
         self.assertTrue(_gone(self.descendant()), "the gate shell's descendant outlived its timeout")
 
