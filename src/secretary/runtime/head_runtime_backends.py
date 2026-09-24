@@ -27,10 +27,10 @@ from pathlib import Path
 from typing import Any
 
 from secretary.runtime.head_runtimes import (
-    DEFAULT_HEAD_RUNTIME,
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
+    RECORD_RUNTIME_WHEN_ABSENT,
 )
 
 from .local_pty_head import LocalPtyHeadRuntime
@@ -47,16 +47,18 @@ def head_runtime_name(subject: Any) -> str:
     The one reader of `HeadSpec.runtime` outside the spec itself. Every lifecycle site already
     holds one of three things — the run it is acting on, the spec that run was launched from, or
     nothing at all — so this takes all three rather than making each caller reach for the same
-    attribute. `None` (an operation that names no head, such as an Orca workspace teardown) is the
-    product default, and so is anything that carries no runtime of its own: absence has meant
-    `orca-legacy` since before the key existed and goes on meaning it here.
+    attribute. `None` (an operation that names no head, such as an Orca workspace teardown), and
+    anything that carries no runtime of its own, is read by the record rule: every subject handed
+    here is a head or its record, never a profile — profiles are read through `HeadSpec`, which
+    applies the profile default — and absence in a record has meant `orca-legacy` since before
+    the key existed and goes on meaning it here.
     """
     if subject is None:
-        return DEFAULT_HEAD_RUNTIME
+        return RECORD_RUNTIME_WHEN_ABSENT
     if isinstance(subject, str):
-        return subject or DEFAULT_HEAD_RUNTIME
+        return subject or RECORD_RUNTIME_WHEN_ABSENT
     spec = getattr(subject, "spec", subject)
-    return str(getattr(spec, "runtime", "") or DEFAULT_HEAD_RUNTIME)
+    return str(getattr(spec, "runtime", "") or RECORD_RUNTIME_WHEN_ABSENT)
 
 
 def build_head_runtime(

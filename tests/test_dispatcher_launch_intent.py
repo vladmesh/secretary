@@ -3753,7 +3753,8 @@ class HostLaunchContourTests(unittest.TestCase):
 
         class Catalog:
             def head_profile(self, _head: str) -> dict[str, str]:
-                return {"adapter": "codex", "model": "gpt-5.6-terra"}
+                # A pane bring-up: a profile that names no runtime is supervised (secretary-1718).
+                return {"adapter": "codex", "model": "gpt-5.6-terra", "runtime": "orca-legacy"}
 
             def head_launch(self, *args: Any, **kwargs: Any) -> HeadCommand:
                 return launch

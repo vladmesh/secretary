@@ -370,15 +370,18 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
 class BackendChoiceTests(MechanicalRoleBackendTestCase):
     """Criterion 1 and 2: the driver chooses, and choosing changes nothing for a pane."""
 
-    def test_a_profile_with_no_runtime_key_keeps_the_pane_lifecycle(self) -> None:
+    def test_a_profile_with_no_runtime_key_raises_a_head_under_a_supervisor(self) -> None:
+        """secretary-1718: a profile that names no runtime is a `local-pty` head, so a pane
+        profile has to say `orca-legacy` — the test below — and a keyless one is supervised."""
         host = RecordingSessionHost()
 
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(self._registry(), host=host), 0)
+        self.assertEqual(self.run_tick(self._registry(), host=host), 0)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.run_dirs(), [], "a pane profile raised a supervised head")
-        self.assertEqual(self.actions(), ["created"])
+        self.assertEqual(host.opened, [], "a keyless profile was put on a pane")
+        run_dirs = self.run_dirs()
+        self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
+        self.assertTrue(_alive(self.head_pid(run_dirs[0])))
+        self.assertEqual(self.actions(), ["supervised-started"])
 
     def test_a_profile_naming_the_pane_backend_keeps_the_pane_lifecycle(self) -> None:
         host = RecordingSessionHost()
@@ -389,6 +392,24 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
         self.assertEqual(self.run_dirs(), [], "a pane profile raised a supervised head")
         self.assertEqual(self.actions(), ["created"])
+
+    def test_a_launch_with_no_usable_profile_stays_on_a_pane(self) -> None:
+        """secretary-1718: the profile default is `local-pty`, and the bare fallback is not a profile.
+
+        A supervisor raises a head from its profile's spec; the bare `claude` invocation and a
+        profile that will not make a spec have none, so they stay where they always ran. Were they
+        read by the profile default, a role on a pane would be handed over every tick.
+        """
+        self.assertEqual(dispatch._profile_runtime(None, None), ORCA_LEGACY_RUNTIME)
+        self.assertEqual(dispatch._profile_runtime("head", {"adapter": "nonsense"}), ORCA_LEGACY_RUNTIME)
+        self.assertEqual(dispatch._profile_runtime("head", {"adapter": "claude"}), LOCAL_PTY_RUNTIME)
+        host = RecordingSessionHost()
+
+        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
+            self.assertEqual(self.run_tick(self._registry(adapter="nonsense"), host=host), 0)
+
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(self.run_dirs(), [], "a launch with no usable profile raised a supervised head")
 
     def test_a_profile_naming_the_supervisor_raises_a_head_under_one(self) -> None:
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
@@ -445,7 +466,12 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
                     "fallback": ["pane"],
                     "runtime": LOCAL_PTY_RUNTIME,
                 },
-                "pane": {"resource": "acct", "adapter": "claude", "fallback": []},
+                "pane": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": [],
+                    "runtime": ORCA_LEGACY_RUNTIME,
+                },
             },
             {self.AGENT: "routed"},
         )
@@ -490,7 +516,7 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
         host = RecordingSessionHost()
 
         with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(self._registry(), host=host), 0)
+            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
         self.assertEqual(self.reads, 1, "the pane tick opened the head registry more than once")
         self.assertEqual(len(host.opened), 1)
@@ -580,7 +606,12 @@ class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
                     "fallback": ["pane"],
                     "runtime": LOCAL_PTY_RUNTIME,
                 },
-                "pane": {"resource": "acct", "adapter": "claude", "fallback": []},
+                "pane": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": [],
+                    "runtime": ORCA_LEGACY_RUNTIME,
+                },
             },
             {self.AGENT: "routed"},
         )
@@ -858,7 +889,7 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
     def test_a_pane_head_is_handed_to_a_supervisor_before_one_is_raised(self) -> None:
         """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
         host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
         self.assertEqual(len(host.opened), 1, "the first tick raised no pane")
         self.assertIsNotNone(self.state.load_terminal_handle())
 
@@ -927,7 +958,7 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
     def test_a_pane_that_will_not_confirm_it_stopped_raises_nothing(self) -> None:
         """Criterion 5 of the contract, on the side this driver cannot ask the boundary about."""
         host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
         with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
             self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
@@ -1063,7 +1094,7 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
     def test_a_pane_head_hands_its_report_over_with_the_role(self) -> None:
         """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
         host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
         standing = self._standing_report()
 
         self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
@@ -1133,7 +1164,7 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         """Fail-closed is fail-closed for the card too: the writer is still up, so it still owns
         the report, and the record still says which head has it."""
         host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
         standing = self._standing_report()
 
         with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):

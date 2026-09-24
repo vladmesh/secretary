@@ -12,12 +12,22 @@ what is left to delete once it has (A20).
 
 ## The runtime default
 
-`secretary.runtime.head_runtimes.DEFAULT_HEAD_RUNTIME` is the only owner of what an absent `runtime`
-key means, and `secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
-Until the runtime-default card of sprint:1459 (its last card), an absent key means `orca-legacy`,
-pinned by `tests/test_dispatcher_contracts.py`. That card makes it `local-pty` and writes
-`runtime = "orca-legacy"` explicitly into the shipped `heads.toml` and the installed registry for
-the profiles that stay on Orca until A20. Update this section when it lands.
+`secretary.runtime.head_runtimes` owns both facts about an absent `runtime`, and
+`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
+
+- **Profile.** `DEFAULT_HEAD_RUNTIME` is `local-pty`: a head profile with no `runtime` key is a
+  `local-pty` head (secretary-1718, the last code card of sprint:1459).
+- **Record.** `RECORD_RUNTIME_WHEN_ABSENT` is `orca-legacy`: a durable `HeadRun` with no
+  `head_runtime`, and a spec rebuilt by hand from a record that never named one, predate
+  `local-pty` and stay Orca heads. No live record changes meaning.
+- **Explicit pins.** Every profile that stays on Orca until A20 says `runtime = "orca-legacy"`: the
+  five tiers of the shipped `heads.toml` (a test keeps it free of keyless profiles), and the
+  installed registry (instance commit 16f4541b7). So an upgrade changes no live head.
+
+A standing agent's launch with no usable profile — the bare `claude` invocation, or a tick where
+nothing it can resolve names a supervisor — stays on a pane (`PANE_FALLBACK_RUNTIME` in
+`automations/runtime/dispatch.py`): a supervisor raises a head from a profile's spec. Pinned by
+`tests/test_dispatcher_contracts.py`.
 
 ## `local-pty` parity criteria
 
@@ -94,7 +104,7 @@ before it.
    PO edit).
 9. **Host coupling.** The units' `After=orca-server.service` (`packaging/systemd/*.service`),
    doctor's `orca-server.service` expectation (`host.py`), bootstrap's Orca AppImage and `xvfb`
-   install (`bootstrap.py`), and the Orca state dirs in `backup.py`. Why: after steps 2–8 no tick,
+   install (`bootstrap.py`), and the Orca state dirs in `backup.py`. Why: after steps 2–7 no tick,
    head or command calls Orca, so ordering after it, requiring it or backing it up protects nothing.
    `orca-server` itself is a host-owned unit; stopping it and uninstalling Orca are PO actions after
    this step.

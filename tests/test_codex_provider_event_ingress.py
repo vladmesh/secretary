@@ -1244,6 +1244,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 "effort": "medium",
                 "codex_mode": "tui",
                 "codex_home": str(self.fixture.root),
+                # This contract is the pane path's; a profile that names no runtime is supervised.
+                "runtime": "orca-legacy",
             }
 
         def head_launch(self, _head: str, _prompt_file: str, **_kwargs) -> HeadCommand:

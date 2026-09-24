@@ -35,7 +35,7 @@ from tests.production_runtime_fixtures import registered_production_runtime
 REF = "sprint:1705"
 TOKEN = "sprint-1705"
 SUPERVISED_HEAD = "claude-local-pty"
-#: The fake registry's observer profile names no runtime, which is `orca-legacy`.
+#: The fake registry's observer profile, which names `orca-legacy` like every profile there.
 LEGACY_HEAD = "codex-observer"
 
 

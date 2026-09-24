@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..head_runtimes import DEFAULT_HEAD_RUNTIME
+from ..head_runtimes import DEFAULT_HEAD_RUNTIME, RECORD_RUNTIME_WHEN_ABSENT
 from .command import (
     CODEX_TUI_MODE,
     PROMPT_AFTER_START_ADAPTERS,
@@ -70,7 +70,11 @@ class HeadSpec:
     #: here, so a head raised under one backend cannot be observed or stopped through another —
     #: including on a later tick, because the value travels with the durable run record. Orthogonal
     #: to `adapter`: this says what holds the head, `adapter` says what the head is.
-    runtime: str = DEFAULT_HEAD_RUNTIME
+    #:
+    #: A spec built from a profile always says it (`from_profile`, with the profile default). One
+    #: built by hand names no profile: it is a head rebuilt from a record that predates the run
+    #: record or never named a backend, so it carries the record rule rather than the profile one.
+    runtime: str = RECORD_RUNTIME_WHEN_ABSENT
 
     @property
     def prompt_after_start(self) -> bool:
