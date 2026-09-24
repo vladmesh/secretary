@@ -175,9 +175,15 @@ cleared after the bring-up, so no rework, review or restart renders a stale one.
 
 A witnessed progress source is dark when it answers unavailable **or** produces no snapshot on a tick
 (`basis` says `absent@<source>`). The wait tick's status can carry a live `pid_status` with no provider
-channel, for example `reason: "pid"` (exact live heartbeat whose pane the worktree inventory no longer
-lists) or `reason: "disconnected"`. A source that never answered is not treated as dark; that is the
-pid-only case above.
+channel, for example `reason: "pid"` (exact live heartbeat of an Orca head whose pane the worktree
+inventory no longer lists) or `reason: "disconnected"`. A source that never answered is not treated as
+dark; that is the pid-only case above.
+
+A `local-pty` head has no pane, so `reason: "pid"` is its normal shape, and that shape carries its
+provider cursor (`provider_progress_for_run` reads the run's own transcript, not a pane). Before
+secretary-1719 it did not. The episode then aged on the pid alone, and only child processes held it
+healthy, within their ceiling: secretary-1703's working worker read `suspected_stall`, then
+`confirmed_stall`.
 
 Darkness freezes the stall clock for at most `dark_ceiling`, measured from the start of the current
 outage (a source that answers again leaves `unavailable_since`; its next outage starts a new window):

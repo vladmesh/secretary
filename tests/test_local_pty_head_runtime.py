@@ -71,6 +71,8 @@ from secretary.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
+from secretary.codex_provider_events import CodexProviderEventIngress
+from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from secretary.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
@@ -2382,6 +2384,15 @@ class ARetainedHeadIsWokenForItsContinuationTests(LocalPtyRuntimeTestCase):
         )
         self.record = self.root / "submitted.jsonl"
         self.woken: list[str] = []
+        self.accepted_when_woken: list[int] = []
+
+    def accepted(self, run: HeadRun) -> list[dict]:
+        """Every payload the head's supervisor wrote into its terminal, off its journal."""
+        return [
+            event
+            for event in read_events(self.runtime._address(run).journal_path).events
+            if event.get("kind") == INPUT_ACCEPTED
+        ]
 
     def submitted(self) -> list[str]:
         if not self.record.exists():
@@ -2415,6 +2426,7 @@ class ARetainedHeadIsWokenForItsContinuationTests(LocalPtyRuntimeTestCase):
 
         def before_send() -> None:
             self.woken.append(run.run_id)
+            self.accepted_when_woken.append(len(self.accepted(run)))
             self.signal_head(run, signal.SIGCONT)
 
         return Transport(before_send=before_send)
@@ -2447,15 +2459,109 @@ class ARetainedHeadIsWokenForItsContinuationTests(LocalPtyRuntimeTestCase):
         self.assertTrue(self.stopped(run))
         self.assertEqual(self.submitted(), [self.FIRST])
 
-    def test_a_running_head_is_not_handed_to_the_hook(self) -> None:
-        # The same hook carries other pre-send work for running heads (a Codex provider-source
-        # binding) that this backend does not perform: a head that is not suspended never calls it.
+    def test_a_running_head_is_handed_to_the_hook_once_before_the_first_byte(self) -> None:
+        # secretary-1719: the hook is the transport's pre-send contract, not a wake for suspended
+        # heads only. It also carries a Codex head's provider-source binding, which a running head
+        # needs; `SIGCONT` to a running head does nothing.
         run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
         receipt = self.runtime.deliver(
             run, NudgePointer.line(self.FIRST), subject="observer-wake", transport=self.resume(run)
         )
         self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(self.woken, [run.run_id], "the hook runs once, and not again for the Enter")
+        self.assertEqual(self.accepted_when_woken, [0], "the hook ran before the first byte")
+        self.assertEqual(self.submitted(), [self.FIRST])
+
+    def test_a_suspended_head_is_handed_to_the_hook_before_the_first_byte(self) -> None:
+        run = self.retained_head()
+        accepted = len(self.accepted(run))
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line(self.CONTINUATION), subject="worker-continuation", transport=self.resume(run)
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(self.woken, [run.run_id])
+        self.assertEqual(self.accepted_when_woken, [accepted])
+
+    def test_a_running_head_refused_as_busy_is_not_handed_to_the_hook(self) -> None:
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+        first = self.runtime.deliver(run, NudgePointer.line(self.FIRST), subject="head-launch", transport=Transport())
+        self.assertEqual(first.status, HEAD_OK, first.reason)
+        busy = self.runtime.deliver(
+            run, NudgePointer.line(self.CONTINUATION), subject="observer-wake", transport=self.resume(run)
+        )
+        self.assertEqual(busy.status, HEAD_BUSY, busy.reason)
         self.assertEqual(self.woken, [])
+
+    def test_a_running_head_refused_as_draining_is_not_handed_to_the_hook(self) -> None:
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+        self.runtime.request_drain(run, StopInitiator(actor="dispatcher", reason="replacement"))
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line(self.FIRST), subject="observer-wake", transport=self.resume(run)
+        )
+        self.assertEqual(receipt.status, HEAD_DRAINING, receipt.reason)
+        self.assertEqual(self.woken, [])
+        self.assertEqual(self.submitted(), [])
+
+    def test_a_hook_that_raises_hands_back_the_turn_and_writes_nothing(self) -> None:
+        # The error handling this backend already had, kept: the exception is the caller's, and
+        # the turn the admission granted is released, so the next delivery is not refused as busy.
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+
+        def refuse() -> None:
+            raise RuntimeError("pre-send refused")
+
+        with self.assertRaisesRegex(RuntimeError, "pre-send refused"):
+            self.runtime.deliver(run, NudgePointer.line(self.FIRST), transport=Transport(before_send=refuse))
+        self.assertEqual(self.accepted(run), [])
+        again = self.runtime.deliver(run, NudgePointer.line(self.FIRST), transport=self.resume(run))
+        self.assertEqual(again.status, HEAD_OK, again.reason)
+
+    def test_a_codex_provider_source_is_bound_through_the_hook_before_the_prompt_is_written(self) -> None:
+        # secretary-1719: the dispatcher hands a running Codex head `bind_before_delivery` as its
+        # hook (`_start_head`, the reviewer continuation, the observer bring-up). On this backend it
+        # never ran, so the source stayed unbound until a later lifecycle poll.
+        run = self.live_run(command=f"{sys.executable} -u {FAKE_TUI} {self.record}")
+        sessions = self.root / "sessions"
+        journal = sessions / "2026" / "09" / "24" / "rollout.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text(
+            json.dumps({"type": "session_meta", "payload": {"session_id": "s-1", "cwd": str(self.workspace.resolve())}})
+            + "\n"
+            + json.dumps({"type": "thread.started", "thread_id": "parent-1"})
+            + "\n",
+            encoding="utf-8",
+        )
+        unbound = run.with_fanout_policy(
+            {
+                **run.fanout_policy,
+                "provider_source": {
+                    "version": 1,
+                    "kind": "codex_session_event_jsonl",
+                    "state": "unbound",
+                    **codex_provider_source_descriptor(run),
+                    "root": str(sessions),
+                    "baseline": [],
+                }
+            }
+        )
+        written: list[tuple[str, int]] = []
+
+        def persist(updated: HeadRun) -> None:
+            source = updated.fanout_policy.get("provider_source") or {}
+            written.append((str(source.get("state")), len(self.accepted(run))))
+
+        ingress = CodexProviderEventIngress(unbound, persist, stop=lambda *_: None, block=lambda _: None)
+        receipt = self.runtime.deliver(
+            unbound,
+            NudgePointer.line(self.FIRST),
+            subject="reviewer-launch",
+            transport=Transport(before_send=ingress.bind_before_delivery),
+        )
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertIn(("bound", 0), written, "the source was bound before any byte reached the head")
+        source = receipt.run.fanout_policy["provider_source"]
+        self.assertEqual((source["state"], source["session_id"]), ("bound", "s-1"))
+        self.assertEqual(receipt.run.handle, run.handle, "the bound run keeps the address it was delivered at")
         self.assertEqual(self.submitted(), [self.FIRST])
 
     def test_a_continuation_refused_at_admission_leaves_the_retained_head_suspended(self) -> None:
