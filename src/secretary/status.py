@@ -68,7 +68,6 @@ def collect_status(
             instance_path=instance_dir,
             data_dir=data_dir,
         ),
-        data_dir=data_dir,
     )
     if offline:
         collected = CollectResult(expected_to_empty_inventory())

@@ -171,8 +171,8 @@ def _project_add_locked(
     # code does not name.
     binding = dict(existing_binding) if existing_binding else {}
     binding.update(identity)
-    existing_orca_binding = existing_binding.get("orca_binding") if existing_binding else None
-    binding["orca_binding"] = existing_orca_binding if isinstance(existing_orca_binding, str) else repo.name
+    # A new project gets no orca_binding: it runs on local-pty heads in git workspaces. The merge
+    # above keeps a legacy one an earlier onboarding wrote, which is what orca-legacy heads read.
     binding["enabled"] = False
     binding_errors = validate(binding, "project-binding", binding_path.name)
     artifact_errors = validate(artifact, "onboarding-contract", draft_path.name)

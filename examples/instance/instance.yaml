@@ -21,10 +21,6 @@ host:
   units:
     - secretary-pipeline.service
     - secretary-curator.timer
-  orca_repos:
-    - example-project
-    - secretary
-    - secretary-instance
   # Components this installation deliberately does not run. Anything the product
   # ships and this block does not name is enabled.
   components:

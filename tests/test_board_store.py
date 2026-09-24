@@ -743,7 +743,6 @@ class ExclusionEnforcementTests(InstanceRepository):
             base_branch="main",
             dry_run=False,
             units=None,
-            orca=None,
             automations=None,
         )
 
@@ -853,7 +852,6 @@ class UpgradeStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            orca=None,
             automations=None,
         )
 

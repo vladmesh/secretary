@@ -152,11 +152,9 @@ class StatusCliTests(unittest.TestCase):
                     instance_path=root,
                     data_dir=report.data_dir,
                 ),
-                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "projects.txt").write_text("/projects/demo\n", encoding="utf-8")
-            (fixture / "orca-repos.txt").write_text("demo\n", encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
                 "\n".join(f"{name} enabled active" for name in sorted(expected.units)), encoding="utf-8"
             )
@@ -549,7 +547,6 @@ class StatusCliTests(unittest.TestCase):
                     instance_path=root / "examples" / "instance",
                     data_dir=report.data_dir,
                 ),
-                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
@@ -594,7 +591,6 @@ class StatusCliTests(unittest.TestCase):
                     instance_path=root / "examples" / "instance",
                     data_dir=report.data_dir,
                 ),
-                data_dir=report.data_dir,
             )
             oneshot = next(
                 name
@@ -651,7 +647,6 @@ class StatusCliTests(unittest.TestCase):
                     instance_path=root / "examples" / "instance",
                     data_dir=report.data_dir,
                 ),
-                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(

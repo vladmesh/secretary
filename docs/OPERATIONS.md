@@ -509,6 +509,12 @@ task and the gate result; the provision result carries only `id` and `adapter`, 
 rejects a mismatch as foreign. `plane`, `policy.code_concurrency` and the other mutable fields carry
 over on a repeat `project add`, so refreshing a draft does not reset routing.
 
+`project add` writes no `orca_binding`, and `reconcile apply` makes no Orca call: a new project runs
+on local-pty heads in git workspaces. `orca_binding` is optional legacy. An existing one is kept and
+still names the project's Orca checkout for orca-legacy heads. A card on orca-legacy heads for a
+project with neither `orca_binding` nor an Orca registration fails bring-up with "project <id> has no
+Orca registration; run it on a local-pty profile"; move the card to a local-pty profile.
+
 ### Stale input or an invalid schema
 
 Validity is checked first, freshness second.
@@ -2219,7 +2225,8 @@ Resolve it:
 - the name belongs to something else: list it in `host.foreign_units` in `instance.yaml`.
 
 A differing unit is not adopted: remove it and let `apply` install the canonical one, or find out why the
-host diverged. The same two decisions apply to an unowned Orca registration.
+host diverged. Orca repo registrations are outside reconcile: `plan`, `apply` and `doctor` neither
+create, check nor remove them, and an existing one is left to Orca.
 
 Switch off a component in config, not by removing its unit:
 

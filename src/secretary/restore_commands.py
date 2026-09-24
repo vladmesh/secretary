@@ -175,7 +175,6 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         managed,
         prefix,
         foreign_units(report.host),
-        availability,
     )
     if availability.unavailable:
         _print_json(

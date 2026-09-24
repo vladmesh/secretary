@@ -49,6 +49,8 @@ class _Catalog(FakeCatalog):
     def __init__(self, repo: Path) -> None:
         super().__init__()
         self.repo = repo
+        # A project onboarded before secretary-1704 carries a legacy `orca_binding`; a new one has none.
+        self.orca_binding: str | None = ORCA_BINDING
         self.profiles[WORKER_HEAD] = {
             "adapter": "codex",
             "model": "gpt-5.6-terra",
@@ -64,7 +66,10 @@ class _Catalog(FakeCatalog):
         }
 
     def binding(self, project: str) -> dict:
-        return {"repo": str(self.repo), "orca_binding": ORCA_BINDING, "default_branch": "main"}
+        binding = {"repo": str(self.repo), "default_branch": "main"}
+        if self.orca_binding is not None:
+            binding["orca_binding"] = self.orca_binding
+        return binding
 
 
 class _RecordingHost(CommandHostRuntime):
@@ -303,6 +308,32 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.assertTrue(workspace.is_dir())
         self.assertIn(workspace.resolve(), self._registered())
         self.assertFalse([argv for argv in self.host.argvs if "worktree" in argv])
+
+    # -- a project with no orca_binding (secretary-1704) ---------------------------------------
+
+    def test_a_supervised_card_on_a_project_without_orca_binding_gets_its_git_workspace(self) -> None:
+        self.catalog.orca_binding = None
+
+        workspace = self._prepare(_task())
+
+        self.assertEqual(workspace, self.git_path)
+        self.assertEqual(git(workspace, "branch", "--show-current"), BRANCH)
+        self.assertIn(workspace.resolve(), self._registered())
+        self._no_orca()
+
+    def test_a_legacy_card_on_a_project_orca_does_not_know_fails_bring_up(self) -> None:
+        self.catalog.orca_binding = None
+        self.host.orca_allowed = True  # the registry is asked, and answers with no registration
+
+        with self.assertRaisesRegex(
+            HostError, f"^project {PROJECT} has no Orca registration; run it on a local-pty profile$"
+        ):
+            self._prepare(_task(worker_head="codex"))
+
+        orca = [argv for argv in self.host.argvs if argv and argv[0] == "orca"]
+        self.assertEqual(orca, [["orca", "repo", "list", "--json"]])
+        self.assertFalse(self.git_path.exists())
+        self.assertFalse(self.orca_root.exists())
 
     # -- a card created on Orca stays on Orca --------------------------------------------------
 

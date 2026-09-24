@@ -665,3 +665,76 @@ class OnboardingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjectWithoutOrcaTests(unittest.TestCase):
+    """secretary-1704: a fresh project is added and reconciled with no Orca call at all."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repo = make_repo(self.root)
+        self.instance = self.root / "instance"
+        self.instance.mkdir()
+        (self.root / "data").mkdir()
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: fresh\ndata_dir: "
+            + str(self.root / "data")
+            + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+            encoding="utf-8",
+        )
+        self.fixture = self.root / "host"
+        self.fixture.mkdir()
+        # The host runs this checkout, so reconcile has this checkout's units to install.
+        product = Path(__file__).resolve().parents[1]
+        env = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(product)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def run_cli(self, argv: list[str]) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(argv)
+        return code, output.getvalue()
+
+    def test_project_add_then_reconcile_apply_issue_no_orca_argv(self):
+        import subprocess
+
+        from tests.fakes.upgrade import FakeUnitInstaller
+
+        argvs: list[list[str]] = []
+        real_popen = subprocess.Popen
+
+        class RecordingPopen(real_popen):  # type: ignore[misc, valid-type]
+            def __init__(self, args, *rest, **kwargs):
+                argvs.append([str(part) for part in ([args] if isinstance(args, (str, Path)) else args)])
+                super().__init__(args, *rest, **kwargs)
+
+        units = FakeUnitInstaller()
+        with (
+            mock.patch("subprocess.Popen", RecordingPopen),
+            mock.patch("secretary.host_apply.SystemdUnitInstaller", return_value=units),
+            mock.patch(
+                "secretary.host_commands.resolve_runtime_owner", return_value=(None, self.root / "home")
+            ),
+        ):
+            add_code, add_output = self.run_cli(
+                ["project", "add", str(self.repo), "--instance", str(self.instance)]
+            )
+            apply_code, apply_output = self.run_cli(
+                ["reconcile", "apply", "--instance", str(self.instance), "--host-fixture", str(self.fixture)]
+            )
+
+        self.assertEqual(add_code, 0, add_output)
+        self.assertEqual(apply_code, 0, apply_output)
+        # The recorder saw the scanner's git calls, so it was in the path the commands took.
+        self.assertTrue([argv for argv in argvs if Path(argv[0]).name == "git"])
+        self.assertFalse([argv for argv in argvs if any(Path(part).name == "orca" for part in argv)], argvs)
+        binding = load_config(self.instance / "projects" / "sample-project.yaml")
+        self.assertNotIn("orca_binding", binding)
+        self.assertEqual(validate(binding, "project-binding", "sample-project.yaml"), [])
+        self.assertTrue(units.calls)
+        manifest = json.loads((self.root / "data" / "host-managed.json").read_text(encoding="utf-8"))
+        self.assertEqual({row["kind"] for row in manifest["resources"]}, {"unit"})
+        self.assertNotIn("orca", apply_output)

@@ -57,12 +57,3 @@ class FakeUnitInstaller:
 
     def process_identity(self, name: str) -> UnitProcessIdentity | None:
         return self.identities.get(name) if name in self.active else None
-
-
-class FakeRegistrar:
-    def __init__(self, user: str | None = None) -> None:
-        self.user = user
-        self.added: list[tuple[str, str]] = []
-
-    def add(self, name: str, repo: str) -> None:
-        self.added.append((name, repo))

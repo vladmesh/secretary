@@ -33,7 +33,7 @@ from secretary.head_registry import (
     snapshot_path,
 )
 from secretary.runtime import heads as shipped_heads
-from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import (
     LEGACY_ENV,
     LEGACY_VALUES,
@@ -324,7 +324,6 @@ class PortableFixture(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=self.units,
-            orca=FakeRegistrar(),
             automations=FakeAutomations(),
             host_fixture=self.host_fixture,
             pull=False,
@@ -360,7 +359,6 @@ class PortableFixture(unittest.TestCase):
             setattr(args, key, value)
         with (
             mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units),
-            mock.patch.object(upgrade, "LiveOrcaRegistrar", FakeRegistrar),
             mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations),
             mock.patch.object(upgrade, "probe_memory"),
         ):

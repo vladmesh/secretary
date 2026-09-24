@@ -217,7 +217,9 @@ reviewer opens as a split pane in the same worktree; the standalone-terminal fal
 fail-closed rules are in [Operations](OPERATIONS.md#worker-and-reviewer-launch-intent). When review
 starts, the worker's head is stopped and its commit recorded, and the merge gate refuses a green
 verdict if the checkout has moved since. Orca decides where the worktree lives (from the binding's
-`orca_binding`). A returned worktree is accepted only if Orca's record ties it to this project's
+legacy `orca_binding`, else Orca's registration for the repo). A project with neither has no Orca
+path: a card on `orca-legacy` heads fails bring-up ("project <id> has no Orca registration; run it
+on a local-pty profile"), and nothing registers the repo on the fly. A returned worktree is accepted only if Orca's record ties it to this project's
 repository and this card's workspace name; otherwise it is removed before bring-up fails. Head
 rendering and delivery are adapter-specific, but not a stable plugin API.
 
@@ -468,8 +470,12 @@ secrets ([Protocols](PROTOCOLS.md#knowledge)).
 - `doctor` reads config, data and host inventory and never changes the host. `status` and `doctor`
   share one recovery projection; it does not decrypt values, update the probe cache or launch heads.
 - `reconcile plan` computes desired state. A matching name or prefix confers no ownership without a
-  managed manifest or a product-written marker. The observer root's session-manager registration is
-  created lazily by the dispatcher, not by reconciliation.
+  managed manifest or a product-written marker. Its kinds are project checkouts and systemd units;
+  Orca repo registrations are Orca's own state, which reconcile and `doctor` neither create, check
+  nor remove (an `orca` record an older reconcile left in the managed manifest is kept, untouched).
+  A binding's `orca_binding` is optional legacy, read only by orca-legacy heads; new projects have
+  none and run on local-pty heads in git workspaces. The observer root's session-manager
+  registration is created lazily by the dispatcher.
 - Store-registered secrets reach instance Git only as encrypted envelopes. The raw installation key,
   the recovery phrase and `runtime.env` stay out of Git. Facts, exports and diagnostics carry no
   secrets.

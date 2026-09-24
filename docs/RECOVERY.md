@@ -420,8 +420,8 @@ refused. A clean tree alone never proves product ownership.
 8. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
 9. Applies host units and session-manager automations, performs any required memory recovery and
-   verifies restore status. An unavailable project keeps its existing matching Orca registration; a
-   missing or drifted one is reported deferred. Dispatch refuses an unavailable binding before starting
+   verifies restore status. Orca repo registrations are not part of this step; they stay Orca's own
+   state. Dispatch refuses an unavailable binding before starting
    its worker, reviewer or project worktree. Observers use the dedicated observer repository and are
    unaffected by unavailable reserved projects. Heads are connected afterwards as a separate step.
 10. Re-enters the ownership barrier on every partial or successful exit, handing root-created instance

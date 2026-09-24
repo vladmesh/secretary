@@ -51,7 +51,7 @@ from secretary.web.health import (
     target_from_unit,
 )
 from secretary.web.server import LoopbackOnly
-from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.fakes.upgrade import FakeUnitInstaller
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "onboarding" / "happy-path.json"
@@ -119,7 +119,6 @@ def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
         base_branch="main",
         dry_run=False,
         units=units,
-        orca=FakeRegistrar(),
         automations=None,
         report=report,
     )

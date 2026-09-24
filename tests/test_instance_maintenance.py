@@ -330,7 +330,6 @@ class MaintenanceStatusTests(unittest.TestCase):
                     instance_path=instance,
                     data_dir=report.data_dir,
                 ),
-                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(

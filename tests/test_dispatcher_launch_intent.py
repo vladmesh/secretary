@@ -3485,7 +3485,9 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.repo = self.data_dir / "projects" / "unregistered"
         self.repo.mkdir()
 
-        with self.orca(), self.assertRaisesRegex(HostError, "not registered with orca"):
+        with self.orca(), self.assertRaisesRegex(
+            HostError, "project codegen-orchestrator has no Orca registration; run it on a local-pty profile"
+        ):
             self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
 
     # which returned worktree may be adopted ----------------------------------

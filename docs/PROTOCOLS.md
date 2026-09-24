@@ -2045,8 +2045,9 @@ python3 -P -m secretary project gate ...
 ```
 
 A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`.
-The mutable `plane`, `policy` and `remote` fields, `orca_binding` and curator-only `curator_roots` are
-not identity and are carried over by a repeat `project add`. Scanner and provisioning prepare changes
+The mutable `plane`, `policy` and `remote` fields, the optional legacy `orca_binding` (never written
+for a new project) and curator-only `curator_roots` are not identity and are carried over by a repeat
+`project add`. Scanner and provisioning prepare changes
 but do not enable a binding; enabling happens only through a passing gate tied to verified revisions, a
 provision run and a write set.
 
