@@ -595,6 +595,12 @@ name the absolute production interpreter, `-P`, and registered production `src`.
 may select an explicit candidate interpreter for its inner suite; missing, refused and module-less
 contracts keep the production wrapper reachable but infer no inner runtime from `PATH`.
 
+Observer, steward, retro and curator shells run the product's own CLI, so they run with the product's
+managed `<product root>/.venv/bin` first, where the product root is the checkout the role imports
+from (`TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`). `role_env exec` refuses to start one of
+those heads when that `python3` is missing or not executable, naming the path and
+`secretary upgrade --no-pull --product-root <root>` as the repair, as the agent gate does.
+
 One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both sides
 of a gate query, both sides of release, and worktree removal. It runs the fixed production
 interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`

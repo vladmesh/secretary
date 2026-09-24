@@ -270,7 +270,9 @@ class RoleEnvWrapperTests(unittest.TestCase):
             expected = (
                 f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
                 "secretary.runtime.role_env exec --role steward -- /bin/sh -lc "
-                + shlex.quote(f"{CLAUDE_BASE} '/steward'")
+                + shlex.quote(
+                    f"PATH=/opt/checkout/.venv/bin${{PATH:+:$PATH}}; export PATH; {CLAUDE_BASE} '/steward'"
+                )
             )
             self.assertEqual(
                 render_head_command(
