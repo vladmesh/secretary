@@ -202,6 +202,49 @@ class RetroPendingTests(unittest.TestCase):
                 self.assertEqual(self.state.load_watermark(), {})
         self.assertIn("pending-refused", [run.get("result") for run in self._runs() if run["event"] == "precheck"])
 
+    def test_a_hostile_v3_batch_is_refused_cleanly_by_every_entry_point(self) -> None:
+        identity = {"workspace": str(self.workspace.resolve())}
+        turn = {"role": "user", "text": "one", "ts": None}
+        session = {"head": "claude", "path": "p", "session_id": "c", "cwd": "/project", "turns": [turn]}
+        batches = {
+            "sessions missing": {"memory": [{}], "pending": {}},
+            "sessions a string": {"sessions": "x", "memory": [], "pending": {}},
+            "sessions of non-dicts": {"sessions": ["x", 1], "memory": [], "pending": {}},
+            "turns missing": {"sessions": [{"head": "claude"}], "memory": [], "pending": {}},
+            "turns a string": {"sessions": [{**session, "turns": "x"}], "memory": [], "pending": {}},
+            "turns of non-dicts": {"sessions": [{**session, "turns": ["x"]}], "memory": [], "pending": {}},
+            "memory a dict": {"sessions": [session], "memory": {}, "pending": {}},
+            "pending a list": {"sessions": [session], "memory": [], "pending": []},
+            "batch a list": [session],
+            # Well-shaped, but a turn the commands cannot render: the retro backstop refuses it.
+            "turn without text": {"sessions": [{**session, "turns": [{"role": "user"}]}], "memory": [], "pending": {}},
+        }
+        for reason, batch in batches.items():
+            with self.subTest(reason=reason):
+                record = {
+                    "version": harvest.PENDING_VERSION,
+                    "identity": identity,
+                    "base": {},
+                    "selector": harvest.selector(None),
+                    "batch": batch,
+                    "batch_id": harvest._batch_id(identity, batch, {}, None),
+                }
+                text = json.dumps(record)
+                self._write_pending(text)
+                for name, fn, args in (
+                    ("precheck", cli.cmd_precheck, (Retention(),)),
+                    ("harvest", cli.cmd_harvest, (True, Retention())),
+                    ("harvest markdown", cli.cmd_harvest, (False, Retention())),
+                    ("advance", cli.cmd_advance, ()),
+                ):
+                    code, out, err = self._run(fn, *args)
+                    self.assertEqual(code, 1, (name, out, err))
+                    self.assertIn("retro: curator pending record has an invalid batch", err)
+                    self.assertNotIn("Traceback", err)
+                    self.assertEqual(self.state.pending_file.read_text(encoding="utf-8"), text)
+                self.assertEqual(list(self.state.dir.glob("pending.legacy-*")), [])
+                self.assertEqual(self.state.load_watermark(), {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ so the two harvest the same sources on separate schedules without clobbering eac
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from datetime import UTC, datetime
@@ -71,12 +72,31 @@ def _cleanup_done(retention: DoneRetention | None = None) -> dict:
     return {"closed_refs": refs, "closed_count": len(refs)}
 
 
+def _load_pending(identity: dict) -> tuple[dict, dict]:
+    """The one place retro loads its pending record and interprets it, as (record, replay batch).
+
+    The shared reader validates the batch shape; this is the backstop behind it. Any failure while
+    reading the record or deriving what the commands use from it (the batch window, the rendered
+    markdown) is a PendingError, so nothing in pending.json can escape a command as a traceback.
+    """
+    try:
+        record = harvest.read_pending(STATE, identity)
+        batch = {**copy.deepcopy(record["batch"]), "batch_id": record["batch_id"]}
+        _batch_window(batch)
+        harvest.render_markdown(batch)
+    except harvest.PendingError:
+        raise
+    except Exception as exc:
+        raise harvest.PendingError("curator pending record has an invalid batch") from exc
+    return record, batch
+
+
 def _legacy_pending(identity: dict) -> bool:
     """Whether the pending file is there and refused only for not being a versioned record."""
     if not STATE.pending_file.is_file():
         return False
     try:
-        harvest.read_pending(STATE, identity)
+        _load_pending(identity)
     except harvest.LegacyPendingError:
         return True
     except harvest.PendingError:
@@ -113,7 +133,7 @@ def _set_aside_legacy_pending(identity: dict) -> None:
 def _harvest_batch(identity: dict) -> dict:
     """Replay the pending record, or publish a fresh fact-bearing one; the caller holds the lock."""
     if STATE.pending_file.is_file():
-        return harvest.harvest(STATE, identity)
+        return _load_pending(identity)[1]
     batch = harvest.harvest(STATE, identity)
     base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
     record = harvest.pending_record(batch, identity, base)
@@ -166,7 +186,7 @@ def cmd_advance() -> int:
                 # A harvest with no turns to judge already settled its cursors.
                 print("retro: nothing pending to advance", file=sys.stderr)
                 return 0
-            record = harvest.read_pending(STATE, identity)
+            record, _ = _load_pending(identity)
             harvest.advance(STATE, record, identity)
             STATE.pending_file.unlink()
     except harvest.PendingError as exc:
@@ -187,7 +207,7 @@ def cmd_precheck(retention: DoneRetention | None = None) -> int:
         identity = harvest.current_identity()
         _set_aside_legacy_pending(identity)
         _cleanup_done(retention)
-        batch = harvest.harvest(STATE, identity)
+        batch = _load_pending(identity)[1] if STATE.pending_file.is_file() else harvest.harvest(STATE, identity)
     except BoardUnavailable as e:
         # Not retro's failure and not a clean tick: the day's run has not happened yet. Logged so
         # the loss is visible in runs.jsonl instead of only as a stale "last healthy tick".

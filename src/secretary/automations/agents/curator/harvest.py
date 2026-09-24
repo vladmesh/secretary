@@ -374,6 +374,21 @@ def write_pending(st, record) -> None:
     tmp.replace(st.pending_file)
 
 
+def _well_formed_batch(batch) -> bool:
+    """The whole batch shape every pending consumer reads, so a replayed record is never half-trusted."""
+    if not isinstance(batch, dict):
+        return False
+    sessions, memory, pending = batch.get("sessions"), batch.get("memory"), batch.get("pending")
+    if not isinstance(sessions, list) or not isinstance(memory, list) or not isinstance(pending, dict):
+        return False
+    return all(
+        isinstance(session, dict)
+        and isinstance(session.get("turns"), list)
+        and all(isinstance(turn, dict) for turn in session["turns"])
+        for session in sessions
+    )
+
+
 def read_pending(st, identity=None, project=None):
     identity = identity or current_identity()
     try:
@@ -385,7 +400,7 @@ def read_pending(st, identity=None, project=None):
     if record.get("identity") != identity:
         raise PendingError("curator pending record belongs to a different run identity")
     batch, base = record.get("batch"), record.get("base")
-    if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
+    if not _well_formed_batch(batch) or not isinstance(base, dict):
         raise PendingError("curator pending record has an invalid batch")
     if record.get("selector") != selector(project):
         raise PendingError("curator pending record belongs to a different project selector")
