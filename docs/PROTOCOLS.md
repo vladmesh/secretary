@@ -1505,6 +1505,18 @@ pane is confirmed closed).
 `model_source`, launch id, provider `session_id` or its typed absence with reason, collection outcome,
 and three token accounts. Identity fields come from the routing journal's launch snapshot.
 
+**What actually ran.** `model` is the configured name (an alias such as `opus`, or empty under
+`cli_default`). Beside it the occurrence carries what the provider journal says the CLI resolved,
+read from the same session records as the tokens and session-wide through the phase's end:
+`resolved_models` (every distinct model id in order of last use), `resolved_model` (the last of them,
+e.g. `claude-opus-5-5`; empty when the journal named none) and `resolved_effort` (the last reasoning
+effort the journal recorded; empty when none). Claude: `message.model` of assistant records (a CLI
+`<synthetic>` message names none) and the record's `effort`. Codex: `model` and `effort` (older
+rollouts `reasoning_effort`) of each `turn_context` record. They are filled whatever the token
+outcome whenever the journal was read, and never copied from `model`. An occurrence written before
+these fields has none of them and reads as unknown; when present, all three are present,
+`resolved_models` holds non-empty distinct ids and `resolved_model` is its last entry.
+
 **Token dimensions.** `input` (uncached input), `cache_input` (cache creation/write input),
 `cache_read_input` (input served from cache), `output` (total generated output, including reasoning)
 and `reasoning` (subset of `output`), each a non-negative integer or `null`. The additive total is
@@ -2251,7 +2263,8 @@ registered projects from validated bindings, the cards in `ready`, `in_progress`
 
 **`task_snapshot(ref)`** — the card as `secretary task show` reads it, its project and whether that
 project is registered, what the dispatcher durably holds for it (attempt, round, gate state, workspace,
-heads, pause), the heads working it, the tail of its history with a cursor, and its result: the worker's
+heads, pause), the heads working it, what each role ran (`heads`, below), the tail of its history with a
+cursor, and its result: the worker's
 `report:done` / `report:blocked` (with classification), the reviewer's `review:green` / `review:red`, the
 observer's `decision:*`, and the latest of them, marked `terminal` when the card is Done.
 
@@ -2279,7 +2292,31 @@ durable `HeadRun`. A terminal, pane or window is never consulted.
 | `unknown` | no evidence yet: no durable run, no heartbeat published, or a foreign pid |
 
 Every agent row carries the `evidence` it was decided from (heartbeat state, pid, pid file) and states
-the invariant in words.
+the invariant in words. It says nothing about the model: that is the head run's row (`heads`, below),
+joined to the agent by `run_id`.
+
+### What each run was, and what it ran
+
+`task_snapshot(ref).heads` is one row per head run the card recorded, oldest first, read from the card's
+whole committed history and the dispatcher's record in the one traversal the history tail already makes
+(:mod:`secretary.webproto.head_view`), so it outlives the dispatcher's record and a finished card still
+answers. A run is a `launch_id` a `routing` or `attempt.usage` event names, or a run the dispatcher record
+holds now (`current: true`). Each row joins three sources by that id:
+
+- identity and liveness — `run_id`, `role`, `head`, `current`, `runtime`, `local_pty`, `state`
+  (`running`, `finished` or `unknown` from the local-pty supervisor lock) and `reason`; a local-pty
+  run has a view at `/tasks/{ref}/heads/{run_id}`;
+- the launch configuration from the routing snapshot that recorded the run — `attempt`, `adapter`,
+  `model` as configured (an alias such as `opus`, null when the CLI picks), `model_source` and `effort`;
+- what the provider journal says the CLI actually ran, from that same run's latest `attempt.usage`
+  occurrence by report generation — `resolved_model`, `resolved_models`, `resolved_effort` and
+  `resolved_report_generation` (e.g. `claude-opus-5-5` for `opus`; see
+  [What a finished phase cost](#what-a-finished-phase-cost)).
+
+The resolved fields are null (and `resolved_models` empty) until a phase of that run finished, and for an
+occurrence written before they existed. Because the join is by run, a model one launch resolved is never
+shown beside another launch of the same role, and a retained worker resumed for a second round stays one
+row. A routing head recorded before launches carried an id is not a run and has no row.
 
 ### Continuing a read
 
@@ -2720,6 +2757,7 @@ Pinned by `tests/test_web_sprint_protocol.py` (`SectionSeamTests`, `SourceIsolat
 | `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
 | `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened, and when the current card last moved |
 | `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
+| `heads` | the installed head registry (`heads/heads.yaml`) | which adapter, model and effort each profile a sprint names configures |
 
 The journal is its own source, read once and handed to `SprintReader.status_views`. Both documents carry
 `cards`, `journal`, `liveness` and `installation` beside their items.
@@ -2741,6 +2779,7 @@ A listing item and the watched sprint's `work` are built by the same call over t
 | `degraded_cards` | `liveness` | `items: null`, never `{}` |
 | `checks` | `sprints` for `not_applicable`; `liveness` otherwise | `unknown`, sourced `sprints` or `liveness`; `card` still names the current card wherever the row answered |
 | `waiting` | `sprints`, then `cards`, then `liveness`, then `cards`, then `liveness` (below) | `unknown`, sourced by the first missing input, and its reason names the column the board *did* establish where it did |
+| `head_profiles` | `heads` (the installed head registry), which also needs `sprints`, and `liveness` when it answered | every role `null`, sourced by the first of `sprints`, `liveness`, `heads` that was missing; a `liveness` alone missing costs only `via: launched` |
 | `observer.declared` | `sprints` | `unknown` — never `absent`, which would be a claim about a row nobody has seen |
 | `observer.launch` | `liveness`, which also needs `sprints` | `unavailable`, sourced `sprints` or `liveness` — never `not_started` |
 | `comment` (delivery document) | `journal` | `unknown`, sourced `journal`; `id` still names which comment the answer would have been about |
@@ -2776,7 +2815,8 @@ source is unreadable.
 **`current_card_state`** is where the current card stands and since when, and it is a section of its own
 because `current_task` is the sprint row's alone: a journal or a Pipeline listing that could not be read
 marks this section and never blanks the card's reference or the sprint's row. `state` is the column the
-Pipeline listing holds the card in. `since` is the card's **last state transition** on the committed
+Pipeline listing holds the card in, and `title` the card's title from that same listing entry (null when
+the listing holds no such card, or the section is `not_applicable` or `unknown`). `since` is the card's **last state transition** on the committed
 audit -- read in both shapes history holds, a typed event's `transition.source`/`transition.target` and a
 legacy `moved` event's `payload.from`/`payload.to` (`secretary.tasks.recorded_card_transition`) -- and never
 `updated_at`, which moves for a comment, a report or any other edit, and never the newest event of any
@@ -2785,6 +2825,16 @@ when the journal holds one, `absent` when it answered and holds none for this ca
 spelled as a zero age), `not_applicable` for a sprint with no current card or one whose card is where it
 ended -- decided from `current_task.live` rather than by re-deriving the rule -- and `unknown` for a
 source nobody could read. The journal is walked once for the whole document, as every other source is.
+
+**`head_profiles`** is `{observer, worker, reviewer}`, each `{profile, via, registered, label, adapter,
+model, effort}` joined against the installed head registry, so a page never joins a sprint against the
+registry itself. The observer's profile is the head its dispatcher record names (`via: launched`), else
+the row's declaration (`declared`; `none` for a sprint without one, `undeclared` when the row names no
+profile). A worker or reviewer is the row's executor pin (`pinned`); an unpinned role has no profile and
+`via: unset` (or `malformed`), because the dispatcher then chooses per card and that choice belongs to the
+card (`web-read task` `heads`). A profile the registry no longer describes keeps its id with `registered:
+false` and null details. `model` and `effort` are what the profile configures (an alias such as `opus`);
+the model a CLI actually resolved is known per card only.
 
 `checks` is the mechanical gate as the dispatcher record holds it; nothing is re-run and no CI backend is
 called. `gate` carries only the recorded `state`, attested SHA, whether a run is pending, last transport
@@ -2944,15 +2994,15 @@ unrouted method on a routed path is 405; neither reaches a handler.
 
 | method | route | operation | answers |
 | --- | --- | --- | --- |
-| GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: active sprints, pipeline controls, provider limits, doctor and server summary, running PO turns |
-| GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: pipeline controls and running PO turns, the current health problem, open sprints with their card, heads and budget |
+| GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: its full description, state, attempt, heads with model and effort, product runs, worker and reviewer output, result, event tail |
 | GET | `/tasks/{ref}/heads/{run_id}` | `reads.head_view` | one of the card's local-pty heads, read-only: its terminal's tail as redacted plain text and its journal's tail; a run id the card did not record is 404 |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |
 | GET | `/projects` | `reads.system_snapshot` | registered projects |
 | GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
-| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: what it was opened with, its pins, its current card, its last resume, and whether its observer is up |
+| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
@@ -3002,6 +3052,15 @@ unknown field is refused.
 [Operations](OPERATIONS.md#the-po-head-in-the-dashboard). A `/po` `request_id` belongs to one operation
 and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
 session or turn and does nothing else; reused otherwise it is 409 `request_conflict`.
+
+**PO documents.** `po.po_create_session(request_id, cli, model, effort="default")` answers
+`{kind: "po_session_created", request_id, session_id, effort, repeated}`; an `effort` outside
+`po.efforts` for the CLI is refused (400 `validation`) and `default` (no effort flag) is always accepted;
+the effort is one of the inputs the request id is bound to. `po_models()` (and `po_overview`) carry
+`models` and `efforts`, each `{cli: [values]}`. Every session object (`po_overview.sessions[]`,
+`po_session.session`) carries `effort` and `resolved_model` — the model the latest turn that reported one
+ran, `null` before any did — and every turn object (`po_session.turns[]`, `last_turn`) its own
+`resolved_model`. [Operations](OPERATIONS.md#po-head-sessions-and-turns) says where each comes from.
 
 ### Opening a sprint from a browser
 

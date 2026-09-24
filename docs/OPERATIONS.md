@@ -266,7 +266,7 @@ secretary role-skills audit --instance INSTANCE
 ### PO head sessions and turns
 
 `secretary.po.runner` runs the PO head headless, without Orca or local-pty. A **session** is one
-conversation with one CLI (`claude` or `codex`) and one model, with `DATA_DIR/po` as cwd. A **turn**
+conversation with one CLI (`claude` or `codex`), one model and one reasoning effort, with `DATA_DIR/po` as cwd. A **turn**
 is one CLI process with full permissions (`--dangerously-skip-permissions`,
 `--dangerously-bypass-approvals-and-sandbox`), its own process group, and the owner's message on stdin:
 
@@ -275,6 +275,18 @@ is one CLI process with full permissions (`--dangerously-skip-permissions`,
 | Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` once a turn completed; before that `--session-id UUID` again | `result` of the JSON result object |
 | Codex | `codex exec --json -C DATA_DIR/po -` | `codex exec resume THREAD_ID -` (`thread_id` from turn 1's event stream) | the `-o` file |
 
+**Effort.** Every turn of a session opened with an effort other than `default` carries it: Claude
+`--effort LEVEL`, Codex `-c model_reasoning_effort=LEVEL` (both checked on Claude Code 2.1.280 and
+Codex 0.155.1). `default` passes no flag, so the CLI runs with its own configured effort; every session
+opened before efforts existed is `default`.
+
+**Resolved model.** Each settled turn records the model the CLI actually ran (`po_turns.resolved_model`),
+e.g. `claude-opus-5-5` for `opus`. Claude: the first key of `modelUsage` in its JSON result — the
+session's own model; subagent models follow it (`claude-opus-5-5[1m]` is the long-context variant, kept
+as reported). Codex: its `--json` event stream names no model, so it is the `model` of the last
+`turn_context` in the thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-THREAD_ID.jsonl`
+(`CODEX_HOME` of the turn environment, else `~/.codex`). A turn that reported nothing (no result object,
+no rollout) keeps `null`; the session reads show the latest turn's non-null value.
 **Environment.** A turn gets the `web-serve` environment (HOME, auth, `SECRETARY_*`, `TA_*` kept) with
 the directory of the interpreter running `web-serve` (the product runtime, `/home/dev/secretary/.venv/bin`
 on prod) first on `PATH` and the product source it imports first on `PYTHONPATH`. So `python3 -P -m
@@ -286,12 +298,13 @@ Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, t
 BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-web.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
 ```
 
-Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_session_close`):
+Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_session_close`,
+`0015_po_effort_resolved_model`):
 
 | Table | Holds |
 | --- | --- |
-| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed) |
-| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason |
+| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (`default` unless chosen) |
+| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason, `resolved_model` |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
 | `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`), fingerprint of its inputs, the session and, for a send, the turn it made |
 
@@ -360,13 +373,15 @@ The cookie value is an HMAC keyed by the token, never the token. Without a valid
 route answers 401 (a page with the login form, or JSON `po_token_required`) before the runner or the
 board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
 
-**The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI and a model
-from the list below. A row's link is the start of the session's first owner message (whitespace
+**The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI, a model
+from the list below and a reasoning effort (`CLI default`, preselected, passes no effort flag). A row's link is the start of the session's first owner message (whitespace
 collapsed, at most 80 characters with `…` when cut, plain text; `no message yet` before the first
 message), then its last activity (the latest of creation, any turn's start or finish, and any feed
-entry), CLI, model, state, whether a turn runs, the short session id and a `close` button. The panel
+entry), the model — the one its last turn reported (`claude-opus-5-5`, said `Opus 5.5`), else the one it
+was opened with, the CLI and the exact id under it — its effort, state, whether a turn runs, the short session id and a `close` button. The panel
 links to `closed sessions (N)`, `/po?closed=1`, which lists closed sessions the same way with their
-`closed_at` instead of state and turn, and links back to the open ones. A session page shows the owner's messages, the PO
+`closed_at` instead of state and turn, and links back to the open ones. A session page names its model
+and effort beside its title and shows the owner's messages, the PO
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
 reason), newest first, under a message box (Enter sends, Shift+Enter inserts a newline; the form goes
 out once until the page reloads). **Every control is one row under that box, never at the end of the
@@ -376,7 +391,7 @@ session` always. `close` and `new session` are forms of their own and HTML has n
 stand beside the message form and `send` reaches it by `form="po-send"`. `close` posts to
 `/po/sessions/ID/close` as actor `owner` and returns to `/po`; pressed while a turn runs (from a list row)
 it renders the session refused (409) and closes nothing. `new session` posts the `/po` form's own route,
-`POST /po/sessions`, with the CLI and the model of the session being read and the page's request id
+`POST /po/sessions`, with the CLI, the model and the effort of the session being read and the page's request id
 suffixed `-new-session` (one id belongs to one operation, so the create never takes the id the message
 box carries); it opens a second session and leaves this one exactly as it was — sessions run side by
 side, and nothing here closes one. A pair the installation no longer offers is refused the way the `/po`
@@ -388,27 +403,33 @@ links; the text is escaped first, so raw HTML shows as text); the owner's messag
 While a turn runs the page polls
 `/po/api/sessions/ID` every 3 seconds and reloads when the turn ends. A message sent while a turn runs
 is refused on the page (409) and nothing is written. Each form carries a request id minted when the page was served. It belongs to one
-operation with fixed inputs, installation-wide: `po_requests` binds it to a session create (CLI and
-model) or a send (session and the exact text), and is written in the transaction that creates the
+operation with fixed inputs, installation-wide: `po_requests` binds it to a session create (CLI,
+model and effort; a `default` effort is left out of the fingerprint, so an id recorded before efforts
+existed still binds the same inputs) or a send (session and the exact text), and is written in the transaction that creates the
 session or the turn. Sending the same form again answers with what it made — the session, or the turn
 running, completed, or failed with its reason even when its CLI never started — and writes and launches
 nothing. The same id reused for anything else is refused (409 `request_conflict`). A message refused
-because another turn runs records no request id, so that form can be sent once the turn ends. The dashboard's `Product owner` panel shows only the number of running PO turns
+because another turn runs records no request id, so that form can be sent once the turn ends. The dashboard's pipeline strip shows only the number of running PO turns
 with a link to `/po`; it needs no token, and a PO store that does not answer hides the number.
 
-**Models.** `instance.yaml`:
+**Models and efforts.** `instance.yaml`:
 
 ```yaml
 po:
   models:
     claude: [fable, opus, sonnet]
     codex: [gpt-6-astra, gpt-5.6-terra, gpt-5.6-sol, gpt-5.6-luna]
+  efforts:
+    claude: [default, low, medium, high, xhigh, max]
+    codex: [default, low, medium, high, xhigh]
 ```
 
-Without `po.models` the product default is exactly that list. The first entry per CLI is preselected in
+Without `po.models` or `po.efforts` the product default is exactly that list. The first entry per CLI is preselected in
 the new-session form: `fable` when Claude is chosen, `gpt-6-astra` when Codex is. A CLI left out keeps its default; an
 empty list offers that CLI nothing. Creating a session with a CLI or model outside the list is refused
-(400). The list is read on every request, so an edit needs no restart.
+(400). The same holds for efforts, except that `default` (no effort flag) is always accepted, listed or
+not; a create that names no effort is `default`. The lists are read on every request, so an edit needs no
+restart.
 
 ### Read-only checkpoint and quiet-tick check
 
@@ -1628,22 +1649,47 @@ fault; if both agree, the source is. A port in use fails the bind naming it; a n
 
 ### The operator's screen
 
-The dashboard (`/`) has four parts that fail apart:
+Every fact is drawn once. What the bottom bar carries on every page — the provider windows and the
+doctor lamp — has no panel of its own anywhere, and a page repeats nothing its header already says.
+Long text (a goal, a decision, a report body) is in the page once, in the reading face: held to two
+lines and grown in place by `show more`, never a one-line preview followed by the whole text again.
 
-1. **pipeline** — running, drained or frozen (since when, by whom) with the opposite button (`drain` with a
-   reason, or `resume`); heads per card; installation health summarized to one word plus named items.
-2. **open sprints** — goal, current card, observer state, gate, budget, cards by state, last decision, and a
-   comment box to the observer.
-3. **in flight** — cards being carried and agents running.
-4. **recent commands** — newest first, with `/history` for paging.
+The dashboard (`/`) has three parts that fail apart:
+
+1. **pipeline** — running, drained or frozen (since when, by whom), the dispatcher phase, the number of
+   running PO turns, and the opposite control (`Drain…` opens a reason and the button; `resume`).
+2. **attention** — while installation health reports a problem, a banner names the first one and links
+   to `/doctor`; health that could not be read is the marked block every unreadable source gets. The
+   facts behind health (checkpoint, disk, memory, load, cards, attempts, last tick, failed units) are one
+   collapsed `Installation` panel.
+3. **open sprints** — one card per sprint: goal (two lines), the card in hand with its state, age, gate
+   and title, the heads (observer, worker, reviewer) with model and effort, and the card budget as a thin
+   secondary line — a spend, not progress.
+
+A sprint page (`/sprints/{ref}`) has a `Now` panel (the card in hand, the gate, what the observer is
+doing, the heads, the budget line), the observer's call (decision in prose, its reasons and rejected
+alternatives behind a disclosure, the next step), and tabs for the cards by state, the Definition of Done
+rendered from its Markdown, the rest of the last resume, and the issues. The side panel says what no chip
+does: projects, repositories, the declared observer and whether it is up (the held head is named only when
+it is not the declared one), and the worker and reviewer pins. Closing an open sprint is under `More
+actions`.
+
+A card page (`/tasks/{ref}`) is headed by the card's title and opens on its **Task** tab: the card's full
+description, rendered from its Markdown. Beside it are the work (report, verdict, decision, result), the
+timeline of transitions with the records that made them, and the raw event tail. The side panel's `Heads`
+lists every run the card recorded, by role: the latest run of each role is a chip with the model that ran
+it — the exact id the run reported (`claude-opus-5-5`, shown as `Opus 5.5`), else the configured one
+marked as configured — its effort (five bars and a word; hollow bars when no effort flag was passed and
+the CLI default applies) and whether its process is alive; the runs before it are one line each, with
+their own model, effort and attempt. A run a local-pty supervisor held links to its read-only view: the
+tail of its terminal and its journal.
 
 Card pages carry a comment and a move with reason (a second reason past the sprint's reservation); sprint
 pages carry a comment and, when open, the close. All post to the routes in
 [Protocols](PROTOCOLS.md#routes) as role `po`, actor `web`. There is no browser `decide`. Every page reloads
 every 30 seconds unless a field has focus or holds typed text — a half-written `/po` message is never
 discarded by it, and a password field counts, so the `/po` token being typed in is never cleared by a
-tick; a checkbox turns the reload off, and the one in the bottom bar and the one on the dashboard are
-the same switch. A page rendered as the answer to a POST — a refusal, normally — carries no reload at
+tick; the checkbox on the bottom bar turns the reload off. A page rendered as the answer to a POST — a refusal, normally — carries no reload at
 all, because reloading one is the browser offering to send the submission again.
 
 ### The bottom status bar
@@ -1660,15 +1706,15 @@ and the percentage follows the window's name at the chip's own gap. A percentage
 rounded it, with a trailing `.0` dropped: `73%`, and `95.4%` when the reading really is fractional.
 The exact moment is not lost: it is the hover title of that element, as the ISO
 UTC string the reading carried. The time left is counted from when the page was drawn, not from when
-the reading was taken, so a reading served from the cache does not overstate what is left. The
-dashboard's `Usage limits` panel says it the same way, from the same renderer. A provider whose reading is stale or
+the reading was taken, so a reading served from the cache does not overstate what is left. The bar is
+the one place the windows are drawn. A provider whose reading is stale or
 unavailable is shown with that word, the reason, and no percentage at all: on a bar a number is read as
 what is left *now*, so no reading is drawn as words rather than as a figure. An available reading taken a
 while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it
 covers nothing, the `/po` composer included.
 
-Its data is the cached provider layer (`secretary.web.provider_usage`, a five-minute in-process cache) —
-the same document the dashboard's `Usage limits` panel draws. **Rendering a page never adds a provider
+Its data is the cached provider layer (`secretary.web.provider_usage`, a five-minute in-process cache).
+**Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the
 provider layer, and a read that refuses, both still serve every page; the bar then carries the reason
@@ -1701,7 +1747,7 @@ code and its message, grouped by the severity that decides the colour, with the 
 there are none it says so plainly; when health could not be read it says that, with the reason.
 
 **Refreshing the lamp reads recorded state only.** It is one cached read of the same collector the
-dashboard's doctor panel uses (`secretary.web.doctor`, a one-minute in-process cache over
+dashboard's attention banner and `Installation` panel use (`secretary.web.doctor`, a one-minute in-process cache over
 `reads.health_snapshot` → `collect_status` with no sprints and no panel probes): this host's own
 systemd inventory, production state, checkpoint snapshot, store findings and memory index. It runs no
 live `secretary doctor`, opens no SSH to any host, and touches no provider credential or provider
@@ -1710,9 +1756,9 @@ page inside one cache window collects once, and JSON routes, which render no pag
 process built without the doctor layer still serves every page, and its lamp is red, because health
 that nothing read is unknown health.
 
-The dashboard's health panel reads that same cached reading, not a collection of its own: one cache,
-one window, so the panel and the lamp cannot disagree, and the panel is up to one minute stale exactly
-as the lamp is. A cache refresh is one collection however many requests arrive during it (they wait
+The dashboard's banner and `Installation` panel read that same cached reading, not a collection of their
+own: one cache, one window, so they and the lamp cannot disagree, and they are up to one minute stale
+exactly as the lamp is. A cache refresh is one collection however many requests arrive during it (they wait
 for it and share it), and one response draws its panel and its lamp from one reading even when the
 window expires mid-request. A warm dashboard render starts no subprocess and opens no `board/*.ndjson`. For the same
 reason `web-serve` runs the board store's git-exclusion guard (`board-store.env` untracked and ignored)
