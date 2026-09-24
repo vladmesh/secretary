@@ -76,6 +76,8 @@ unit tests/test_head_vitality_regression.py
 integration-heads tests/test_head_vitality_wait_decisions.py
 unit tests/test_health_suite_command.py
 component tests/test_hermetic_codex.py
+unit tests/test_codex_home.py
+unit tests/test_workspace_roots.py
 integration-board tests/test_hermetic_board.py
 component tests/test_hermetic_orca.py
 component tests/test_hermetic_pipeline_state.py
