@@ -60,7 +60,7 @@ from secretary.host_apply import (
     resolve_packaged,
     resolve_runtime_owner,
 )
-from secretary.memory.client_config import ClientConfigError, reconcile_clients
+from secretary.memory.client_config import ClientConfigError, reconcile_clients, reconciled_codex_configs
 from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
 from secretary.po import token as po_token
@@ -445,12 +445,12 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
     except ClientConfigError as exc:
         return StepResult("memory-clients", "failed", str(exc))
     if not context.dry_run:
-        managed = context.runtime_home / ".config" / "orca" / "codex-runtime-home" / "home" / "config.toml"
+        managed = reconciled_codex_configs(context.runtime_home, data_dir)
         user_codex = context.runtime_home / ".codex" / "config.toml"
         claude = context.runtime_home / ".claude.json"
         try:
             _set_runtime_directory_owner(user_codex.parent, context.runtime_user)
-            for path in (managed, user_codex, claude):
+            for path in (*managed, user_codex, claude):
                 _set_runtime_owner(path, context.runtime_user)
         except GitError as exc:
             return StepResult("memory-clients", "failed", str(exc))

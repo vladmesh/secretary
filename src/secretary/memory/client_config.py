@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_text_atomic
+from secretary.runtime.codex_home import managed_codex_homes
 
 MEMORY_URL = "http://127.0.0.1:8077/mcp"
 LEGACY_SERVER = "memory"
@@ -33,10 +34,11 @@ class ClientConfigResult:
     codex_managed: bool = False
     codex_user: bool = False
     claude_user: bool = False
+    codex_data_dir: bool = False
 
     @property
     def changed(self) -> int:
-        return sum((self.codex_managed, self.codex_user, self.claude_user))
+        return sum((self.codex_managed, self.codex_user, self.claude_user, self.codex_data_dir))
 
 
 def bridge_executable(product_root: Path) -> Path:
@@ -165,17 +167,34 @@ def reconcile_claude(path: Path, command: Path, data_dir: Path, *, dry_run: bool
     return True
 
 
+def reconciled_codex_configs(runtime_home: Path, data_dir: Path) -> tuple[Path, ...]:
+    """The managed Codex configs `reconcile_clients` writes the bridge entry into.
+
+    The legacy home's always, as it always was. `<data_dir>/codex-home`'s once seeding has written
+    it: a home with no config yet gets the entry from seeding itself, and writing a bridge-only
+    config first would make the copy-once seed skip the packaged defaults.
+    """
+    legacy, *others = managed_codex_homes(runtime_home, data_dir)
+    return (
+        legacy / "config.toml",
+        *(home / "config.toml" for home in others if (home / "config.toml").exists()),
+    )
+
+
 def reconcile_clients(
     product_root: Path, runtime_home: Path, data_dir: Path, *, dry_run: bool = False
 ) -> ClientConfigResult:
     command = bridge_executable(product_root)
     if not dry_run and not command.is_file():
         raise ClientConfigError(f"PO bridge executable is missing: {command}")
-    managed = runtime_home / ".config" / "orca" / "codex-runtime-home" / "home" / "config.toml"
+    managed, *data_homes = reconciled_codex_configs(runtime_home, data_dir)
     user_codex = runtime_home / ".codex" / "config.toml"
     claude = runtime_home / ".claude.json"
     return ClientConfigResult(
         codex_managed=reconcile_codex(managed, command, data_dir, dry_run=dry_run),
         codex_user=reconcile_codex(user_codex, command, data_dir, dry_run=dry_run),
         claude_user=reconcile_claude(claude, command, data_dir, dry_run=dry_run),
+        codex_data_dir=any(
+            [reconcile_codex(path, command, data_dir, dry_run=dry_run) for path in data_homes]
+        ),
     )
