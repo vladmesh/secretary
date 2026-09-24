@@ -743,7 +743,6 @@ class ExclusionEnforcementTests(InstanceRepository):
             base_branch="main",
             dry_run=False,
             units=None,
-            automations=None,
         )
 
         with mock.patch.object(upgrade, "migrate_instance") as migrated:
@@ -852,7 +851,6 @@ class UpgradeStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            automations=None,
         )
 
     def test_it_runs_immediately_after_the_step_that_installs_the_driver(self) -> None:

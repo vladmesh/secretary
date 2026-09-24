@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(
     """
-    __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
+    __init__.py __main__.py _fsutil.py _proc.py backup.py
     backup_policy.py backup_retention.py backup_verify.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py

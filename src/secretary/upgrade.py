@@ -27,14 +27,6 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc, role_skills, state_repo
-from secretary.automations import (
-    AutomationError,
-    OrcaAutomationClient,
-    agents_root,
-    apply_automations,
-    load_specs,
-    workspaces_root,
-)
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
@@ -127,7 +119,6 @@ class UpgradeContext:
     base_branch: str
     dry_run: bool
     units: UnitInstaller
-    automations: OrcaAutomationClient
     host_fixture: Path | None = None
     pull: bool = True
     report: Any = None
@@ -739,6 +730,58 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
     return StepResult("head-registry-checkpoint", "changed" if commit else "unchanged", detail)
 
 
+class AgentSpecsError(RuntimeError):
+    """The product's declaration of its background agents' specs is broken."""
+
+
+# The product declares where its background agents' specs live in its own `pyproject.toml`:
+# the agents are a package on top of `secretary`, so `secretary` reads their location from the
+# product's manifest instead of naming the package (sprint:1455, secretary-1689).
+AGENT_SPECS_KEY = "agent-specs"
+
+
+def agents_root(product_root: Path) -> Path | None:
+    """The directory of ``<agent>/automation.toml`` specs this product declares, or None.
+
+    A product tree without a manifest, or whose manifest declares no specs, ships no agents —
+    as a tree without the directory always did. A manifest that cannot be parsed, or declares a
+    path outside the product, is a broken product rather than an empty one.
+    """
+    manifest = product_root / "pyproject.toml"
+    try:
+        raw = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise AgentSpecsError(
+            f"{manifest}: product manifest is unreadable: {exc.__class__.__name__}"
+        ) from None
+    tool = raw.get("tool")
+    table = tool.get("secretary") if isinstance(tool, dict) else None
+    declared = table.get(AGENT_SPECS_KEY) if isinstance(table, dict) else None
+    if declared is None:
+        return None
+    relative = Path(declared) if isinstance(declared, str) else None
+    if relative is None or not declared or relative.is_absolute() or ".." in relative.parts:
+        raise AgentSpecsError(
+            f"{manifest}: [tool.secretary] {AGENT_SPECS_KEY} must be a path inside the product"
+        )
+    return product_root / relative
+
+
+def workspaces_root(home: Path | str | None = None) -> Path:
+    """Where role workspaces live: the configured root, else under the named home.
+
+    ``home`` is the installation owner's, which is not the invoking process's when a repair runs
+    as root or against another account's installation. Materializing root's workspace paths for
+    units the owner then runs is how a workspace ends up somewhere nothing materialized.
+    """
+    configured = os.environ.get("TA_WORKSPACES_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(home if home is not None else Path.home()) / "orca" / "workspaces"
+
+
 def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
     """Every derived role worktree shipped by this product, present or absent."""
     root = workspaces_root(home) / "secretary"
@@ -840,7 +883,7 @@ def _worktree_git_dir(worktree: Path) -> Path | None:
 def step_worktrees(context: UpgradeContext) -> StepResult:
     try:
         worktrees = desired_role_worktrees(context.product_root, context.runtime_home)
-    except AutomationError as exc:
+    except AgentSpecsError as exc:
         return StepResult("role-worktrees", "failed", str(exc))
     if not worktrees:
         return StepResult("role-worktrees", "skipped", "the product ships no role worktrees")
@@ -988,22 +1031,6 @@ def _component_unit_prefix(report: Any, component: str) -> str:
 
 def _memory_unit_prefix(report: Any) -> str:
     return f"{_component_unit_prefix(report, MEMORY_COMPONENT)}."
-
-
-def step_automations(context: UpgradeContext) -> StepResult:
-    try:
-        specs = load_specs(context.product_root, home=context.runtime_home)
-        changes, _ = apply_automations(specs, context.automations, dry_run=context.dry_run)
-    except AutomationError as exc:
-        return StepResult("automations", "failed", str(exc))
-    pending = [change for change in changes if change.action != "unchanged"]
-    if not pending:
-        return StepResult("automations", "unchanged", f"{len(changes)} automations current")
-    detail = ", ".join(
-        f"{change.action} {change.name}" + (f" ({', '.join(change.drifted)})" if change.drifted else "")
-        for change in pending
-    )
-    return StepResult("automations", "changed", detail)
 
 
 def step_memory(context: UpgradeContext) -> StepResult:
@@ -1606,7 +1633,6 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_po_workspace_owner,
     step_po_token,
     step_host,
-    step_automations,
     step_memory,
     # Last of the materializing steps: a restart is the moment the new code becomes the code that
     # answers, so it follows the checkout, the dependencies, the schemas and the unit.
@@ -1660,15 +1686,12 @@ def run_upgrade(args) -> int:
     except ValueError as exc:
         print(f"secretary upgrade: {exc}")
         return 2
-    # Run Orca as the runtime user; root has no Orca runtime.
-    orca_user = runtime_user if os.geteuid() == 0 else None
     context = UpgradeContext(
         instance_path=instance_path,
         product_root=product_root,
         base_branch=args.base_branch,
         dry_run=args.dry_run,
         units=SystemdUnitInstaller(),
-        automations=OrcaAutomationClient(orca_user),
         host_fixture=Path(args.host_fixture) if args.host_fixture else None,
         pull=not args.no_pull,
         report=report,

@@ -200,7 +200,6 @@ class ProductMemoryPackTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(active={"secretary-memory.service"}),
-            automations=None,
             report=report,
             runtime_user="operator",
         )
@@ -252,7 +251,6 @@ class ProductMemoryPackTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(active={"secretary-memory.service"}),
-            automations=None,
             pull=False,
             report=report,
         )

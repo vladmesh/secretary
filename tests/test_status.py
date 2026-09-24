@@ -687,7 +687,7 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["host"]["external_runtime"]["enabled"], "not-found")
         self.assertEqual(payload["host"]["external_runtime"]["active"], "inactive")
         # examples/instance's fixture host is otherwise incomplete (missing project checkout,
-        # drifted automations), same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor;
+        # unit drift), same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor;
         # this scenario only asserts the external-runtime line, not the overall exit code.
         self.assertIn("Orca runtime: absent (external, not managed by Secretary)", text_output.getvalue())
 

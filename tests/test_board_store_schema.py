@@ -906,7 +906,6 @@ class BoardStoreSchemaTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            automations=None,
         )
 
     def test_an_upgrade_migrates_a_configured_store_and_then_leaves_it_alone(self) -> None:

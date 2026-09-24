@@ -282,44 +282,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertNotIn("resource probes", output)
 
-    def test_doctor_lists_background_automations_but_offline_leaves_them_uninspected(self):
-        code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)])
+    def test_doctor_reports_no_background_automations_and_never_asks_orca_for_them(self):
+        # secretary-1706: systemd units are the only schedule owner of the background roles, so
+        # doctor no longer has an Orca-automations section, inspected or not.
+        argvs: list[list[str]] = []
+        real_popen_init = subprocess.Popen.__init__
 
-        self.assertEqual(code, 0, output)
-        self.assertIn("background automations: read-only", output)
-        self.assertIn("not inspected", output)
-        # Offline must never shell out to orca, so no role can be reported as reconciled or missing.
-        self.assertNotIn(": managed", output)
-        self.assertNotIn(": missing", output)
+        def recording_init(popen, args, *rest, **kwargs):
+            argvs.append([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [str(args)])
+            return real_popen_init(popen, args, *rest, **kwargs)
 
-    def test_background_automations_report_missing_and_managed_roles(self):
-        from secretary.cli import print_background_automations
-
-        # No live automation of any name -> every shipped background role reads as not provisioned.
-        with mock.patch("secretary.automations.OrcaAutomationClient.list", return_value=[]):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                print_background_automations(inspect=True)
-        rendered = out.getvalue()
-        self.assertIn("background automations: read-only", rendered)
-        for role in ("curator", "retro", "steward"):
-            self.assertIn(f"{role}: missing (not provisioned)", rendered)
-
-    def test_background_automations_report_an_unreadable_inventory_as_unavailable(self):
-        from secretary.automations import AutomationError
-        from secretary.cli import print_background_automations
-
-        with mock.patch(
-            "secretary.automations.OrcaAutomationClient.list",
-            side_effect=AutomationError("list automations: orca not found"),
+        with (
+            tempfile.TemporaryDirectory() as fixture,
+            mock.patch.object(subprocess.Popen, "__init__", recording_init),
         ):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                print_background_automations(inspect=True)
-        rendered = out.getvalue()
-        self.assertIn("unavailable: list automations: orca not found", rendered)
-        # A hiccup reading Orca must not masquerade as "every role missing".
-        self.assertNotIn("missing (not provisioned)", rendered)
+            outputs = [
+                self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)])[1],
+                self.run_cli(["doctor", "--host-fixture", fixture, "--instance", str(EXAMPLE_INSTANCE)])[1],
+            ]
+
+        for output in outputs:
+            self.assertNotIn("background automations", output)
+        self.assertFalse([argv for argv in argvs if "automations" in argv], argvs)
 
     def test_doctor_prints_checkpoint_freshness(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -41,7 +41,6 @@ from secretary._fsutil import (
     write_json,
     write_text_atomic,
 )
-from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.board.backend import CARD, board_client
 from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from secretary.config import validate_instance
@@ -91,6 +90,7 @@ from secretary.upgrade import (
     default_product_root,
     run_steps,
     step_host,
+    workspaces_root,
 )
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
@@ -1124,7 +1124,6 @@ def materialize_host(
         base_branch="main",
         dry_run=False,
         units=SystemdUnitInstaller(),
-        automations=OrcaAutomationClient(installation_user),
         host_fixture=host_fixture,
         pull=False,
         report=report,

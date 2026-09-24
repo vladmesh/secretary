@@ -1,33 +1,17 @@
-# Portable automation spec for the retro triggered-agent.
+# Portable spec for the retro triggered-agent.
 #
-# Canon for HOW the retro agent is scheduled and dispatched. Host bindings Orca generates
-# (workspace path, repo/automation UUIDs) are NOT here — `secretary upgrade` resolves them on
-# the host and applies this spec idempotently (match the Orca automation by `name`, compare its
-# whole context, and edit in place so the automation id stays stable).
+# The canon for HOW the retro agent is dispatched. Its schedule is the packaged systemd timer
+# (secretary-retro.timer), the only schedule owner; Secretary manages no Orca automation.
 
-name = "retro"            # Orca automation name; the match key across re-provisions
-skill = "/retro"          # automation prompt = skill invocation (skill lives in .claude/skills/retro)
-provider = "claude"
-reuse_session = true
+name = "retro"
+skill = "/retro"          # prompt = skill invocation (skill lives in .claude/skills/retro)
 # Last resort only — `role_defaults.retro` in the selected head registry decides the real head.
 head = "claude-opus-medium"
-# Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
-# not Orca's field (manual `automations run` ignores --precheck).
+# Skip the run when no session has new turns since the watermark. Gated in the systemd unit.
 precheck = "python3 -P -m triggered_agents retro precheck"
 
-[trigger]
-# Orca's own rrule does not tick in headless `orca serve`; kept for correctness but the real
-# clock is the systemd timer below.
-orca = "daily"
-# secretary-retro.timer is the sole schedule owner: a non-headless orca (its rrule DOES tick there)
-# or a manual re-enable in the GUI must not fire /retro a second time alongside the timer. Same
-# reasoning as curator/steward. `secretary upgrade` reads this and passes --disabled on every
-# create/edit; a manual diagnostic `orca automations run <id>` is unaffected — it dispatches on
-# demand regardless of this flag.
-enabled = false
-
 [systemd]
-# The actual scheduler on this headless box; packaged as secretary-<name>.timer. Retro is a
+# The only scheduler; packaged as secretary-<name>.timer. Retro is a
 # slow reflective pass, so daily (not hourly like curator/board).
 calendar = "daily"
 randomized_delay_sec = 300   # jitter so the daily retro pass never races another sweep at midnight

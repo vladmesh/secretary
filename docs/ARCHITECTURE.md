@@ -25,6 +25,9 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   `automation.toml` specs through the product manifest (`[tool.secretary] agent-specs` in
   `pyproject.toml`), not by the package name. `tests/test_architecture.py` holds the one direction
   and asserts that nothing under `src/secretary` names the package at all.
+- The packaged systemd timers are the only schedule owner of the background agents. Secretary
+  manages no Orca automations: `upgrade` neither creates nor deletes them, and ones left on a live
+  host by older upgrades stay Orca's state until Orca itself is removed (A20).
 - Resource health has one writer and one vocabulary: `secretary.head_health` runs each registry
   resource's `probe` command, classifies it (`ready`, `unknown`, `probe_broken`, `unauthenticated`,
   `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
