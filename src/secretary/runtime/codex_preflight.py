@@ -185,26 +185,19 @@ def legacy_codex_home() -> str:
 
 
 def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
-    """`<data_dir>/codex-home` of the installation this process serves, or None with none selected.
+    """`<data_dir>/codex-home` of the installation this process serves, or None with none named.
 
-    A named data dir wins, then `SECRETARY_DATA_DIR`, then the `data_dir` of an explicitly
-    configured `SECRETARY_INSTANCE`. The default instance path is never read: a checkout on a host
-    with an installation must not pick up that installation's login.
+    A named data dir wins, then `SECRETARY_DATA_DIR`. This module reads no instance file: it imports
+    nothing else of `secretary`, so the processes that launch heads bind `SECRETARY_DATA_DIR` for
+    it from their installation (`secretary.runtime.codex_home.bound_data_dir`). A process that did
+    not has no data-dir rung and stays on the legacy home, which is still logged in.
     """
     if data_dir is not None:
         return Path(data_dir).expanduser() / CODEX_HOME_DATA_DIRNAME
     configured = os.environ.get("SECRETARY_DATA_DIR")
     if configured:
         return Path(configured).expanduser() / CODEX_HOME_DATA_DIRNAME
-    instance = os.environ.get("SECRETARY_INSTANCE")
-    if not instance:
-        return None
-    from secretary.config import DataDirError, instance_data_dir
-
-    try:
-        return instance_data_dir(Path(instance)) / CODEX_HOME_DATA_DIRNAME
-    except (DataDirError, OSError):
-        return None
+    return None
 
 
 def codex_home_logged_in(home: Path) -> bool:

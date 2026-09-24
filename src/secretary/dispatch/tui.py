@@ -19,7 +19,7 @@ from secretary.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )
-from secretary.runtime.codex_preflight import codex_home
+from secretary.runtime.codex_home import installation_codex_home
 from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.pane_host import PaneHost
 from secretary.runtime.tui_delivery import (
@@ -808,7 +808,7 @@ def _sessions_root() -> Path:
     root = os.environ.get("SECRETARY_CODEX_SESSIONS") or os.environ.get("TA_CODEX_SESSIONS")
     if root:
         return Path(root)
-    return Path(codex_home({})) / "sessions"
+    return Path(installation_codex_home().path) / "sessions"
 
 
 def _session_cwd(path: Path) -> str | None:

@@ -23,7 +23,7 @@ import json
 import os
 from pathlib import Path
 
-from secretary.runtime.codex_preflight import codex_home
+from secretary.runtime.codex_home import installation_codex_home
 
 
 def sessions_root() -> Path:
@@ -32,7 +32,7 @@ def sessions_root() -> Path:
     Resolved per call, so the switch to the data-dir home is seen the tick after the login.
     """
     configured = os.environ.get("TA_CODEX_SESSIONS")
-    return Path(configured) if configured else Path(codex_home({})) / "sessions"
+    return Path(configured) if configured else Path(installation_codex_home().path) / "sessions"
 
 
 # A TUI head alive right now wrote its rollout today, or yesterday across midnight.

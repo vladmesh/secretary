@@ -10,6 +10,8 @@ and the legacy home is only ever compared as a string.
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -17,6 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
+from secretary.dispatch import commands as dispatch_commands
+from secretary.runtime import codex_home as codex_home_module
 from secretary.runtime import codex_preflight, heads
 from secretary.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
@@ -97,11 +101,53 @@ class ResolverOrderTests(unittest.TestCase):
             encoding="utf-8",
         )
         os.environ["SECRETARY_INSTANCE"] = str(instance)
-        self.assertEqual(codex_home({}), str(self.data_home))
+        # The leaf resolver reads no instance file; the installation helper does, and so does a
+        # launching process once it has bound the data dir.
+        self.assertEqual(codex_home({}), CODEX_HOME_DEFAULT)
+        self.assertEqual(codex_home_module.selected_data_dir(), self.data_dir.resolve())
+        self.assertEqual(
+            codex_home_module.installation_codex_home().path, str(self.data_dir.resolve() / "codex-home")
+        )
+        with codex_home_module.bound_data_dir():
+            self.assertEqual(codex_home({}), str(self.data_dir.resolve() / "codex-home"))
+        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
 
     def test_no_selected_installation_keeps_the_legacy_home(self) -> None:
         self.log_in()
         self.assertEqual(codex_home({}), CODEX_HOME_DEFAULT)
+        self.assertIsNone(codex_home_module.selected_data_dir())
+        self.assertEqual(codex_home_module.installation_codex_home().path, CODEX_HOME_DEFAULT)
+
+    def test_a_bound_data_dir_is_scoped_and_never_replaces_the_operators(self) -> None:
+        self.log_in()
+        with codex_home_module.bound_data_dir(self.data_dir):
+            self.assertEqual(os.environ["SECRETARY_DATA_DIR"], str(self.data_dir))
+            self.assertEqual(codex_home({}), str(self.data_home))
+        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
+
+        os.environ["SECRETARY_DATA_DIR"] = "/tmp/operator-data"
+        with codex_home_module.bound_data_dir(self.data_dir):
+            self.assertEqual(os.environ["SECRETARY_DATA_DIR"], "/tmp/operator-data")
+        self.assertEqual(os.environ["SECRETARY_DATA_DIR"], "/tmp/operator-data")
+
+    def test_a_dispatcher_operation_launches_against_its_own_data_dir(self) -> None:
+        """The production entry binds the runtime's data dir around the operation that launches."""
+        self.log_in()
+        seen: list[str] = []
+
+        def operation(_runtime: object) -> dict[str, str]:
+            seen.append(codex_home({}))
+            return {"status": "ok"}
+
+        runtime = mock.Mock(data_dir=self.data_dir)
+        args = mock.Mock(instance="unused", data_dir=None, host_mode="noop", owner="secretary-production")
+        with (
+            mock.patch("secretary.dispatch.commands.runtime_from_args", return_value=runtime),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(dispatch_commands._run_production(args, operation), 0)
+        self.assertEqual(seen, [str(self.data_home)])
+        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
 
     def test_a_head_launched_after_the_login_renders_the_data_dir_home(self) -> None:
         os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)

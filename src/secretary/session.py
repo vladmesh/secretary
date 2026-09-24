@@ -18,6 +18,7 @@ from pathlib import Path
 
 from secretary.memory import access as memory_access
 from secretary.runtime import heads as head_registry
+from secretary.runtime.codex_home import bound_data_dir
 from secretary.runtime.head import (
     HeadCommandError,
     HeadRun,
@@ -117,6 +118,12 @@ def render_interactive(
 
 
 def run_shell(args: argparse.Namespace) -> int:
+    # A Codex shell renders its CODEX_HOME against the selected installation's data dir.
+    with bound_data_dir():
+        return _run_shell(args)
+
+
+def _run_shell(args: argparse.Namespace) -> int:
     try:
         profile_id = resolve_profile_id(args.head)
         command = render_interactive(profile_id, workspace=args.workspace)

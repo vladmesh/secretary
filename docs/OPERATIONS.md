@@ -180,6 +180,11 @@ Every Codex head launched by the dispatcher, and the `openai-sub` resource probe
 3. `DATA_DIR/codex-home`, once it holds a login (a non-empty `auth.json`);
 4. otherwise the legacy Orca home `~/.config/orca/codex-runtime-home/home`.
 
+Rung 3 needs to know the data dir. It comes from `SECRETARY_DATA_DIR`. The production dispatcher
+tick, the background agents and `secretary shell` set that variable for their own run from the
+selected instance, and the web unit sets it in its unit file. A process that has no data dir stays
+on rung 4.
+
 Rung 4 keeps live Codex heads logged in until the PO logs in to the new home. It goes away with Orca
 (A20). Install and upgrade (the `codex-home` step) copy `AGENTS.md` and `config.toml` into
 `DATA_DIR/codex-home` if they are missing. Install keeps doing the same for the legacy home,

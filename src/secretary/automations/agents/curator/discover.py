@@ -19,7 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
-from secretary.runtime.codex_preflight import codex_home
+from secretary.runtime.codex_home import installation_codex_home
 from secretary.runtime.paths import default_instance_path, instance_dir
 from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
 
@@ -392,7 +392,7 @@ def _codex_meta_from_file(path: Path) -> dict:
 def codex_sessions() -> list[dict]:
     """List Codex session JSONL files as {head, path, session_id, cwd}, self-excluded."""
     out = []
-    root = CODEX_SESSIONS if CODEX_SESSIONS is not None else Path(codex_home({})) / "sessions"
+    root = CODEX_SESSIONS if CODEX_SESSIONS is not None else Path(installation_codex_home().path) / "sessions"
     if not root.is_dir():
         return out
     resolver = RouteResolver()
