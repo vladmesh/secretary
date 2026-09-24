@@ -21,7 +21,6 @@ from unittest import mock
 from secretary._fsutil import file_lock
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.review import orca_worktree_panes
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
 from secretary.dispatch.types import HostError
@@ -592,10 +591,9 @@ class RecordingReviewHost(CommandHostRuntime):
     """CommandHostRuntime with git stubbed and its heads on a recording `SupervisedBackend`, so the
     bring-up, delivery and stop paths run for real above the backend.
 
-    `terminals` is the pane inventory `dispatch.review.command_terminal_status` still reads for a
-    host that has one (the read-only head-status host does, step 5 of A20). The dispatcher host itself
-    has none — `workspace_panes` is always empty there — so this fixture answers it from the Orca
-    inventory stub below only for the liveness tests that are about that reader.
+    `terminals` is what the Orca transport stub below answers to `orca terminal list`. Nothing in
+    `dispatch` asks it any more: `command_terminal_status` reads no pane inventory since
+    secretary-1723 (A20 steps 5 and 6).
     """
 
     def __init__(
@@ -653,9 +651,6 @@ class RecordingReviewHost(CommandHostRuntime):
             pid_file=pid_file,
             run_id=run_id,
         )
-
-    def workspace_panes(self, workspace: str) -> list[Any]:
-        return orca_worktree_panes(self._run_json, workspace)
 
     def _run_json(self, args: list[str]) -> dict:
         self.calls.append(args)

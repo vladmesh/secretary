@@ -1721,8 +1721,8 @@ and get no synthetic identity; they keep only the launch grace and pane-output f
 A head is alive only by its own observation: a live matching heartbeat whose process is running or
 suspended, or an advancing provider cursor bound to the same `HeadRun`. Only the heartbeat may say a
 head is gone. Anything else is `unproven`, including a role with a head identity but no durable
-`HeadRun`. Pane and terminal readings never enter the answer. `secretary head-status` shows the two
-halves apart; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
+`HeadRun`. Pane and terminal readings never enter the answer. `secretary head-status` shows the answer
+and which source proved it; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
 Stall ageing, rungs and the destructive guard are in [Head vitality](HEAD_VITALITY.md).
 
 ### Worker retention through validation and review

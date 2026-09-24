@@ -259,6 +259,54 @@ class AutomationsReachNoOrcaTests(unittest.TestCase):
         )
 
 
+# The dispatcher reads no pane (secretary-1723, A20 steps 5 and 6 for `dispatch/`): head-status,
+# vitality and the review liveness read the local-pty supervisor and the pid heartbeat alone, so no
+# module under `secretary.dispatch` imports the pane host. The rest of the tree is the next step.
+DISPATCH_SOURCE = "src/secretary/dispatch/"
+
+
+def _dispatch_pane_host_imports(relative: str, source: str) -> list[str]:
+    """Every import of, or dotted name for, the pane host in one module under `secretary.dispatch`."""
+    if not relative.startswith(DISPATCH_SOURCE):
+        return []
+    offenders = {
+        f"{relative}:{lineno}: imports {PANE_HOST_MODULE}"
+        for lineno, module in _imported_modules(relative, source)
+        if _names(module, PANE_HOST_MODULE)
+    }
+    offenders.update(
+        f"{relative}:{node.lineno}: names {node.value}"
+        for node in ast.walk(ast.parse(source, filename=relative))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and _names(node.value, PANE_HOST_MODULE)
+    )
+    return sorted(offenders)
+
+
+class DispatchReadsNoPaneTests(unittest.TestCase):
+    """secretary-1723: nothing under `secretary.dispatch` imports `secretary.runtime.pane_host`."""
+
+    def test_no_dispatch_module_imports_the_pane_host(self) -> None:
+        package = ROOT / "src" / "secretary" / "dispatch"
+        offenders: list[str] = []
+        for path in sorted(package.rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+            offenders.extend(_dispatch_pane_host_imports(relative, path.read_text(encoding="utf-8")))
+        self.assertEqual(offenders, [])
+
+    def test_each_import_of_the_pane_host_is_caught(self) -> None:
+        planted = "src/secretary/dispatch/planted.py"
+        for source in (
+            "from secretary.runtime.pane_host import PaneHost\n",
+            "import secretary.runtime.pane_host\n",
+            "from secretary.runtime import pane_host\n",
+            "from ..runtime import pane_host\n",
+            "def f():\n    from secretary.runtime.pane_host import WorkspaceInventory\n",
+            "import importlib\nimportlib.import_module('secretary.runtime.pane_host')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(_dispatch_pane_host_imports(planted, source), source)
+
+
 RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
 
 

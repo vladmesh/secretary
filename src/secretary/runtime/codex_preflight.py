@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -34,19 +35,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
     from .head.run import HeadRun
 
-# The legacy home, shared with Orca's own Codex sessions. Still the fallback until the data-dir home
-# holds a login; the fallback is removed in A20. `legacy_codex_home` reads the home at the call.
-CODEX_HOME_LEGACY_RELATIVE = Path(".config") / "orca" / "codex-runtime-home" / "home"
-CODEX_HOME_DEFAULT = str(Path.home() / CODEX_HOME_LEGACY_RELATIVE)
 # The installation-owned home, `<data_dir>/codex-home`.
 CODEX_HOME_DATA_DIRNAME = "codex-home"
-# Codex's login. Its presence in the data-dir home is what moves heads there; it is never copied.
+# Codex's login. Without it in the data-dir home no Codex head of this installation can start.
 CODEX_AUTH_FILE = "auth.json"
 # Which rung of `resolve_codex_home` answered.
 CODEX_HOME_PROFILE = "profile"
 CODEX_HOME_ENV = "env"
 CODEX_HOME_DATA_DIR = "data-dir"
-CODEX_HOME_LEGACY = "legacy"
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
 # The file codex keeps its update check in, inside the same CODEX_HOME: a `VersionInfo` of
@@ -104,6 +100,23 @@ class CodexPreflightError(RuntimeError):
     """
 
 
+class CodexHomeLoginMissing(CodexPreflightError):
+    """No CODEX_HOME a head may run with: no profile `codex_home`, no `TA_CODEX_HOME`, no data-dir login.
+
+    The message names the fix. `home` is the data-dir home the login belongs in, or None when this
+    process names no data dir at all.
+    """
+
+    def __init__(self, home: Path | None) -> None:
+        self.home = home
+        target = "<data_dir>/codex-home" if home is None else shlex.quote(str(home))
+        unnamed = "" if home is not None else " (this process names no data dir: SECRETARY_DATA_DIR)"
+        super().__init__(
+            f"no Codex login for this installation{unnamed}: log in under {target} "
+            f"(`CODEX_HOME={target} codex login`), or copy an {CODEX_AUTH_FILE} there"
+        )
+
+
 class CodexFanoutPolicyError(CodexPreflightError):
     """The exact Codex run has no independently acceptable no-fan-out attestation."""
 
@@ -144,21 +157,17 @@ class CodexHome:
     path: str
     kind: str
 
-    @property
-    def migration_pending(self) -> bool:
-        """The installation still runs on the legacy home because the data-dir one has no login."""
-        return self.kind == CODEX_HOME_LEGACY
-
 
 def resolve_codex_home(
     profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None
 ) -> CodexHome:
     """Which CODEX_HOME a head with this profile runs with, resolved now rather than at import.
 
-    In order: the profile's `codex_home`, `TA_CODEX_HOME`, `<data_dir>/codex-home` once it holds a
-    login, and otherwise the legacy Orca home. The data-dir home is taken only with a non-empty
-    `auth.json` in it, so the switch happens when the PO logs in there and never earlier: a default
-    that moved on its own would log every Codex head out. The legacy rung is removed in A20.
+    In order: the profile's `codex_home`, `TA_CODEX_HOME`, and `<data_dir>/codex-home` when it holds
+    a login (a non-empty `auth.json`). With none of them it fails closed with
+    `CodexHomeLoginMissing`, whose message names the fix: there is no other home to fall back to.
+    The legacy Orca home (`~/.config/orca/...`) was the last rung until A20 step 7 removed it
+    (secretary-1723), once every live Codex head was proven to run on the data-dir login.
     """
     configured = profile.get("codex_home")
     if configured:
@@ -169,7 +178,7 @@ def resolve_codex_home(
     data_home = data_dir_codex_home(data_dir)
     if data_home is not None and codex_home_logged_in(data_home):
         return CodexHome(str(data_home), CODEX_HOME_DATA_DIR)
-    return CodexHome(legacy_codex_home(), CODEX_HOME_LEGACY)
+    raise CodexHomeLoginMissing(data_home)
 
 
 def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None) -> str:
@@ -179,18 +188,14 @@ def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] |
     return resolve_codex_home(profile, data_dir=data_dir).path
 
 
-def legacy_codex_home() -> str:
-    """The legacy Orca-managed home of the account this process runs as."""
-    return str(Path.home() / CODEX_HOME_LEGACY_RELATIVE)
-
-
 def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
     """`<data_dir>/codex-home` of the installation this process serves, or None with none named.
 
     A named data dir wins, then `SECRETARY_DATA_DIR`. This module reads no instance file: it imports
     nothing else of `secretary`, so the processes that launch heads bind `SECRETARY_DATA_DIR` for
     it from their installation (`secretary.runtime.codex_home.bound_data_dir`). A process that did
-    not has no data-dir rung and stays on the legacy home, which is still logged in.
+    not has no data-dir rung, and `resolve_codex_home` refuses it unless a profile or
+    `TA_CODEX_HOME` names a home.
     """
     if data_dir is not None:
         return Path(data_dir).expanduser() / CODEX_HOME_DATA_DIRNAME

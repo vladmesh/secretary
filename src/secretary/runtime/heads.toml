@@ -31,7 +31,7 @@ probe = "python3 -P -m secretary.runtime.resource_probe --resource claude-sub"
 [resources.openai-sub]
 # An OpenAI/ChatGPT subscription reached through the native `codex` CLI, mirroring claude-sub.
 # Authed once with `codex login` into the active CODEX_HOME (codex_preflight.resolve_codex_home:
-# `<data_dir>/codex-home` once it holds a login, else the legacy Orca home), which also holds MCP,
+# `<data_dir>/codex-home`; with no login there no Codex head starts), which also holds MCP,
 # skills, hooks and the global agent instructions. Probe: one real `codex exec` token
 # through that home (resource_probe.probe_openai_sub).
 account = "openai-subscription"

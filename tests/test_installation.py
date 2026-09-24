@@ -1636,15 +1636,14 @@ class InstallationTests(unittest.TestCase):
             source.mkdir(parents=True)
             (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
             (source / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
-            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
-            with (
-                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.installation._set_installation_owner"),
-            ):
-                self.assertEqual(provision_codex_home(product, "dev"), 2)
-                target = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
-                (target / "config.toml").write_text("operator state\n", encoding="utf-8")
+            data_dir = root / "data"
+            target = data_dir / "codex-home"
+            with mock.patch("secretary.installation._set_installation_owner"):
+                # With no data dir there is no managed home to seed (secretary-1723).
                 self.assertEqual(provision_codex_home(product, "dev"), 0)
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
+                (target / "config.toml").write_text("operator state\n", encoding="utf-8")
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 0)
             self.assertEqual((target / "config.toml").read_text(encoding="utf-8"), "operator state\n")
 
     def test_codex_home_upgrade_repairs_only_the_managed_memory_bearer_setting(self):
@@ -1659,18 +1658,15 @@ class InstallationTests(unittest.TestCase):
                 'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n',
                 encoding="utf-8",
             )
-            target = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+            data_dir = root / "data"
+            target = data_dir / "codex-home"
             target.mkdir(parents=True)
             (target / "config.toml").write_text(
                 'model = "operator-choice"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n',
                 encoding="utf-8",
             )
-            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
-            with (
-                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.installation._set_installation_owner"),
-            ):
-                self.assertEqual(provision_codex_home(product, "dev"), 2)
+            with mock.patch("secretary.installation._set_installation_owner"):
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
 
             rendered = (target / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model = "operator-choice"', rendered)
@@ -1700,10 +1696,10 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
                 mock.patch("secretary.installation._set_installation_owner"),
             ):
-                # Both homes are seeded while the legacy one is still the active one.
-                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 4)
+                # Only the data-dir home is seeded: the legacy one is not managed (secretary-1723).
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
                 self.assertEqual(sorted(path.name for path in data_home.iterdir()), ["AGENTS.md", "config.toml"])
-                self.assertEqual(sorted(path.name for path in legacy.iterdir()), ["AGENTS.md", "config.toml"])
+                self.assertFalse(legacy.exists())
                 self.assertEqual(stat.S_IMODE(data_home.stat().st_mode), 0o700)
                 (data_home / "config.toml").write_text("operator state\n", encoding="utf-8")
                 self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 0)
@@ -1711,7 +1707,7 @@ class InstallationTests(unittest.TestCase):
             self.assertFalse((data_home / "auth.json").exists())
             self.assertFalse((legacy / "auth.json").exists())
 
-    def test_codex_home_reconciles_the_legacy_home_only_while_it_is_active(self):
+    def test_codex_home_never_touches_the_legacy_home(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             product = self._codex_product(root)
@@ -1727,16 +1723,13 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
                 mock.patch("secretary.installation._set_installation_owner"),
             ):
-                # Legacy active: its managed Memory entry is still reconciled, next to the new seed.
-                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 3)
-                self.assertIn(
-                    'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"',
-                    (legacy / "config.toml").read_text(encoding="utf-8"),
-                )
-                # After the PO's login the data-dir home is the active one and the legacy is left alone.
+                # No login anywhere: the data-dir home is seeded and the legacy one is left as found
+                # (A20 step 7, secretary-1723). It used to be reconciled while it was the active one.
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
+                self.assertEqual((legacy / "config.toml").read_text(encoding="utf-8"), unreconciled)
+                # And after the PO's login, the same.
                 login = '{"tokens": "fixture"}\n'
                 (data_home / "auth.json").write_text(login, encoding="utf-8")
-                (legacy / "config.toml").write_text(unreconciled, encoding="utf-8")
                 (legacy / "AGENTS.md").unlink()
                 self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 0)
             self.assertEqual((legacy / "config.toml").read_text(encoding="utf-8"), unreconciled)

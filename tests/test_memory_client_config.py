@@ -87,13 +87,14 @@ class MemoryClientConfigTests(unittest.TestCase):
         self.assertTrue(reconcile_claude(path, self.command, self.data_dir))
         self.assertNotIn("memory", json.loads(path.read_text(encoding="utf-8"))["mcpServers"])
 
-    def test_reconcile_clients_materializes_both_codex_homes_and_claude(self) -> None:
+    def test_reconcile_clients_materializes_the_user_codex_config_and_claude(self) -> None:
         runtime_home = self.root / "home"
         result = reconcile_clients(self.root / "product", runtime_home, self.data_dir)
 
-        self.assertEqual(result.changed, 3)
+        self.assertEqual(result.changed, 2)
         self.assertTrue((runtime_home / ".codex" / "config.toml").is_file())
-        self.assertTrue((runtime_home / ".config/orca/codex-runtime-home/home/config.toml").is_file())
+        # The legacy Orca home is no longer a managed CODEX_HOME (A20 step 7, secretary-1723).
+        self.assertFalse((runtime_home / ".config").exists())
         self.assertTrue((runtime_home / ".claude.json").is_file())
         self.assertEqual(
             reconcile_clients(self.root / "product", runtime_home, self.data_dir).changed,
@@ -133,7 +134,7 @@ class MemoryClientConfigTests(unittest.TestCase):
         runtime_home = self.root / "preview-home"
         self.assertEqual(
             reconcile_clients(self.root / "product", runtime_home, self.data_dir, dry_run=True).changed,
-            3,
+            2,
         )
         self.assertFalse(runtime_home.exists())
 

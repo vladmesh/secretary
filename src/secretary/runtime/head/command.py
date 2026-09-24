@@ -30,7 +30,7 @@ from typing import Any, cast
 from secretary.runtime import role_env
 from secretary.runtime.launch_prefix import pythonpath_prefix
 
-from ..codex_preflight import codex_home, codex_trust_paths
+from ..codex_preflight import CodexHomeLoginMissing, codex_home, codex_trust_paths
 
 # Valid backend names; this renderer validates the profile's choice.
 from ..head_runtimes import DEFAULT_HEAD_RUNTIME, HEAD_RUNTIMES
@@ -380,7 +380,12 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
     for path in codex_trust_paths(workspace):
         # TUI trust comes from preflight's config.toml, not these command overrides.
         args += ["-c", f'projects.{json.dumps(path)}.trust_level="trusted"']
-    return f"CODEX_HOME={shlex.quote(codex_home(profile))} {shlex.join(args)}"
+    try:
+        home = codex_home(profile)
+    except CodexHomeLoginMissing as exc:
+        # No home to launch in (A20 step 7): refused in the renderer's own failure type, with the fix.
+        raise HeadCommandError(str(exc)) from None
+    return f"CODEX_HOME={shlex.quote(home)} {shlex.join(args)}"
 
 
 _ADAPTERS = {

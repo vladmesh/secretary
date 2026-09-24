@@ -152,7 +152,7 @@ upgrade retries.
 ### Memory access from Claude and Codex
 
 Install and upgrade reconcile an installation-owned `po_memory` stdio MCP entry in the installation
-user's `~/.claude.json`, `~/.codex/config.toml` and Orca's managed Codex home, preserving login state
+user's `~/.claude.json`, `~/.codex/config.toml` and `DATA_DIR/codex-home`, preserving login state
 and unrelated entries. The command is `PRODUCT_ROOT/.venv/bin/secretary-memory-po-bridge`; its
 environment names only the grant directory and loopback Memory URL, and no bearer is stored.
 
@@ -167,7 +167,6 @@ Inspect without exposing credentials:
 secretary upgrade --dry-run --no-pull --instance INSTANCE
 rg -n 'po_memory|secretary-memory-po-bridge' \
   ~/.claude.json ~/.codex/config.toml \
-  ~/.config/orca/codex-runtime-home/home/config.toml \
   DATA_DIR/codex-home/config.toml
 ```
 
@@ -178,52 +177,56 @@ Every Codex head launched by the dispatcher, and the `openai-sub` resource probe
 
 1. the profile's `codex_home`;
 2. `TA_CODEX_HOME`;
-3. `DATA_DIR/codex-home`, once it holds a login (a non-empty `auth.json`);
-4. otherwise the legacy Orca home `~/.config/orca/codex-runtime-home/home`.
+3. `DATA_DIR/codex-home`, when it holds a login (a non-empty `auth.json`).
+
+With none of them the launch fails closed: no Codex head starts, and the refusal names the fix, "log
+in under `DATA_DIR/codex-home` (`CODEX_HOME=DATA_DIR/codex-home codex login`), or copy an `auth.json`
+there". There is no fallback to the legacy Orca home (`~/.config/orca/...`); A20 step 7 removed it
+(secretary-1723) once every live Codex head was proven to run on the data-dir login.
 
 Rung 3 needs to know the data dir. It comes from `SECRETARY_DATA_DIR`. The production dispatcher
 tick, the background agents and `secretary shell` set that variable for their own run from the
-selected instance, and the web unit sets it in its unit file. A process that has no data dir stays
-on rung 4.
+selected instance, and the web unit sets it in its unit file. A process with no data dir, no profile
+`codex_home` and no `TA_CODEX_HOME` is refused.
 
-Rung 4 keeps live Codex heads logged in until the PO logs in to the new home. It goes away with Orca
-(A20). Install and upgrade (the `codex-home` step) copy `AGENTS.md` and `config.toml` into
-`DATA_DIR/codex-home` if they are missing. Install keeps doing the same for the legacy home,
-including the managed Memory entry, while it is still the active one. Upgrade leaves the legacy home
-alone, as it always has. Neither copies or writes `auth.json`.
+Install and upgrade (the `codex-home` step) copy `AGENTS.md` and `config.toml` into
+`DATA_DIR/codex-home` if they are missing. It is the only CODEX_HOME the installation manages: the
+legacy Orca home is neither seeded nor reconciled, and is not moved or deleted either (that is a PO
+action, if ever). Neither step copies or writes `auth.json`.
 
-Every managed home must hold the full `[mcp_servers.po_memory]` bridge entry (`command`, `args`,
+The managed home must hold the full `[mcp_servers.po_memory]` bridge entry (`command`, `args`,
 `env`). Each head is launched with `-c mcp_servers.po_memory.enabled=false`, and on a home without
 the entry that override creates a table with no `command` or `url`: Codex then refuses every command
 with `invalid transport in mcp_servers.po_memory`. The packaged `config.toml` therefore carries no
 such table. Seeding writes the entry into each `config.toml` it creates, in the same step. The
-upgrade's `memory-clients` step reconciles it in the legacy home and in `DATA_DIR/codex-home`
-whenever that directory exists, since a login alone is enough for heads to select it: a file the
-home lacks is seeded first through the same copy-once path, so the packaged defaults are never
-skipped, whichever of the `memory-clients` and `codex-home` steps reaches the home first.
+upgrade's `memory-clients` step reconciles it in `DATA_DIR/codex-home` whenever that directory
+exists, since a login alone is enough for heads to select it: a file the home lacks is seeded first
+through the same copy-once path, so the packaged defaults are never skipped, whichever of the
+`memory-clients` and `codex-home` steps reaches the home first.
 
-Migration runbook, run once as the installation user after an upgrade that includes the `codex-home`
-step:
+Check the login as the installation user:
 
 ```bash
 secretary doctor --offline --instance INSTANCE | grep 'codex home'
-#   codex home: ~/.config/orca/codex-runtime-home/home (legacy fallback)
-#   warning: codex home migration pending: DATA_DIR/codex-home holds no login; ...
+#   error: codex home: no Codex login for this installation: log in under DATA_DIR/codex-home ...
 CODEX_HOME=DATA_DIR/codex-home codex login
 secretary doctor --offline --instance INSTANCE | grep 'codex home'
 #   codex home: DATA_DIR/codex-home (data-dir home)
 ```
 
 `doctor --json` returns the same answer in `codex_home` (`path`, `kind`, `data_dir_home`,
-`migration_pending`). A pending migration is only a warning and does not change doctor's exit status.
-Nothing else needs to change. Heads launched after the login use the new home, and heads already
-running keep the home they started with. Every session reader scans the `sessions/` of the current home,
-of the legacy home and of the data-dir home, whichever of them exist. So a head that started on the
-legacy home is still found after the login. This covers the watchdog's activity signal, the delivery
-confirmation for service heads, the dispatcher's continuation recovery proof and the curator. Each
-reader counts a session only once. An explicit sessions override (`TA_CODEX_SESSIONS`,
-`SECRETARY_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root while it is set. The
-legacy home is not moved or deleted, and nothing is copied out of it.
+`login_missing`, `codex_required`). A missing login is a red finding (`codex_home_login_missing`,
+with the fix text) whenever an installed head profile runs on the `codex` adapter; an installation
+with no Codex profile only prints it.
+
+Every session reader scans the `sessions/` of the current home and of the data-dir home, whichever
+exist, and, read-only, the legacy Orca home's `sessions/`: on 2026-09-24 the curator had not yet
+ingested 468 of the 3217 rollouts there (`runtime/codex_home.py`, `_LEGACY_SESSIONS`, which goes once
+the curator's watermark names every one). No head is launched there. This covers the watchdog's
+activity signal, the delivery confirmation for service heads, the dispatcher's continuation recovery
+proof and the curator. Each reader counts a session only once. An explicit sessions override
+(`TA_CODEX_SESSIONS`, `SECRETARY_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root
+while it is set.
 
 ### The PO workspace
 
@@ -2471,8 +2474,6 @@ for an answer, 3 for degraded (no workspace path, or a host in `noop` mode). No 
   `run_id`. `alive`: heartbeat process running or suspended, or an advancing provider cursor bound to the
   run. `absent`: from the heartbeat alone. Anything else is `unproven`, with `unavailable_sources` and
   per-source `evidence`.
-- `runtime_pane` — `visible`, `no-runtime-pane` (a connected pty no runtime pane draws), `no-pane`,
-  `unknown` or `unavailable`, from the renderer's drawn-pane tree.
 - `episode` — the persisted vitality conclusion: `quiet_seconds`, `dark_progress_sources`,
   `missing_progress_sources`, `last_progress`, and `next_recovery_deadline` (or `null` with
   `deadline_note`). Ladder semantics: [Head vitality](HEAD_VITALITY.md).
@@ -2483,9 +2484,9 @@ and `heartbeat` from its launch identity (state, pid), `supervisor` from the sup
 `turn_open`, `turn`, `draining`, `stopping`), `lease` from the kernel's lock table (`held` with
 `holder_pid`, or `free`), and `journal.tail`, the last eight journal records; a journal with skipped,
 torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
-`unavailable_sources`, never read as a gone head. Rows read through Orca panes say
-`runtime: orca-legacy`; when every recorded head is supervised, or the workspace is git-managed, Orca is not
-called and `pane_channel` is `not_consulted` with its reason.
+`unavailable_sources`, never read as a gone head. A legacy record (a run on `orca-legacy`, or a head
+identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through its
+pid heartbeat alone; no pane inventory is read for any row, and Orca is never called (secretary-1723).
 
 Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:

@@ -39,15 +39,12 @@ from secretary.dispatch.tui import (
     DELIVERY_RECEIPT_REFUSED,
     READINESS_BLOCKED,
     READINESS_BUSY,
-    READINESS_READY,
     delivery_readiness_state,
-    terminal_readiness,
 )
 from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     HeadLaunchAborted,
     HostError,
-    review_pane_label,
 )
 from secretary.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
@@ -80,11 +77,6 @@ from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.head_runtime_backends import head_runtime_name
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.runtime.pane_host import (
-    OrcaSessionHost,
-    PaneHostError,
-    WorkspaceInventory,
-)
 
 
 def candidate_sha(record: DispatcherRecord) -> str:
@@ -227,159 +219,21 @@ def review_infrastructure_failure(
     }
 
 
-def worktree_panes(host: Any, workspace: str) -> list[Any]:
-    """One worktree's pane inventory, for a caller whose decision depends on reading it.
-
-    The dispatcher host keeps its own inventory seam (`workspace_panes`, empty: its heads own no
-    pane); a read-only observer holding nothing but the JSON transport gets the public Orca adapter.
-    Both reach a refusal the same way, as a `HostError`, because an inventory that could not be read
-    is not an empty worktree and neither caller may turn that difference into a missing pane.
-    """
-    inventory = getattr(host, "workspace_panes", None)
-    if callable(inventory):
-        return list(inventory(workspace))
-    return orca_worktree_panes(host._run_json, workspace)
-
-
-def orca_worktree_panes(run_json: Any, workspace: str) -> list[Any]:
-    """Ask the installed session manager itself, for a caller with no inventory seam of its own."""
-    try:
-        return list(OrcaSessionHost(run_json).panes(workspace))
-    except PaneHostError as exc:
-        raise HostError(str(exc)) from None
-
-
-def orca_workspace_inventory(run_json: Any, workspace: str) -> WorkspaceInventory:
-    """The panes of a worktree together with what the session manager's renderer draws there.
-
-    The same refusal contract as `orca_worktree_panes`: an inventory that could not be read is a
-    `HostError` and never an empty worktree. What the renderer could not answer is carried inside
-    the inventory instead, because a readable pane list beside an unreadable layout is a real state
-    and the caller has to be able to say so.
-    """
-    try:
-        return OrcaSessionHost(run_json).workspace_inventory(workspace)
-    except PaneHostError as exc:
-        raise HostError(str(exc)) from None
-
-
-def pane_matcher(record: DispatcherRecord, *, kind: str, task_ref: str):
-    """The predicate that re-finds one role's pane in a worktree inventory.
-
-    Identity first and the label last: `terminal list` can hand back a different handle alias for
-    the same pty, so the persisted leaf is the strongest token, the handle the next one, and the
-    reviewer's label only the fallback for a pane whose identity was never persisted. Shared with
-    every read-only observer so the pane a status command reports on is exactly the pane the
-    watchdog would have found.
-    """
-    if kind == "review":
-        if record.review_leaf:
-            return lambda pane: pane.leaf == record.review_leaf
-        if record.review_handle:
-            return lambda pane: pane.handle == record.review_handle
-        label = review_pane_label(task_ref)
-        return lambda pane: pane.title == label
-    if record.worker_leaf:
-        return lambda pane: pane.leaf == record.worker_leaf
-    return lambda pane: bool(record.handle and pane.handle == record.handle)
-
-
 def command_terminal_status(
     host: Any, task: dict[str, Any], record: DispatcherRecord, *, kind: str
 ) -> dict[str, Any]:
-    """Return the tracked pane's liveness and its last output time.
+    """Return one role's liveness, read from its pid heartbeat and its exact-run provider cursor.
 
-    A failed inventory raises instead of looking like a missing pane, so the wait watchdog can report
-    a degraded runtime without restarting a head on a transport failure. The public Orca session
-    adapter owns the inventory call, so this read path only requires the host's JSON transport; it
-    does not make a read-only status adapter pretend to be a dispatcher runtime.
+    No pane is read: every head the dispatcher raises is supervised and owns none, and a legacy
+    Orca record (`head_runtime_backends.is_legacy_record`) is read through the same pid heartbeat
+    and never through a pane inventory (A20 step 6, secretary-1723). The reason words are the ones
+    the wait watchdog and the vitality reduction already read: `pid` for a proved process,
+    `missing-terminal` for one the heartbeat does not prove, whatever the runtime.
     """
     if host.mode == "noop":
         return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
-    terminals = worktree_panes(host, record.workspace)
-    matches = pane_matcher(record, kind=kind, task_ref=str(task["ref"]))
-    for terminal in terminals:
-        if not matches(terminal):
-            continue
-        run = record.review_head_run if kind == "review" else record.worker_head_run
-        leaf = record.review_leaf if kind == "review" else record.worker_leaf
-        pid_status = _head_run_process_status(
-            _pid_file_path(kind, task["ref"]),
-            run=run,
-            role=kind,
-            task=f"card:{task['ref']}",
-            leaf=leaf,
-        )
-        # Fence a live foreign heartbeat before treating a disconnected pane as terminal.
-        if _heartbeat_is_mismatch(pid_status):
-            return {
-                "known": True,
-                "live": True,
-                "reason": "heartbeat-identity-mismatch",
-                "identity_mismatch": True,
-                "pid_confirmed": False,
-            }
-        if not terminal.connected:
-            # Pass classification to vitality reduction with the dropped-pane observation.
-            return {
-                "known": True,
-                "live": False,
-                "reason": "disconnected",
-                "pid_status": dict(pid_status),
-            }
-        if _heartbeat_is_dead(pid_status):
-            # The pane is connected and Orca kept its wrapping shell open, but the head process
-            # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
-            return {
-                "known": True,
-                "live": False,
-                "reason": "process-exited",
-                "pid_status": dict(pid_status),
-            }
-        activity = terminal.last_output_at or None
-        # Only observed provider cursors refresh liveness; tui-idle is independent.
-        provider_progress = _provider_progress_for_status(host, task, record, kind)
-        if (
-            str(provider_progress.get("state") or "") == "observed"
-            and str(provider_progress.get("admission") or "") == "accepted"
-        ):
-            try:
-                observed_at = float(provider_progress.get("observed_at") or 0.0)
-            except (TypeError, ValueError):
-                observed_at = 0.0
-            if observed_at:
-                activity = max(activity or 0.0, observed_at)
-        pid_confirmed = _heartbeat_is_live_match(pid_status)
-        status = {
-            "known": True,
-            "live": True,
-            "reason": "live",
-            "last_activity": activity,
-            # A pid-heartbeat that proves this exact process still runs; only this — not a
-            # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
-            "pid_confirmed": pid_confirmed,
-            # The raw classification, passed through so the shadow vitality reduction can build
-            # its own snapshot without a second /proc probe. No existing consumer reads it.
-            "pid_status": dict(pid_status),
-            "provider_progress": dict(provider_progress),
-        }
-        child_activity = _head_child_activity(host, pid_status)
-        if child_activity is not None:
-            status["child_activity"] = child_activity
-        if pid_confirmed:
-            # Whether the head is working or waiting at its prompt. Only asked of a process the
-            # heartbeat proves is running, because that is the one case where no timing ceiling
-            # applies and silence has to be told apart from a finished turn (secretary-1063). The
-            # key is absent when the question could not be answered, which is not the same as a
-            # busy head: the caller falls back to its timing ceilings for that.
-            work = _pane_work_state(host, terminal.handle)
-            if work:
-                status["idle"] = work != "working"
-                status["idle_reason"] = work
-        return status
-    # Missing inventory does not beat an exact live heartbeat; never respawn beside it.
     run = record.review_head_run if kind == "review" else record.worker_head_run
     leaf = record.review_leaf if kind == "review" else record.worker_leaf
     pid_status = _head_run_process_status(
@@ -398,9 +252,9 @@ def command_terminal_status(
             "pid_confirmed": False,
         }
     if _heartbeat_is_live_match(pid_status):
-        # The classification rides along (a suspended head behind a lost pane must be
-        # seen as Suspended, never aged as Unverifiable), and the pid answers the
-        # process axis alone: no pane flag exists on this shape.
+        # The classification rides along (a suspended head must be seen as Suspended, never aged
+        # as Unverifiable), and the pid answers the process axis alone: no pane flag exists on
+        # this shape.
         status = {
             "known": True,
             "live": True,
@@ -409,21 +263,20 @@ def command_terminal_status(
             "pid_status": dict(pid_status),
         }
         if _supervised(run):
-            # A local-pty head has no pane to lose: this is its normal shape, not a lost pane's.
-            # Its provider cursor is an exact-run file read that never needed the pane, and
-            # without it the episode had no channel that sees the head work: it aged on the pid
-            # alone and was held healthy only by child processes, inside their ceiling
-            # (secretary-1703's working worker read `suspected_stall`, then `confirmed_stall`,
-            # secretary-1719). An Orca head that lost its pane keeps the provider-less shape, whose
-            # darkness the episode records (secretary-1543).
+            # A local-pty head's provider cursor is an exact-run file read, and without it the
+            # episode had no channel that sees the head work: it aged on the pid alone and was
+            # held healthy only by child processes, inside their ceiling (secretary-1703's working
+            # worker read `suspected_stall`, then `confirmed_stall`, secretary-1719). A legacy
+            # record keeps the provider-less shape, whose darkness the episode records
+            # (secretary-1543).
             status["provider_progress"] = _provider_progress_for_status(host, task, record, kind)
         child_activity = _head_child_activity(host, pid_status)
         if child_activity is not None:
             status["child_activity"] = child_activity
         return status
     if _heartbeat_is_dead(pid_status):
-        # The pane vanished AND the heartbeat names a gone process: the reclaim is
-        # evidence-backed, so the classification rides along and the reduction sees Dead.
+        # The heartbeat names a gone process: the reclaim is evidence-backed, so the
+        # classification rides along and the reduction sees Dead.
         return {
             "known": True,
             "live": False,
@@ -433,8 +286,7 @@ def command_terminal_status(
     if not pid_status.get("known"):
         # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh
         # launch and the new head writes it "the moment it starts", so a respawn opens a window in
-        # which neither identity answers — the handle/leaf just written may alias to nothing in the
-        # inventory (the case above) and the heartbeat has not been written yet either. The observer
+        # which the heartbeat has not been written yet. The observer
         # path already grants a launch grace window for exactly this reading (`observer_alive`); the
         # worker/reviewer path did not, so a watchdog tick landing in that window read a live,
         # just-(re)launched head as missing-terminal and, being the second such tick, escalated
@@ -442,7 +294,7 @@ def command_terminal_status(
         started_at = record.review_started_at if kind == "review" else record.worker_started_at
         if started_at and time.time() - started_at <= _initial_output_stall_seconds():
             return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
-    # A lost pane plus live heartbeat is observation failure, not death.
+    # An unproven heartbeat is observation failure, not death.
     return {
         "known": True,
         "live": bool(pid_status.get("alive")) if pid_status.get("known") else False,
@@ -545,25 +397,6 @@ def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, An
             "reason": "provider-progress source admission is incomplete",
         }
     return result
-
-
-def _pane_work_state(host: Any, handle: str) -> str:
-    """Is this pane working on a turn, waiting for input, or held in a dialog? "" if unknowable.
-
-    Orca's `tui-idle`, from the pane's own agent status falling back to a quiescence window, so it
-    reads no screen and answers for every adapter. A pane held in a dialog counts as stopped rather
-    than busy. The empty answer matters as much as the other three: a refused probe, a stale binding
-    or a handle Orca no longer knows is neither working nor stopped, and the caller falls back to the
-    timing ceilings.
-    """
-    if not handle:
-        return ""
-    readiness = terminal_readiness(handle, run_json=host._run_json)
-    if readiness == READINESS_READY:
-        return "idle"
-    if readiness == READINESS_BLOCKED:
-        return "dialog"
-    return "working" if readiness == READINESS_BUSY else ""
 
 
 def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:

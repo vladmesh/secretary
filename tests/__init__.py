@@ -23,8 +23,10 @@ same shape. Since secretary-1173 every Codex head is an interactive TUI, so
 every Codex bring-up answers the directory-trust dialog *before* the pane
 exists, by appending a ``[projects."<workspace>"]`` table to ``config.toml``
 inside the ``CODEX_HOME`` that head will run with. On a developer box that
-home defaults to ``~/.config/orca/codex-runtime-home/home`` -- installation
-state shared by every Codex head on the host -- so any test that reaches a
+home is the installation's ``<data_dir>/codex-home`` wherever
+``SECRETARY_DATA_DIR`` names one (the legacy ``~/.config/orca/...`` home before
+secretary-1723) -- installation state shared by every Codex head on the
+host -- so any test that reaches a
 worker/reviewer/service bring-up without saying otherwise would record a
 permanent ``trusted`` grant for its own throwaway workspace there, and
 nothing prunes it. ``TA_CODEX_HOME`` is the single seam every one of those

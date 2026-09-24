@@ -85,8 +85,8 @@ from secretary.role_skills import add_role_skills_subcommands
 from secretary.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
     CODEX_HOME_ENV,
-    CODEX_HOME_LEGACY,
     CODEX_HOME_PROFILE,
+    CodexHomeLoginMissing,
     data_dir_codex_home,
     resolve_codex_home,
 )
@@ -569,33 +569,60 @@ _CODEX_HOME_KINDS = {
     CODEX_HOME_PROFILE: "profile codex_home",
     CODEX_HOME_ENV: "TA_CODEX_HOME override",
     CODEX_HOME_DATA_DIR: "data-dir home",
-    CODEX_HOME_LEGACY: "legacy fallback",
 }
 
 
 def _codex_home_status(report) -> dict[str, object]:
-    """The CODEX_HOME a Codex head of this installation launches with now, and which rung chose it."""
+    """The CODEX_HOME a Codex head of this installation launches with now, and which rung chose it.
+
+    With none (`CodexHomeLoginMissing`) `path` is None and `login_missing` carries the resolver's
+    own message, which names the fix. `codex_required` says whether any installed profile runs
+    Codex: only then is a missing login a finding (`collect_doctor_inspection`).
+    """
     assert report.data_dir is not None
-    home = resolve_codex_home({}, data_dir=report.data_dir)
+    data_dir_home = str(data_dir_codex_home(report.data_dir))
+    required = _codex_required(report.instance_path.parent)
+    try:
+        home = resolve_codex_home({}, data_dir=report.data_dir)
+    except CodexHomeLoginMissing as exc:
+        return {
+            "path": None,
+            "kind": "",
+            "data_dir_home": data_dir_home,
+            "login_missing": str(exc),
+            "codex_required": required,
+        }
     return {
         "path": home.path,
         "kind": home.kind,
-        "data_dir_home": str(data_dir_codex_home(report.data_dir)),
-        "migration_pending": home.migration_pending,
+        "data_dir_home": data_dir_home,
+        "login_missing": "",
+        "codex_required": required,
     }
 
 
+def _codex_required(instance_dir: Path) -> bool:
+    """Whether an installed head profile runs on the `codex` adapter; a registry that cannot be read
+    cannot rule one out, so it counts as yes."""
+    try:
+        profiles = installed_heads(instance_dir).get("profiles", {})
+    except HeadRegistryConfigError:
+        return True
+    if not isinstance(profiles, dict):
+        return True
+    return any(
+        isinstance(profile, dict) and profile.get("adapter") == "codex" for profile in profiles.values()
+    )
+
+
 def _codex_home_lines(status: dict[str, object]) -> list[str]:
-    """Doctor's lines for the active CODEX_HOME; a pending migration warns and never fails."""
+    """Doctor's lines for the active CODEX_HOME; a missing login an installed profile needs is an error."""
+    if status["login_missing"]:
+        if status["codex_required"]:
+            return [f"error: codex home: {status['login_missing']} (docs/OPERATIONS.md)"]
+        return [f"codex home: none, and no installed profile runs Codex ({status['login_missing']})"]
     kind = str(status["kind"])
-    lines = [f"codex home: {status['path']} ({_CODEX_HOME_KINDS.get(kind, kind)})"]
-    if status["migration_pending"]:
-        target = status["data_dir_home"]
-        lines.append(
-            f"warning: codex home migration pending: {target} holds no login; "
-            f"run `CODEX_HOME={shlex.quote(str(target))} codex login` (docs/OPERATIONS.md)"
-        )
-    return lines
+    return [f"codex home: {status['path']} ({_CODEX_HOME_KINDS.get(kind, kind)})"]
 
 
 def _memory_cache_dir(report) -> Path:
@@ -780,6 +807,10 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(checkpoint_rpo)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_plain)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
+    codex_home_status = _codex_home_status(report)
+    if codex_home_status["login_missing"] and codex_home_status["codex_required"]:
+        # No Codex head of this installation can start: red, with the resolver's own fix text.
+        findings.append({"code": "codex_home_login_missing", "message": codex_home_status["login_missing"]})
     findings.extend(
         {"code": "resource_probe", "resource": readiness.resource, "message": _probe_finding(readiness)}
         for readiness in resource_probes

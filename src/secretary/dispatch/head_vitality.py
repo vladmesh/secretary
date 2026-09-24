@@ -527,7 +527,10 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-        """Wrap one pane readiness answer (`{"idle": bool}` as callers of ``PaneHost`` build it).
+        """Wrap one pane readiness answer (a status carrying `{"idle": bool}`).
+
+        No dispatcher status carries one since secretary-1723 removed the pane path from
+        ``command_terminal_status``; the snapshot stays readable for a persisted status that does.
 
         Advisory by construction: the session manager answers whether a pane will take input, which
         speaks to the ``Turn`` axis alone. A busy pane is a head possibly mid-turn, an idle pane is

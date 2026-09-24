@@ -646,33 +646,52 @@ class CodexHomeMigrationTests(PortableFixture):
         self.assertFalse((self.home / ".config").exists())
         self.assert_invoker_home_untouched()
 
-    def test_doctor_shows_the_active_home_and_warns_while_the_migration_is_pending(self) -> None:
+    def test_doctor_reports_a_missing_login_red_with_the_fix_and_then_the_active_home(self) -> None:
+        """A20 step 7 (secretary-1723): no legacy fallback, so no login is a red finding naming the fix."""
+        canon = self.product / "src" / "secretary" / "runtime" / "heads.toml"
+        canon.write_text(
+            PRODUCT_CANON
+            + '\n[profiles.portable-codex]\nresource = "portable-sub"\nadapter = "codex"\nfallback = []\n',
+            encoding="utf-8",
+        )
         self.run_upgrade()
         instance = ["doctor", "--instance", str(self.instance), "--offline"]
-        legacy = Path.home() / ".config" / "orca" / "codex-runtime-home" / "home"
         data_home = self.data / "codex-home"
+        fix = (
+            f"no Codex login for this installation: log in under {data_home} "
+            f"(`CODEX_HOME={data_home} codex login`), or copy an auth.json there"
+        )
 
         code, text = self.run_cli(instance)
         json_code, report = self.run_json_cli([*instance, "--json"])
 
-        self.assertEqual(code, 0, text)
-        self.assertIn(f"codex home: {legacy} (legacy fallback)", text)
-        self.assertIn(f"warning: codex home migration pending: {data_home} holds no login", text)
-        self.assertEqual(json_code, 0, report)
+        self.assertEqual(code, 1, text)
+        self.assertIn(f"error: codex home: {fix}", text)
+        self.assertNotIn("legacy", text)
+        self.assertEqual(json_code, 1, report)
         self.assertEqual(
             report["codex_home"],
-            {"path": str(legacy), "kind": "legacy", "data_dir_home": str(data_home), "migration_pending": True},
+            {"path": None, "kind": "", "data_dir_home": str(data_home), "login_missing": fix, "codex_required": True},
         )
+        self.assertIn({"code": "codex_home_login_missing", "message": fix}, report["findings"])
 
         (data_home / "auth.json").write_text('{"tokens": "fixture"}\n', encoding="utf-8")
         code, text = self.run_cli(instance)
-        _json_code, report = self.run_json_cli([*instance, "--json"])
+        json_code, report = self.run_json_cli([*instance, "--json"])
 
         self.assertEqual(code, 0, text)
         self.assertIn(f"codex home: {data_home} (data-dir home)", text)
-        self.assertNotIn("migration pending", text)
+        self.assertNotIn("error: codex home", text)
+        self.assertEqual(json_code, 0, report)
         self.assertEqual(report["codex_home"]["kind"], "data-dir")
-        self.assertFalse(report["codex_home"]["migration_pending"])
+        self.assertEqual(report["codex_home"]["login_missing"], "")
+
+    def test_an_installation_without_a_codex_profile_is_not_red_for_a_missing_login(self) -> None:
+        self.run_upgrade()
+        code, text = self.run_cli(["doctor", "--instance", str(self.instance), "--offline"])
+
+        self.assertEqual(code, 0, text)
+        self.assertIn("codex home: none, and no installed profile runs Codex", text)
 
 
 class InstallationOwnerTests(PortableFixture):

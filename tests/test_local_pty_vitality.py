@@ -13,8 +13,9 @@ Child processes held it healthy only inside their ceiling, measured from a head-
 that never moved. A continuation did not cause the stall. It only made it visible, because the
 freeze kept the quiet the pid-only episode had already built up.
 
-These tests go through the production status function (only the Orca inventory and the /proc
-probe are stubbed), the production snapshot builder and the production reducer, tick by tick.
+These tests go through the production status function (only the /proc probe is stubbed), the
+production snapshot builder and the production reducer, tick by tick. Since secretary-1723 that
+function reads no pane inventory at all.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ TICK = 60.0
 
 
 class _Host:
-    """The one host read the status function makes besides the stubbed inventory and /proc."""
+    """The one host read the status function makes besides the stubbed /proc probe."""
 
     mode = "real"
 
@@ -93,10 +94,7 @@ class ResumedLocalPtyWorkerVitalityTests(unittest.TestCase):
     def status(self, host: _Host, record: DispatcherRecord, *, stopped: bool) -> dict:
         """What the real `command_terminal_status` answers for a head with no Orca pane."""
         heartbeat = {"known": True, "alive": True, "match": True, "state": "live-match", "stopped": stopped}
-        with (
-            mock.patch.object(dispatcher_review, "worktree_panes", return_value=[]),
-            mock.patch.object(dispatcher_review, "_head_run_process_status", return_value=heartbeat),
-        ):
+        with mock.patch.object(dispatcher_review, "_head_run_process_status", return_value=heartbeat):
             return dispatcher_review.command_terminal_status(host, {"ref": REF}, record, kind="worker")
 
     def run_1703(self, record: DispatcherRecord, *, works_after_continuation: bool):
@@ -176,6 +174,21 @@ class ResumedLocalPtyWorkerVitalityTests(unittest.TestCase):
         status = self.status(_Host(record.worker_head_run), record, stopped=False)
         self.assertEqual(status["reason"], "pid")
         self.assertEqual(status["provider_progress"]["state"], "observed")
+
+    def test_foreign_or_incomplete_provider_evidence_does_not_reach_the_status(self) -> None:
+        # The exact-HeadRun admission fence, on the one path that carries a provider cursor now
+        # (secretary-1723 removed the pane path this was pinned on): a cursor naming another run is
+        # an identity mismatch, and one with no cursor is unavailable.
+        record = self.record()
+        foreign = _Host(record.worker_head_run)
+        foreign.run = {**record.worker_head_run, "run_id": "foreign-worker-run"}
+        incomplete = _Host(record.worker_head_run)
+        incomplete.cursor = ""
+        for host, expected in ((foreign, "identity_mismatch"), (incomplete, "unavailable")):
+            with self.subTest(expected=expected):
+                status = self.status(host, record, stopped=False)
+                self.assertEqual(status["reason"], "pid")
+                self.assertEqual(status["provider_progress"]["state"], expected)
 
     def test_an_orca_head_that_lost_its_pane_keeps_the_provider_less_shape(self) -> None:
         # secretary-1543's shape is unchanged: its darkness is what the episode records.

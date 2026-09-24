@@ -12,6 +12,10 @@ tree under `visualLayouts`, whose drawn panes are nodes of `type: "terminal"` ke
 leaf. The previous round of this card asserted against a `paneRuntimeId` field that this call does
 not return, which is why fourteen green tests proved nothing about the live system; these
 assertions are written against the request the command really sends and the answer it really gets.
+
+Since secretary-1723 (A20 step 5) the command reads no pane inventory at all: a legacy record is
+shown as legacy and read through its pid heartbeat. The fixtures above still serve
+`RuntimePaneInventoryTransportTests`, which pins `runtime/pane_host.py` until that module goes.
 """
 
 from __future__ import annotations
@@ -35,12 +39,6 @@ from secretary.dispatch.head_status import (
     HEAD_ABSENT,
     HEAD_ALIVE,
     HEAD_UNPROVEN,
-    PANE_NO_PANE,
-    PANE_NO_RUNTIME_PANE,
-    PANE_NOT_CONSULTED,
-    PANE_UNAVAILABLE,
-    PANE_UNKNOWN,
-    PANE_VISIBLE,
     head_status,
 )
 from secretary.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
@@ -260,88 +258,28 @@ class HeadStatusTests(unittest.TestCase):
         self.assertEqual(runtime.production_state.saves, 0, "head-status must write nothing")
         return result
 
-    # -- the case the card exists for -----------------------------------------------------
+    # -- a legacy record (secretary-1723: no pane inventory) ---------------------------------
 
-    def test_a_head_whose_pty_has_no_runtime_pane_is_reported_alive(self) -> None:
-        """The measured shape: the pty is listed, the renderer draws it nowhere, the head works."""
+    def test_a_legacy_record_is_shown_as_legacy_with_no_pane_inventory(self) -> None:
+        """A20 step 5: the row is a legacy record read through its pid heartbeat, and Orca is not asked."""
         record = self._record()
         self._write_heartbeat(record, self._live_pid(), alive=True)
 
         answer = self._answer(record)
 
         self.assertEqual(answer["status"], "ok")
+        self.assertEqual(self.calls, [], "head-status asked the session manager about a legacy record")
+        self.assertNotIn("pane_channel", answer)
+        self.assertNotIn("runtime_pane_channel", answer)
         head = answer["heads"][0]
+        self.assertEqual((head["runtime"], head["legacy_record"]), ("orca-legacy", True))
+        self.assertNotIn("runtime_pane", head)
+        self.assertNotIn("pane", head)
         self.assertEqual(head["head"], HEAD_ALIVE)
-        self.assertEqual(head["process"], "running")
         self.assertEqual(head["proved_by"], "pid_heartbeat")
-        # The pane axis is answered separately and says the opposite of what the window suggests.
-        self.assertEqual(head["runtime_pane"], PANE_NO_RUNTIME_PANE)
-        self.assertTrue(head["pane"]["connected"])
-        self.assertEqual(head["pane"]["leaf"], "leaf-106")
-        self.assertIn("renderer tree", head["pane"]["renderer_reason"])
         self.assertIn("ALIVE", head["summary"])
-        self.assertIn("NOT visible", head["summary"])
-        # And the evidence really was asked for: the flag is in the request the command sent.
-        listings = [call for call in self.calls if call[:3] == ["orca", "terminal", "list"]]
-        self.assertTrue(listings)
-        self.assertIn("--include-visual-layouts", listings[0])
-        # One reading of the workspace serves the whole answer.
-        self.assertEqual(len(listings), 1)
-
-    def test_a_renderer_channel_this_build_does_not_support_is_unknown_not_a_denial(self) -> None:
-        """The other half of the same lie: an unread tree must not read as an undrawn pane."""
-        record = self._record()
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-        self.layout_flag_supported = False
-
-        answer = self._answer(record)
-
-        self.assertEqual(answer["runtime_pane_channel"]["state"], "unavailable")
-        self.assertFalse(answer["runtime_pane_channel"]["supported"])
-        head = answer["heads"][0]
-        self.assertEqual(head["runtime_pane"], PANE_UNKNOWN)
-        self.assertNotEqual(head["runtime_pane"], PANE_NO_RUNTIME_PANE)
-        # The pty itself was still listed, so the head half is unaffected.
-        self.assertEqual(head["head"], HEAD_ALIVE)
-        self.assertEqual(head["pane"]["leaf"], "leaf-106")
-        self.assertIn("unknown", head["summary"])
-
-    def test_a_renderer_that_names_no_tree_for_this_workspace_is_unknown(self) -> None:
-        record = self._record()
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-        self.layouts = measured_layouts(str(self.root / "somewhere-else"))
-
-        head = self._answer(record)["heads"][0]
-
-        self.assertEqual(head["runtime_pane"], PANE_UNKNOWN)
-        self.assertIn("no layout tree for this workspace", head["pane"]["renderer_reason"])
-        self.assertEqual(head["head"], HEAD_ALIVE)
-
-    def test_an_identity_the_tree_cannot_be_compared_by_is_unknown_not_a_denial(self) -> None:
-        """A handle the session manager may have aliased proves nothing, so it denies nothing."""
-        record = self._record()
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-        # A tree whose drawn panes carry no leaf id at all: the primary key is unusable here.
-        self.layouts = measured_layouts(
-            str(self.workspace), drawn=[{"handle": "term-105-alias", "tabId": "tab-1"}]
-        )
-
-        head = self._answer(record)["heads"][0]
-
-        self.assertEqual(head["runtime_pane"], PANE_UNKNOWN)
-        self.assertIn("aliased", head["pane"]["renderer_reason"])
-        self.assertEqual(head["head"], HEAD_ALIVE)
-
-    def test_a_workspace_whose_renderer_draws_nothing_still_answers(self) -> None:
-        """An empty tree is a real answer about the window: nothing here is drawn."""
-        record = self._record()
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-        self.layouts = measured_layouts(str(self.workspace), drawn=[])
-
-        head = self._answer(record)["heads"][0]
-
-        self.assertEqual(head["runtime_pane"], PANE_NO_RUNTIME_PANE)
-        self.assertEqual(head["head"], HEAD_ALIVE)
+        self.assertIn("legacy record", head["summary"])
+        self.assertIn("no pane inventory is read", head["summary"])
 
     def test_the_answer_names_what_each_source_said_and_which_could_not_answer(self) -> None:
         record = self._record()
@@ -352,30 +290,11 @@ class HeadStatusTests(unittest.TestCase):
         evidence = {entry["source"]: entry for entry in head["evidence"]}
         self.assertEqual(evidence["pid_heartbeat"]["availability"], "available")
         self.assertEqual(evidence["pid_heartbeat"]["process"], "running")
-        # The pane reading answered (the head is mid-turn) and is marked advisory on its face.
-        self.assertEqual(evidence["pane_advisory"]["turn"], "active")
-        self.assertTrue(evidence["pane_advisory"]["advisory"])
-        # The provider journal of a fake run cannot be read, and that is a fact about the channel.
-        self.assertEqual(evidence["provider_cursor"]["availability"], "unavailable")
-        self.assertIn("provider_cursor", head["unavailable_sources"])
+        # A legacy record's provider cursor is never read, which is not the same as one that failed.
+        self.assertEqual(evidence["provider_cursor"]["availability"], "not_observed")
+        self.assertNotIn("pane_advisory", evidence)
+        self.assertEqual(head["unavailable_sources"], [])
         self.assertNotEqual(head["head"], HEAD_ABSENT)
-
-    def test_an_unreadable_pane_channel_never_reads_as_a_head_that_is_gone(self) -> None:
-        """The whole `head_vitality` invariant, made visible: a dark channel is not a death."""
-        record = self._record()
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-        self.list_fails = True
-
-        answer = self._answer(record)
-
-        self.assertEqual(answer["pane_channel"]["state"], "unavailable")
-        self.assertEqual(answer["runtime_pane_channel"]["state"], "unavailable")
-        head = answer["heads"][0]
-        self.assertEqual(head["head"], HEAD_ALIVE)
-        self.assertEqual(head["proved_by"], "pid_heartbeat")
-        self.assertEqual(head["runtime_pane"], PANE_UNAVAILABLE)
-        self.assertIn("pid heartbeat alone", head["reason"])
-        self.assertIn("none of them is evidence that a head is absent", head["invariant"])
 
     def test_a_head_that_is_really_gone_is_reported_absent_and_names_its_proof(self) -> None:
         record = self._record()
@@ -389,29 +308,6 @@ class HeadStatusTests(unittest.TestCase):
         self.assertIn("ABSENT", head["summary"])
         evidence = {entry["source"]: entry for entry in head["evidence"]}
         self.assertEqual(evidence["pid_heartbeat"]["availability"], "available")
-
-    def test_a_pty_the_renderer_tree_draws_is_reported_visible(self) -> None:
-        record = self._record(leaf="leaf-105")
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-
-        head = self._answer(record)["heads"][0]
-
-        self.assertEqual(head["runtime_pane"], PANE_VISIBLE)
-        self.assertIn("leaf", head["pane"]["renderer_reason"])
-        self.assertEqual(head["head"], HEAD_ALIVE)
-        self.assertIn("visible", head["summary"])
-
-    def test_a_pane_no_inventory_names_is_not_the_same_answer_as_no_runtime_pane(self) -> None:
-        """A pty the inventory does not list is its own word, and still not a dead head."""
-        record = self._record(leaf="leaf-nowhere")
-        record.handle = ""
-        self._write_heartbeat(record, self._live_pid(), alive=True)
-
-        head = self._answer(record)["heads"][0]
-
-        self.assertEqual(head["runtime_pane"], PANE_NO_PANE)
-        self.assertIsNone(head["pane"])
-        self.assertEqual(head["head"], HEAD_ALIVE)
 
     # -- identity ---------------------------------------------------------------------------
 
@@ -635,9 +531,8 @@ class HeadStatusTests(unittest.TestCase):
 
         answer = self._supervised_answer({self.ref: record})
 
-        self.assertEqual(answer["pane_channel"]["state"], "not_consulted")
-        self.assertIn("local-pty", answer["pane_channel"]["reason"])
-        self.assertEqual(answer["runtime_pane_channel"]["state"], "not_consulted")
+        self.assertNotIn("pane_channel", answer)
+        self.assertNotIn("runtime_pane_channel", answer)
         self.assertEqual(len(answer["heads"]), 1, answer)
         row = answer["heads"][0]
         self.assertEqual((row["role"], row["kind"], row["runtime"]), ("worker", "worker", LOCAL_PTY_RUNTIME))
@@ -893,14 +788,14 @@ class HeadStatusTests(unittest.TestCase):
 
         answer = self._supervised_answer({self.ref: record})
 
-        self.assertEqual(answer["pane_channel"]["state"], "not_consulted")
+        self.assertNotIn("pane_channel", answer)
         rows = {row["role"]: row for row in answer["heads"]}
         self.assertEqual(sorted(rows), ["reviewer", "worker"])
         self.assertEqual(rows["reviewer"]["run_id"], "run-review-1701")
         self.assertEqual(rows["reviewer"]["runtime"], LOCAL_PTY_RUNTIME)
         self.assertEqual(rows["reviewer"]["process"]["state"], HEARTBEAT_LIVE_MATCH)
 
-    def test_a_mixed_record_gets_one_row_of_each_kind_and_one_inventory_read(self) -> None:
+    def test_a_mixed_record_gets_one_row_of_each_kind_and_no_inventory_read(self) -> None:
         record = self._record()
         self._write_heartbeat(record, self._live_pid(), alive=True)
         record.review_handle = "review-handle"
@@ -909,17 +804,17 @@ class HeadStatusTests(unittest.TestCase):
         record.review_leaf = record.review_head_run["leaf"]
         self._write_run_heartbeat(record, "review", self._live_pid())
 
-        answer = self._supervised_answer({self.ref: record}, run=self._orca)
+        answer = self._supervised_answer({self.ref: record})
 
-        self.assertEqual(answer["pane_channel"]["state"], "available")
+        self.assertNotIn("pane_channel", answer)
         rows = {row["role"]: row for row in answer["heads"]}
         self.assertEqual(rows["worker"]["runtime"], "orca-legacy")
+        self.assertTrue(rows["worker"]["legacy_record"])
         self.assertIn("orca-legacy run run-1450", rows["worker"]["summary"])
-        self.assertEqual(rows["worker"]["runtime_pane"], PANE_NO_RUNTIME_PANE)
+        self.assertNotIn("runtime_pane", rows["worker"])
+        self.assertEqual(rows["worker"]["head"], HEAD_ALIVE)
         self.assertEqual(rows["reviewer"]["runtime"], LOCAL_PTY_RUNTIME)
         self.assertEqual(rows["reviewer"]["head"], HEAD_ALIVE)
-        listings = [call for call in self.calls if call[:3] == ["orca", "terminal", "list"]]
-        self.assertEqual(len(listings), 1)
 
     def test_a_git_managed_workspace_is_answered_without_orca(self) -> None:
         # Even a row shaped like the legacy case -- a run naming no backend, and a head identity
@@ -932,12 +827,12 @@ class HeadStatusTests(unittest.TestCase):
 
                 answer = self._supervised_answer({self.ref: record}, host=host)
 
-                self.assertEqual(answer["pane_channel"]["state"], "not_consulted")
-                self.assertIn("git-managed", answer["pane_channel"]["reason"])
+                self.assertNotIn("pane_channel", answer)
                 row = answer["heads"][0]
                 self.assertEqual(row["head"], verdict)
-                self.assertEqual(row["runtime_pane"], PANE_NOT_CONSULTED)
-                self.assertIn("not consulted", row["summary"])
+                self.assertTrue(row["legacy_record"])
+                self.assertNotIn("runtime_pane", row)
+                self.assertIn("no pane inventory is read", row["summary"])
 
 
 class RuntimePaneInventoryTransportTests(unittest.TestCase):

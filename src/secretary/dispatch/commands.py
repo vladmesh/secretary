@@ -110,8 +110,7 @@ def add_head_status_command(subparsers) -> None:
     """
     command = subparsers.add_parser(
         "head-status",
-        help="read whether the dispatcher's heads in a workspace are alive, and separately "
-        "whether their runtime panes are visible",
+        help="read whether the dispatcher's heads in a workspace are alive, and what proved it",
     )
     add_common(command)
     command.add_argument(

@@ -450,14 +450,14 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
     except ClientConfigError as exc:
         return StepResult("memory-clients", "failed", str(exc))
     if not context.dry_run:
-        legacy, *data_homes = reconciled_codex_homes(context.runtime_home, data_dir)
+        data_homes = reconciled_codex_homes(data_dir)
         # A data-dir home may have been seeded here; the home itself and its login are left as found.
         seeded = (home / name for home in data_homes for name in CODEX_HOME_SEEDED_FILES)
         user_codex = context.runtime_home / ".codex" / "config.toml"
         claude = context.runtime_home / ".claude.json"
         try:
             _set_runtime_directory_owner(user_codex.parent, context.runtime_user)
-            for path in (legacy / "config.toml", *seeded, user_codex, claude):
+            for path in (*seeded, user_codex, claude):
                 _set_runtime_owner(path, context.runtime_user)
         except GitError as exc:
             return StepResult("memory-clients", "failed", str(exc))
@@ -468,15 +468,13 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
 
 
 def step_codex_home(context: UpgradeContext) -> StepResult:
-    """Seed the non-secret Codex runtime files into `<data_dir>/codex-home`, so the PO's `codex login`
-    there is the only step the move needs. The legacy home stays install's, as it always was."""
+    """Seed the non-secret Codex runtime files into `<data_dir>/codex-home`, the one CODEX_HOME the
+    installation manages; the PO's `codex login` there is the only other step it needs."""
     if not (context.product_root / "packaging" / "codex-home").is_dir():
         return StepResult("codex-home", "skipped", "no packaging/codex-home in the product checkout")
     data_dir = _data_dir(context)
     if data_dir is None:
         return StepResult("codex-home", "failed", "instance data directory is unresolved")
-    if context.runtime_home is None:
-        return StepResult("codex-home", "failed", "installation runtime home is unresolved")
     if context.dry_run:
         return StepResult("codex-home", "skipped", "--dry-run does not seed CODEX_HOME")
     # installation imports this module; the seeding lives there with install's own call of it.
@@ -487,8 +485,6 @@ def step_codex_home(context: UpgradeContext) -> StepResult:
             context.product_root,
             context.runtime_user,
             data_dir=data_dir,
-            runtime_home=context.runtime_home,
-            legacy=False,
         )
     except InstallError as exc:
         return StepResult("codex-home", "failed", str(exc))
