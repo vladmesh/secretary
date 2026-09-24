@@ -731,22 +731,31 @@ class LocalPtySubstrateTests(unittest.TestCase):
         The notice used to travel with the next chunk that fit, so a client that overflowed at the
         very end of a run was told nothing: it saw the stream end with no sign that part of it was
         missing. Here the head's last act is to exit without a word, so there is no next chunk.
+
+        What is asserted is the property itself, as an account that has to balance: every byte the
+        head wrote after the attach either arrived as output or is inside the last `dropped` count
+        the stream carried before `exited`. Which frame carries that count is timing: on a slow
+        host the last line of the spew can be read on its own and still fit, and then the count
+        rides with it instead of with the exit (secretary-1703, runtime-component on bf5a655). An
+        unreported final loss leaves the account short either way, so every frame from the attach
+        to the exit is kept, the ones read while the stream drains included.
         """
         handle = self._start(run_id="dropped-tail")
         commander = self._client(handle)
         self._await_output(commander, b"SIZE ")
         watcher = handle.connect()
         self.addCleanup(watcher.close)
-        self.assertTrue(watcher.attach()["ok"])
+        attached = watcher.attach()
+        self.assertTrue(attached["ok"])
 
         # Far more than the supervisor will hold for one client, none of it read while it arrives.
         self.assertTrue(commander.send_input(f"spew {protocol.OUTPUT_BUFFER_BYTES * 8 // 1000}\n")["ok"])
         self._await_output(commander, b"SPEWDONE", timeout=60.0)
-        while watcher.next_event(0.4) is not None:
-            pass
+        frames = []
+        while (event := watcher.next_event(0.4)) is not None:
+            frames.append(event)
 
         self.assertTrue(commander.send_input("die 5\n")["ok"])
-        frames = []
         while True:
             event = watcher.next_event(5.0)
             if event is None:
@@ -755,11 +764,23 @@ class LocalPtySubstrateTests(unittest.TestCase):
             if event.get("event") == protocol.EVENT_EXITED:
                 break
         kinds = [frame.get("event") for frame in frames]
-        self.assertEqual(kinds[-1], protocol.EVENT_EXITED, kinds)
-        self.assertIn(protocol.EVENT_DROPPED, kinds, "the last loss was never reported")
+        self.assertEqual(kinds[-1], protocol.EVENT_EXITED, kinds[-5:])
+        self.assertEqual(frames[-1]["record"]["exit_code"], 5)
+        self.assertIn(protocol.EVENT_DROPPED, kinds, "the loss was never reported")
         dropped = [frame for frame in frames if frame.get("event") == protocol.EVENT_DROPPED][-1]
         self.assertGreater(dropped["bytes"], 0)
-        self.assertEqual(frames[-1]["record"]["exit_code"], 5)
+
+        received = sum(
+            len(protocol.decode_payload(frame.get("data") or ""))
+            for frame in frames
+            if frame.get("event") == protocol.EVENT_OUTPUT
+        )
+        written_since_attach = frames[-1]["record"]["output_bytes"] - attached["total_bytes"]
+        self.assertEqual(
+            received + dropped["bytes"],
+            written_since_attach,
+            "the stream ended with part of the loss unreported",
+        )
 
     def test_a_refusal_written_before_the_connection_closed_is_not_lost_to_the_write_that_failed(
         self,
