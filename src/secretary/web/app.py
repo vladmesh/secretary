@@ -90,6 +90,9 @@ class Route:
 ROUTES: tuple[Route, ...] = (
     Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
     Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
+    # One of the card's local-pty heads, read-only: its terminal's tail and its journal
+    # (secretary-1703). The run id has to be one the card recorded, or the answer is 404.
+    Route("GET", "/tasks/{ref}/heads/{run_id}", "head_page", "reads.head_view", page=True),
     Route("GET", "/sprints", "sprints_page", "sprint_reads.sprint_list", page=True),
     Route("GET", "/projects", "projects_page", "reads.system_snapshot", page=True),
     Route("GET", "/projects/{project}", "project_page", "reads.system_snapshot", page=True),
@@ -100,6 +103,7 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/tasks/{ref}", "task", "reads.task_snapshot"),
     Route("GET", "/api/tasks/{ref}/events", "events", "reads.task_events"),
     Route("GET", "/api/tasks/{ref}/runs", "task_runs", "ops.run_list"),
+    Route("GET", "/api/tasks/{ref}/heads/{run_id}", "head", "reads.head_view"),
     Route("GET", "/api/runs/{run_id}", "run", "ops.run_state"),
     Route("POST", "/api/runs/start", "start", "ops.run_start"),
     Route("POST", "/api/runs/review", "review", "ops.run_review"),
@@ -374,6 +378,9 @@ class WebApp:
             self.reads.task_events(params["ref"], _one(query, "cursor"), limit=_limit(query)),
         )
 
+    def _head(self, params, _query, _body) -> Response:
+        return _json(200, self.reads.head_view(params["ref"], params["run_id"]))
+
     def _task_runs(self, params, _query, _body) -> Response:
         return _json(200, self.ops.run_list(params["ref"]))
 
@@ -519,6 +526,9 @@ class WebApp:
             ref, events=_int(query, "events", TASK_PAGE_EVENTS, ceiling=MAX_LIMIT)
         )
         return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
+
+    def _head_page(self, params, _query, _body) -> Response:
+        return _html(200, pages.head_view(self.reads.head_view(params["ref"], params["run_id"])))
 
     def _sprints_page(self, _params, query, _body) -> Response:
         view = "archive" if _one(query, "view") == "archive" else "active"

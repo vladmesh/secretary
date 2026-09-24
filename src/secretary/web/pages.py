@@ -260,6 +260,7 @@ details.text > summary::-webkit-details-marker { display: none; }
 details.text > summary::after { content: " more"; color: var(--accent); font-size: .8rem; }
 details.text[open] > summary::after { content: " less"; }
 details.text > pre { margin-top: .4rem; }
+pre.transcript { max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .5rem .7rem; }
 
 /* the transition timeline */
 ol.timeline { list-style: none; margin: 0; padding: 0; }
@@ -1824,6 +1825,8 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
     events = snapshot.get("events") or {}
     agents = snapshot.get("agents") or {}
     agent_items = list(agents.get("items") or [])
+    heads = snapshot.get("heads") or {}
+    head_items = [item for item in heads.get("items") or [] if isinstance(item, dict)]
     chips = [_state_chip(value.get("state"))] if value else []
     if project.get("id") or value.get("project"):
         chips.append(_chip(str(project.get("id") or value.get("project"))))
@@ -1870,6 +1873,17 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
                 count=len(agent_items) or None,
             ),
             _panel(
+                "Heads",
+                _section(
+                    heads.get("source"),
+                    head_items,
+                    what="which heads this card has run",
+                    empty="this card has run no head yet.",
+                    table=_head_table(ref, head_items),
+                ),
+                count=len(head_items) or None,
+            ),
+            _panel(
                 "Owner's actions",
                 _comment_form(
                     f"/api/tasks/{quote(ref)}/comment",
@@ -1892,6 +1906,159 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
         nav="dashboard",
         crumbs=((ref, ""),),
     )
+
+
+def _head_table(ref: str, items: list[dict[str, Any]]) -> str:
+    """The card's heads: role, run id, state, and a link to the view of each local-pty one."""
+    rows = []
+    for item in items:
+        run_id = str(item.get("run_id") or "")
+        if item.get("local_pty"):
+            run = f'<a class="ref" href="{escape(_head_href(ref, run_id))}">{escape(run_id)}</a>'
+        else:
+            run = f"<code>{escape(run_id)}</code>"
+        role = escape(str(item.get("role") or ""))
+        if item.get("current"):
+            role += ' <span class="age">(current)</span>'
+        rows.append(
+            [
+                role,
+                run,
+                _state_cell(str(item.get("state") or "unknown"), str(item.get("reason") or "")),
+                _or_dash(item.get("head")),
+            ]
+        )
+    return _rows(["role", "run", "state", "head"], rows)
+
+
+def _head_href(ref: str, run_id: str) -> str:
+    return f"/tasks/{quote(ref, safe='')}/heads/{quote(run_id, safe='')}"
+
+
+def head_view(document: dict[str, Any]) -> str:
+    """One local-pty head, read-only: the end of its terminal output and of its journal.
+
+    The output is the layer's plain text, already stripped of escape sequences and redacted, and it
+    is escaped here like every other value: it is what a head printed, and a head may print markup.
+    There is no form on this page and no script of its own.
+
+    The layer hands over normalised values only, and each section is still drawn under
+    `_shown`: whatever a head's run directory held, a section that cannot be drawn says so in its
+    own place and the rest of the page is served.
+    """
+    ref = str(document.get("ref") or "")
+    run_id = str(document.get("run_id") or "")
+    head = _mapping(document.get("head"))
+    transcript = _mapping(document.get("transcript"))
+    journal = _mapping(document.get("journal"))
+    card = f"/tasks/{quote(ref, safe='')}"
+    tail = journal.get("tail")
+    body = "\n".join(
+        [
+            _shown(lambda: _head_header(document, head, run_id)),
+            _panel("Terminal output", _shown(lambda: _transcript(transcript))),
+            _panel(
+                "Journal",
+                _shown(lambda: _head_journal(journal)),
+                count=(len(tail) if isinstance(tail, list) else 0) or None,
+            ),
+            f'<p><a href="{escape(card)}">back to {escape(ref or "the card")}</a></p>',
+        ]
+    )
+    return _page(f"Head {run_id}", body, nav="dashboard", crumbs=((ref, card), (run_id, "")))
+
+
+def _shown(draw: Callable[[], str]) -> str:
+    """One section of the head view, or the plain statement that it could not be drawn."""
+    try:
+        return draw()
+    except Exception as exc:  # noqa: BLE001 - a head's run directory is untrusted input
+        return f'<p class="unavailable"><b>this section could not be shown ({escape(type(exc).__name__)})</b></p>'
+
+
+def _head_header(document: dict[str, Any], head: dict[str, Any], run_id: str) -> str:
+    chips = [_chip(str(head.get("role") or "head"))]
+    if head.get("runtime"):
+        chips.append(_chip(str(head.get("runtime"))))
+    return "\n".join(
+        [
+            '<div class="hero">',
+            f"<h1>{escape(run_id or 'head')}</h1>",
+            f'<div class="chips">{"".join(chips)}</div>',
+            f'<span class="age" style="margin-left:auto">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span>',
+            f'<div class="title">{_state_cell(str(head.get("state") or "unknown"), str(head.get("reason") or ""))}</div>',
+            "</div>",
+            f'<p class="empty">{escape(str(document.get("read_only") or ""))}</p>',
+        ]
+    )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _transcript(section: dict[str, Any]) -> str:
+    """The head's output as the layer gave it, or why there is none; never as markup."""
+    reason = str(section.get("reason") or "")
+    if section.get("state") == "not_applicable":
+        return f'<p class="empty">{escape(reason)}</p>'
+    if not section.get("answered"):
+        also = f" ({section['also']})" if section.get("also") else ""
+        return (
+            "<p class=\"unavailable\"><b>the head's output is not answering:</b> "
+            f"{escape(reason or 'no reason was recorded')}{escape(also)}</p>"
+        )
+    if section.get("state") == "not_kept":
+        return f'<p class="empty">{escape(reason)}</p>'
+    source = "its supervisor, live" if section.get("source") == "supervisor" else "the tail its supervisor kept"
+    shown = f"the last {section.get('bytes') or 0} bytes"
+    total = section.get("total_bytes")
+    if isinstance(total, int) and not isinstance(total, bool):
+        shown += f" of {total}"
+    elif section.get("truncated"):
+        shown += " (earlier output was not kept)"
+    text = str(section.get("text") or "")
+    output = f'<pre class="transcript">{escape(text)}</pre>' if text else '<p class="empty">the head printed nothing.</p>'
+    return f'<p class="age">from {escape(source)}: {escape(shown)}, as plain text, secrets redacted</p>{output}'
+
+
+def _head_journal(section: dict[str, Any]) -> str:
+    """The journal's last records, through the layer's whitelist, and what the read left out."""
+    parts = []
+    if section.get("state") == "not_applicable":
+        return f'<p class="empty">{escape(str(section.get("reason") or ""))}</p>'
+    if not section.get("answered"):
+        parts.append(
+            '<p class="unavailable"><b>the journal is not answering:</b> '
+            f"{escape(str(section.get('reason') or 'no reason was recorded'))}</p>"
+        )
+    elif section.get("reason"):
+        parts.append(f'<p class="unavailable"><b>the journal answered in part:</b> {escape(str(section["reason"]))}</p>')
+    tail = [record for record in section.get("tail") or [] if isinstance(record, dict)]
+    rows = []
+    for record in tail:
+        at = record.get("at")
+        when = (
+            datetime.fromtimestamp(at, UTC).strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(at, (int, float)) and not isinstance(at, bool)
+            else ""
+        )
+        said = " ".join(str(record.get(key)) for key in ("reason", "subject") if record.get(key))
+        rows.append(
+            [
+                _or_dash(record.get("seq")),
+                f"<code>{escape(str(record.get('kind') or ''))}</code>",
+                _or_dash(when),
+                _or_dash(record.get("turn")),
+                _or_dash(record.get("bytes")),
+                _or_dash(said),
+            ]
+        )
+    if rows:
+        parts.append(_rows(["seq", "kind", "at (UTC)", "turn", "bytes", "reason"], rows))
+    elif section.get("answered"):
+        parts.append('<p class="empty">the journal holds no record.</p>')
+    return "\n".join(parts)
 
 
 def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:

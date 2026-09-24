@@ -171,6 +171,8 @@ integration-board tests/test_web_transport.py
 integration-board tests/test_web_transport_dashboard.py
 unit tests/test_web_po_transport.py
 unit tests/test_web_status_bar.py
+unit tests/test_web_head_view.py
+runtime-component tests/test_web_head_view_supervised.py
 integration-board tests/test_web_doctor.py
 integration-board tests/test_web_warm_render.py
 unit tests/test_web_markdown.py

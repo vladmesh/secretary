@@ -106,13 +106,24 @@ class CommittedAudit:
         As in the file reader, the cursor is the end of the history rather than the end of the page,
         so a client that polls with it is never handed an event it has just been shown.
         """
+        return self.tail_with_history(ref, limit=limit, now=now)[0]
+
+    def tail_with_history(
+        self, ref: str, *, limit: int, now: float
+    ) -> tuple[EventPage, tuple[dict[str, Any], ...] | None]:
+        """`tail`, and every committed record of the card as its `kind` and `data`, from one traversal.
+
+        For a reader that needs something out of the whole history -- which head runs a card has
+        had -- beside the page it shows, without reading the audit twice. The history is `None`
+        when the audit did not answer, which the page's source already says.
+        """
         bounded = max(1, min(int(limit), MAX_LIMIT))
         try:
             records = self._records(ref)
         except self._failures() as exc:
-            return self._unreadable(ref, None, exc, now=now)
+            return self._unreadable(ref, None, exc, now=now), None
         start = max(0, len(records) - bounded)
-        return EventPage(
+        page = EventPage(
             items=tuple(
                 _item(record, self._at(ref, start + index + 1))
                 for index, record in enumerate(records[start:])
@@ -121,6 +132,11 @@ class CommittedAudit:
             has_more=False,
             source=sources.available(now),
         )
+        return page, tuple(_brief(record) for record in records)
+
+    def history(self, ref: str) -> tuple[dict[str, Any], ...]:
+        """Every committed record of the card as its `kind` and `data`; a store failure raises."""
+        return tuple(_brief(record) for record in self._records(ref))
 
     def _records(self, ref: str) -> tuple[dict[str, Any], ...]:
         """This card's committed records in claim order, as the audit owner traverses them.
@@ -165,13 +181,24 @@ def _reason(exc: Exception) -> str:
     return getattr(exc, "message", None) or str(exc) or type(exc).__name__
 
 
+def _payload(record: dict[str, Any]) -> Any:
+    """What a record says: a typed event's `data`, a generic audit record's `payload`."""
+    return record.get("data") if record.get("record_type") == Event.RECORD_TYPE else record.get("payload")
+
+
+def _brief(record: dict[str, Any]) -> dict[str, Any]:
+    """A record reduced to its `kind` and its `data`, for a reader of the whole history."""
+    payload = _payload(record)
+    return {"kind": _text(record.get("kind")), "data": payload if isinstance(payload, dict) else {}}
+
+
 def _item(record: dict[str, Any], cursor: Cursor) -> dict[str, Any]:
     """One journal record in the layer's stable event shape."""
     typed = record.get("record_type") == Event.RECORD_TYPE
     actor = record.get("actor")
     transition = record.get("transition")
     related = record.get("related_refs")
-    payload = record.get("data") if typed else record.get("payload")
+    payload = _payload(record)
     return {
         "cursor": cursor.encode(),
         "typed": typed,
