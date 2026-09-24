@@ -1576,8 +1576,9 @@ class _StandingPromptTransport:
     """What a standing head's skill prompt is handed to the supervised backend with.
 
     The supervised backend owns the delivery — settle, type, submit on its own, confirm a turn —
-    and reads only one thing off a caller's transport: the `before_send` hook a suspended head is
-    resumed through. A standing head is never suspended, so it carries none.
+    and reads only one thing off a caller's transport: the `before_send` hook it runs before the
+    first byte (a retained worker's resume, a Codex provider-source binding). A standing head needs
+    neither, so it carries none.
     """
 
     before_send: Callable[[], Any] | None = None

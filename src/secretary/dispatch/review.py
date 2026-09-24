@@ -77,6 +77,9 @@ from secretary.dispatch.watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatch.worker_lifecycle import head_run_binding
+from secretary.runtime.head import HeadRun, HeadRunError
+from secretary.runtime.head_runtime_backends import head_runtime_name
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.pane_host import (
     OrcaSessionHost,
     PaneHostError,
@@ -337,16 +340,7 @@ def command_terminal_status(
             }
         activity = terminal.last_output_at or None
         # Only observed provider cursors refresh liveness; tui-idle is independent.
-        try:
-            provider_progress = getattr(
-                host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
-            )(task, record, kind)
-        except Exception:
-            provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
-        provider_progress = _admitted_provider_progress_for_status(
-            provider_progress,
-            record.review_head_run if kind == "review" else record.worker_head_run,
-        )
+        provider_progress = _provider_progress_for_status(host, task, record, kind)
         if (
             str(provider_progress.get("state") or "") == "observed"
             and str(provider_progress.get("admission") or "") == "accepted"
@@ -414,6 +408,15 @@ def command_terminal_status(
             "pid_confirmed": True,
             "pid_status": dict(pid_status),
         }
+        if _supervised(run):
+            # A local-pty head has no pane to lose: this is its normal shape, not a lost pane's.
+            # Its provider cursor is an exact-run file read that never needed the pane, and
+            # without it the episode had no channel that sees the head work: it aged on the pid
+            # alone and was held healthy only by child processes, inside their ceiling
+            # (secretary-1703's working worker read `suspected_stall`, then `confirmed_stall`,
+            # secretary-1719). An Orca head that lost its pane keeps the provider-less shape, whose
+            # darkness the episode records (secretary-1543).
+            status["provider_progress"] = _provider_progress_for_status(host, task, record, kind)
         child_activity = _head_child_activity(host, pid_status)
         if child_activity is not None:
             status["child_activity"] = child_activity
@@ -467,6 +470,30 @@ def _head_child_activity(host: Any, pid_status: Any) -> dict[str, Any] | None:
     if not isinstance(evidence, dict) or str(evidence.get("state") or "") != "observed":
         return None
     return evidence
+
+
+def _provider_progress_for_status(
+    host: Any, task: dict[str, Any], record: DispatcherRecord, kind: str
+) -> dict[str, Any]:
+    """This role's exact-run provider cursor off the host, inside the status admission fence."""
+    try:
+        provider_progress = getattr(
+            host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
+        )(task, record, kind)
+    except Exception:
+        provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
+    return _admitted_provider_progress_for_status(
+        provider_progress,
+        record.review_head_run if kind == "review" else record.worker_head_run,
+    )
+
+
+def _supervised(run: Any) -> bool:
+    """Whether a record's persisted HeadRun is held by a local-pty supervisor rather than a pane."""
+    try:
+        return head_runtime_name(HeadRun.from_json(run)) == LOCAL_PTY_RUNTIME
+    except (HeadRunError, AttributeError, KeyError, TypeError, ValueError):
+        return False
 
 
 def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:
