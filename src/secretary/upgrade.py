@@ -460,6 +460,32 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
     return StepResult("memory-clients", "changed", f"{action} {result.changed} client config(s)")
 
 
+def step_codex_home(context: UpgradeContext) -> StepResult:
+    """Seed the non-secret Codex runtime files into `<data_dir>/codex-home` (and the legacy home
+    while it is the active one), so the PO's `codex login` there is the only step the move needs."""
+    if not (context.product_root / "packaging" / "codex-home").is_dir():
+        return StepResult("codex-home", "skipped", "no packaging/codex-home in the product checkout")
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("codex-home", "failed", "instance data directory is unresolved")
+    if context.runtime_home is None:
+        return StepResult("codex-home", "failed", "installation runtime home is unresolved")
+    if context.dry_run:
+        return StepResult("codex-home", "skipped", "--dry-run does not seed CODEX_HOME")
+    # installation imports this module; the seeding lives there with install's own call of it.
+    from secretary.installation import InstallError, provision_codex_home
+
+    try:
+        seeded = provision_codex_home(
+            context.product_root, context.runtime_user, data_dir=data_dir, runtime_home=context.runtime_home
+        )
+    except InstallError as exc:
+        return StepResult("codex-home", "failed", str(exc))
+    if not seeded:
+        return StepResult("codex-home", "unchanged", "CODEX_HOME files current")
+    return StepResult("codex-home", "changed", f"seeded {seeded} CODEX_HOME file(s)")
+
+
 def step_po_workspace(context: UpgradeContext) -> StepResult:
     """Materialize the PO head's working directory; its notes file is never rewritten.
 
@@ -1624,6 +1650,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_board_store,
     step_board_store_roles,
     step_memory_clients,
+    step_codex_home,
     step_po_workspace,
     step_head_registry,
     step_instance_packing,

@@ -23,9 +23,18 @@ import json
 import os
 from pathlib import Path
 
-from secretary.runtime import heads
+from secretary.runtime.codex_preflight import codex_home
 
-SESSIONS_ROOT = Path(os.environ.get("TA_CODEX_SESSIONS", str(Path(heads.CODEX_HOME) / "sessions")))
+
+def sessions_root() -> Path:
+    """Where Codex heads write their rollouts: `TA_CODEX_SESSIONS`, else the active CODEX_HOME's.
+
+    Resolved per call, so the switch to the data-dir home is seen the tick after the login.
+    """
+    configured = os.environ.get("TA_CODEX_SESSIONS")
+    return Path(configured) if configured else Path(codex_home({})) / "sessions"
+
+
 # A TUI head alive right now wrote its rollout today, or yesterday across midnight.
 SCAN_DAY_DIRS = 2
 
@@ -87,7 +96,7 @@ def _recent_day_dirs(root: Path, limit: int = SCAN_DAY_DIRS) -> list[Path]:
 
 
 def _session_paths_for(workspace: str):
-    root = SESSIONS_ROOT
+    root = sessions_root()
     if not root.is_dir():
         return
     want = str(Path(workspace).resolve(strict=False))

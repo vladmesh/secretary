@@ -304,20 +304,26 @@ def observe(
     product_root: str | Path,
     package: str = PACKAGE,
     workspaces_root: str | Path = "",
+    git_workspaces_root: str | Path = "",
 ) -> RuntimeProvenance:
     """Classify the current interpreter's static package provenance.
 
     The supplied interpreter is an identity to report.  Callers run this source file under that
     interpreter, so the observation never starts a candidate package import merely to discover it
     was foreign.
+
+    An editable target inside either workspaces root is workspace-targeted: the Orca root
+    (`workspaces_root`) and `<data_dir>/workspaces` (`git_workspaces_root`), where git-managed card
+    and observer worktrees live. Both are card checkouts that are removed when their card ends.
     """
+    workspace_roots = [str(candidate) for candidate in (workspaces_root, git_workspaces_root) if candidate]
     expected_python = Path(interpreter).expanduser().absolute()
     root = _resolved(product_root)
     if not expected_python.is_file() or not os.access(expected_python, os.X_OK):
         return RuntimeProvenance("interpreter_unavailable", str(expected_python), str(root), "", ())
     targets = _metadata_targets(package)
     for _kind, source, target in targets:
-        if workspaces_root and _inside(target, workspaces_root):
+        if any(_inside(target, candidate) for candidate in workspace_roots):
             return RuntimeProvenance(
                 "workspace_targeted_editable",
                 str(expected_python),
@@ -466,7 +472,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--package", default=PACKAGE)
     parser.add_argument(
         "--workspaces-root",
+        help="the Orca workspaces root",
         default=os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")),
+    )
+    parser.add_argument(
+        "--git-workspaces-root",
+        help="the git workspaces root, <data_dir>/workspaces; derived from --data-dir when omitted",
     )
     parser.add_argument("--state-path")
     parser.add_argument("--data-dir")
@@ -477,18 +488,21 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # The dispatcher itself gives an explicit runtime.env override priority over the configured
+    # data directory. Follow that same address rule or the health reader would watch one file
+    # while the pre-import fence writes another, and the fence would guard another workspaces root.
+    data_dir = Path(os.environ.get("SECRETARY_DATA_DIR") or args.data_dir) if args.data_dir else None
+    git_workspaces_root = args.git_workspaces_root or (str(data_dir / "workspaces") if data_dir else "")
     provenance = observe(
         interpreter=args.interpreter,
         product_root=args.product_root,
         package=args.package,
         workspaces_root=args.workspaces_root,
+        git_workspaces_root=git_workspaces_root,
     )
     state_path = args.state_path
-    if state_path is None and args.data_dir:
-        # The dispatcher itself gives an explicit runtime.env override priority over the configured
-        # data directory. Follow that same address rule or the health reader would watch one file
-        # while the pre-import fence writes another.
-        state_path = str(Path(os.environ.get("SECRETARY_DATA_DIR") or args.data_dir) / "dispatcher" / "production-state.json")
+    if state_path is None and data_dir is not None:
+        state_path = str(data_dir / "dispatcher" / "production-state.json")
     if state_path:
         record_diagnostic(state_path, provenance)
     if args.json or not args.command:

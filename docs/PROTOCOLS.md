@@ -605,7 +605,8 @@ One production-runtime provenance probe fences workspace prepare, worker/reviewe
 of a gate query, both sides of release, and worktree removal. It runs the fixed production
 interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`
 and `workspace_targeted_editable` (plain editable paths, executable editable finder modules named by
-`.pth`, and `direct_url.json`, including vanished paths under the dispatcher workspace root). Any
+`.pth`, and `direct_url.json`, including vanished paths under either workspaces root: the Orca root
+and `<data_dir>/workspaces`). Any
 refusal becomes durable blocked evidence and keeps the checkout; installation metadata is never
 repaired implicitly.
 

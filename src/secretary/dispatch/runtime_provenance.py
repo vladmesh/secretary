@@ -29,22 +29,46 @@ class ProductionRuntime:
     product_root: str
     package: str = PACKAGE
     workspaces_root: str = ""
+    # `<data_dir>/workspaces`, the git-managed card and observer worktrees. Empty checks only Orca's.
+    git_workspaces_root: str = ""
 
     @classmethod
-    def current(cls, product_root: Path | str, *, workspaces_root: Path | str = "") -> ProductionRuntime:
+    def current(
+        cls,
+        product_root: Path | str,
+        *,
+        workspaces_root: Path | str = "",
+        git_workspaces_root: Path | str = "",
+    ) -> ProductionRuntime:
         root = workspaces_root or os.environ.get(
             "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
         )
-        return cls(sys.executable, str(Path(product_root).expanduser()), workspaces_root=str(root))
+        return cls(
+            sys.executable,
+            str(Path(product_root).expanduser()),
+            workspaces_root=str(root),
+            git_workspaces_root=str(git_workspaces_root),
+        )
 
     @classmethod
-    def installed(cls, product_root: Path | str, *, workspaces_root: Path | str = "") -> ProductionRuntime:
+    def installed(
+        cls,
+        product_root: Path | str,
+        *,
+        workspaces_root: Path | str = "",
+        git_workspaces_root: Path | str = "",
+    ) -> ProductionRuntime:
         """Address the production venv without borrowing Doctor's own interpreter."""
         root = Path(product_root).expanduser()
         workspace_root = workspaces_root or os.environ.get(
             "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
         )
-        return cls(str(root / ".venv" / "bin" / "python3"), str(root), workspaces_root=str(workspace_root))
+        return cls(
+            str(root / ".venv" / "bin" / "python3"),
+            str(root),
+            workspaces_root=str(workspace_root),
+            git_workspaces_root=str(git_workspaces_root),
+        )
 
     def probe(self) -> RuntimeProvenance:
         """Observe the configured interpreter through the executable pre-import boundary."""
@@ -68,6 +92,7 @@ class ProductionRuntime:
                     self.package,
                     "--workspaces-root",
                     self.workspaces_root,
+                    *(["--git-workspaces-root", self.git_workspaces_root] if self.git_workspaces_root else []),
                     "--json",
                 ],
                 text=True,

@@ -34,7 +34,19 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
     from .head.run import HeadRun
 
-CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
+# The legacy home, shared with Orca's own Codex sessions. Still the fallback until the data-dir home
+# holds a login; the fallback is removed in A20. `legacy_codex_home` reads the home at the call.
+CODEX_HOME_LEGACY_RELATIVE = Path(".config") / "orca" / "codex-runtime-home" / "home"
+CODEX_HOME_DEFAULT = str(Path.home() / CODEX_HOME_LEGACY_RELATIVE)
+# The installation-owned home, `<data_dir>/codex-home`.
+CODEX_HOME_DATA_DIRNAME = "codex-home"
+# Codex's login. Its presence in the data-dir home is what moves heads there; it is never copied.
+CODEX_AUTH_FILE = "auth.json"
+# Which rung of `resolve_codex_home` answered.
+CODEX_HOME_PROFILE = "profile"
+CODEX_HOME_ENV = "env"
+CODEX_HOME_DATA_DIR = "data-dir"
+CODEX_HOME_LEGACY = "legacy"
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
 # The file codex keeps its update check in, inside the same CODEX_HOME: a `VersionInfo` of
@@ -125,11 +137,83 @@ class ProviderEventOutcome:
         return self.terminal_state != FANOUT_TERMINAL_CLEAN
 
 
-def codex_home(profile: Mapping[str, Any]) -> str:
+@dataclass(frozen=True)
+class CodexHome:
+    """The CODEX_HOME a head runs with, and which rung of the resolver chose it."""
+
+    path: str
+    kind: str
+
+    @property
+    def migration_pending(self) -> bool:
+        """The installation still runs on the legacy home because the data-dir one has no login."""
+        return self.kind == CODEX_HOME_LEGACY
+
+
+def resolve_codex_home(
+    profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None
+) -> CodexHome:
+    """Which CODEX_HOME a head with this profile runs with, resolved now rather than at import.
+
+    In order: the profile's `codex_home`, `TA_CODEX_HOME`, `<data_dir>/codex-home` once it holds a
+    login, and otherwise the legacy Orca home. The data-dir home is taken only with a non-empty
+    `auth.json` in it, so the switch happens when the PO logs in there and never earlier: a default
+    that moved on its own would log every Codex head out. The legacy rung is removed in A20.
+    """
+    configured = profile.get("codex_home")
+    if configured:
+        return CodexHome(str(configured), CODEX_HOME_PROFILE)
+    override = os.environ.get("TA_CODEX_HOME")
+    if override:
+        return CodexHome(override, CODEX_HOME_ENV)
+    data_home = data_dir_codex_home(data_dir)
+    if data_home is not None and codex_home_logged_in(data_home):
+        return CodexHome(str(data_home), CODEX_HOME_DATA_DIR)
+    return CodexHome(legacy_codex_home(), CODEX_HOME_LEGACY)
+
+
+def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None) -> str:
     """The CODEX_HOME a head with this profile runs with — and therefore the config it reads trust
     from. The launch command names the same one, so the file written here is the file that head
     will actually consult."""
-    return str(profile.get("codex_home") or os.environ.get("TA_CODEX_HOME") or CODEX_HOME_DEFAULT)
+    return resolve_codex_home(profile, data_dir=data_dir).path
+
+
+def legacy_codex_home() -> str:
+    """The legacy Orca-managed home of the account this process runs as."""
+    return str(Path.home() / CODEX_HOME_LEGACY_RELATIVE)
+
+
+def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
+    """`<data_dir>/codex-home` of the installation this process serves, or None with none selected.
+
+    A named data dir wins, then `SECRETARY_DATA_DIR`, then the `data_dir` of an explicitly
+    configured `SECRETARY_INSTANCE`. The default instance path is never read: a checkout on a host
+    with an installation must not pick up that installation's login.
+    """
+    if data_dir is not None:
+        return Path(data_dir).expanduser() / CODEX_HOME_DATA_DIRNAME
+    configured = os.environ.get("SECRETARY_DATA_DIR")
+    if configured:
+        return Path(configured).expanduser() / CODEX_HOME_DATA_DIRNAME
+    instance = os.environ.get("SECRETARY_INSTANCE")
+    if not instance:
+        return None
+    from secretary.config import DataDirError, instance_data_dir
+
+    try:
+        return instance_data_dir(Path(instance)) / CODEX_HOME_DATA_DIRNAME
+    except (DataDirError, OSError):
+        return None
+
+
+def codex_home_logged_in(home: Path) -> bool:
+    """Whether a CODEX_HOME holds a login: `auth.json` present and non-empty."""
+    try:
+        info = (home / CODEX_AUTH_FILE).stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
 
 
 def codex_trust_paths(workspace: str) -> list[str]:

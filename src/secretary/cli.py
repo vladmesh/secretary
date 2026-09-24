@@ -82,6 +82,14 @@ from secretary.provision import apply_provision_result, render_result, start_pro
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.role_skills import add_role_skills_subcommands
+from secretary.runtime.codex_preflight import (
+    CODEX_HOME_DATA_DIR,
+    CODEX_HOME_ENV,
+    CODEX_HOME_LEGACY,
+    CODEX_HOME_PROFILE,
+    data_dir_codex_home,
+    resolve_codex_home,
+)
 from secretary.secret_commands import add_secret_subcommands
 from secretary.secret_store import store_findings as _secret_store_findings
 from secretary.session import run_shell
@@ -520,6 +528,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"memory model cache: {cache_dir}")
     if _is_temporary_directory(cache_dir):
         print("warning: memory model cache is in a temporary directory and can be cleaned unexpectedly")
+    for line in _codex_home_lines(_codex_home_status(report)):
+        print(line)
     if report.warnings:
         print(f"warnings: {len(report.warnings)}")
         for warning in report.warnings:
@@ -553,6 +563,39 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
+
+
+_CODEX_HOME_KINDS = {
+    CODEX_HOME_PROFILE: "profile codex_home",
+    CODEX_HOME_ENV: "TA_CODEX_HOME override",
+    CODEX_HOME_DATA_DIR: "data-dir home",
+    CODEX_HOME_LEGACY: "legacy fallback",
+}
+
+
+def _codex_home_status(report) -> dict[str, object]:
+    """The CODEX_HOME a Codex head of this installation launches with now, and which rung chose it."""
+    assert report.data_dir is not None
+    home = resolve_codex_home({}, data_dir=report.data_dir)
+    return {
+        "path": home.path,
+        "kind": home.kind,
+        "data_dir_home": str(data_dir_codex_home(report.data_dir)),
+        "migration_pending": home.migration_pending,
+    }
+
+
+def _codex_home_lines(status: dict[str, object]) -> list[str]:
+    """Doctor's lines for the active CODEX_HOME; a pending migration warns and never fails."""
+    kind = str(status["kind"])
+    lines = [f"codex home: {status['path']} ({_CODEX_HOME_KINDS.get(kind, kind)})"]
+    if status["migration_pending"]:
+        target = status["data_dir_home"]
+        lines.append(
+            f"warning: codex home migration pending: {target} holds no login; "
+            f"run `CODEX_HOME={shlex.quote(str(target))} codex login` (docs/OPERATIONS.md)"
+        )
+    return lines
 
 
 def _memory_cache_dir(report) -> Path:
@@ -666,6 +709,7 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         "ok": not inspection.findings,
         "findings": inspection.findings,
         "status": snapshot,
+        "codex_home": _codex_home_status(report),
     }
     print(json.dumps(payload, sort_keys=True))
     if inspection.unavailable:
@@ -972,7 +1016,9 @@ def production_runtime_provenance_finding(
     elif not inspect_runtime:
         return None
     else:
-        provenance = ProductionRuntime.installed(Path(product_root)).probe()
+        provenance = ProductionRuntime.installed(
+            Path(product_root), git_workspaces_root=report.data_dir / "workspaces"
+        ).probe()
     if provenance.valid:
         return None
     repair = shlex.join(

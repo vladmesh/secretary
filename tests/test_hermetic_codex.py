@@ -23,8 +23,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
+from secretary.dispatch import tui as dispatcher_tui
 from secretary.dispatch.host import InstanceCatalog
-from secretary.runtime import codex_preflight, heads
+from secretary.runtime import codex_preflight
 from tests import _SUITE_CODEX_HOME
 
 # A registry in the shape the offending dispatcher tests use: a Codex profile that says nothing
@@ -58,9 +60,13 @@ class HermeticCodexHomeTests(unittest.TestCase):
         installation_home = Path(codex_preflight.CODEX_HOME_DEFAULT)
         self.assertNotEqual(suite_home, installation_home)
         self.assertFalse(suite_home.is_relative_to(installation_home))
-        # Both readers of the seam agree, including the one that captured it at import time.
+        # Every reader resolves the seam at the call, so all of them agree on the suite's home.
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
-        self.assertEqual(Path(heads.CODEX_HOME), suite_home)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("TA_CODEX_SESSIONS", None)
+            os.environ.pop("SECRETARY_CODEX_SESSIONS", None)
+            self.assertEqual(dispatcher_tui._sessions_root(), suite_home / "sessions")
+            self.assertEqual(pipeline_codex_sessions.sessions_root(), suite_home / "sessions")
 
     def test_a_worker_and_a_reviewer_bring_up_write_only_where_the_run_owns(self) -> None:
         """The regression proper: the two roles whose launch tests wrote into the live config.
