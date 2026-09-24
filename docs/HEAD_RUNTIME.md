@@ -24,10 +24,17 @@ what is left to delete once it has (A20).
   five tiers of the shipped `heads.toml` (a test keeps it free of keyless profiles), and the
   installed registry (instance commit 16f4541b7). So an upgrade changes no live head.
 
-A standing agent's launch with no usable profile — the bare `claude` invocation, or a tick where
-nothing it can resolve names a supervisor — stays on a pane (`PANE_FALLBACK_RUNTIME` in
-`automations/runtime/dispatch.py`): a supervisor raises a head from a profile's spec. Pinned by
-`tests/test_dispatcher_contracts.py`.
+A standing agent's tick with no usable `local-pty` profile fails closed (secretary-1720): it starts
+no head and never falls back to a pane. The causes are: the registry would not load, no profile is
+routed to the role, the profile will not make a `HeadSpec`, its command will not render, or it names
+a runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The tick creates no
+steward report card, stops a supervised head an earlier tick raised for that role, and exits 1.
+To see the reason, read the last entry of `automation-state/<agent>/runs.jsonl` (under
+`TA_STATE`, by default `~/secretary-data/automation-state`): `action="no-supervised-head"`,
+`result="error"`, the cause in `error`. The unit's journal (`journalctl -u secretary-<agent>.service`)
+has the same reason on stderr. A `terminal_handle.json` left in the agent's state by the pane
+backend is refused the same way (`action="supervised-owner-conflict"`, exit 1): the tick never
+deletes it and never raises a head beside it. Remove it once that pane is confirmed gone. Pinned by `tests/test_automations_dispatch_local_pty.py` (`FailClosedTests`).
 
 ## `local-pty` parity criteria
 
@@ -74,15 +81,20 @@ before it.
    `_register_observer_repo`. Why: the git manager is chosen for every card whose heads are
    supervised, and later operations route by path, so with no Orca path left on a live record these
    branches are unreachable. The observer root repo then needs no Orca registration.
-4. **Orca branches in `automations/runtime/dispatch.py`** and `automations/runtime/orca_rpc.py`.
-   Why: a background agent reaches `orca_rpc` only on an `orca-legacy` profile.
+4. **Done (secretary-1720; the merge commit is filled in by a later docs card).** Orca branches in
+   `automations/runtime/dispatch.py` and `automations/runtime/orca_rpc.py`. A standing agent's
+   tick without a `local-pty` head fails closed instead of falling back to a pane. So the pane
+   lifecycle (`PANE_FALLBACK_RUNTIME`, warm reuse, ghost reap, watchdog restart, finalizer
+   trailer) and `orca_rpc.py` are deleted. `tests/test_architecture.py` keeps every module under
+   `secretary.automations` free of `pane_host`, `orca_rpc` and the `orca` / `orca-cli` binary.
 5. **The pane inventory in `dispatch/head_status.py`.** Why: it is read only for a run on
    `orca-legacy` or an Orca workspace; every other row already reads the supervisor and sets
    `pane_channel: not_consulted`.
 6. **`runtime/orca_legacy_head.py`, then `runtime/pane_host.py`.** Why: only the `orca-legacy`
    backend constructs them. Remove the pane-host importers first (`runtime/tui_delivery.py`,
    `runtime/agent_prompt_transport.py`, `runtime/head/operations.py`, `dispatch/tui.py`,
-   `dispatch/review.py`, `automations/runtime/finalizer.py`): each keeps a pane path only for Orca.
+   `dispatch/review.py`): each keeps a pane path only for Orca. `automations/runtime/finalizer.py`
+   is already deleted, with its `--spawn-finalizer` / `--finalize` flags (done: secretary-1720).
 7. **The legacy `CODEX_HOME` rung** (`~/.config/orca/codex-runtime-home/home`) in
    `codex_preflight.resolve_codex_home`, and its readers in `upgrade.py` and `installation.py`
    (secretary-1710). Why: once the login under the data dir is proven live, no Codex head reads the

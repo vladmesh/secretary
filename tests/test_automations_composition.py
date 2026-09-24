@@ -131,23 +131,6 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
         run.assert_called_once_with("steward", None, cleanup_only=True)
 
-    def test_finalizer_paths_delegate_without_canonical_construction(self) -> None:
-        with (
-            mock.patch.object(composition, "_instance_path", side_effect=AssertionError("instance")),
-            mock.patch.object(composition, "_report_board", side_effect=AssertionError("report board")),
-            mock.patch.object(triggered_main, "main", return_value=9) as main,
-        ):
-            self.assertEqual(composition.main(["steward", "dispatch", "--finalize"]), 9)
-            self.assertEqual(composition.main(["steward", "dispatch", "--spawn-finalizer"]), 9)
-
-        self.assertEqual(
-            main.call_args_list,
-            [
-                mock.call(["steward", "dispatch", "--finalize"]),
-                mock.call(["steward", "dispatch", "--spawn-finalizer"]),
-            ],
-        )
-
     def test_non_steward_is_delegated_without_reinterpretation(self) -> None:
         argv = ["retro", "dispatch", "--generation", "bad"]
         with mock.patch.object(triggered_main, "main", return_value=4) as main:
@@ -423,16 +406,18 @@ class SecretaryCliEntryTests(unittest.TestCase):
 
 
 class DispatchArgumentParityTests(unittest.TestCase):
-    def test_legacy_parser_keeps_variant_and_generation_quirks(self) -> None:
-        parsed = triggered_main.parse_dispatch_arguments(["--generation", "not-a-number", "deep-sweep"])
-        self.assertTrue(parsed.cleanup_only is False)
-        self.assertIsNone(parsed.generation)
-        # The legacy selector picks the first non-flag, including this malformed value.
-        self.assertEqual(parsed.variant, "not-a-number")
+    def test_the_variant_is_the_first_non_flag_and_cleanup_only_is_still_accepted(self) -> None:
+        parsed = triggered_main.parse_dispatch_arguments(["deep-sweep"])
+        self.assertIs(parsed.cleanup_only, False)
+        self.assertEqual(parsed.variant, "deep-sweep")
 
-        parsed = triggered_main.parse_dispatch_arguments(["--generation", "2"])
-        self.assertEqual(parsed.generation, 2)
-        self.assertEqual(parsed.variant, "2")
+        parsed = triggered_main.parse_dispatch_arguments(["--cleanup-only"])
+        self.assertIs(parsed.cleanup_only, True)
+        self.assertIsNone(parsed.variant)
+
+    def test_the_retired_finalizer_flags_are_gone(self) -> None:
+        """secretary-1720: the pane finalizer trailer and its helper are deleted with the pane."""
+        self.assertEqual(set(vars(triggered_main.parse_dispatch_arguments([]))), {"cleanup_only", "variant"})
 
 
 if __name__ == "__main__":

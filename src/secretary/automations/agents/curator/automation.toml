@@ -5,11 +5,6 @@
 
 name = "curator"
 skill = "/curate"         # prompt = skill invocation (skill lives in .claude/skills/curate)
-# runtime/dispatch.py's singleton driver never `/clear`-reuses a warm terminal for this agent:
-# every tick that finds its terminal idle (or stuck past the watchdog) tears the whole workspace
-# down and starts a brand new `claude` process instead (triggered-agents-445). See dispatch.py's
-# module docstring and its "idle: an ephemeral agent..." branch.
-ephemeral = true
 # Last resort only. The head this agent launches on is `role_defaults.curator` in the selected
 # head registry (the installation's own snapshot when it has one); this line answers for a
 # registry that routes the curator nowhere at all.

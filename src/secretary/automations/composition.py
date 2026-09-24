@@ -93,11 +93,8 @@ def _steward(argv: list[str]) -> int:
         return steward_cli.main(argv, reader=reader)
 
     parsed = triggered_main.parse_dispatch_arguments(argv[1:])
-    # These are the legacy dispatch terminal-finalizer paths.  They must remain
-    # free of config, board and audit construction; notably cleanup-only for a
-    # non-ephemeral steward is a zero-side-effect early return in dispatch.run.
-    if parsed.spawn_finalizer or parsed.finalize:
-        return triggered_main.main(["steward", *argv])
+    # A precheck skip's `--cleanup-only` must stay free of config, board and audit construction:
+    # it is a zero-side-effect early return in dispatch.run.
     if parsed.cleanup_only:
         return dispatch.run("steward", parsed.variant, cleanup_only=True)
     return dispatch.run("steward", parsed.variant, report_board=_report_board())

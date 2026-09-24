@@ -33,9 +33,8 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 - Resource health has one writer and one vocabulary: `secretary.head_health` runs each registry
   resource's `probe` command, classifies it (`ready`, `unknown`, `probe_broken`, `unauthenticated`,
   `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
-  300 s. The card dispatcher and the background agents' head resolution and warm-reuse check read
-  that one cache; a head is launchable when its status is `ready` or `unknown`. The shipped registry's
-  probes are `python3 -P -m secretary.runtime.resource_probe --resource <id>` (`claude-sub`,
+  300 s. The card dispatcher and the background agents' head resolution read that one cache; a
+  head is launchable when its status is `ready` or `unknown`. The shipped registry's probes are `python3 -P -m secretary.runtime.resource_probe --resource <id>` (`claude-sub`,
   `openai-sub`, `openrouter`): one cheap provider call, exit 0 healthy, 1 failed with one scrubbed
   reason line on stderr, 2 for an id it has no probe for. It writes nothing.
 - `src/secretary/runtime` holds the head-runtime utilities both the pipeline and the background
@@ -187,6 +186,8 @@ metadata; its freshness is computed against card audit.
 Standing agents: curator, steward and retro all enter `python3 -P -m secretary automations`. Its
 composition root supplies task-backed ports for steward signals and reports and for retro Done
 retention; curator needs none. The generic triggered-agent runtime owns only the port interfaces.
+Each tick raises the role's head on `local-pty` or fails closed with a recorded reason and exit 1.
+There is no pane path (see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
 
 ### Head runtime ownership
 

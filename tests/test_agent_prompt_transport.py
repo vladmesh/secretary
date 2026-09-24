@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 import threading
 import unittest
 from unittest import mock
 
-from secretary.automations.runtime import dispatch
 from secretary.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
@@ -193,26 +191,16 @@ class AgentPromptTransportTests(unittest.TestCase):
             send_agent_prompt("term-1", prepared)
 
     def test_public_runner_labels_never_include_the_prompt_body(self) -> None:
-        """Both runners that reach Orca redact before a failure of theirs becomes durable.
+        """The runner that reaches Orca redacts before a failure of its becomes durable.
 
-        The dispatcher's is a label predicate; the mechanical-role scheduler's is the failure its
-        runner raises, which is where its prompt could otherwise end up — it has no redactor of its
-        own any more, it runs the vectors `pane_host` spells and labels them with `pane_host`'s
-        own predicate (secretary-1416).
+        The dispatcher's is a label predicate. The mechanical-role scheduler had a runner of its
+        own that labelled its failures with the same predicate; it went with that scheduler's pane
+        lifecycle (secretary-1720).
         """
         prompt = "do not retain this 🔐\nsecond line"
         dispatcher_label = safe_command_label(
             ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
         )
-        refused = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="nope")
-        with mock.patch("secretary.automations.runtime.dispatch.subprocess.run", return_value=refused):
-            with self.assertRaises(RuntimeError) as raised:
-                dispatch._run_json(
-                    ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
-                )
-        service_label = str(raised.exception)
 
         self.assertNotIn(prompt, dispatcher_label)
-        self.assertNotIn(prompt, service_label)
         self.assertIn("<prompt-redacted>", dispatcher_label)
-        self.assertIn("<prompt-redacted>", service_label)

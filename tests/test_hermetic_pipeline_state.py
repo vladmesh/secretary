@@ -31,8 +31,6 @@ from secretary.automations.agents.pipeline import state as pipeline_state
 from secretary.automations.runtime import dispatch
 from secretary.runtime import shared_state
 from secretary.runtime import state as runtime_state
-from secretary.runtime.pane_host import Pane
-from tests.fakes.triggered_dispatch import FakeSessionHost
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -111,8 +109,8 @@ class SuitePipelineStateDirTests(unittest.TestCase):
 
 class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
     """The behavioural half: a hard freeze sitting in a production-like state directory cannot
-    make a triggered-dispatch test skip. Same scaffolding as tests/test_automations_dispatch.py's
-    warm-reuse case, so a regression shows up as "paused" where "reused" is expected."""
+    make a triggered-dispatch test skip. A regression shows up as "paused" where a bring-up is
+    expected."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -126,38 +124,27 @@ class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
         state_root_patch = mock.patch.object(runtime_state, "STATE_ROOT", self.state_root)
         state_root_patch.start()
         self.addCleanup(state_root_patch.stop)
-        self.command = dispatch.DispatchCommand("/retro", "claude '/retro'", None)
+        self.resolution = dispatch.LaunchResolution("/retro", "head", {"adapter": "claude"})
 
     def _actions(self, agent: str = "retro") -> list[str]:
         runs = self.state_root / agent / "runs.jsonl"
         return [json.loads(line)["action"] for line in runs.read_text(encoding="utf-8").splitlines()]
 
     def test_a_hard_freeze_in_a_production_like_state_dir_does_not_skip_a_dispatch(self) -> None:
-        host = FakeSessionHost(
-            panes=(Pane(handle="term-live", title="triggered-agent:retro", last_output_at=1.0),),
-            screens=(
-                "Claude Code\n❯",
-                "Claude Code\n✻ Forming... (4s · ↑ 13.2k tokens)",
-            ),
-        )
         with tempfile.TemporaryDirectory() as tmp:
             workspaces = Path(tmp) / "workspaces"
             _write_production_like_state_dir(workspaces)
             with (
                 mock.patch.object(shared_state, "WORKSPACES_ROOT", workspaces),
                 mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
-                mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
-                mock.patch.object(dispatch, "_is_idle", return_value=True),
-                mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
-                mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
-                mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
-                mock.patch("secretary.automations.runtime.dispatch.time.sleep"),
-                mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]),
+                mock.patch.object(dispatch, "_resolve_launch", return_value=self.resolution),
+                mock.patch.object(dispatch, "_supervised_bring_up", return_value=0) as bring_up,
             ):
-                self.assertEqual(dispatch.run("retro", host=host), 0)
+                self.assertEqual(dispatch.run("retro"), 0)
 
-        self.assertEqual(self._actions(), ["reused"])
-        self.assertEqual(host.sends, ["/clear", "/retro"])
+        bring_up.assert_called_once()
+        runs = self.state_root / "retro" / "runs.jsonl"
+        self.assertNotIn("paused", self._actions() if runs.exists() else [])
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 """secretary-1474: a mechanical role whose head this product holds under a supervisor of its own.
 
-The driver in `runtime/dispatch.py` has always driven every head of curator, steward and retro
-through `SessionHost`. Which backend holds a head has been the profile's own answer since
-secretary-1467, and the dispatcher's core has read it since; this driver did not. These tests are
-about the choice it now makes and about the tick that choice leads to.
+Since secretary-1720 that supervisor is the only way `runtime/dispatch.py` holds a head of
+curator, steward or retro: a tick whose resolution names no `local-pty` head fails closed — it
+raises nothing, records why in `runs.jsonl` and exits nonzero — and the pane lifecycle is gone.
+These tests are about the bring-up, about what a later tick makes of a head an earlier one raised,
+and about each cause of a failed-closed tick.
 
 Nothing about the supervised half is faked, for the reason `test_local_pty_head_runtime` gives:
 what the branch has to establish — a head that outlives the tick that raised it, a bring-up over a
@@ -12,16 +13,14 @@ nothing out — are facts about processes on this host, and a fake backend would
 So every supervised tick here starts a real supervisor over a real pty, and every test gives back
 what it started.
 
-The pane half is asserted the other way round, and at the bottom: on the supervised path the
-session manager is a host that raises on contact AND `orca_rpc.call` — the one place this driver
-reaches the session store directly, under `_reap_ghosts` — records and raises. Nothing in between
-is stubbed out, so no helper can stand in front of a call and hide it: a mock of `_reap_ghosts`
-that answers plausibly is exactly what let the last round's tests pass over a breach.
+That no route to Orca is left in the driver at all is `tests/test_architecture.py`'s to assert,
+over the source: there is no pane verb left here to forbid at run time.
 """
 
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import shlex
@@ -44,7 +43,6 @@ from secretary.runtime.head import HeadCommand, render_head_command
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty.client import SupervisorClient
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from secretary.runtime.pane_host import Pane
 
 REPO = Path(__file__).resolve().parents[1]
 #: A head that never exits and says what its own terminal handed it. Both properties are the point:
@@ -82,81 +80,6 @@ def _kill(pid: int, number: int = signal.SIGKILL, *, group: bool = False) -> Non
         os.killpg(pid, number) if group else os.kill(pid, number)
     except OSError:
         pass
-
-
-class ForbiddenSessionHost:
-    """A session manager that fails the test on contact.
-
-    The supervised path's claim is not "it uses Orca less"; it is that it uses Orca not at all. A
-    host that answers plausibly could let a stray call pass unnoticed, so this one cannot answer.
-    """
-
-    def _refuse(self, verb: str):
-        raise AssertionError(f"the supervised path reached the session manager: {verb}")
-
-    def send(self, *args, **kwargs):
-        self._refuse("send")
-
-    def read(self, *args, **kwargs):
-        self._refuse("read")
-
-    def wait_idle(self, *args, **kwargs):
-        self._refuse("wait_idle")
-
-    def open_pane(self, *args, **kwargs):
-        self._refuse("open_pane")
-
-    def split_pane(self, *args, **kwargs):
-        self._refuse("split_pane")
-
-    def rename_pane(self, *args, **kwargs):
-        self._refuse("rename_pane")
-
-    def close_pane(self, *args, **kwargs):
-        self._refuse("close_pane")
-
-    def panes(self, *args, **kwargs):
-        self._refuse("panes")
-
-    def stop_workspace(self, *args, **kwargs):
-        self._refuse("stop_workspace")
-
-
-class RecordingSessionHost:
-    """The pane backend as the ordinary tick uses it, recording what it was asked."""
-
-    def __init__(self) -> None:
-        self.opened: list[tuple[str, str, str]] = []
-        self.stopped: list[str] = []
-
-    def send(self, handle: str, text: str, *, enter: bool) -> dict:
-        return {"send": {"accepted": True}}
-
-    def read(self, handle: str, *, limit: int | None = None) -> dict:
-        return {"terminal": {"tail": []}}
-
-    def wait_idle(self, handle: str, *, timeout_ms: int) -> dict:
-        return {"wait": {"satisfied": True}}
-
-    def open_pane(self, workspace: str, title: str, command: str) -> Pane:
-        self.opened.append((workspace, title, command))
-        return Pane(handle=f"term-{len(self.opened)}", leaf=f"leaf-{len(self.opened)}", title=title)
-
-    def split_pane(self, handle: str, command: str) -> Pane:
-        raise AssertionError("the scheduler never splits a pane")
-
-    def rename_pane(self, handle: str, title: str) -> None:
-        raise AssertionError("the scheduler never renames a pane")
-
-    def close_pane(self, handle: str) -> None:
-        return None
-
-    def panes(self, workspace: str) -> list[Pane]:
-        return []
-
-    def stop_workspace(self, workspace: str) -> None:
-        self.stopped.append(workspace)
-        return None
 
 
 class MechanicalRoleBackendTestCase(unittest.TestCase):
@@ -223,35 +146,21 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         standing for any further read: a second reading gets the second answer, which is what an
         ordinary profile publication landing mid-tick used to do to a tick that read twice. A tick
         that takes one reading never sees past the first entry, and `self.reads` is what says so.
+        An exception as an answer is a registry that would not load.
         """
         answers = list(registry) if isinstance(registry, list) else [registry]
 
         def read() -> pipeline_heads.Registry:
             self.reads += 1
-            return answers.pop(0) if len(answers) > 1 else answers[0]
+            answer = answers.pop(0) if len(answers) > 1 else answers[0]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
 
         return read
 
     @contextlib.contextmanager
-    def _orca_banned(self):
-        """Every direct call into Orca's session store, recorded and refused.
-
-        `orca_rpc.call` is the bottom of the one route this driver has to the session store that
-        `SessionHost` does not carry (`_reap_ghosts` uses it). Recording as well as raising is
-        deliberate: `_reap_ghosts` swallows its own failures, so a test that only raised would
-        prove nothing about a call that was in fact made.
-        """
-        made: list[str] = []
-
-        def banned(method, *args, **kwargs):
-            made.append(method)
-            raise AssertionError(f"the supervised path reached Orca: {method}")
-
-        with mock.patch.object(dispatch.orca_rpc, "call", side_effect=banned):
-            yield made
-
-    @contextlib.contextmanager
-    def _tick(self, registry, *, host):
+    def _tick(self, registry):
         with contextlib.ExitStack() as stack:
             enter = stack.enter_context
             enter(
@@ -288,12 +197,11 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
                     ),
                 )
             )
-            yield host
+            yield stack
 
-    def run_tick(self, registry, *, host=None) -> int:
-        host = ForbiddenSessionHost() if host is None else host
-        with self._tick(registry, host=host):
-            return dispatch.run(self.AGENT, host=host, report_board=getattr(self, "board", None))
+    def run_tick(self, registry) -> int:
+        with self._tick(registry):
+            return dispatch.run(self.AGENT, report_board=getattr(self, "board", None))
 
     # -- what the tick left behind -------------------------------------------------------------
 
@@ -368,48 +276,16 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
 
 
 class BackendChoiceTests(MechanicalRoleBackendTestCase):
-    """Criterion 1 and 2: the driver chooses, and choosing changes nothing for a pane."""
+    """The resolved profile's own runtime decides, and only `local-pty` raises a head."""
 
     def test_a_profile_with_no_runtime_key_raises_a_head_under_a_supervisor(self) -> None:
-        """secretary-1718: a profile that names no runtime is a `local-pty` head, so a pane
-        profile has to say `orca-legacy` — the test below — and a keyless one is supervised."""
-        host = RecordingSessionHost()
+        """secretary-1718: a profile that names no runtime is a `local-pty` head."""
+        self.assertEqual(self.run_tick(self._registry()), 0)
 
-        self.assertEqual(self.run_tick(self._registry(), host=host), 0)
-
-        self.assertEqual(host.opened, [], "a keyless profile was put on a pane")
         run_dirs = self.run_dirs()
         self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
         self.assertTrue(_alive(self.head_pid(run_dirs[0])))
         self.assertEqual(self.actions(), ["supervised-started"])
-
-    def test_a_profile_naming_the_pane_backend_keeps_the_pane_lifecycle(self) -> None:
-        host = RecordingSessionHost()
-
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.run_dirs(), [], "a pane profile raised a supervised head")
-        self.assertEqual(self.actions(), ["created"])
-
-    def test_a_launch_with_no_usable_profile_stays_on_a_pane(self) -> None:
-        """secretary-1718: the profile default is `local-pty`, and the bare fallback is not a profile.
-
-        A supervisor raises a head from its profile's spec; the bare `claude` invocation and a
-        profile that will not make a spec have none, so they stay where they always ran. Were they
-        read by the profile default, a role on a pane would be handed over every tick.
-        """
-        self.assertEqual(dispatch._profile_runtime(None, None), ORCA_LEGACY_RUNTIME)
-        self.assertEqual(dispatch._profile_runtime("head", {"adapter": "nonsense"}), ORCA_LEGACY_RUNTIME)
-        self.assertEqual(dispatch._profile_runtime("head", {"adapter": "claude"}), LOCAL_PTY_RUNTIME)
-        host = RecordingSessionHost()
-
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(self._registry(adapter="nonsense"), host=host), 0)
-
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.run_dirs(), [], "a launch with no usable profile raised a supervised head")
 
     def test_a_profile_naming_the_supervisor_raises_a_head_under_one(self) -> None:
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
@@ -420,10 +296,9 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.actions(), ["supervised-started"])
 
     def test_the_backend_is_read_off_the_profile_the_launch_was_rendered_from(self) -> None:
-        """Not off a second lookup: the value is the resolved profile's own, as `_launch_cmd`
-        handed it back. The profile the registry routes this agent to is `orca-legacy`, and health
-        resolves the launch onto a supervised one, so a driver reading the routed profile instead
-        of the resolved one would take the pane path here."""
+        """Not off a second lookup: the profile the registry routes this agent to is `orca-legacy`,
+        and health resolves the launch onto a supervised one, so a driver reading the routed
+        profile instead of the resolved one would fail this tick closed."""
         registry = pipeline_heads.Registry(
             {"acct": {"account": "acct", "probe": "true"}},
             {
@@ -450,13 +325,73 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual(len(self.run_dirs()), 1)
         self.assertEqual(self.state.load_head_profile(), "supervised")
 
-    def test_a_launch_diverted_onto_a_pane_profile_runs_its_ordinary_tick(self) -> None:
-        """The mirror image, and the reason the choice is confirmed after the resolution.
 
-        The registry routes this agent to a supervised head, but this tick's own resolution landed
-        on a pane profile — a red resource is exactly how that happens. The tick has to dispatch
-        that head the way that backend's heads are dispatched, with the command it already built.
-        """
+class FailClosedTests(MechanicalRoleBackendTestCase):
+    """secretary-1720: a tick with no `local-pty` head to raise starts none, one test per cause.
+
+    Every one of them asserts the same four things: no supervisor was asked to start anything, no
+    run directory exists, `runs.jsonl` holds exactly one `no-supervised-head` entry with
+    `result="error"` and the cause, and the tick returned nonzero with that cause on stderr. There
+    is no pane verb left in the driver for any of them to reach instead; `test_architecture` holds
+    that line over the source.
+    """
+
+    def run_refused_tick(self, registry, reason: str) -> dict:
+        err = io.StringIO()
+        with (
+            mock.patch.object(
+                dispatch,
+                "_local_pty_runtime",
+                side_effect=AssertionError("a failed-closed tick asked for a supervisor"),
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertEqual(self.run_tick(registry), dispatch.REFUSED_EXIT)
+        self.assertEqual(self.run_dirs(), [], "a failed-closed tick raised a head")
+        self.assertIsNone(self.state.load_head_run())
+        events = self.events()
+        self.assertEqual([event["action"] for event in events], [dispatch.NO_SUPERVISED_HEAD])
+        self.assertEqual(events[0]["result"], "error")
+        self.assertIn(reason, events[0]["error"])
+        self.assertIn(reason, err.getvalue())
+        return events[0]
+
+    def test_a_registry_that_will_not_load(self) -> None:
+        event = self.run_refused_tick(
+            pipeline_heads.HeadRegistryError("heads.yaml: bad table"), "the head registry would not load"
+        )
+
+        self.assertIn("heads.yaml: bad table", event["error"])
+
+    def test_no_profile_routed_to_the_role(self) -> None:
+        registry = pipeline_heads.Registry(
+            {"acct": {"account": "acct", "probe": "true"}},
+            {"head": {"resource": "acct", "adapter": "claude", "fallback": []}},
+            {},
+        )
+
+        self.run_refused_tick(registry, f"no head profile is routed to {self.AGENT}")
+
+    def test_a_profile_that_will_not_make_a_head_spec(self) -> None:
+        """The reversed pin: this launch used to stay on a pane as the bare `claude` fallback."""
+        self.run_refused_tick(self._registry(adapter="nonsense"), "will not make a head spec")
+
+    def test_a_command_that_will_not_render(self) -> None:
+        def unrenderable(*_args, **_kwargs):
+            raise ValueError("no binary for this adapter")
+
+        with mock.patch.object(self, "_rendered", side_effect=unrenderable):
+            self.run_refused_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), "will not render")
+
+    def test_a_profile_naming_any_other_runtime(self) -> None:
+        event = self.run_refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), ORCA_LEGACY_RUNTIME)
+
+        self.assertIn("'head'", event["error"])
+
+    def test_a_launch_diverted_onto_another_runtime_is_refused_too(self) -> None:
+        """The registry routes this agent to a supervised head, and this tick's own resolution —
+        a red resource is exactly how that happens — lands on a profile naming another runtime.
+        What is refused is the resolution, not the routing."""
         registry = pipeline_heads.Registry(
             {"acct": {"account": "acct", "probe": "true"}},
             {
@@ -475,51 +410,73 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
             },
             {self.AGENT: "routed"},
         )
-        host = RecordingSessionHost()
         self.resolved = "pane"
 
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(registry, host=host), 0)
+        event = self.run_refused_tick(registry, ORCA_LEGACY_RUNTIME)
 
-        self.assertEqual(len(host.opened), 1, "the diverted launch never reached a pane")
-        self.assertEqual(self.run_dirs(), [])
-        self.assertEqual(self.state.load_head_profile(), "pane")
-        self.assertEqual(self.actions(), ["created"])
+        self.assertIn("'pane'", event["error"])
+
+    def test_a_paused_pipeline_is_not_a_refusal(self) -> None:
+        with (
+            self._tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)),
+            mock.patch.object(dispatch, "_pipeline_paused", return_value=True),
+        ):
+            self.assertEqual(dispatch.run(self.AGENT), 0)
+
+        self.assertEqual(self.actions(), ["paused"])
+        self.assertEqual(self.reads, 0, "a paused tick read the head registry")
+
+    def test_a_recorded_pane_refuses_the_bring_up_and_is_left_recorded(self) -> None:
+        """A `terminal_handle.json` from the retired pane backend names a head nothing here can
+        reach. It is not deleted, and no second head is raised beside it."""
+        self.state.save_terminal_handle("term-1", created_at=1.0)
+        err = io.StringIO()
+
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), dispatch.REFUSED_EXIT)
+
+        self.assertEqual(self.run_dirs(), [], "a head was raised beside a recorded pane")
+        self.assertEqual(self.state.load_terminal_handle(), "term-1", "the pane record was deleted")
+        events = self.events()
+        self.assertEqual([event["action"] for event in events], [dispatch.SUPERVISED_OWNER_CONFLICT])
+        self.assertEqual(events[0]["result"], "error")
+        self.assertIn("terminal_handle.json", events[0]["error"])
+        self.assertIn("terminal_handle.json", err.getvalue())
+
+    def test_cleanup_only_is_a_no_op_for_every_agent(self) -> None:
+        """The gate still passes `--cleanup-only` on a precheck skip; it touches nothing at all."""
+        for agent in ("curator", "retro", "steward"):
+            with (
+                self.subTest(agent=agent),
+                mock.patch.object(dispatch, "AgentState", side_effect=AssertionError("state was built")),
+                mock.patch.object(dispatch, "_pipeline_paused", side_effect=AssertionError("paused read")),
+            ):
+                self.assertEqual(dispatch.run(agent, cleanup_only=True), 0)
 
 
 class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
-    """Criteria 1, 2 and 3 against the reading itself: a tick opens the registry once.
+    """A tick opens the registry once, and acts on that one reading from its first verb to its last.
 
-    A tick asks the registry two things — could this agent land on a supervised head at all, and
-    which profile did this launch resolve to — and it used to open the registry four times to do
-    it. An ordinary profile publication fits between those readings, so the cheap answer could say
-    `orca-legacy` while the resolution said `local-pty`, and the tick then reaped ghost tabs and
-    listed panes on the first answer before handing its head to a supervisor on the second. The
-    repair is not another guard in front of another verb: it is the one reading. Both answers come
-    out of it, so the tick belongs to one backend from its first verb to its last.
+    A tick asks the registry which profile this agent is routed to and which profile its launch
+    resolved onto. An ordinary profile publication fits between two readings, so a tick that read
+    twice could route on one registry and resolve on the other. Both answers come out of one reading.
     """
 
     def _published_between_the_old_readings(self) -> list[pipeline_heads.Registry]:
-        """The registry a publication lands in the middle of, as the old four readings saw it.
-
-        The first two readings answer `orca-legacy` for this agent's profile and the last two
-        answer `local-pty` for the very same one — the ordinary `secretary upgrade` against a
-        scheduled tick. A tick that reads once never reaches the third entry at all; a tick that
-        read four times acted on both.
-        """
+        """The registry a publication lands in the middle of: the first two readings answer
+        `orca-legacy` for this agent's profile and the last two answer `local-pty` for the very
+        same one. A tick that reads once never reaches the third entry at all."""
         before = self._registry(runtime=ORCA_LEGACY_RUNTIME)
         after = self._registry(runtime=LOCAL_PTY_RUNTIME)
         return [before, before, after, after]
 
-    def test_a_pane_tick_opens_the_registry_once(self) -> None:
-        """Criterion 2, at the cost the pre-scan used to add: a pane tick pays for one reading."""
-        host = RecordingSessionHost()
+    def test_a_failed_closed_tick_opens_the_registry_once(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT
+            )
 
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-
-        self.assertEqual(self.reads, 1, "the pane tick opened the head registry more than once")
-        self.assertEqual(len(host.opened), 1)
+        self.assertEqual(self.reads, 1, "the tick opened the head registry more than once")
 
     def test_a_supervised_tick_opens_the_registry_once(self) -> None:
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
@@ -527,128 +484,36 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.reads, 1, "the supervised tick opened the head registry more than once")
         self.assertEqual(len(self.run_dirs()), 1)
 
-    def test_a_supervised_tick_makes_no_orca_call_at_all(self) -> None:
-        """Criterion 3 with nothing stubbed in between.
-
-        `_reap_ghosts`, `_agent_terminals` and the rest are left exactly as the driver has them;
-        what fails the test is the session manager and `orca_rpc.call` themselves, so any route to
-        Orca this tick took would be recorded whether or not its caller swallowed the failure.
-        """
-        self.prompt_after_start = True
-
-        with self._orca_banned() as made:
-            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
-
-        self.assertEqual(made, [], "the supervised tick reached Orca's session store")
-        self.assertEqual(self.submitted(), ["$retro"], "the head was never asked to run its skill")
-
     def test_a_publication_mid_tick_is_not_read_by_the_tick_it_lands_in(self) -> None:
-        """The one reading is the tick's whole answer, and the tick is a pane tick end to end.
+        """The one reading is the tick's whole answer: it said `orca-legacy`, so the tick fails
+        closed, and the publication is the next tick's business."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                self.run_tick(self._published_between_the_old_readings()), dispatch.REFUSED_EXIT
+            )
 
-        This is the reviewer's scenario for the previous submission: those same four readings, and
-        `_reap_ghosts` left alone. With four readings the tick reaped ghost tabs and listed panes
-        on the first answer and then raised a supervised head on the last one — Orca's session
-        lifecycle touched for a head a supervisor ends up holding. With one reading there is no
-        second answer to act on: this tick is the pane tick its reading described, and the
-        publication is the next tick's business.
-        """
-        host = RecordingSessionHost()
-        reaped: list[str] = []
-
-        def reap(method, *args, **kwargs):
-            reaped.append(method)
-            return {"result": {"snapshots": []}}
-
-        with mock.patch.object(dispatch.orca_rpc, "call", side_effect=reap):
-            self.assertEqual(self.run_tick(self._published_between_the_old_readings(), host=host), 0)
-
-        self.assertEqual(
-            self.run_dirs(), [], "the tick acted on Orca and then handed its head to a supervisor"
-        )
+        self.assertEqual(self.run_dirs(), [], "the tick acted on a registry it never read first")
         self.assertEqual(self.reads, 1, "the tick read the registry the publication changed")
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.actions(), ["created"])
-        self.assertTrue(reaped, "the pane tick was expected to reap its own ghost tabs")
+        self.assertEqual(self.actions(), [dispatch.NO_SUPERVISED_HEAD])
 
     def test_a_publication_before_the_tick_is_the_whole_tick(self) -> None:
-        """The mirror: the reading the tick takes is the supervised one, so the tick is supervised
-        from its first verb, and the readings a four-reading tick would have taken afterwards are
-        never taken at all."""
         after = self._registry(runtime=LOCAL_PTY_RUNTIME)
         stale = self._registry(runtime=ORCA_LEGACY_RUNTIME)
 
-        with self._orca_banned() as made:
-            self.assertEqual(self.run_tick([after, stale, stale, stale]), 0)
+        self.assertEqual(self.run_tick([after, stale, stale, stale]), 0)
 
-        self.assertEqual(made, [], "the supervised tick reached Orca's session store")
         self.assertEqual(self.reads, 1)
         self.assertEqual(len(self.run_dirs()), 1, "the tick raised no supervised head")
         self.assertEqual(self.actions(), ["supervised-started"])
 
 
-class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
-    """Criterion 2's other half: a tick that dispatches nothing leaves no report card.
-
-    One branch can reach an early exit already holding a command, and so already holding the
-    report card the command carries: a launch this tick resolved onto a pane profile after the
-    registry routed the agent to a supervised one. Every other skip is reached before any command
-    exists, which is what "a busy-skip never creates a card" has always meant; this one closes the
-    card it is holding instead, so the two say the same thing.
-    """
-
-    def _diverted(self) -> pipeline_heads.Registry:
-        return pipeline_heads.Registry(
-            {"acct": {"account": "acct", "probe": "true"}},
-            {
-                "routed": {
-                    "resource": "acct",
-                    "adapter": "claude",
-                    "fallback": ["pane"],
-                    "runtime": LOCAL_PTY_RUNTIME,
-                },
-                "pane": {
-                    "resource": "acct",
-                    "adapter": "claude",
-                    "fallback": [],
-                    "runtime": ORCA_LEGACY_RUNTIME,
-                },
-            },
-            {self.AGENT: "routed"},
-        )
-
-    def test_an_active_report_skip_releases_the_card_the_diverted_launch_built(self) -> None:
-        self.resolved = "pane"
-        released: list[object] = []
-
-        with contextlib.ExitStack() as stack:
-            enter = stack.enter_context
-            enter(
-                mock.patch.object(
-                    dispatch,
-                    "_fresh_steward_report_in_progress",
-                    return_value={"reference": "secretary-report"},
-                )
-            )
-            enter(
-                mock.patch.object(
-                    dispatch,
-                    "_release_steward_report",
-                    side_effect=lambda state, event, cmd, note, **_kwargs: released.append(cmd),
-                )
-            )
-            self.assertEqual(self.run_tick(self._diverted()), 0)
-
-        self.assertEqual(len(released), 1, "the diverted launch's report card was left open")
-        self.assertEqual(self.actions(), ["active-report-skip"])
-        self.assertEqual(self.run_dirs(), [], "a skipped tick raised a supervised head")
-
-
 class ManagedInterpreterLaunchTests(MechanicalRoleBackendTestCase):
-    """secretary-1708: whichever backend holds the head, its command puts the product's venv first.
+    """secretary-1708: the head's command puts the product's venv first.
 
-    The command a tick renders is recorded from the real renderer, and the head each backend then
-    raises is still this module's fixture: a provider CLI is not something these tests start. The
-    helper is answered with a sentinel so the rendered command can only carry it through that helper.
+    The command a tick renders is recorded from the real renderer, and the head the supervisor
+    then raises is still this module's fixture: a provider CLI is not something these tests start.
+    The helper is answered with a sentinel so the rendered command can only carry it through that
+    helper.
     """
 
     SENTINEL = Path("/sentinel/product/.venv/bin")
@@ -674,17 +539,6 @@ class ManagedInterpreterLaunchTests(MechanicalRoleBackendTestCase):
         for command in self.rendered:
             self.assertIn(f" -- /bin/sh -lc {shlex.quote(prefix)[:-1]}", command)
 
-    def test_a_pane_head_is_launched_under_the_product_venv(self) -> None:
-        host = RecordingSessionHost()
-        with (
-            mock.patch.object(role_env, "managed_venv_bin", return_value=self.SENTINEL),
-            mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
-        ):
-            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-
-        self.assertEqual(len(host.opened), 1)
-        self.assert_rendered_under_the_helper()
-
     def test_a_supervised_head_is_launched_under_the_product_venv(self) -> None:
         with mock.patch.object(role_env, "managed_venv_bin", return_value=self.SENTINEL):
             self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
@@ -694,28 +548,17 @@ class ManagedInterpreterLaunchTests(MechanicalRoleBackendTestCase):
 
 
 class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
-    """Criterion 3: the skill crosses the backend's own boundary, and nothing else is touched."""
+    """Criterion 3: the skill crosses the backend's own boundary."""
 
-    def test_the_skill_reaches_the_head_across_the_boundary_and_no_pane_is_read(self) -> None:
+    def test_the_skill_reaches_the_head_across_the_boundary(self) -> None:
         self.prompt_after_start = True
-        forbidden = {
-            name: mock.patch.object(
-                dispatch,
-                name,
-                side_effect=AssertionError(f"the supervised path called {name}"),
-            )
-            for name in ("_confirm_delivery", "_is_idle", "_agent_terminals", "_reap_ghosts")
-        }
 
-        with contextlib.ExitStack() as stack:
-            for patch in forbidden.values():
-                stack.enter_context(patch)
-            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
         self.assertEqual(self.submitted(), ["$retro"], "the head was never asked to run its skill")
 
     def test_a_head_whose_command_carries_its_prompt_is_not_typed_at(self) -> None:
-        """The claude shape: the prompt is on the command line, exactly as it is on a pane.
+        """The claude shape: the prompt is on the command line.
 
         There is nothing to deliver, so the receipt is a bring-up and the head is left working.
         """
@@ -872,107 +715,44 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
 
 
 class BackendHandoverTests(MechanicalRoleBackendTestCase):
-    """One role, one owner of its head, and a change of backend is a tick of its own.
+    """The hand-back from a supervised head: its role's resolution stops naming a supervisor.
 
-    Publishing a `runtime` for a role whose head is already up is an ordinary `secretary upgrade`
-    against a scheduled tick, and it used to leave the old head running while a second one was
-    raised on the new backend — a pane beside a supervised head one way, a supervised head beside a
-    pane the other. Both directions are here, and each of them asserts the same three things: no
-    intermediate state of the role has two live heads, the handover tick dispatches nothing and
-    leaves no report card, and the head on the new backend is raised by the tick after it.
+    Publishing a profile that names another runtime for a role whose head is already up used to
+    hand the role to a pane. There is no pane any more, so that tick fails closed — and it still
+    stops the supervised head first, across the boundary that raised it, because nothing would
+    ever stop a head its role no longer resolves to. It never raises a second head.
     """
 
-    def _pane_tick(self, registry, host):
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            return self.run_tick(registry, host=host)
+    def refused_tick(self, registry) -> int:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return self.run_tick(registry)
 
-    def test_a_pane_head_is_handed_to_a_supervisor_before_one_is_raised(self) -> None:
-        """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-        self.assertEqual(len(host.opened), 1, "the first tick raised no pane")
-        self.assertIsNotNone(self.state.load_terminal_handle())
-
-        # The profile of this same role is republished onto the supervisor, between ticks.
-        self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
-
-        self.assertEqual(
-            self.run_dirs(), [], "the handover tick raised a supervised head beside the live pane"
-        )
-        self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
-        self.assertEqual(
-            host.stopped,
-            [str(self.workspace)],
-            "the pane that held this role's head was not closed on the pane's path",
-        )
-        self.assertIsNone(
-            self.state.load_terminal_handle(), "the pane is still recorded as the owner of this role's head"
-        )
-        self.assertIsNone(
-            self.state.load_head_run(), "the handover tick wrote a supervised owner it never raised"
-        )
-        self.assertIsNone(self.state.load_active_report(), "the handover tick left a report card behind")
-        self.assertEqual(self.actions(), ["created", "handover-to-supervised"])
-
-        # The next tick, with no live head left anywhere, raises one on the new backend.
-        with self._orca_banned() as made:
-            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
-
-        self.assertEqual(made, [], "the bring-up after the handover reached Orca")
-        self.assertEqual(len(self.run_dirs()), 1, "the tick after the handover raised no head")
-        self.assertTrue(_alive(self.head_pid(self.run_dirs()[0])))
-        self.assertEqual(self.actions()[-1], "supervised-started")
-
-    def test_a_supervised_head_is_handed_back_to_a_pane_before_one_is_opened(self) -> None:
+    def test_a_supervised_head_is_stopped_when_its_role_stops_naming_a_supervisor(self) -> None:
         """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
         head, supervisor = self.head_pid(run_dir), self.supervisor_pid(run_dir)
         self.assertTrue(_alive(head), "the first tick raised no live head")
 
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
+        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self.assertEqual(host.opened, [], "the handover tick opened a pane beside a live supervised head")
         self.await_(
             lambda: not _alive(head),
-            message="the supervised head outlived the tick that handed the role back",
+            message="the supervised head outlived the tick that stopped naming a supervisor",
         )
         self.await_(lambda: not _alive(supervisor), soft=True)
         self.assertIsNone(self.state.load_head_run(), "the supervised head is still recorded as the owner")
-        self.assertIsNone(
-            self.state.load_terminal_handle(), "the handover tick recorded a pane it never opened"
-        )
-        self.assertIsNone(self.state.load_active_report(), "the handover tick left a report card behind")
-        self.assertEqual(self.actions(), ["supervised-started", "handover-to-pane"])
+        self.assertIsNone(self.state.load_terminal_handle(), "the tick recorded a pane")
+        self.assertIsNone(self.state.load_active_report(), "the tick left a report card behind")
+        self.assertEqual(self.actions(), ["supervised-started", "owner-stopped", dispatch.NO_SUPERVISED_HEAD])
 
-        # The next tick, with no live head left anywhere, opens the pane.
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
+        # The next tick has nothing to stop and still raises nothing.
+        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(
-            self.run_dirs(), [run_dir], "the tick after the handover raised another supervised head"
-        )
-        self.assertEqual(self.actions()[-1], "created")
+        self.assertEqual(self.run_dirs(), [run_dir], "a failed-closed tick raised another supervised head")
+        self.assertEqual(self.actions()[-1], dispatch.NO_SUPERVISED_HEAD)
 
-    def test_a_pane_that_will_not_confirm_it_stopped_raises_nothing(self) -> None:
-        """Criterion 5 of the contract, on the side this driver cannot ask the boundary about."""
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-
-        with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
-            self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
-
-        self.assertEqual(
-            self.run_dirs(), [], "a pane that would not confirm its stop still got a second head"
-        )
-        self.assertIsNotNone(
-            self.state.load_terminal_handle(), "the owner was forgotten without its stop being confirmed"
-        )
-        self.assertEqual(self.actions(), ["created", "handover-stop-failed"])
-
-    def test_a_supervised_head_that_has_already_ended_is_not_a_handover(self) -> None:
-        """A record whose head is provably gone names no owner, so the pane tick runs at once."""
+    def test_a_supervised_head_that_has_already_ended_is_forgotten_without_a_stop(self) -> None:
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
         dead = self.head_pid(run_dir)
@@ -984,12 +764,28 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
             message="the head never actually died",
         )
 
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
+        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self.assertEqual(len(host.opened), 1, "the pane tick was skipped for a head that had ended")
         self.assertIsNone(self.state.load_head_run())
-        self.assertEqual(self.actions(), ["supervised-started", "handover-owner-gone", "created"])
+        self.assertEqual(self.actions(), ["supervised-started", "owner-gone", dispatch.NO_SUPERVISED_HEAD])
+
+    def test_a_head_that_will_not_confirm_it_stopped_stays_recorded(self) -> None:
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        record = self.state.load_head_run()
+        refusing = mock.Mock()
+        refusing.observe.return_value = mock.Mock(status="alive", ok=True, reason="")
+        refusing.stop.return_value = mock.Mock(ok=False, status="alive", reason="stop not confirmed")
+
+        with mock.patch.object(dispatch, "_local_pty_runtime", return_value=refusing):
+            self.assertEqual(
+                self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT
+            )
+
+        self.assertEqual(self.state.load_head_run(), record, "the owner was forgotten unconfirmed")
+        refusing.start.assert_not_called()
+        self.assertEqual(
+            self.actions(), ["supervised-started", "owner-stop-failed", dispatch.NO_SUPERVISED_HEAD]
+        )
 
 
 class StewardBoard:
@@ -1035,19 +831,16 @@ class StewardBoard:
 
 
 class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
-    """The handover of the one mechanical role that reports on itself.
+    """The one mechanical role that reports on itself.
 
-    `retro` has no reporting contract, so the handover tests above can say nothing about it: a
-    steward dispatch creates a report card as it renders the skill naming it, hands it to the head
-    it launches, and records in `active_report.json` which head is writing which card. A handover
-    stops that head. Everything below is about what that owes the card.
+    `retro` has no reporting contract, so the tests above can say nothing about it: a steward
+    dispatch creates a report card as it renders the skill naming it, hands it to the head it
+    launches, and records in `active_report.json` which head is writing which card. Everything
+    below is about what a tick owes that card.
 
-    Two things, and this is the case that used to get both wrong. The card the stopped head was
-    writing is nobody else's to finish, so it is closed as part of stopping its writer — a card
-    left In progress under a head this driver has just ended is a sweep later steward reporting
-    reads as still under way, and the record naming its writer is about to be forgotten, so no
-    later tick could even tell. And the handover creates no card of its own: it is decided before
-    a command is built, so the tick that dispatches nothing never files a report to discover it.
+    A stopped head's card is nobody else's to finish, so it is closed as part of stopping its
+    writer, before the record naming that writer is forgotten. And a tick that raises nothing
+    creates no card of its own: the refusal is decided before a command is built.
     """
 
     AGENT = "steward"
@@ -1057,16 +850,16 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.board = StewardBoard()
 
     @contextlib.contextmanager
-    def _tick(self, registry, *, host):
+    def _tick(self, registry):
         with (
-            super()._tick(registry, host=host) as running,
+            super()._tick(registry) as running,
             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"}),
         ):
             yield running
 
-    def _pane_tick(self, registry, host):
-        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            return self.run_tick(registry, host=host)
+    def refused_tick(self, registry) -> int:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return self.run_tick(registry)
 
     def _standing_report(self) -> str:
         """The card the head this role currently has is writing, as the record names it."""
@@ -1076,113 +869,65 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.board.in_progress(), [reference])
         return reference
 
-    def _assert_the_handover_owed_nothing(self, standing: str) -> None:
-        """What a handover tick leaves behind, in both directions and for both cards."""
-        self.assertEqual(len(self.board.cards), 1, "the handover tick created a report card of its own")
-        self.assertEqual(
-            self.board.in_progress(), [], "the card the stopped head was writing was left In progress"
-        )
-        self.assertIn(
-            (self.AGENT, standing, "Done"),
-            self.board.moves,
-            "the card of the head this tick stopped was never closed",
-        )
-        self.assertIsNone(
-            self.state.load_active_report(), "a record of a head that no longer exists was left standing"
-        )
+    def test_a_failed_closed_tick_creates_no_report_card(self) -> None:
+        for registry in (
+            self._registry(runtime=ORCA_LEGACY_RUNTIME),
+            self._registry(adapter="nonsense"),
+            pipeline_heads.HeadRegistryError("heads.yaml: bad table"),
+        ):
+            with self.subTest(registry=registry):
+                self.assertEqual(self.refused_tick(registry), dispatch.REFUSED_EXIT)
+                self.assertEqual(self.board.cards, [], "a tick that raised nothing filed a report card")
+        self.assertEqual(self.actions(), [dispatch.NO_SUPERVISED_HEAD] * 3)
 
-    def test_a_pane_head_hands_its_report_over_with_the_role(self) -> None:
-        """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-        standing = self._standing_report()
+    def test_a_card_whose_command_will_not_render_after_all_is_closed_undispatched(self) -> None:
+        """The resolution renders once without a card; should the render with the card refuse
+        after all, the card it was made for is closed through `_TickReports` before the refusal."""
+        rendered = self._rendered
 
-        self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
+        def refuse_with_a_card(profile, *, prompt=None, **kwargs):
+            if prompt and "--card" in prompt:
+                raise ValueError("the card argument broke the renderer")
+            return rendered(profile, prompt=prompt, **kwargs)
 
-        self._assert_the_handover_owed_nothing(standing)
-        self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
-        self.assertEqual(host.stopped, [str(self.workspace)])
-        self.assertEqual(self.run_dirs(), [], "the handover tick raised a supervised head")
-        self.assertIsNone(self.state.load_terminal_handle())
-        self.assertEqual(self.actions()[-2:], ["owner-report-release", "handover-to-supervised"])
+        with mock.patch.object(self, "_rendered", side_effect=refuse_with_a_card):
+            self.assertEqual(
+                self.refused_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), dispatch.REFUSED_EXIT
+            )
 
-        # The tick after it raises the head on the new backend, and files exactly one card for it.
-        with self._orca_banned() as made:
-            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        self.assertEqual(self.run_dirs(), [])
+        self.assertEqual(len(self.board.cards), 1)
+        self.assertEqual(self.board.in_progress(), [], "the card of a tick that raised nothing is open")
+        self.assertIsNone(self.state.load_active_report())
+        self.assertEqual(self.actions(), ["dispatch-release", dispatch.NO_SUPERVISED_HEAD])
 
-        self.assertEqual(made, [], "the bring-up after the handover reached Orca")
-        self.assertEqual(len(self.run_dirs()), 1, "the tick after the handover raised no head")
-        self.assertTrue(_alive(self.head_pid(self.run_dirs()[0])))
-        self.assertEqual(
-            len(self.board.cards), 2, "the tick that raised the head filed no card, or filed more than one"
-        )
-        self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
-        self.assertEqual(
-            (self.state.load_active_report() or {}).get("reference"),
-            self.board.cards[-1]["reference"],
-            "the head that was raised is not recorded as writing the new card",
-        )
-
-    def test_a_supervised_head_hands_its_report_back_with_the_role(self) -> None:
-        """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
+    def test_a_supervised_head_is_stopped_with_its_report(self) -> None:
+        """`local-pty -> orca-legacy`: the head is stopped across the boundary that raised it, and
+        the card it was writing is closed with it."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         run_dir = self.run_dirs()[0]
         head = self.head_pid(run_dir)
         self.assertTrue(_alive(head), "the first tick raised no live head")
         standing = self._standing_report()
 
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
+        self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self._assert_the_handover_owed_nothing(standing)
-        self.assertEqual(host.opened, [], "the handover tick opened a pane beside a live supervised head")
-        self.await_(
-            lambda: not _alive(head),
-            message="the supervised head outlived the tick that handed the role back",
+        self.assertEqual(len(self.board.cards), 1, "the failed-closed tick created a report card of its own")
+        self.assertEqual(
+            self.board.in_progress(), [], "the card the stopped head was writing was left In progress"
         )
+        self.assertIn((self.AGENT, standing, "Done"), self.board.moves)
+        self.assertIsNone(self.state.load_active_report())
+        self.await_(lambda: not _alive(head), message="the supervised head outlived the tick that stopped it")
         self.assertIsNone(self.state.load_head_run())
-        self.assertEqual(self.actions()[-2:], ["owner-report-release", "handover-to-pane"])
-
-        # The tick after it opens the pane, and files exactly one card for it.
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-
-        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
         self.assertEqual(
-            self.run_dirs(), [run_dir], "the tick after the handover raised another supervised head"
+            self.actions()[-3:], ["owner-report-release", "owner-stopped", dispatch.NO_SUPERVISED_HEAD]
         )
-        self.assertEqual(
-            len(self.board.cards), 2, "the tick that opened the pane filed no card, or filed more than one"
-        )
-        self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
-        self.assertEqual(
-            (self.state.load_active_report() or {}).get("reference"),
-            self.board.cards[-1]["reference"],
-            "the head that was opened is not recorded as writing the new card",
-        )
-
-    def test_a_pane_that_will_not_confirm_it_stopped_keeps_its_head_and_its_report(self) -> None:
-        """Fail-closed is fail-closed for the card too: the writer is still up, so it still owns
-        the report, and the record still says which head has it."""
-        host = RecordingSessionHost()
-        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
-        standing = self._standing_report()
-
-        with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
-            self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
-
-        self.assertEqual(len(self.board.cards), 1, "the refused handover created a report card")
-        self.assertEqual(
-            self.board.in_progress(), [standing], "the card of a head that is still up was closed"
-        )
-        self.assertEqual((self.state.load_active_report() or {}).get("reference"), standing)
-        self.assertIsNotNone(self.state.load_terminal_handle())
-        self.assertEqual(self.run_dirs(), [])
-        self.assertEqual(self.actions(), ["created", "handover-stop-failed"])
 
     def test_a_working_supervised_head_keeps_the_report_it_is_writing(self) -> None:
-        """The busy-skip is the other tick that dispatches nothing, and it is not a handover: the
-        head that is up is the one writing the standing card, so that card is untouched and the
-        card this tick made is the one that is closed."""
+        """The busy-skip dispatches nothing and stops nothing: the head that is up is the one
+        writing the standing card, so that card is untouched and the card this tick made is the one
+        that is closed."""
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
         standing = self._standing_report()
 
