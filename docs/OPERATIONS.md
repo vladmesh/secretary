@@ -1407,7 +1407,7 @@ nothing can be typed into, or an unconfirmed send takes respawn then Blocked. A 
 was never persisted or whose binding was lost falls back to the long ceiling. The respawned worker gets the
 same `TASK.md`, commands and generation.
 
-This idle bounce is a degraded tick and turns `triggered_agents health` red until a healthy tick follows.
+This idle bounce is a degraded tick and turns `secretary automations health` red until a healthy tick follows.
 The Blocked move after it is not degraded; the steward reports it as `new_blocked`. Every respawn writes a
 board comment.
 
@@ -1469,7 +1469,7 @@ the same command unchanged (answers `replayed`) or run `secretary task reconcile
 ## Background-role telemetry
 
 ```bash
-python3 -P -m triggered_agents health
+python3 -P -m secretary automations health
 ```
 
 One line per role: timer state and freshness of the last healthy tick. Expected state comes from
@@ -1478,7 +1478,7 @@ neutral. An unreadable config prints an error. Non-zero exit: an enabled role is
 unavailable.
 
 - `scripts/secretary-agent-gate.sh` runs every role through one environment and exit-code protocol
-  (every role through `python3 -P -m triggered_agents`, which injects the board ports steward and retro need). It
+  (every role through `python3 -P -m secretary automations`, which injects the board ports steward and retro need). It
   resolves the checkout as `TA_RUNTIME_PYTHONPATH`, then `TA_SECRETARY_REPO`, then `$HOME/secretary`, and
   uses only that checkout's `.venv/bin/python3`. A `configuration error` naming the checkout means its
   source tree or interpreter is missing, non-executable or another venv's; it fails before precheck.
@@ -1837,7 +1837,7 @@ Restart reasons, from repository-relative changed paths:
 
 | reason | what moved |
 | --- | --- |
-| `product code or dependencies changed` | `src/` (both `secretary` and the background agents' `triggered_agents`), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
+| `product code or dependencies changed` | `src/` (`secretary`, the background agents' `secretary.automations` included), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
 | `bundled schemas changed` | `src/secretary/schemas/` |
 | `a web unit file changed` | `secretary-web.service` or the front unit |
 | `the head registry snapshot changed` | `heads/heads.yaml` regenerated |
@@ -2184,7 +2184,7 @@ automation must remain disabled, and this installation's curator component must 
 route change. Verify the latter read-only against the selected installation:
 
 ```bash
-SECRETARY_INSTANCE=INSTANCE python3 -P -m triggered_agents health
+SECRETARY_INSTANCE=INSTANCE python3 -P -m secretary automations health
 ```
 
 The output must retain the `DISABLED curator` line. Do not change `host.components.curator`, enable the Orca

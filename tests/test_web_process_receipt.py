@@ -57,7 +57,7 @@ class WebProcessReceiptTests(unittest.TestCase):
             "src/secretary/__init__.py": "",
             "src/secretary/app.py": "VERSION = 'A'\n",
             "src/secretary/schemas/contract.json": '{"type":"object"}\n',
-            "src/triggered_agents/__init__.py": "",
+            "src/secretary/automations/__init__.py": "",
             "pyproject.toml": "[project]\nname = 'secretary'\n",
             "packaging/systemd/secretary-web.service": UNIT_TEXT.decode(),
             "packaging/systemd/secretary-web-front.service": "[Unit]\nPartOf=secretary-web.service\n",

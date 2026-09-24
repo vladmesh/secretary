@@ -7,13 +7,13 @@ Output is PROPOSALS only — cards in the Pipeline board's Issues column (never 
 merge/push to any main). All judgment lives in the /retro skill; Python only gathers and redacts.
 
 Flow the agent follows each run:
-  1. `python3 -m triggered_agents retro harvest`  -> redacted transcript batch (markdown) plus
+  1. `python3 -P -m secretary automations retro harvest`  -> redacted transcript batch (markdown) plus
                                      the search-log tail for the batch's time window on stdout;
                                      the pending watermark is cached on disk.
   2. agent judges the batch, files each proposal as an Issues card on the Pipeline board
      (`pipeline --role retro idea ...`) or concludes there is nothing, optionally
      `retro log-proposal --ref <card reference> [--ref <card reference> ...]`.
-  3. `python3 -m triggered_agents retro advance`  -> moves the watermark past step 1.
+  3. `python3 -P -m secretary automations retro advance`  -> moves the watermark past step 1.
 
 Two-phase like the curator: a crash before the proposals are filed re-harvests instead of
 dropping turns. `harvest --json` emits the structured batch; `sessions` lists discovered sources;
@@ -165,7 +165,7 @@ def main(argv=None, *, retention: DoneRetention | None = None) -> int:
     if cmd == "log-proposal":
         import argparse
 
-        p = argparse.ArgumentParser(prog="triggered_agents retro log-proposal")
+        p = argparse.ArgumentParser(prog="secretary automations retro log-proposal")
         p.add_argument(
             "--ref", required=True, action="append", help="board card reference filed this run (repeatable)"
         )

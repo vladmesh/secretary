@@ -1920,7 +1920,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
 
     FORBIDDEN_IMPORTS = frozenset(
         """
-        triggered_agents.runtime.orca_rpc secretary.runtime.pane_host
+        secretary.automations.runtime.orca_rpc secretary.runtime.pane_host
         secretary.runtime.orca_legacy_head secretary.runtime.tui_delivery
         secretary.dispatch.head_status secretary.dispatch.host secretary.dispatch.review
         orca
@@ -1949,8 +1949,8 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
         self.assertEqual(offenders, [])
 
     def test_the_start_and_result_paths_call_no_orca(self) -> None:
+        from secretary.automations.runtime import orca_rpc
         from secretary.runtime import pane_host
-        from triggered_agents.runtime import orca_rpc
 
         def detonate(*_args, **_kwargs):
             raise AssertionError("the product runtime reached Orca")

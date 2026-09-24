@@ -25,6 +25,9 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import host
+from secretary.automations.agents.steward import cli as steward_cli
+from secretary.automations.agents.steward import signals as steward_signals
+from secretary.automations.runtime import health, production_telemetry
 from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
 from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
@@ -44,14 +47,11 @@ from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.runtime import role_env
+from secretary.runtime.state import PRECHECK_SKIP, AgentState
 from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
 from tests.retired_board import legacy_runtime_lines
 from tests.sql_backend_fixtures import card_store
-from triggered_agents.agents.steward import cli as steward_cli
-from triggered_agents.agents.steward import signals as steward_signals
-from triggered_agents.runtime import health, production_telemetry
-from secretary.runtime.state import PRECHECK_SKIP, AgentState
 
 
 class EmptyStewardReader:
@@ -143,7 +143,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
     def read_through_the_agent_reader(self) -> production_telemetry.TickTelemetry:
         """The record as the health line and the steward actually see it.
 
-        Reading it back through `triggered_agents` rather than out of the payload is the point:
+        Reading it back through `secretary.automations` rather than out of the payload is the point:
         writer and reader live in different processes on the host, and the file is the only
         contract between them.
         """

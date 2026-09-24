@@ -12,7 +12,6 @@ import sys
 import time
 
 from secretary.runtime import role_env
-
 from secretary.runtime.pane_host import SessionHost, session_host
 from secretary.runtime.state import AgentState
 
@@ -32,7 +31,7 @@ def with_finalizer(agent: str, launch: str, generation: int) -> str:
     identifies this terminal, so a late helper cannot stop a newer replacement.
     """
     finalizer = role_env.wrap_shell_command(
-        agent, f"python3 -P -m triggered_agents {agent} dispatch --spawn-finalizer --generation {generation}"
+        agent, f"python3 -P -m secretary automations {agent} dispatch --spawn-finalizer --generation {generation}"
     )
     return f"{launch}; {finalizer}"
 
@@ -43,7 +42,7 @@ def spawn_finalizer(agent: str, generation: int | None = None) -> int:
     if not dispatch._is_ephemeral(agent):
         return 0
     state = AgentState(agent)
-    command = [sys.executable, "-P", "-m", "triggered_agents", agent, "dispatch", "--finalize"]
+    command = [sys.executable, "-P", "-m", "secretary", "automations", agent, "dispatch", "--finalize"]
     if generation is not None:
         command += ["--generation", str(generation)]
     try:

@@ -33,10 +33,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.automations.runtime import dispatch
 from secretary.dispatch.watchdog import head_process_status
-from secretary.runtime import heads as pipeline_heads
 from secretary.head_health import HeadChoice, HeadReadiness
-from triggered_agents.runtime import dispatch
+from secretary.runtime import heads as pipeline_heads
 from secretary.runtime import state as runtime_state
 from secretary.runtime.head import HeadCommand
 from secretary.runtime.head.local_pty import protocol

@@ -261,8 +261,7 @@ python3 -P -m secretary task decide --role observer --actor observer --ref <card
 You cannot move the card out of Assessment yourself, and a matching decision does not buy you the
 move: every exit from that column is refused to you, because the merge or the rework round has to
 run before the card moves and the dispatcher is what runs it. Recording the decision is the whole
-of your part. The `triggered_agents pipeline` CLI does not serve this either, it only
-carries the steward's escalation to Blocked. Left alone the card wakes the steward as a stale one,
+of your part. No other board command serves this either. Left alone the card wakes the steward as a stale one,
 which is an escalation, not a decision.
 
 A release the dispatcher could not carry out lands the card in Blocked with the failure on it, not

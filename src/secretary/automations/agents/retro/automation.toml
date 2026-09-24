@@ -8,7 +8,7 @@ skill = "/retro"          # prompt = skill invocation (skill lives in .claude/sk
 # Last resort only — `role_defaults.retro` in the selected head registry decides the real head.
 head = "claude-opus-medium"
 # Skip the run when no session has new turns since the watermark. Gated in the systemd unit.
-precheck = "python3 -P -m triggered_agents retro precheck"
+precheck = "python3 -P -m secretary automations retro precheck"
 
 [systemd]
 # The only scheduler; packaged as secretary-<name>.timer. Retro is a

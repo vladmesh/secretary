@@ -30,28 +30,69 @@ LEGACY_FLAT_MODULES = frozenset(
     """.split()
 )
 
-# `triggered_agents` is the CLI of the three background agents, built on top of `secretary`: it may
-# import any `secretary` module, and no `secretary` module may import it back. Since the
-# resource-health single writer (sprint:1455 fork #2, secretary-1690) moved the probes to
-# `secretary.runtime.resource_probe`, nothing under `src/secretary` names the package at all.
-REMAINING_TRIGGERED_AGENTS_MENTIONS: frozenset[str] = frozenset()
+# The background agents (curator, retro, steward) are `secretary.automations`, built on top of the
+# rest of `secretary`: the package may import any `secretary` module, and no other `secretary` module
+# imports it back. The one admitted edge is the `automations` subcommand of `secretary.cli`, which
+# hands its argv to the composition root through an import inside the handler, so no other command
+# pays for the agents' wiring. The package was the top-level `triggered_agents` until sprint:1459;
+# that name must not come back anywhere.
+AUTOMATIONS_PACKAGE = "secretary.automations"
+AUTOMATIONS_ENTRY = "src/secretary/cli.py"
+RETIRED_AGENTS_PACKAGE = "triggered_agents"
 
 
-def _imports_triggered_agents(relative: str, source: str) -> list[str]:
-    """Every absolute import of `triggered_agents` in one `secretary` module, as offender lines."""
-    offenders: list[str] = []
-    for node in ast.walk(ast.parse(source, filename=relative)):
-        names: list[str] = []
+def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, bool]]:
+    """Every absolute import in one module: (node, imported module, whether at module level)."""
+    tree = ast.parse(source, filename=relative)
+    top_level = {id(node) for node in tree.body}
+    found: list[tuple[ast.stmt, str, bool]] = []
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
+            found.extend((node, alias.name, id(node) in top_level) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names = [node.module]
-        offenders.extend(
-            f"{relative}:{node.lineno}: {name}"
-            for name in names
-            if name == "triggered_agents" or name.startswith("triggered_agents.")
-        )
-    return offenders
+            found.append((node, node.module, id(node) in top_level))
+            found.extend(
+                (node, f"{node.module}.{alias.name}", id(node) in top_level) for alias in node.names
+            )
+    return found
+
+
+def _names(module: str, package: str) -> bool:
+    return module == package or module.startswith(package + ".")
+
+
+def _imports_retired_agents_package(relative: str, source: str) -> list[str]:
+    """Every import of the retired top-level `triggered_agents` package, as offender lines."""
+    return sorted(
+        {
+            f"{relative}:{node.lineno}: {module.split('.')[0]}"
+            for node, module, _ in _absolute_imports(relative, source)
+            if _names(module, RETIRED_AGENTS_PACKAGE)
+        }
+    )
+
+
+def _imports_automations(relative: str, source: str) -> list[str]:
+    """Every back edge from a `secretary` module outside the agents into `secretary.automations`."""
+    if relative.startswith("src/secretary/automations/"):
+        return []
+    offenders: set[str] = set()
+    for node, module, top_level in _absolute_imports(relative, source):
+        # `from secretary import automations` names the package through its alias.
+        if not _names(module, AUTOMATIONS_PACKAGE):
+            continue
+        if relative == AUTOMATIONS_ENTRY and not top_level:
+            continue
+        offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
+    if relative.startswith("src/secretary/"):
+        tree = ast.parse(source, filename=relative)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level and (
+                (node.module or "").split(".")[0] == "automations"
+                or any(alias.name == "automations" for alias in node.names)
+            ):
+                offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
+    return sorted(offenders)
 
 
 # The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
@@ -386,26 +427,69 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertIn(f"def {entry}(", wait_source)
         self.assertNotIn("from secretary.dispatch.runtime import", wait_source)
 
-    def test_no_secretary_module_imports_triggered_agents(self) -> None:
-        """The dependency runs one way: `triggered_agents` -> `secretary`, never back."""
+    def test_the_retired_agents_package_stays_retired(self) -> None:
+        """`src/triggered_agents` is gone, and nothing in `src/`, `tests/` or `scripts/` imports it."""
+        self.assertFalse((ROOT / "src" / RETIRED_AGENTS_PACKAGE).exists())
+        self.assertTrue((ROOT / "src" / "secretary" / "automations" / "composition.py").is_file())
+        offenders: list[str] = []
+        for tree_root in ("src", "tests", "scripts"):
+            for path in sorted((ROOT / tree_root).rglob("*.py")):
+                relative = path.relative_to(ROOT).as_posix()
+                offenders.extend(_imports_retired_agents_package(relative, path.read_text(encoding="utf-8")))
+        self.assertEqual(offenders, [])
+
+    def test_a_planted_import_of_the_retired_package_is_caught(self) -> None:
+        for relative, source in (
+            ("tests/test_planted.py", "from triggered_agents import __main__\n"),
+            ("scripts/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
+            ("src/secretary/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
+        ):
+            with self.subTest(relative):
+                self.assertEqual(len(_imports_retired_agents_package(relative, source)), 1)
+        self.assertEqual(
+            _imports_retired_agents_package("tests/x.py", "from secretary.automations import composition\n"), []
+        )
+
+    def test_no_secretary_module_imports_the_agents_back(self) -> None:
+        """The dependency runs one way: `secretary.automations` -> the rest of `secretary`."""
         package = ROOT / "src" / "secretary"
         offenders: list[str] = []
         for path in sorted(package.rglob("*.py")):
             relative = path.relative_to(ROOT).as_posix()
-            offenders.extend(_imports_triggered_agents(relative, path.read_text(encoding="utf-8")))
-        self.assertTrue((package / "runtime" / "__init__.py").is_file())
+            offenders.extend(_imports_automations(relative, path.read_text(encoding="utf-8")))
         self.assertEqual(offenders, [])
+        # The admitted edge exists and is the on-demand one, or the exception above guards nothing.
+        entry = (ROOT / AUTOMATIONS_ENTRY).read_text(encoding="utf-8")
+        self.assertIn(
+            (AUTOMATIONS_PACKAGE + ".composition", False),
+            {(module, top) for _, module, top in _absolute_imports(AUTOMATIONS_ENTRY, entry)},
+        )
 
     def test_a_planted_back_edge_is_caught_anywhere_in_secretary(self) -> None:
         for relative, source in (
-            ("src/secretary/dispatch/planted.py", "from triggered_agents import __main__\n"),
-            ("src/secretary/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
-            ("src/secretary/runtime/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
+            ("src/secretary/dispatch/planted.py", "from secretary.automations import __main__\n"),
+            ("src/secretary/planted.py", "import secretary.automations.runtime.dispatch as d\n"),
+            ("src/secretary/runtime/planted.py", "def f():\n    from secretary.automations.agents import x\n"),
+            ("src/secretary/board/planted.py", "from secretary import automations\n"),
+            ("src/secretary/planted.py", "from .automations import composition\n"),
+            (AUTOMATIONS_ENTRY, "from secretary.automations.composition import main\n"),
         ):
-            with self.subTest(relative):
-                self.assertEqual(len(_imports_triggered_agents(relative, source)), 1)
-        # The admitted direction is not a back edge.
-        self.assertEqual(_imports_triggered_agents("src/secretary/x.py", "from secretary import tasks\n"), [])
+            with self.subTest(relative, source=source):
+                self.assertEqual(len(_imports_automations(relative, source)), 1)
+        # The admitted directions are not back edges.
+        self.assertEqual(_imports_automations("src/secretary/x.py", "from secretary import tasks\n"), [])
+        self.assertEqual(
+            _imports_automations(
+                "src/secretary/automations/composition.py", "from secretary.automations import __main__\n"
+            ),
+            [],
+        )
+        self.assertEqual(
+            _imports_automations(
+                AUTOMATIONS_ENTRY, "def run():\n    from secretary.automations.composition import main\n"
+            ),
+            [],
+        )
 
     def test_secretary_never_names_triggered_agents(self) -> None:
         """`grep -rn triggered_agents src/secretary` is empty: code, data and comments alike."""
@@ -415,9 +499,9 @@ class SourceLayoutTests(unittest.TestCase):
             if not path.is_file() or "__pycache__" in path.parts:
                 continue
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if "triggered_agents" in line:
+                if RETIRED_AGENTS_PACKAGE in line:
                     mentions.add(f"{path.relative_to(package).as_posix()}:{number}")
-        self.assertEqual(mentions, REMAINING_TRIGGERED_AGENTS_MENTIONS)
+        self.assertEqual(mentions, set())
 
 
 # Every place in `secretary` that builds the *file* audit (`TaskAudit` over a data dir) rather than
@@ -790,11 +874,11 @@ class SingleHomeTests(unittest.TestCase):
 
     def test_each_second_copy_is_caught(self) -> None:
         probes = {
-            "role_env module": ("triggered_agents/runtime/role_env.py", "X = 1\n"),
+            "role_env module": ("secretary/automations/runtime/role_env.py", "X = 1\n"),
             "ROLE_ALLOWLIST": ("secretary/session.py", "ROLE_ALLOWLIST = {}\n"),
             "SENSITIVE_ENV_NAME_RE": ("secretary/tasks.py", "SENSITIVE_ENV_NAME_RE = None\n"),
             "sensitive-name pattern": (
-                "triggered_agents/runtime/scrub.py",
+                "secretary/automations/runtime/scrub.py",
                 'import re\nNAMES = re.compile(r"(^|_)(TOKEN|SECRET)(_|$)")\n',
             ),
             "def is_sensitive_env_name": (
@@ -803,13 +887,13 @@ class SingleHomeTests(unittest.TestCase):
             ),
             "CODEX_EFFORTS": ("secretary/dispatch/launcher.py", "CODEX_EFFORTS: dict = {}\n"),
             "LAUNCH_ALLOWED_STATUSES": (
-                "triggered_agents/runtime/dispatch.py",
+                "secretary/automations/runtime/dispatch.py",
                 'LAUNCH_ALLOWED_STATUSES = frozenset({"green"})\n',
             ),
             "PROBE_TTL_SECONDS": ("secretary/runtime/resource_probe.py", "PROBE_TTL_SECONDS = 300\n"),
             # The shape the deleted second writer had: its own cache file next to its own state.
             "resource-health file": (
-                "triggered_agents/agents/pipeline/health.py",
+                "secretary/automations/agents/pipeline/health.py",
                 'from pathlib import Path\nHEALTH_FILE = Path("state") / "resource_health.json"\n',
             ),
             "def call_batch": (
@@ -833,7 +917,7 @@ class SingleHomeTests(unittest.TestCase):
                         'def resource_health_path(d):\n    return d / "dispatcher" / "resource_health.json"\n'
                     ),
                     # A reader that mentions the file in prose is not a writer.
-                    "triggered_agents/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
+                    "secretary/automations/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
                 }
             ),
             [],

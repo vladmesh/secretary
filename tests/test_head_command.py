@@ -389,7 +389,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
         """An agent a registry routes nowhere keeps the bare default-model `claude` invocation.
         That fallback is the emptiest profile there is, rendered here — not a second place a head
         command is assembled, which is what it used to be."""
-        from triggered_agents.runtime import dispatch
+        from secretary.automations.runtime import dispatch
 
         with (
             mock.patch.dict(os.environ, LAUNCH_ENV, clear=True),
@@ -412,17 +412,16 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 
 
 def _module_paths() -> list[Path]:
-    """Every module of both packages, minus the two files the seam is allowed to live in."""
+    """Every product module, the background agents' included, minus the files the seam lives in."""
     allowed = {
         REPO_ROOT / "src" / "secretary" / "runtime" / "pane_host.py",
     }
     head_package = REPO_ROOT / "src" / "secretary" / "runtime" / "head"
     paths = []
-    for package in ("secretary", "triggered_agents"):
-        for path in sorted((REPO_ROOT / "src" / package).rglob("*.py")):
-            if path in allowed or head_package in path.parents:
-                continue
-            paths.append(path)
+    for path in sorted((REPO_ROOT / "src" / "secretary").rglob("*.py")):
+        if path in allowed or head_package in path.parents:
+            continue
+        paths.append(path)
     return paths
 
 
@@ -599,7 +598,7 @@ class SeamGrepTests(unittest.TestCase):
         exception dict would be saying nothing (secretary-1416).
         """
         self.assertEqual(_SEAM_EXCEPTIONS, {})
-        scheduler = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "dispatch.py"
+        scheduler = REPO_ROOT / "src" / "secretary" / "automations" / "runtime" / "dispatch.py"
         self.assertIn(scheduler, _module_paths())
         source = scheduler.read_text(encoding="utf-8")
         self.assertEqual(_terminal_vectors(ast.parse(source)), [])

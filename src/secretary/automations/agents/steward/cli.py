@@ -1,7 +1,7 @@
 """steward agent — deterministic anomaly signals the `/steward` skill drives via Bash.
 
 Flow the agent follows each run:
-  1. `python3 -m triggered_agents steward scan`  -> JSON batch of anomaly signals since the
+  1. `python3 -P -m secretary automations steward scan`  -> JSON batch of anomaly signals since the
      watermark (see signals.py for the five kinds). Nothing here judges or writes anything —
      that is entirely the skill's job, same split as curator/retro.
   2. agent investigates by its own judgment (transcripts, workspaces, repos, curator/retro
@@ -10,7 +10,7 @@ Flow the agent follows each run:
      to Blocked with a writeup, comments on every card it touched, and posts the run's report as
      a comment on the wake-up report card the dispatcher created for this run (triggered-
      agents-255/259 — no more markdown file in control-panel/docs/steward/).
-  3. `python3 -m triggered_agents steward advance`  -> folds the scanned state into the
+  3. `python3 -P -m secretary automations steward advance`  -> folds the scanned state into the
      watermark, so a condition that hasn't changed does not re-spawn the head next hour.
 
 Two-phase like curator/retro: a crash before advance re-scans instead of dropping a signal.
@@ -38,7 +38,7 @@ from secretary.runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, B
 from . import signals
 
 STATE = signals.STATE
-ROLE_SKILLS = Path(__file__).resolve().parents[4] / "scripts" / "role_skills.py"
+ROLE_SKILLS = Path(__file__).resolve().parents[5] / "scripts" / "role_skills.py"
 
 
 def _scan(reader: signals.StewardSignalReader | None) -> dict:

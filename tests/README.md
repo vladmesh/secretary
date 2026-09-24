@@ -71,7 +71,7 @@ of by module attribute (which would keep an unpatched reference).
 ## The pipeline pause flag is read from a state dir this run owns
 
 The same result-must-not-depend-on-the-host rule covers the live pipeline's pause flag.
-`src/triggered_agents/agents/pipeline/state.py` resolves `STATE` at import time and
+`src/secretary/automations/agents/pipeline/state.py` resolves `STATE` at import time and
 `agents/pipeline/pause.py` binds `PAUSE_FILE` off it, so the file every
 triggered-dispatch test runs against is fixed before any test body executes. At its
 default that file is the live `<workspaces>/secretary/pipeline/state/pipeline/pause.json`
@@ -108,7 +108,7 @@ suite run inside a candidate worktree can pass while exercising production's `se
 the candidate's test files.
 
 `tests/test_hermetic_source_tree.py` asserts it: `secretary.__file__` and
-`triggered_agents.__file__` must resolve inside the checkout that contains `tests/`. It installs no
+`secretary.automations.__file__` must resolve inside the checkout that contains `tests/`. It installs no
 seam and shadows nothing -- there is no default to patch here, only a fact about the process.
 
 It is also the one guard in this family that is legitimately red on a perfectly good checkout: run

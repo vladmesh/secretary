@@ -11,7 +11,8 @@ move them to `Ready`; a PO or a person does that.
 
 `Issues` is also the Product backlog, and a Product issue is not yours to create: you cannot choose its
 product, kind and priority. Your card is a different record in the same column, typed as an execution task
-awaiting triage, and the `idea` command is the only way you write one; it resolves the column itself.
+awaiting triage, and `secretary task create --role retro --state issues` is the only way you write one:
+the board refuses a retro card in any other column.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
 only collect the redacted batch and the tail of the search log.
@@ -42,7 +43,7 @@ verdict of "no failures" beats noise.
 ### 1. Take the batch
 
 ```
-python3 -P -m triggered_agents retro harvest
+python3 -P -m secretary automations retro harvest
 ```
 
 Run it from your own workspace (the run's starting working directory is the retro worktree). **Do not `cd`**
@@ -63,9 +64,10 @@ MCP server that the fact really is in the canon. Do not draw the conclusion with
 Before wording the proposals, load the current cards:
 
 ```
-python3 -P -m triggered_agents pipeline list --column "Issues"
-python3 -P -m triggered_agents pipeline list --column "Ready"
+python3 -P -m secretary task list --state issues --state ready
 ```
+
+Add `--project <canonical-id>` to narrow the list to the project you are about to file against.
 
 Do not file a card if such a proposal is already in one of those lists in meaning, not in wording (do not
 breed duplicates on rephrasings), comparing title and description. If it matches, skip that failure and
@@ -79,7 +81,7 @@ Otherwise file one card per failure in `Issues` through the board CLI (board cre
 by the role environment; there is nothing to source separately):
 
 ```
-python3 -P -m triggered_agents pipeline --role retro idea \
+python3 -P -m secretary task create --role retro --state issues --type code \
   --project <the project whose skill or infrastructure is being fixed> \
   --title "retro: <short failure pattern>" \
   --description "$(cat <<'EOF'
@@ -90,12 +92,15 @@ EOF
 )"
 ```
 
+`--type code` fits a change to a skill, persona or code; use `--type research` when the proposal is an
+investigation rather than a change.
+
 `--project` is not the project where the failure happened, but the project whose skill or infrastructure you
 propose to fix (usually the product itself, when the fix belongs in the runtime's persona, hook or
 provisioning). Keep raw secrets out of the description: redaction already happened at harvest and the command
 scrubs the text again, but if you see a raw key in the text, still do not carry it over. The `retro` role can
-only file proposal cards on the board; the `idea` command refuses anything else. It picks the column itself,
-so there is no `--column`. The card it creates is typed as an execution task record, so a PO moves it to
+only file proposal cards on the board: `task create` refuses any `--state` other than `issues` for it, and
+the role may move no card. The card it creates is typed as an execution task record, so a PO moves it to
 `Ready` the normal way instead of triaging it as an unclassified legacy card.
 
 For the canon-hygiene pattern, target the project that owns the memory canon, and make the proposal concrete
@@ -107,13 +112,13 @@ the curator's work once the card is taken into `Ready`.
 Afterwards you can record what you found:
 
 ```
-python3 -P -m triggered_agents retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
+python3 -P -m secretary automations retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
 ```
 
 ### 5. Move the watermark
 
 ```
-python3 -P -m triggered_agents retro advance
+python3 -P -m secretary automations retro advance
 ```
 
 Always at the end, both when proposals were filed and when the verdict is "no failures". Otherwise the next

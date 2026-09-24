@@ -12,18 +12,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.runtime.claude_sessions import claude_project_dir_name
-from tests.fakes.triggered_dispatch import FakeSessionHost
-from secretary.runtime import tui_delivery
-from secretary.runtime import codex_preflight
-from triggered_agents.runtime import dispatch
+from secretary.automations.runtime import dispatch
+from secretary.runtime import codex_preflight, tui_delivery
 from secretary.runtime import state as runtime_state
 from secretary.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
+from secretary.runtime.claude_sessions import claude_project_dir_name
 from secretary.runtime.head import HeadSpec
 from secretary.runtime.pane_host import Pane, PaneHostError
+from tests.fakes.triggered_dispatch import FakeSessionHost
 
 
 class RecordingReports:
@@ -90,7 +89,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             # The resource-health cache a resolution reads and fills is the installation's; this
             # tick's is a throwaway one, never the live `<data>/dispatcher/resource_health.json`.
             mock.patch.object(dispatch, "_installation_data_dir", return_value=Path(self.tmp.name) / "data"),
-            mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
+            mock.patch("secretary.automations.runtime.dispatch.time.sleep"),
         ]
 
     def _running(self, patches):
@@ -107,7 +106,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch(
-                "triggered_agents.agents.pipeline.pause.is_paused",
+                "secretary.automations.agents.pipeline.pause.is_paused",
                 side_effect=OSError("pause.json: input/output error"),
             ),
             contextlib.redirect_stderr(output),
@@ -201,7 +200,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
             mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
             mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
-            mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
+            mock.patch("secretary.automations.runtime.dispatch.time.sleep"),
             mock.patch.object(dispatch, "_claude_user_turn_after", return_value=True),
         ]
         with self._running(patches):
@@ -250,7 +249,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         it did is the list that follows, never the stop's own answer."""
         host = FakeSessionHost(panes=(self.term,))
         state = runtime_state.AgentState("retro")
-        with mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
+        with mock.patch("secretary.automations.runtime.dispatch.time.sleep"):
             self.assertTrue(dispatch._stop_and_confirm(self.workspace, state, host=host))
 
         self.assertEqual(host.stopped, [self.workspace])
@@ -267,7 +266,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
         host = RefusingStop(panes=(self.term,))
         state = runtime_state.AgentState("retro")
-        with mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
+        with mock.patch("secretary.automations.runtime.dispatch.time.sleep"):
             self.assertTrue(dispatch._stop_and_confirm(self.workspace, state, host=host))
         self.assertEqual(host.stopped, [self.workspace])
 
@@ -462,8 +461,8 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         )
 
     def test_a_codex_service_head_is_launched_without_its_skill(self) -> None:
-        from secretary.runtime import heads as pipeline_heads
         from secretary.head_health import HeadChoice, HeadReadiness
+        from secretary.runtime import heads as pipeline_heads
 
         chosen = HeadChoice("codex", "codex", HeadReadiness("openai-sub", "ready", "probe succeeded", 0.0))
         with (

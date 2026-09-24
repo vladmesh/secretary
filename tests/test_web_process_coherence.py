@@ -638,7 +638,7 @@ class WebStepOrderingTests(unittest.TestCase):
 BASELINE = {
     "src/secretary/config.py": "SCHEMAS = {}\n",
     "src/secretary/schemas/onboarding-contract.schema.json": '{"$id": "onboarding-contract.schema.json"}\n',
-    "src/triggered_agents/__main__.py": "ROOT = None\n",
+    "src/secretary/automations/__main__.py": "ROOT = None\n",
     "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n",
     "packaging/systemd/README.md": "not a unit\n",
     "pyproject.toml": '[project]\nname = "secretary"\n',
@@ -803,9 +803,9 @@ class PulledRevisionTests(unittest.TestCase):
         self.assertIn("bundled schemas changed", result.detail)
         self.assertIn(("restart", WEB_UNIT), self.units.calls)
 
-    def test_a_revision_in_the_other_product_package_reaches_the_web_step(self) -> None:
-        """The transport imports `triggered_agents` too, so that source root is a reason as well."""
-        self.publish({"src/triggered_agents/__main__.py": "ROOT = '/x'\n"})
+    def test_a_revision_in_the_background_agents_reaches_the_web_step(self) -> None:
+        """The transport imports `secretary.automations` too, so a change there is a reason as well."""
+        self.publish({"src/secretary/automations/__main__.py": "ROOT = '/x'\n"})
         context = self.context()
 
         upgrade.step_pull(context)

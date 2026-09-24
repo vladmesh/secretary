@@ -5,7 +5,7 @@ import threading
 import unittest
 from unittest import mock
 
-from triggered_agents.runtime import dispatch
+from secretary.automations.runtime import dispatch
 from secretary.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
@@ -205,7 +205,7 @@ class AgentPromptTransportTests(unittest.TestCase):
             ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
         )
         refused = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="nope")
-        with mock.patch("triggered_agents.runtime.dispatch.subprocess.run", return_value=refused):
+        with mock.patch("secretary.automations.runtime.dispatch.subprocess.run", return_value=refused):
             with self.assertRaises(RuntimeError) as raised:
                 dispatch._run_json(
                     ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]

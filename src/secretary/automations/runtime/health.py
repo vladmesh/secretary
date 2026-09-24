@@ -75,7 +75,8 @@ def _max_age_s(agent: str, product_root: Path | None = None) -> int:
             (
                 (product_root or configured_product_root())
                 / "src"
-                / "triggered_agents"
+                / "secretary"
+                / "automations"
                 / "agents"
                 / agent
                 / "automation.toml"
@@ -133,7 +134,7 @@ def _role_expectations(agents: tuple[str, ...]) -> tuple[dict[str, RoleExpectati
         if not enabled:
             expectations[agent] = RoleExpectation(component, False, unit_prefix, 0)
             continue
-        spec_path = product_root / "src" / "triggered_agents" / "agents" / agent / "automation.toml"
+        spec_path = product_root / "src" / "secretary" / "automations" / "agents" / agent / "automation.toml"
         try:
             spec = tomllib.loads(spec_path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:

@@ -1,13 +1,13 @@
-"""triggered-agents CLI — dispatch to a registered agent's deterministic helpers.
+"""Background-agents CLI — dispatch to a registered agent's deterministic helpers.
 
-Usage: python3 -m triggered_agents <agent> <cmd> [args]
+Usage: python3 -P -m secretary automations <agent> <cmd> [args]
 
 Each triggered-agent (cron/event-driven headless run) shares this runtime: watermark,
 lock, precheck, redaction. The per-agent judgment lives in that agent's Orca skill; the
 `<cmd>` helpers here are the deterministic parts the agent drives via Bash.
 
-Agents are modules under `triggered_agents.agents.<name>` exposing `cli.main(argv)`.
-`python3 -m triggered_agents` enters through `triggered_agents.composition`, which injects the
+Agents are modules under `secretary.automations.agents.<name>` exposing `cli.main(argv)`.
+`secretary automations` enters through `secretary.automations.composition`, which injects the
 board ports steward and retro need from `secretary` and hands everything else to `main` here.
 """
 
@@ -74,7 +74,7 @@ def main(argv=None) -> int:
         return health.check(HEALTH_COMPONENTS)
     agent, rest = argv[0], argv[1:]
     if agent not in AGENTS:
-        print(f"triggered_agents: unknown agent {agent!r} (known: {', '.join(AGENTS)})", file=sys.stderr)
+        print(f"secretary automations: unknown agent {agent!r} (known: {', '.join(AGENTS)})", file=sys.stderr)
         return 2
     if rest and rest[0] == "dispatch":
         # Every dispatchable agent here is an LLM head driven by the generic singleton terminal
@@ -99,11 +99,11 @@ def main(argv=None) -> int:
         # an ephemeral agent's finished/stuck terminal get torn down instead of waiting for a
         # tick that has real work.
         return dispatch.run(agent, parsed.variant, cleanup_only=parsed.cleanup_only)
-    cli = import_module(f"triggered_agents.agents.{agent}.cli")
+    cli = import_module(f"secretary.automations.agents.{agent}.cli")
     return cli.main(rest)
 
 
 if __name__ == "__main__":
-    from triggered_agents.composition import main as composed_main
+    from secretary.automations.composition import main as composed_main
 
     raise SystemExit(composed_main())

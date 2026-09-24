@@ -10,10 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.agents.curator import cli
-from triggered_agents.agents.curator import harvest
-from secretary.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP
-from secretary.runtime.state import AgentState
+from secretary.automations.agents.curator import cli, harvest
+from secretary.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState
 
 
 def claude(text: str) -> str:
@@ -47,10 +45,10 @@ class CuratorHarvestTests(unittest.TestCase):
         self.identity = {"workspace": str(self.root / "curator")}
         self.limits = harvest.Limits(2, 10_000, 8, 20, 4096, 4096)
         self.patches = [
-            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.all_memory_files", return_value=[]),
         ]
         for patch in self.patches:
             patch.start()
@@ -71,7 +69,7 @@ class CuratorHarvestTests(unittest.TestCase):
         path = self.root / "claude.jsonl"
         path.write_text(claude("one") + claude("two") + claude("three"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             first = harvest.harvest(self.state, self.identity, self.limits)
             self.assertEqual([t["text"] for t in first["sessions"][0]["turns"]], ["one", "two"])
             record = self._persist(first)
@@ -91,8 +89,8 @@ class CuratorHarvestTests(unittest.TestCase):
         ]
         def messages(_session, since, *_limits):
             return [row for row in rows if row["id"] > since]
-        with mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[session]), mock.patch(
-            "triggered_agents.agents.curator.discover.hermes_messages", side_effect=messages
+        with mock.patch("secretary.automations.agents.curator.discover.hermes_sessions", return_value=[session]), mock.patch(
+            "secretary.automations.agents.curator.discover.hermes_messages", side_effect=messages
         ):
             first = harvest.harvest(self.state, self.identity, self.limits)
             record = self._persist(first)
@@ -109,7 +107,7 @@ class CuratorHarvestTests(unittest.TestCase):
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
         limits = harvest.Limits(2, 10_000, 8, 2, 256, 4096)
         offsets = []
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             for expected_turns in ([], [], ["real"]):
                 batch = harvest.harvest(self.state, self.identity, limits)
                 turns = [turn["text"] for entry in batch["sessions"] for turn in entry["turns"]]
@@ -136,8 +134,8 @@ class CuratorHarvestTests(unittest.TestCase):
 
         limits = harvest.Limits(2, 10_000, 8, 2, 4096, 4096)
         cursors = []
-        with mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[session]), mock.patch(
-            "triggered_agents.agents.curator.discover.hermes_messages", side_effect=messages
+        with mock.patch("secretary.automations.agents.curator.discover.hermes_sessions", return_value=[session]), mock.patch(
+            "secretary.automations.agents.curator.discover.hermes_messages", side_effect=messages
         ):
             for expected_turns in ([], [], ["real"]):
                 batch = harvest.harvest(self.state, self.identity, limits)
@@ -155,7 +153,7 @@ class CuratorHarvestTests(unittest.TestCase):
         path.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
         limits = harvest.Limits(2, 10_000, 8, 4, 256, 4096)
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             first = harvest.harvest(self.state, self.identity, limits)
         self.assertEqual(first["partial_sources"], [{"head": "claude", "path": str(path), "session_id": "c"}])
         self.assertEqual(first["pending"][str(path)]["offset"], len(claude_tool()))
@@ -187,7 +185,7 @@ class CuratorHarvestTests(unittest.TestCase):
             {"head": "hermes", "path": str(large), "cwd": ""},
         ]
         limits = harvest.Limits(5, 100, 5, 10, 100, 20)
-        with mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=files):
+        with mock.patch("secretary.automations.agents.curator.discover.all_memory_files", return_value=files):
             batch = harvest.harvest(self.state, self.identity, limits)
         self.assertEqual(batch["memory"][0]["text"], "durable memory")
         self.assertEqual(batch["rejected"][0]["reason"], "memory-file-too-large")
@@ -197,7 +195,7 @@ class CuratorHarvestTests(unittest.TestCase):
         path = self.root / "claude.jsonl"
         path.write_text(claude("one"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             batch = harvest.harvest(self.state, self.identity, self.limits)
         record = self._persist(batch)
         with self.assertRaises(harvest.PendingError):
@@ -216,7 +214,7 @@ class CuratorHarvestTests(unittest.TestCase):
         path.write_text(first + claude("new"), encoding="utf-8")
         self.state.save_watermark({str(path): {"lines": 1, "mtime": old_stat.st_mtime, "size": old_stat.st_size}})
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             batch = harvest.harvest(self.state, self.identity, self.limits)
         self.assertEqual([t["text"] for t in batch["sessions"][0]["turns"]], ["new"])
         record = self._persist(batch)
@@ -227,7 +225,7 @@ class CuratorHarvestTests(unittest.TestCase):
         path = self.root / "claude.jsonl"
         path.write_text(claude("one"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             batch = harvest.harvest(self.state, self.identity, self.limits)
         record = self._persist(batch)
         harvest.advance(self.state, record, self.identity)
@@ -245,7 +243,7 @@ class CuratorHarvestTests(unittest.TestCase):
             {"head": "claude", "path": str(a), "session_id": "a", "cwd": "/project"},
         ]
         limits = harvest.Limits(1, 10_000, 1, 20, 4096, 4096)
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             batch = harvest.harvest(self.state, self.identity, limits)
         self.assertEqual([s["path"] for s in batch["sessions"]], [str(a)])
         self.assertNotIn("\nb\n", harvest.render_markdown(batch))
@@ -265,8 +263,8 @@ class CuratorHarvestTests(unittest.TestCase):
             {"head": "claude", "path": str(beta), "session_id": "b", "cwd": "/beta", "route": "beta"},
             {"head": "claude", "path": str(alpha), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
-            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}
         ):
             selected = harvest.harvest(self.state, self.identity, self.limits, project="alpha")
             all_backlog = harvest.harvest(self.state, self.identity, self.limits)
@@ -278,8 +276,8 @@ class CuratorHarvestTests(unittest.TestCase):
         path = self.root / "alpha.jsonl"
         path.write_text(claude("alpha"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
-            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
+            "secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha"}
         ):
             batch = harvest.harvest(self.state, self.identity, self.limits, project="alpha")
             record = harvest.pending_record(batch, self.identity, {str(path): None}, project="alpha")
@@ -306,8 +304,8 @@ class CuratorHarvestTests(unittest.TestCase):
             },
             {"head": "claude", "path": str(alpha), "session_id": "alpha", "cwd": "/alpha", "route": "alpha"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
-            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha"}
         ):
             batch = harvest.harvest(self.state, self.identity, self.limits, project="review:po")
             cutoff = harvest.baseline_cutoff(self.state, "review:po", self.limits)
@@ -324,8 +322,8 @@ class CuratorHarvestTests(unittest.TestCase):
             {"head": "claude", "path": str(unknown), "session_id": "u", "cwd": "/tmp", "route": "unknown"},
             {"head": "claude", "path": str(alpha), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
-            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha"}
         ):
             batch = harvest.harvest(self.state, self.identity, self.limits, project="unknown")
             cutoff = harvest.baseline_cutoff(self.state, "unknown", self.limits)
@@ -345,11 +343,11 @@ class CuratorHarvestTests(unittest.TestCase):
         ]
         memories = [{"head": "claude", "path": str(memory), "cwd": "/alpha", "route": "alpha"}]
         before = self.state.load_watermark()
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[sessions[0]]), mock.patch(
-            "triggered_agents.agents.curator.discover.codex_sessions", return_value=[sessions[1]]
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[sessions[0]]), mock.patch(
+            "secretary.automations.agents.curator.discover.codex_sessions", return_value=[sessions[1]]
         ), mock.patch(
-            "triggered_agents.agents.curator.discover.all_memory_files", return_value=memories
-        ), mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}):
+            "secretary.automations.agents.curator.discover.all_memory_files", return_value=memories
+        ), mock.patch("secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}):
             summary = harvest.backlog(self.state, project="alpha", limits=self.limits)
             all_summary = harvest.backlog(self.state, limits=self.limits)
         self.assertEqual(summary["groups"][0]["project"], "alpha")
@@ -369,11 +367,11 @@ class CuratorBaselineTests(unittest.TestCase):
         self.identity = harvest.current_identity()
         self.patches = [
             mock.patch.object(cli, "STATE", self.state),
-            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}),
+            mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.all_memory_files", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}),
         ]
         for patch in self.patches:
             patch.start()
@@ -393,7 +391,7 @@ class CuratorBaselineTests(unittest.TestCase):
         ]
 
     def _pending_batch(self, alpha: Path, sessions: list[dict]) -> dict:
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             batch = harvest.harvest(self.state, self.identity, project="alpha")
         record = harvest.pending_record(batch, self.identity, {str(alpha): None}, project="alpha")
         self.state.ensure_dir()
@@ -418,7 +416,7 @@ class CuratorBaselineTests(unittest.TestCase):
             },
             {"head": "claude", "path": str(alpha), "session_id": "alpha", "cwd": "/alpha", "route": "alpha"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             cutoff = harvest.baseline_cutoff(self.state, "review:po")
             audit = cli.baseline_settlement(
                 project="review:po",
@@ -437,7 +435,7 @@ class CuratorBaselineTests(unittest.TestCase):
         alpha, beta, sessions = self._sessions(alpha_text=f"alpha transcript {secret}", beta_text="beta transcript")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions),
+            mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -483,7 +481,7 @@ class CuratorBaselineTests(unittest.TestCase):
 
     def test_cutoff_proof_is_stale_after_growth_and_retry_cannot_repeat_it(self) -> None:
         alpha, _beta, sessions = self._sessions()
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             cutoff = harvest.baseline_cutoff(self.state, "alpha")
             alpha.write_text(claude("alpha") + claude("newer"), encoding="utf-8")
             with self.assertRaisesRegex(harvest.PendingError, "stale"):
@@ -511,7 +509,7 @@ class CuratorBaselineTests(unittest.TestCase):
                 str(beta): {"lines": 1, "mtime": beta.stat().st_mtime, "size": beta.stat().st_size},
             }
         )
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             cutoff = harvest.baseline_cutoff(self.state, "alpha")
             self.assertEqual(cutoff["base"][str(alpha)]["lines"], 1)
             self.assertEqual(cutoff["pending"][str(alpha)]["offset"], alpha.stat().st_size)
@@ -529,7 +527,7 @@ class CuratorBaselineTests(unittest.TestCase):
     def test_batch_proof_settles_only_its_project_and_rejects_foreign_selector(self) -> None:
         alpha, beta, sessions = self._sessions()
         record = self._pending_batch(alpha, sessions)
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             with self.assertRaisesRegex(harvest.PendingError, "selector"):
                 cli.baseline_settlement(
                     project="beta", actor="operator", reason="wrong project", batch_id=record["batch_id"]
@@ -552,7 +550,7 @@ class CuratorBaselineTests(unittest.TestCase):
         foreign = harvest.pending_record(batch, self.identity, {str(alpha): None, str(beta): None}, project="alpha")
         self.state.pending_file.write_text(json.dumps(foreign), encoding="utf-8")
         before_pending = self.state.pending_file.read_bytes()
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             with self.assertRaisesRegex(harvest.PendingError, "foreign"):
                 cli.baseline_settlement(
                     project="alpha", actor="operator", reason="approved batch", batch_id=foreign["batch_id"]
@@ -567,7 +565,7 @@ class CuratorBaselineTests(unittest.TestCase):
         before_pending = self.state.pending_file.read_bytes()
         errors = io.StringIO()
         with (
-            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions),
+            mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions),
             mock.patch.object(cli, "publish_state_atomic", side_effect=OSError("audit unavailable")),
             contextlib.redirect_stderr(errors),
         ):
@@ -586,7 +584,7 @@ class CuratorBaselineTests(unittest.TestCase):
         alpha, _beta, sessions = self._sessions()
         self.state.save_watermark({str(alpha): {"lines": "one", "mtime": 1, "size": 1}})
         before = self.state.watermark_file.read_bytes()
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             with self.assertRaisesRegex(harvest.PendingError, "malformed or legacy"):
                 harvest.baseline_cutoff(self.state, "alpha")
             with self.assertRaisesRegex(harvest.PendingError, "exactly one"):
@@ -606,9 +604,9 @@ class CuratorCliPreparationTests(unittest.TestCase):
         self.state = AgentState("curator", self.root / "state")
         self.patches = [
             mock.patch.object(cli, "STATE", self.state),
-            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
-            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.all_memory_files", return_value=[]),
             mock.patch.dict(
                 "os.environ",
                 {
@@ -634,7 +632,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
         path = self.root / "noise.jsonl"
         path.write_text(claude_tool() * 4 + claude("real"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
             first = self.state.load_watermark()[str(path)]["offset"]
             self.assertFalse(self.state.pending_file.exists())
@@ -651,7 +649,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
         noisy.write_text(claude_tool() * 2, encoding="utf-8")
         later = self.root / "b-later.jsonl"
         sessions = [{"head": "claude", "path": str(noisy), "session_id": "a", "cwd": "/project"}]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             self.assertEqual(cli.cmd_harvest(False), 0)
             self.assertFalse(self.state.pending_file.exists())
             self.assertIn(str(noisy), self.state.load_watermark())
@@ -666,7 +664,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
         path = self.root / "session.jsonl"
         path.write_text(claude("first"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
             "sys.stdout", new_callable=io.StringIO
         ) as stdout:
             self.assertEqual(cli.cmd_harvest(True), 0)
@@ -683,7 +681,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
         path = self.root / "writing.jsonl"
         path.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[session]):
             self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
             self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(claude_tool()))
             self.assertFalse(self.state.pending_file.exists())
@@ -703,7 +701,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
             {"head": "claude", "path": str(partial), "session_id": "a", "cwd": "/project"},
             {"head": "claude", "path": str(healthy), "session_id": "b", "cwd": "/project"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=sessions):
             self.assertEqual(cli.cmd_precheck(), 0)
             pending = harvest.read_pending(self.state)
             self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["fact"])
@@ -722,7 +720,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
             {"head": "codex", "path": str(partial), "session_id": "a", "cwd": "/project"},
             {"head": "codex", "path": str(healthy), "session_id": "b", "cwd": "/project"},
         ]
-        with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=sessions):
+        with mock.patch("secretary.automations.agents.curator.discover.codex_sessions", return_value=sessions):
             self.assertEqual(cli.cmd_precheck(), 0)
             pending = harvest.read_pending(self.state)
         self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["fact"])
@@ -790,7 +788,7 @@ class CuratorCliPreparationTests(unittest.TestCase):
             "rejected": [],
         }
         with (
-            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("secretary.automations.agents.curator.discover.claude_sessions", return_value=[]),
             mock.patch.object(self.state, "lock", side_effect=AssertionError("run lock must not be used")),
             mock.patch.object(
                 cli, "cursor_settlement_transaction", wraps=cli.cursor_settlement_transaction

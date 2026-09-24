@@ -1,9 +1,10 @@
-"""Focused contract tests for the one entry of the background agents, `-m triggered_agents`."""
+"""Focused contract tests for the one entry of the background agents, `secretary automations`."""
 
 from __future__ import annotations
 
 import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -13,14 +14,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import cli as secretary_cli
+from secretary.automations import __main__ as triggered_main
+from secretary.automations import composition
+from secretary.automations.agents.retro import cli as retro_cli
+from secretary.automations.agents.steward import cli as steward_cli
 from secretary.board.steward_reports import StewardReportBoard
 from secretary.config import DataDirError
-from secretary.runtime.state import PRECHECK_BOARD_UNREACHABLE, AgentState, BoardUnavailable
+from secretary.runtime.state import (
+    PRECHECK_BOARD_UNREACHABLE,
+    PRECHECK_DEFERRED,
+    PRECHECK_SKIP,
+    AgentState,
+    BoardUnavailable,
+)
 from secretary.tasks import TaskError
-from triggered_agents import __main__ as triggered_main
-from triggered_agents import composition
-from triggered_agents.agents.retro import cli as retro_cli
-from triggered_agents.agents.steward import cli as steward_cli
 
 
 class StewardCliReaderTests(unittest.TestCase):
@@ -55,9 +63,9 @@ class StewardCliReaderTests(unittest.TestCase):
 class StandingAgentEntrypointTests(unittest.TestCase):
     def test_retired_board_cli_modules_are_not_importable(self) -> None:
         for name in (
-            "triggered_agents.agents.pipeline.cli",
-            "triggered_agents.agents.pipeline.model",
-            "triggered_agents.agents.pipeline.ops",
+            "secretary.automations.agents.pipeline.cli",
+            "secretary.automations.agents.pipeline.model",
+            "secretary.automations.agents.pipeline.ops",
         ):
             with self.subTest(name=name):
                 self.assertIsNone(importlib.util.find_spec(name))
@@ -288,7 +296,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
 
 class ModuleEntryTests(unittest.TestCase):
-    """`python3 -P -m triggered_agents` is the one entry, and it always goes through the wiring."""
+    """`python3 -P -m secretary automations` is the one entry, and it always goes through the wiring."""
 
     def test_module_entry_injects_board_ports_for_every_board_role(self) -> None:
         # An Orca automation's precheck string names the module, not a composition root. Before the
@@ -305,7 +313,7 @@ class ModuleEntryTests(unittest.TestCase):
                     "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
                 }
                 result = subprocess.run(
-                    [sys.executable, "-P", "-m", "triggered_agents", agent, "precheck"],
+                    [sys.executable, "-P", "-m", "secretary", "automations", agent, "precheck"],
                     env=env,
                     capture_output=True,
                     text=True,
@@ -314,6 +322,104 @@ class ModuleEntryTests(unittest.TestCase):
                 )
                 self.assertNotIn("must be supplied by the composition root", result.stderr)
                 self.assertEqual(result.returncode, PRECHECK_BOARD_UNREACHABLE, result.stderr)
+
+
+class SecretaryCliEntryTests(unittest.TestCase):
+    """`secretary automations <agent> <cmd>` is the composition root behind the product CLI."""
+
+    def _environment(self, root: Path) -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(root / "home"),
+            "TA_STATE": str(root / "state"),
+            "SECRETARY_INSTANCE": str(root / "instance"),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        }
+
+    def test_the_argv_reaches_the_composition_root_untouched(self) -> None:
+        argv = ["curator", "baseline", "--project", "review:po", "--json", "--help"]
+        with mock.patch.object(composition, "main", return_value=0) as composed:
+            self.assertEqual(secretary_cli.main(["automations", *argv]), 0)
+        composed.assert_called_once_with(argv)
+
+    def test_every_precheck_code_is_the_commands_exit_code(self) -> None:
+        for code in (0, PRECHECK_SKIP, PRECHECK_BOARD_UNREACHABLE, PRECHECK_DEFERRED, 1, 2):
+            for agent in triggered_main.AGENTS:
+                with self.subTest(agent=agent, code=code):
+                    with mock.patch.object(composition, "main", return_value=code) as composed:
+                        self.assertEqual(secretary_cli.main(["automations", agent, "precheck"]), code)
+                    composed.assert_called_once_with([agent, "precheck"])
+
+    def test_help_and_an_unknown_agent_answer_as_the_agents_runner_does(self) -> None:
+        for argv in ([], ["--help"], ["help"]):
+            with self.subTest(argv=argv):
+                through_cli, direct = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(through_cli):
+                    cli_code = secretary_cli.main(["automations", *argv])
+                with contextlib.redirect_stdout(direct):
+                    direct_code = composition.main(argv)
+                self.assertEqual(cli_code, direct_code)
+                self.assertEqual(through_cli.getvalue(), direct.getvalue())
+                self.assertIn("python3 -P -m secretary automations <agent> <cmd>", direct.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(secretary_cli.main(["automations", "pipeline", "list"]), 2)
+
+    def test_health_is_the_cross_agent_check(self) -> None:
+        from secretary.automations.runtime import health
+
+        with mock.patch.object(health, "check", return_value=0) as check:
+            self.assertEqual(secretary_cli.main(["automations", "health"]), 0)
+        check.assert_called_once_with(triggered_main.HEALTH_COMPONENTS)
+
+    def test_the_parser_tree_names_the_subcommand(self) -> None:
+        parser = secretary_cli.build_parser()
+        subcommands = next(
+            action.choices for action in parser._actions if hasattr(action, "choices") and action.choices
+        )
+        self.assertIn("automations", subcommands)
+        args = parser.parse_args(["automations", "curator", "precheck"])
+        with mock.patch.object(composition, "main", return_value=PRECHECK_SKIP) as composed:
+            self.assertEqual(args.handler(args), PRECHECK_SKIP)
+        composed.assert_called_once_with(["curator", "precheck"])
+
+    def test_the_process_entry_keeps_the_exit_protocol(self) -> None:
+        """A real process per agent: curator skips on no new turns, retro and steward defer."""
+        expected = {
+            "curator": PRECHECK_SKIP,
+            "retro": PRECHECK_BOARD_UNREACHABLE,
+            "steward": PRECHECK_BOARD_UNREACHABLE,
+        }
+        for module in (["secretary", "automations"], ["secretary.automations"]):
+            for agent, code in expected.items():
+                with self.subTest(module=module, agent=agent), tempfile.TemporaryDirectory() as tmp:
+                    result = subprocess.run(
+                        [sys.executable, "-P", "-m", *module, agent, "precheck"],
+                        env=self._environment(Path(tmp)),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=60,
+                    )
+                    self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_the_process_entry_runs_health(self) -> None:
+        """No installation behind it: every component says so, and the check fails rather than crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, "-P", "-m", "secretary", "automations", "health"],
+                env=self._environment(Path(tmp)),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for component in triggered_main.HEALTH_COMPONENTS:
+            self.assertIn(
+                f"ERROR {component}: effective installation configuration unavailable",
+                result.stdout + result.stderr,
+            )
 
 
 class DispatchArgumentParityTests(unittest.TestCase):

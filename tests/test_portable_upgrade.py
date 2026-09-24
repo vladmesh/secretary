@@ -491,11 +491,11 @@ class PortableInstallationTests(PortableFixture):
         The product ships a background agent's spec, which is exactly what the retired automations
         step turned into `orca automations` calls; the upgrade must now issue none of them.
         """
-        agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
+        agent = self.product / "src" / "secretary" / "automations" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "/curate"\n', encoding="utf-8")
         (self.product / "pyproject.toml").write_text(
-            '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+            '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
         )
         argvs: list[list[str]] = []
         real_popen_init = subprocess.Popen.__init__
@@ -692,11 +692,11 @@ class InstallationOwnerTests(PortableFixture):
 
     def test_role_worktrees_belong_to_the_owner(self) -> None:
         """Not written here; decided from a home, and it must be the owner's."""
-        agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
+        agent = self.product / "src" / "secretary" / "automations" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
         (self.product / "pyproject.toml").write_text(
-            '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+            '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
         )
 
         worktrees = upgrade.desired_role_worktrees(self.product, self.home)
