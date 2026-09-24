@@ -60,6 +60,7 @@ integration-heads tests/test_dispatcher_observer.py
 integration-dispatcher tests/test_dispatcher_tui.py
 integration-dispatcher tests/test_gate.py
 unit tests/test_head_command.py
+unit tests/test_legacy_head_records.py
 unit tests/test_head_health.py
 unit tests/test_head_operations.py
 runtime-component tests/test_head_runtime.py

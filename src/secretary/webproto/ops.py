@@ -19,13 +19,11 @@ read layer holds, checked the same way.
 **What is owned here, and what is borrowed.** The workspace (`workspaces`), the run record
 (`runs`), the run directory, the pid file, the journal and the result file are the product's. The
 head's process is held by `LocalPtyHeadRuntime` — the backend that already exists — reached through
-the product's one name-to-backend mapping, `head_runtime_backends.build_head_runtime`, with a
-session factory that *raises*: a supervised head is not held by a session manager, and this says so
-out loud instead of leaving a route to Orca open that nothing here is allowed to use. No pane is
-created, listed, probed or reaped on any path below, because a supervisor leaves none; no Orca CLI
-is spawned, no Orca RPC is spoken, and no repository inventory of Orca's is read. `secretary
-run_start` and `run_state` are the two paths criterion 2 names, and `tests/test_web_run_protocol.py`
-fails if either of them grows one.
+the product's one name-to-backend mapping, `head_runtime_backends.build_head_runtime`, which builds
+no other backend and holds no session manager. No pane is created, listed, probed or reaped on
+any path below, because a supervisor leaves none; no Orca CLI is spawned, no Orca RPC is spoken,
+and no repository inventory of Orca's is read. `secretary run_start` and `run_state` are the two
+paths criterion 2 names, and `tests/test_web_run_protocol.py` fails if either of them grows one.
 
 **Which head runs is configuration, not code.** A profile id is an argument, it is resolved through
 the head registry (`secretary.runtime.heads`), and it must name the `local-pty`
@@ -126,7 +124,6 @@ __all__ = [
     "STOP_ENDED",
     "STOP_RESULT_IN",
     "SUBMIT_KEY",
-    "no_session",
 ]
 
 SCHEMA_VERSION = 1
@@ -139,20 +136,6 @@ RUN_ENV = "SECRETARY_RUN_ID"
 ROLE_ENV = "SECRETARY_RUN_ROLE"
 REF_ENV = "SECRETARY_RUN_REF"
 WORKSPACE_ENV = "SECRETARY_RUN_WORKSPACE"
-
-
-def no_session() -> Any:
-    """The session manager a product run never has.
-
-    `build_head_runtime` is the product's one name-to-backend mapping and takes both backends'
-    dependencies, because it is the one mapping for both. This layer only ever names the supervised
-    one, and this is what says so out loud rather than leaving open a route to Orca that nothing
-    here is allowed to use. It is a function and not a value so that naming the supervised backend
-    never constructs the other one's dependency.
-    """
-    raise RuntimeUnavailable(
-        "a product run's head is held by a supervisor of this product's own, not by a session manager"
-    )
 
 
 class OperationLayer(ProtocolBoundary):
@@ -232,9 +215,8 @@ class OperationLayer(ProtocolBoundary):
     def _profile(self, profile_id: str) -> tuple[HeadSpec, dict[str, Any]]:
         """One registry profile as a launchable spec, refused by name when it is not one.
 
-        The `local-pty` check is here and not in the backend because the backend would happily hold
-        any head: what would be wrong is running a head under a backend its own profile does not
-        declare, so a profile naming Orca's backend is a configuration refusal rather than a silent
+        A profile naming any runtime but `local-pty` — Orca's included — never becomes a spec
+        (`validate_launch_shape`), so it is a configuration refusal here rather than a silent
         substitution.
         """
         if not profile_id:
@@ -246,20 +228,13 @@ class OperationLayer(ProtocolBoundary):
             spec = HeadSpec.from_profile(resolved, profile)
         except (HeadRegistryError, HeadSpecError, HeadCommandError) as exc:
             raise ValidationRefused(f"head profile {profile_id!r} is not launchable: {exc}") from None
-        if spec.runtime != LOCAL_PTY_RUNTIME:
-            raise ValidationRefused(
-                f"head profile {profile_id!r} declares the {spec.runtime!r} runtime; the product "
-                f"runtime raises only {LOCAL_PTY_RUNTIME!r} heads, whose process, workspace, pid "
-                "and logs this product owns"
-            )
         return spec, profile
 
     def _runtime(self, data_dir: Path) -> Any:
         """This layer's backend, built through the product's one name-to-backend mapping.
 
         `runtime_factory` is the seam a test supplies its own backend through, and it is the only
-        one: with none given this builds the supervised backend by name, with a session factory
-        that raises. There is no branch here that could reach the other backend.
+        one: with none given this builds the supervised backend by name, the only one there is.
         """
         if self._runtime_factory is not None:
             return self._runtime_factory(data_dir)
@@ -267,7 +242,6 @@ class OperationLayer(ProtocolBoundary):
 
         return build_head_runtime(
             LOCAL_PTY_RUNTIME,
-            session=no_session,
             local_pty_root=lambda: data_dir / HEADS_RELATIVE,
             head_process_status=head_process_status,
         )

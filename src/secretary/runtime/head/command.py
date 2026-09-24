@@ -93,6 +93,8 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     profile gives its backend has to be refused when the table is read, not when the head is
     raised. It is checked independently of the adapter, because the two are orthogonal — any of
     `HEAD_RUNTIMES` may hold any of the adapters — and an absent one is `DEFAULT_HEAD_RUNTIME`.
+    A profile still naming `orca-legacy` is the upgrade boundary of A20 step 2: it is refused by
+    name with the fix, never rewritten silently.
     """
     adapter = _named(profile.get("adapter"), f"profile {profile_id!r} adapter")
     if adapter not in _ADAPTERS:
@@ -123,7 +125,10 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     runtime = _named(profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime")
     if runtime not in HEAD_RUNTIMES:
         known = ", ".join(HEAD_RUNTIMES)
-        raise HeadCommandError(f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known})")
+        raise HeadCommandError(
+            f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known}); "
+            f'set `runtime = "{DEFAULT_HEAD_RUNTIME}"` or drop the key'
+        )
 
 
 def _named(value: object, what: str) -> str:

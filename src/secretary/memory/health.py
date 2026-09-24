@@ -13,6 +13,7 @@ from typing import Any
 
 from secretary.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
 from secretary.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 from . import access
 
@@ -269,7 +270,8 @@ def probe_memory(
     pid_file = bindings / "health-probes" / f"{run_id}.pid"
     run = HeadRun(
         run_id=run_id,
-        spec=HeadSpec(profile_id="memory-health", adapter="probe"),
+        # Named, not defaulted: see `po_bridge.bind_operator`.
+        spec=HeadSpec(profile_id="memory-health", adapter="probe", runtime=LOCAL_PTY_RUNTIME),
         workspace="",
         task_ref=TaskRef.standing("steward"),
         role="steward",

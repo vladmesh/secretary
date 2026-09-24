@@ -3660,7 +3660,9 @@ class CommandHostRuntime:
 
         An unknown name cannot arrive from a validated registry (`validate_launch_shape` refuses it
         when the table loads), so reaching this refusal means a record or a caller invented one,
-        and it fails closed by name rather than falling back to a backend the head is not on.
+        and it fails closed by name rather than falling back to a backend the head is not on. A
+        legacy Orca record (`orca-legacy`, or no runtime at all) is refused the same way: no
+        backend is built for it, so it is never launched or delivered to.
         """
         held = self._head_runtimes.get(name)
         if held is not None:
@@ -3668,7 +3670,6 @@ class CommandHostRuntime:
         try:
             built = build_head_runtime(
                 name,
-                session=lambda: self.session,
                 local_pty_root=self._local_pty_root,
                 head_process_status=_head_process_status,
             )

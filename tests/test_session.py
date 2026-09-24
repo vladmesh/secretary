@@ -91,18 +91,18 @@ class ResolveHeadTest(ShippedRegistryTestCase):
         with self.assertRaisesRegex(head_registry.HeadRegistryError, "no hermes head"):
             session.resolve_profile_id("hermes", registry=registry)
 
-    def test_a_keyless_profile_is_a_pty_held_variant(self):
-        """secretary-1718: naming no runtime is `local-pty`, so it yields to a pane profile."""
+    def test_a_bare_adapter_opens_the_first_role_default_on_it(self):
+        """secretary-1722: with no pane profile left to prefer, every profile is a `local-pty` one."""
         registry = head_registry.Registry(
             {"acct": {"account": "acct"}},
             {
                 "claude-keyless": {"resource": "acct", "adapter": "claude"},
-                "claude-pane": {"resource": "acct", "adapter": "claude", "runtime": "orca-legacy"},
+                "claude-explicit": {"resource": "acct", "adapter": "claude", "runtime": "local-pty"},
             },
-            {"new_card": "claude-keyless", "observer": "claude-pane"},
+            {"new_card": "claude-keyless", "observer": "claude-explicit"},
         )
 
-        self.assertEqual(session.resolve_profile_id("claude", registry=registry), "claude-pane")
+        self.assertEqual(session.resolve_profile_id("claude", registry=registry), "claude-keyless")
 
     def test_the_default_is_the_registry_new_card_head(self):
         shipped = head_registry.load_registry()

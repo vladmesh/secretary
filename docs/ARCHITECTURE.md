@@ -193,14 +193,13 @@ There is no pane path (see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
 
 `HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
-infer success from a pane, a socket write or process existence. The backend is chosen per head
-profile from the closed set `orca-legacy | local-pty`, and
-`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend. What an absent
-key means, who owns that default and when it changes, the `local-pty` parity criteria and the A20
-exit checklist are in [Head runtime](HEAD_RUNTIME.md).
+infer success from a pane, a socket write or process existence. There is one head runtime,
+`local-pty`, and `secretary.runtime.head_runtime_backends` is the only place a name becomes a
+backend. A durable record written while heads were Orca panes (`orca-legacy`, or no runtime) still
+loads and is shown as a legacy record, but no backend is built for it, so it is never launched or
+delivered to. What an absent key means, the `local-pty` parity criteria and the A20 exit checklist
+are in [Head runtime](HEAD_RUNTIME.md).
 
-- `OrcaLegacyHeadRuntime` runs heads in Orca panes. Its readiness probe and conditional stop narrow
-  races but cannot make observe-then-stop atomic.
 - `LocalPtyHeadRuntime` runs a per-run supervisor that owns the process group, PTY, Unix socket and
   a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
   frame is the live source for turn, admission and journal sequence; a bounded 64 KiB journal tail is
@@ -220,6 +219,8 @@ Head liveness and recovery rules are in [Head vitality](HEAD_VITALITY.md).
 
 ### Card workspaces
 
+No profile can name `orca-legacy` any more, so the Orca path described here is reached only from a
+legacy record, and A20 step 3 deletes it ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)).
 On the Orca backend one card occupies one Orca worktree. The worker has its own terminal. The
 reviewer opens as a split pane in the same worktree; the standalone-terminal fallback and its
 fail-closed rules are in [Operations](OPERATIONS.md#worker-and-reviewer-launch-intent). When review

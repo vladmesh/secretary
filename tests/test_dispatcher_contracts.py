@@ -87,7 +87,6 @@ from secretary.runtime.head_runtimes import (
     RECORD_RUNTIME_WHEN_ABSENT,
 )
 from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
-from secretary.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 from secretary.runtime.role_env import observer_binding
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
@@ -1338,11 +1337,12 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
     # -- criterion 1: the key, and what its absence means --------------------------------------
 
-    def test_a_profile_may_name_either_runtime_and_naming_none_is_the_supervised_one(self) -> None:
-        """secretary-1718: a profile's absent key is `local-pty`; an explicit `orca-legacy` stays."""
+    def test_a_profile_may_name_local_pty_and_naming_none_is_the_same(self) -> None:
+        """secretary-1718: a profile's absent key is `local-pty`; secretary-1722: `orca-legacy` is refused."""
+        with self.assertRaisesRegex(heads.HeadRegistryError, "unknown runtime 'orca-legacy'.*drop the key"):
+            heads.validate_registry(self.RESOURCES, self._profiles(adapter="claude", runtime=ORCA_LEGACY_RUNTIME))
         for named, expected in (
             (LOCAL_PTY_RUNTIME, LOCAL_PTY_RUNTIME),
-            (ORCA_LEGACY_RUNTIME, ORCA_LEGACY_RUNTIME),
             (None, LOCAL_PTY_RUNTIME),
         ):
             with self.subTest(runtime=named):
@@ -1360,16 +1360,15 @@ class PerProfileRuntimeTests(unittest.TestCase):
             RECORD_RUNTIME_WHEN_ABSENT, ORCA_LEGACY_RUNTIME, "a record's absence must not change hands"
         )
 
-    def test_the_shipped_registry_names_a_runtime_on_every_profile(self) -> None:
-        """A fresh install keeps every shipped tier on Orca until A20, by saying so."""
+    def test_the_shipped_registry_names_no_runtime_but_local_pty(self) -> None:
+        """secretary-1722 (A20 step 2): every shipped tier is a `local-pty` head."""
         shipped = heads.load_registry(heads.HEADS_TOML)
 
         self.assertTrue(shipped.profiles)
         for profile_id, profile in shipped.profiles.items():
             with self.subTest(profile=profile_id):
-                self.assertIn("runtime", profile, "a keyless shipped profile would become local-pty")
-                self.assertEqual(profile["runtime"], ORCA_LEGACY_RUNTIME)
-                self.assertEqual(HeadSpec.from_profile(profile_id, profile).runtime, ORCA_LEGACY_RUNTIME)
+                self.assertEqual(profile.get("runtime", DEFAULT_HEAD_RUNTIME), LOCAL_PTY_RUNTIME)
+                self.assertEqual(HeadSpec.from_profile(profile_id, profile).runtime, LOCAL_PTY_RUNTIME)
 
     def test_a_spec_built_by_hand_is_read_by_the_record_rule(self) -> None:
         """Every hand-built spec is a head rebuilt from a record that never named a backend."""
@@ -1484,9 +1483,13 @@ class PerProfileRuntimeTests(unittest.TestCase):
         legacy = HeadSpec(profile_id="head", adapter="claude")
         supervised = HeadSpec(profile_id="head", adapter="claude", runtime=LOCAL_PTY_RUNTIME)
 
-        self.assertIsInstance(host.head_runtime_for(legacy), OrcaLegacyHeadRuntime)
+        # secretary-1722: a legacy record is given no backend, and never the supervised one.
+        for subject in (legacy, ORCA_LEGACY_RUNTIME, None):
+            with self.subTest(subject=subject), self.assertRaisesRegex(HostError, "legacy Orca record"):
+                host.head_runtime_for(subject)
+        with self.assertRaisesRegex(HostError, "legacy Orca record"):
+            host.head_runtime  # noqa: B018
         self.assertIsInstance(host.head_runtime_for(supervised), LocalPtyHeadRuntime)
-        self.assertIsInstance(host.head_runtime, OrcaLegacyHeadRuntime)
         self.assertIs(
             host.head_runtime_for(supervised),
             host.head_runtime_for(supervised),
@@ -1538,12 +1541,12 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
     # -- criterion 6: nothing the product ships moves ------------------------------------------
 
-    def test_no_profile_the_product_ships_is_on_the_new_backend(self) -> None:
+    def test_every_profile_the_product_ships_is_on_the_one_backend(self) -> None:
         canon = canonical_heads(upgrade.running_product_root())
 
         for pid, profile in canon["profiles"].items():
             with self.subTest(profile=pid):
-                self.assertEqual(profile.get("runtime", DEFAULT_HEAD_RUNTIME), ORCA_LEGACY_RUNTIME)
+                self.assertEqual(profile.get("runtime", DEFAULT_HEAD_RUNTIME), LOCAL_PTY_RUNTIME)
 
 
 class _RecordingBackend:

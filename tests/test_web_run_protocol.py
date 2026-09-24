@@ -1981,10 +1981,10 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
     def test_the_backend_is_named_and_holds_no_session_manager(self) -> None:
         seen: list[dict[str, Any]] = []
 
-        def watched(name, *, session, local_pty_root, head_process_status):
-            seen.append(
-                {"name": name, "session": session, "root": local_pty_root(), "identity": head_process_status}
-            )
+        def watched(name, *, local_pty_root, head_process_status):
+            # secretary-1722: the mapping takes no session factory at all, since it builds no
+            # backend that could use one.
+            seen.append({"name": name, "root": local_pty_root(), "identity": head_process_status})
             return self.runtime
 
         with mock.patch.object(ops_module, "build_head_runtime", watched):
@@ -1997,9 +1997,6 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
         for call in seen:
             self.assertEqual(call["name"], "local-pty")
             self.assertEqual(call["root"], self.data_dir / "webproto" / "heads")
-            # The session manager it is handed is one that refuses to exist.
-            with self.assertRaises(RuntimeUnavailable):
-                call["session"]()
             # And liveness is the product's one launch-identity reader, not a scheme of its own.
             from secretary.dispatch.watchdog import head_process_status
 
