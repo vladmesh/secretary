@@ -1,11 +1,10 @@
-"""secretary-1705: an observer on a supervised runtime gets a plain `git worktree`, never Orca's.
+"""secretary-1705, secretary-1722: every observer gets a plain detached `git worktree`, never Orca's.
 
-The same rule as a card's workspace (secretary-1700): the manager is chosen at launch from the
-observer's declared profile, and every later operation reads it back from the recorded path. So
-these tests hold four things: a `local-pty` observer's workspace is cut, stopped and removed with no
-`orca` argv at all; the launch intent and the bring-up name the same path for either runtime; an
-`orca-legacy` observer keeps the Orca worktree; and a live record whose workspace Orca made stays on
-Orca even after its profile moves to `local-pty`.
+The same rule as a card's workspace: the path is fixed when the launch intent is written and read
+back from the record ever after. So these tests hold three things: an observer's workspace is cut,
+stopped and removed with no `orca` argv at all; the launch intent and the bring-up name the same
+path whatever the head; and a record whose workspace Orca made, or whose run is a legacy record, is
+refused by every verb and left untouched.
 
 The host runs in real mode over the real observer repo it creates; only the head itself (its pane,
 its process, its stop) is stood in for.
@@ -25,7 +24,7 @@ from unittest import mock
 
 from secretary.dispatch.host import OBSERVER_REPO_BRANCH, CommandHostRuntime
 from secretary.dispatch.observer import ObserverRecord, _write_launch_intent
-from secretary.dispatch.types import HostError
+from secretary.dispatch.types import HostError, LegacyDispatcherRecord
 from secretary.observer_root import observer_root_repo
 from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
@@ -35,8 +34,8 @@ from tests.production_runtime_fixtures import registered_production_runtime
 REF = "sprint:1705"
 TOKEN = "sprint-1705"
 SUPERVISED_HEAD = "claude-local-pty"
-#: The fake registry's observer profile, which names `orca-legacy` like every profile there.
-LEGACY_HEAD = "codex-observer"
+#: The fake registry's own observer profile.
+REGISTRY_HEAD = "codex-observer"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -64,49 +63,26 @@ class _Catalog(FakeCatalog):
 
 
 class _RecordingHost(CommandHostRuntime):
-    """Every child and every head step is recorded in order; `orca` fails unless allowed."""
+    """Every child and every head step is recorded in order; an `orca` argv fails the test."""
 
     def __init__(self, data_dir: Path, root: Path) -> None:
         super().__init__(  # type: ignore[arg-type]
             _Catalog(), data_dir, mode="real", production_runtime=registered_production_runtime(root)
         )
         self.events: list[Any] = []
-        self.orca_allowed = False
-        self.orca_registered: set[str] = set()
 
     def _record(self, args: list[str]) -> None:
         self.events.append(list(args))
-        if args and args[0] == "orca" and not self.orca_allowed:
-            raise AssertionError(f"orca was called on a git-managed observer path: {args}")
+        if args and args[0] == "orca":
+            raise AssertionError(f"orca was called: {args}")
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
         return super()._run(args, label, cwd=cwd)
 
-    def _run_json(self, args):  # type: ignore[override]
-        self._record(args)
-        if args and args[0] == "orca":
-            # Answered here, never by a real CLI: a developer's live Orca must not be asked.
-            return self._orca(args)
-        return super()._run_json(args)
-
     def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
         return super().run_capture(args, label, cwd=cwd)
-
-    def _orca(self, args: list[str]) -> dict[str, Any]:
-        step = args[1:3]
-        if step == ["worktree", "show"]:
-            path = args[args.index("--worktree") + 1].split(":", 1)[1]
-            if path not in self.orca_registered:
-                raise HostError("orca worktree show failed: selector_not_found")
-            return {}
-        if step == ["worktree", "create"]:
-            path = str(Path(self.observer_workspace(REF)).parent / args[args.index("--name") + 1])
-            Path(path).mkdir(parents=True, exist_ok=True)
-            self.orca_registered.add(path)
-            return {"worktree": {"path": path}}
-        return {}
 
     def _open_head_pane(self, run, title, command):  # type: ignore[override]
         self.events.append("head-start")
@@ -120,17 +96,14 @@ class _RecordingHost(CommandHostRuntime):
 
 
 class _HeadRuntime:
-    """The head's backend, standing in for both: a head stop, and Orca's by-worktree teardown."""
+    """The head's backend, standing in for its stop."""
 
     def __init__(self, events: list[Any]) -> None:
         self.events = events
 
     def stop(self, run, initiator):
-        self.events.append(f"head-stop:{run.spec.runtime or ORCA_LEGACY_RUNTIME}")
+        self.events.append(f"head-stop:{run.spec.runtime}")
         return SimpleNamespace(ok=True, reason="")
-
-    def stop_workspace(self, workspace: str) -> None:
-        self.events.append(["orca", "stop_workspace", f"path:{workspace}"])
 
     def forget_head(self, run_id: str) -> None:
         return None
@@ -184,7 +157,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
     # -- the supervised observer -----------------------------------------------------------------
 
     def test_a_local_pty_observer_is_a_detached_git_worktree_with_no_orca_argv_from_intent_to_removal(self) -> None:
-        intent = self.host.observer_workspace(REF, SUPERVISED_HEAD)
+        intent = self.host.observer_workspace(REF)
         self.assertEqual(intent, str(self.git_path))
 
         launched = self.prepare(SUPERVISED_HEAD, intent)
@@ -205,7 +178,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.orca_argvs(), [])
 
     def test_the_stop_confirms_the_head_gone_before_git_removes_and_prunes_its_worktree(self) -> None:
-        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF, SUPERVISED_HEAD))
+        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
         del self.host.events[:]
 
         self.stop(self.record(launched, SUPERVISED_HEAD))
@@ -223,7 +196,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertIn("--force", remove)
 
     def test_a_respawn_reuses_a_live_worktree_and_recuts_a_removed_one(self) -> None:
-        workspace = self.host.observer_workspace(REF, SUPERVISED_HEAD)
+        workspace = self.host.observer_workspace(REF)
         launched = self.prepare(SUPERVISED_HEAD, workspace)
         (self.git_path / "notes.txt").write_text("kept\n", encoding="utf-8")
 
@@ -239,7 +212,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.orca_argvs(), [])
 
     def test_a_stop_over_a_worktree_already_gone_only_confirms_the_head(self) -> None:
-        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF, SUPERVISED_HEAD))
+        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
         record = self.record(launched, SUPERVISED_HEAD)
         self.stop(record)
         del self.host.events[:]
@@ -250,95 +223,111 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.orca_argvs(), [])
         self.assertNotIn(["worktree", "remove"], [argv[:2] for argv in self.worktree_argvs()])
 
+    def test_a_directory_git_never_registered_is_cleared_not_worked_around(self) -> None:
+        """A directory at the observer's path that is not a worktree of the observer repo is
+        removed and the worktree cut in its place, rather than placed beside it."""
+        self.git_path.mkdir(parents=True)
+        (self.git_path / "SPRINT.md").write_text("stale\n", encoding="utf-8")
+
+        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
+
+        self.assertEqual(launched["workspace"], str(self.git_path))
+        self.assertEqual(git(self.git_path, "rev-parse", "--show-toplevel"), str(self.git_path))
+        self.assertEqual((self.git_path / "SPRINT.md").read_text(encoding="utf-8"), "# Sprint\n")
+        self.assertEqual(self.orca_argvs(), [])
+
+    def test_a_worktree_git_refuses_to_cut_starts_no_head(self) -> None:
+        with (
+            mock.patch(
+                "secretary.dispatch.host.git_worktree.add",
+                return_value=subprocess.CompletedProcess([], 128, "", "fatal: invalid reference"),
+            ),
+            mock.patch("secretary.dispatch.host.git_worktree.remove", return_value=True),
+            self.assertRaisesRegex(HostError, "git worktree add failed for the observer workspace"),
+        ):
+            self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
+
+        self.assertNotIn("head-start", self.host.events)
+        self.assertEqual(self.orca_argvs(), [])
+
     # -- the same path from intent and bring-up ---------------------------------------------------
 
-    def test_the_intent_and_the_bring_up_name_the_same_path_for_either_runtime(self) -> None:
-        for head, expected in ((SUPERVISED_HEAD, self.git_path), (LEGACY_HEAD, self.orca_path)):
+    def test_the_intent_and_the_bring_up_name_the_same_path_whatever_the_head(self) -> None:
+        for head in (SUPERVISED_HEAD, REGISTRY_HEAD):
             with self.subTest(head=head):
-                self.host.orca_allowed = head == LEGACY_HEAD
-                intent = self.host.observer_workspace(REF, head)
-                self.assertEqual(intent, str(expected))
+                intent = self.host.observer_workspace(REF)
+                self.assertEqual(intent, str(self.git_path))
                 self.assertEqual(self.prepare(head, intent)["workspace"], intent)
                 self.assertEqual(self.prepare(head)["workspace"], intent, "without a recorded path")
+        self.assertEqual(self.orca_argvs(), [])
 
     def test_the_launch_intent_fixes_the_path_the_bring_up_then_cuts(self) -> None:
         runtime = SimpleNamespace(host=self.host, production_state=SimpleNamespace(save=lambda _payload: None))
-        for head, expected in ((SUPERVISED_HEAD, self.git_path), (LEGACY_HEAD, self.orca_path)):
+        for head in (SUPERVISED_HEAD, REGISTRY_HEAD):
             with self.subTest(head=head):
-                self.host.orca_allowed = head == LEGACY_HEAD
                 record = ObserverRecord(sprint=REF)
                 self.assertIsNone(_write_launch_intent(runtime, {}, {}, REF, record, head, 1))
-                self.assertEqual(record.workspace, str(expected))
+                self.assertEqual(record.workspace, str(self.git_path))
                 self.assertEqual(self.prepare(head, record.workspace)["workspace"], record.workspace)
+        self.assertEqual(self.orca_argvs(), [])
 
-    def test_a_record_that_names_an_orca_workspace_keeps_it_in_the_next_intent(self) -> None:
+    # -- a record written on Orca is a legacy record ------------------------------------------------
+
+    def test_a_record_that_names_an_orca_workspace_keeps_it_and_the_bring_up_refuses_it(self) -> None:
         runtime = SimpleNamespace(host=self.host, production_state=SimpleNamespace(save=lambda _payload: None))
         record = ObserverRecord(sprint=REF, workspace=str(self.orca_path))
 
         self.assertIsNone(_write_launch_intent(runtime, {}, {}, REF, record, SUPERVISED_HEAD, 2))
 
+        # Never re-placed silently: the intent keeps the recorded path, and the bring-up refuses it.
         self.assertEqual(record.workspace, str(self.orca_path))
-
-    # -- the Orca route ---------------------------------------------------------------------------
-
-    def test_an_orca_legacy_observer_keeps_todays_orca_worktree(self) -> None:
-        self.host.orca_allowed = True
-
-        launched = self.prepare(LEGACY_HEAD, self.host.observer_workspace(REF, LEGACY_HEAD))
-
-        self.assertEqual(launched["workspace"], str(self.orca_path))
-        repo = observer_root_repo(self.data_dir)
-        self.assertEqual(
-            [argv[1:3] for argv in self.orca_argvs()],
-            [["worktree", "show"], ["repo", "add"], ["worktree", "create"]],
-        )
-        self.assertIn(["orca", "repo", "add", "--path", str(repo), "--json"], self.orca_argvs())
-        self.assertEqual(self.worktree_argvs(), [])
+        with self.assertRaisesRegex(LegacyDispatcherRecord, "refused to launch the observer of sprint:1705"):
+            self.prepare(SUPERVISED_HEAD, record.workspace)
+        self.assertFalse(self.orca_path.exists())
         self.assertFalse(self.git_path.exists())
+        self.assertEqual(self.orca_argvs(), [])
 
-    def test_a_live_orca_observer_record_on_a_now_local_pty_profile_stays_on_orca(self) -> None:
-        """The invariant sprint:1459's own observer depends on: stopped, respawned and torn down
-        through Orca, and its workspace never moved, re-created or registered again."""
-        self.host.orca_allowed = True
+    def test_a_live_orca_observer_record_is_refused_by_every_verb_and_left_in_place(self) -> None:
+        """sprint:1459's own observer ran on Orca: its record still loads, and nothing drives it."""
         self.orca_path.mkdir(parents=True)
         (self.orca_path / "SPRINT.md").write_text("live\n", encoding="utf-8")
-        self.host.orca_registered.add(str(self.orca_path))
         pid_file = self.host.observer_pid_file(REF)
-        record = ObserverRecord(
-            sprint=REF,
-            head=SUPERVISED_HEAD,
-            workspace=str(self.orca_path),
-            handle="term-obs",
-            leaf="leaf-obs",
-            pid_file=pid_file,
-            head_run=HeadRun(
-                run_id="live-observer",
-                spec=HeadSpec(profile_id=SUPERVISED_HEAD, adapter="claude", runtime=ORCA_LEGACY_RUNTIME),
-                workspace=str(self.orca_path),
-                task_ref=TaskRef.sprint(REF),
-                role="observer",
-                pid_file=pid_file,
+
+        def legacy(workspace: Path, runtime: str) -> ObserverRecord:
+            return ObserverRecord(
+                sprint=REF,
+                head=SUPERVISED_HEAD,
+                workspace=str(workspace),
                 handle="term-obs",
                 leaf="leaf-obs",
-            ).to_json(),
-        )
+                pid_file=pid_file,
+                head_run=HeadRun(
+                    run_id="live-observer",
+                    spec=HeadSpec(profile_id=SUPERVISED_HEAD, adapter="claude", runtime=runtime),
+                    workspace=str(workspace),
+                    task_ref=TaskRef.sprint(REF),
+                    role="observer",
+                    pid_file=pid_file,
+                    handle="term-obs",
+                    leaf="leaf-obs",
+                ).to_json(),
+            )
 
-        # Respawn over the recorded path: Orca already has it, so nothing is created or registered.
-        launched = self.prepare(SUPERVISED_HEAD, record.workspace)
-        self.assertEqual(launched["workspace"], str(self.orca_path))
-        self.assertEqual([argv[1:3] for argv in self.orca_argvs()], [["worktree", "show"]])
-        self.assertEqual((self.orca_path / "SPRINT.md").read_text(encoding="utf-8"), "# Sprint\n")
-        del self.host.events[:]
-
-        self.stop(record)
-
-        self.assertEqual(
-            [argv[1:3] for argv in self.orca_argvs()],
-            [["worktree", "show"], ["stop_workspace", f"path:{self.orca_path}"], ["worktree", "rm"]],
-        )
-        self.assertIn(f"path:{self.orca_path}", self.orca_argvs()[-1])
+        # An Orca workspace, and a git-placed workspace whose run is a legacy record.
+        for record in (legacy(self.orca_path, ORCA_LEGACY_RUNTIME), legacy(self.git_path, ORCA_LEGACY_RUNTIME)):
+            with self.subTest(workspace=record.workspace):
+                for verb in (
+                    lambda held: self.host.stop_observer(held),
+                    lambda held: self.host.nudge_observer(held, sprint={"ref": REF}),
+                    lambda held: self.host.observer_status(held),
+                    lambda held: self.host.stop_observer_if_quiescent(held, 0, True),
+                ):
+                    with self.assertRaises(LegacyDispatcherRecord):
+                        verb(record)
+        self.assertEqual((self.orca_path / "SPRINT.md").read_text(encoding="utf-8"), "live\n")
+        self.assertEqual(self.orca_argvs(), [])
         self.assertEqual(self.worktree_argvs(), [])
-        self.assertFalse(self.git_path.exists())
+        self.assertNotIn("head-confirmed-gone", self.host.events)
         self.assertFalse(observer_root_repo(self.data_dir).exists(), "the git route was taken")
 
 

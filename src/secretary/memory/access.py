@@ -275,6 +275,16 @@ def _read_payload(grant_id: str, data_dir: str | Path | None) -> dict[str, Any] 
 def _resolve_payload(
     payload: dict[str, Any] | None, *, token: str | None, now: float | None
 ) -> MemoryReadIdentity | MemoryAccessDenial:
+    """Resolve one stored grant, or deny it with the first reason that holds.
+
+    A grant's `head_run` is read with `HeadRun.from_json`, so a legacy Orca record — one naming
+    `orca-legacy`, or no runtime — loads like any other and is never `runtime_identity_malformed`
+    for its runtime alone. Its runtime is not an identity fact here: liveness is. The head it names
+    was an Orca pane, and none is alive, so it is denied as `runtime_identity_unbound` (no pid
+    file) or `runtime_identity_stale` (a heartbeat that is not this run's live one). A deliberate
+    runtime denial would also cut off a live PO bridge or health probe that wrote its grant before
+    they named `local-pty` (both hand-build their spec, and a hand-built spec is legacy by default).
+    """
     if payload is None:
         return MemoryAccessDenial("runtime_identity_unknown")
     if payload.get("version") != GRANT_VERSION or not isinstance(payload.get("grant_id"), str):

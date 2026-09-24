@@ -1,15 +1,13 @@
-"""A card's workspace on plain `git worktree`, for a card whose heads all run supervised.
+"""Every card's workspace, on plain `git worktree`.
 
-The Orca path gives a card an Orca worktree: `orca worktree create` places it, Orca's record of it
-is what makes it acceptable, and `orca worktree rm` takes it back. A card whose worker and reviewer
-both run on a supervised runtime puts nothing in an Orca pane, so this manager gives it a worktree
-Orca never hears of: cut with `git worktree add -b <card branch>` from the card's seed into
+Cut with `git worktree add -b <card branch>` from the card's seed into
 `<data_dir>/workspaces/<project id>/<worker>`, accepted by the same resumable-workspace check a
-resumed card already passes, and taken back with `git worktree remove --force` and `prune`.
+resumed card already passes, and taken back with `git worktree remove --force` and `prune`. It is
+the only placement: which runtime a card's heads are on is not asked (secretary-1722).
 
-Which manager a card has is decided once, when its workspace is created, and is read back from the
-workspace path ever after (`owns`): the dispatcher record carries no new field, and a card whose
-profiles move mid-round stays on the manager its checkout was made by.
+Whether a recorded workspace is one of these is read from its path alone (`owns`). A record whose
+workspace is an Orca worktree under the Orca workspaces root was written before this was the only
+placement; the dispatcher host refuses it as a legacy record rather than tearing it down.
 """
 
 from __future__ import annotations
@@ -28,7 +26,8 @@ if TYPE_CHECKING:
 
 #: The directory under the data dir that git-managed card workspaces live in.
 WORKSPACES_DIR = "workspaces"
-#: Names the Orca workspaces root, and only it.
+#: Names the Orca workspaces root, and only it. Read to recognise a legacy record, route curator
+#: discovery and keep role worktrees apart from this root; never to place a card.
 ORCA_WORKSPACES_ROOT_ENV = "SECRETARY_DISPATCHER_WORKSPACES_ROOT"
 
 
@@ -41,8 +40,8 @@ def workspace_roots_overlap(orca_root: Path, data_dir: Path) -> str | None:
     """Why the Orca root and `<data_dir>/workspaces` cannot both be served, or None when disjoint.
 
     Ownership of a workspace is read from its path alone (`owns`, `_is_git_observer_workspace`),
-    so two roots that are equal or nest would hand one path to both managers. The dispatcher refuses
-    to start on that rather than let one manager silently win.
+    so two roots that are equal or nest would make one path both a git workspace and a legacy Orca
+    one. The dispatcher refuses to start on that rather than let one reading silently win.
     """
     orca = _resolved(orca_root)
     git = _resolved(Path(data_dir) / WORKSPACES_DIR)
@@ -77,22 +76,15 @@ class GitWorkspaceManager:
                 raise HostError(f"workspace name {part!r} is not a single path component")
         return self.root / project / worker
 
-    def owns(self, workspace: str | Path, *, orca_root: Path) -> bool:
-        """Whether this workspace path is one this manager made.
-
-        Exactly `<root>/<project>/<worker>`, the one shape it cuts, and not under the Orca root: a
-        configuration that points the Orca root at or above the git root leaves every such path to
-        Orca, which is what it was before.
-        """
+    def owns(self, workspace: str | Path) -> bool:
+        """Whether this workspace path is one this manager made: exactly `<root>/<project>/<worker>`,
+        the one shape it cuts. The dispatcher refuses to start when the Orca root and this one
+        overlap (`workspace_roots_overlap`), so no such path is also an Orca one."""
         if not workspace:
             return False
         path = _resolved(Path(workspace))
         root = _resolved(self.root)
-        return (
-            path.is_relative_to(root)
-            and len(path.relative_to(root).parts) == 2
-            and not path.is_relative_to(_resolved(orca_root))
-        )
+        return path.is_relative_to(root) and len(path.relative_to(root).parts) == 2
 
     def create(self, task: dict[str, Any], worker_id: str, seed: str, *, expected: str = "") -> str:
         """Cut this card's branch from `seed` into its worktree and accept it only as that.
@@ -144,7 +136,7 @@ class GitWorkspaceManager:
         return left
 
     def teardown(self, workspace: str) -> None:
-        """Take a stopped card's worktree back. Best-effort, like the Orca removal it stands for."""
+        """Take a stopped card's worktree back. Best-effort: a removal that fails leaves it standing."""
         try:
             repo = self._repo_of(workspace)
         except (HostError, KeyError, ValueError):

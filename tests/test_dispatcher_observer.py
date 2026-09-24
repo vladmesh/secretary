@@ -19,7 +19,6 @@ from unittest import mock
 
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.sql_cards import BOARD_ID
-from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch import observer_fence as dispatcher_observer_fence
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -57,12 +56,11 @@ from secretary.dispatch.production import (
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.tui import (
     DeliveryEvidence,
-    TuiDeliveryError,
     claude_project_dir_name,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
 )
-from secretary.dispatch.types import HostError
+from secretary.dispatch.types import HostError, LegacyDispatcherRecord
 from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
@@ -90,25 +88,20 @@ from tests.fakes.dispatcher import (
     dispatcher_seed,
 )
 from tests.fakes.observer import (
-    BLOCKED_PANE_WAIT_BODY,
     DEAD_PID,
-    STALE_HANDLE_WAIT_FAILURE,
-    TIMEOUT_WAIT_FAILURE,
     install_skill_registry,
 )
+from tests.dispatcher_fixtures import SupervisedBackend, supervised_run
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import as_observer, bind_observer
 from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
-from secretary.runtime import tui_delivery
 from secretary.runtime import codex_preflight
-from secretary.runtime.agent_prompt_transport import (
-    BRACKETED_PASTE_END,
-    BRACKETED_PASTE_START,
-)
 from secretary.runtime.codex_preflight import ensure_codex_workspace_trusted
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from secretary.observer_root import observer_root_repo
+from secretary.runtime.head import HEAD_BUSY, HEAD_GONE, DeliverReceipt, HeadCommand, HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import operations as head_ops
 
 
 @contextlib.contextmanager
@@ -290,6 +283,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 delivery_id=delivery.delivery_id,
                 through_event=delivery.through_event,
             )
+
+    def real_host_delivering(self) -> SupervisedBackend:
+        """Wake through the real host's `nudge_observer`, onto a recording supervised backend.
+
+        Everything else about the observer stays the fake host's: this is about what the real
+        delivery path writes, hands over and raises, not about how its backend types.
+        """
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        backend = SupervisedBackend().install(real_host)
+        self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+        return backend
 
     def expire_wake_retry(self, reference: str = "sprint:1") -> None:
         """Age a deferred wake past its backoff so the next tick retries the delivery."""
@@ -1124,46 +1128,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_claude_head_is_nudged_and_acknowledges_with_its_causal_marker(self) -> None:
         """The gap this closes: a claude observer never showed Codex's completed-queue screen.
 
-        Both halves run against the real host: readiness and delivery come from Orca's `tui-idle`,
-        so the pane is never read for a vendor marker, and the batch is closed only by the
-        observer's own resume naming this delivery.
+        The wake runs against the real host, and the batch is closed only by the observer's own
+        resume naming this delivery.
         """
         self.catalog.profiles["claude-observer"] = {
             "adapter": "claude",
             "model": "opus",
             "resource": "claude-sub",
-            "runtime": "orca-legacy",
+            "runtime": "local-pty",
         }
         self.catalog.role_defaults["observer"] = "claude-observer"
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
         self.assertEqual(self.observers()["sprint:1"].head, "claude-observer")
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-        sends: list[list[str]] = []
-        busy = [False]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "send"]:
-                sends.append(args)
-                busy[0] = True
-                return {}
-            if args[1:3] == ["terminal", "wait"]:
-                # Ready for input until the wake lands, working on it afterwards.
-                return {"wait": {"condition": "tui-idle", "satisfied": not busy[0]}}
-            raise AssertionError(args)
+        backend = self.real_host_delivering()
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
 
         self.writer.comment(
             role="dispatcher",
@@ -1172,74 +1152,45 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             body="card changed",
             request_id="claude-observer-event",
         )
+        woke = self.runtime.production_tick()
 
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            woke = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
+        [(_run, pointer, subject)] = backend.deliveries
+        self.assertEqual(subject, "observer-wake")
+        self.assertNotIn("\n", pointer.text)
+        self.assertLessEqual(len(pointer.text.encode("utf-8")), 256)
+        document = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
+        self.assertIn(f"delivery_id: {delivery.delivery_id}", document)
+        self.assertIn(f"through_event: {delivery.through_event}", document)
 
-            self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
-            delivery = self.observers()["sprint:1"].delivery
-            self.assertEqual(delivery.stage, DeliveryStage.AWAITING_ACK)
-            message = sends[0][sends[0].index("--text") + 1]
-            self.assertNotIn("\n", message)
-            self.assertLessEqual(len(message.encode("utf-8")), 256)
-            document = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(
-                encoding="utf-8"
-            )
-            self.assertIn(f"delivery_id: {delivery.delivery_id}", document)
-            self.assertIn(f"through_event: {delivery.through_event}", document)
-
-            entry = {
-                "selected_step": "read board",
-                "selected_why": "card changed",
-                "rejected_alternatives": "wait",
-                "current_task": "secretary-510",
-                "dod_state": "open",
-                "next_safe_step": "resume",
-            }
-            self.acknowledge_delivery(entry, request_id="claude-observer-ack")
-            busy[0] = False
-            acknowledged = self.runtime.production_tick()
+        entry = {
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510",
+            "dod_state": "open",
+            "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="claude-observer-ack")
+        acknowledged = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.IDLE)
         self.assertTrue(delivery.acknowledged_delivery_id)
         self.assertTrue(delivery.acknowledged_resume_id)
-        self.assertEqual(len(sends), 2)
-        self.assertIn("--enter", sends[1])
-        self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
+        self.assertEqual(len(backend.deliveries), 1, "an acknowledged batch is not delivered again")
 
-    def test_a_wake_the_pane_never_took_is_an_explicit_refusal(self) -> None:
+    def test_a_wake_the_head_never_took_is_an_explicit_refusal(self) -> None:
         """Retry exhaustion reaches the tick and the delivery record instead of being silent."""
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-        sends: list[list[str]] = []
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "send"]:
-                sends.append(args)
-                return {}
-            if args[1:3] == ["terminal", "wait"]:
-                # The pane stays ready however often the prompt is entered: it took none of them.
-                return {"wait": {"condition": "tui-idle", "satisfied": True}}
-            raise AssertionError(args)
-
+        backend = self.real_host_delivering()
+        backend.deliver_refusal = DeliverReceipt(status=HEAD_GONE, reason="the prompt did not start a turn")
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
@@ -1248,62 +1199,28 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             request_id="swallowed-wake-event",
         )
 
-        # Drive the bounded resend loop without giving process scheduling a chance to consume its
-        # short delivery window before both retries run. Keep this clock local to tui_delivery:
-        # the observer lifecycle still uses its ordinary wall clock for persisted retry deadlines.
-        now = [0.0]
-        slept: list[float] = []
+        result = self.runtime.production_tick()
 
-        def sleep(seconds: float) -> None:
-            slept.append(seconds)
-            now[0] += seconds
+        action = self.actions(result)[0]
+        self.assertEqual(action["action"], "observer-wake-deferred")
+        self.assertEqual(action["status"], "degraded")
+        self.assertIn("observer wake was not delivered", action["reason"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+        self.assertIn("did not start a turn", delivery.reason)
+        self.assertEqual(delivery.attempts, 1)
+        self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
+        owed = (delivery.delivery_id, delivery.through_event)
 
-        delivery_time = mock.Mock(spec_set=("monotonic", "sleep", "time"))
-        delivery_time.monotonic.side_effect = lambda: now[0]
-        delivery_time.sleep.side_effect = sleep
-        delivery_time.time.side_effect = time.time
+        # Retries are bounded: the last one hands the batch to the replacement path instead of
+        # growing the backoff on a head that takes none of its prompts.
+        self.expire_wake_retry()
+        second = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(second)], ["observer-wake-deferred"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 2)
 
-        with (
-            mock.patch.object(real_host, "_run_json", side_effect=run_json),
-            mock.patch.object(tui_delivery, "time", delivery_time),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
-        ):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            result = self.runtime.production_tick()
-
-            action = self.actions(result)[0]
-            self.assertEqual(action["action"], "observer-wake-deferred")
-            self.assertEqual(action["status"], "degraded")
-            self.assertIn("observer wake was not delivered", action["reason"])
-            delivery = self.observers()["sprint:1"].delivery
-            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
-            self.assertIn("observer wake was not delivered", delivery.reason)
-            self.assertEqual(delivery.attempts, 1)
-            self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
-            # The prompt body is one write, followed by its submit and the existing two bare
-            # Enter retries before the delivery is given up on.
-            self.assertEqual(len(sends), 4)
-            self.assertNotIn("--enter", sends[0])
-            self.assertIn("--enter", sends[1])
-            self.assertTrue(all("--enter" in send for send in sends[2:]))
-            self.assertGreaterEqual(now[0], 0.3)
-            self.assertTrue(slept)
-            self.assertTrue(all(seconds == 0.01 for seconds in slept))
-            owed = (delivery.delivery_id, delivery.through_event)
-
-            # Retries are bounded: the last one hands the batch to the replacement path instead of
-            # growing the backoff on a head that takes none of its prompts.
-            self.expire_wake_retry()
-            second = self.runtime.production_tick()
-            self.assertEqual([row["action"] for row in self.actions(second)], ["observer-wake-deferred"])
-            self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 2)
-
-            self.expire_wake_retry()
-            replaced = self.runtime.production_tick()
+        self.expire_wake_retry()
+        replaced = self.runtime.production_tick()
 
         action = self.actions(replaced)[0]
         self.assertEqual(action["action"], "observer-relaunched")
@@ -1428,44 +1345,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         ):
             self.runtime.production_tick()
 
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
-        sends: list[list[str]] = []
-        busy = [False]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "send"]:
-                sends.append(args)
-                busy[0] = True
-                return {"send": {"accepted": True, "bytesWritten": 900}}
-            if args[1:3] == ["terminal", "read"]:
-                return {"terminal": {"tail": ["›"]}}
-            if args[1:3] == ["terminal", "wait"]:
-                return {"wait": {"condition": "tui-idle", "satisfied": not busy[0]}}
-            raise AssertionError(args)
-
+        backend = self.real_host_delivering()
         self.expire_wake_retry()
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            self.runtime.production_tick()
+        self.runtime.production_tick()
 
         # The wake carries what the sprint had lost before it: this delivery is not history yet.
         # The first launch's own prompt is one of those attempts — every prompt this sprint put in
         # front of its head is counted, not only the ones carrying a card-event batch.
-        message = sends[0][sends[0].index("--text") + 1]
-        self.assertNotIn("\n", message)
+        [(_run, pointer, _subject)] = backend.deliveries
+        self.assertNotIn("\n", pointer.text)
         wake_document = (Path(record.workspace) / "SPRINT.md").read_text(encoding="utf-8")
         self.assertIn("observer delivery so far: 2 attempt(s), 1 failed (1 wake, 0 launch)", wake_document)
         self.assertIn("closing resume", wake_document)
@@ -1519,65 +1408,6 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual((delivery.launch_delivery_attempts, delivery.launch_delivery_failures), (2, 1))
         self.assertEqual(status_observers(self.runtime.production_state.load())[0]["delivery_failures"], 1)
 
-    def test_a_wake_whose_transport_was_refused_keeps_its_evidence(self) -> None:
-        """A `terminal send` the host refuses is a prompt that did not land, evidenced like one.
-
-        The failure used to escape the delivery boundary as the host's own exception, so the record
-        kept a count and a sentence: no terminal, no payload fingerprint, no stage — and whatever
-        evidence an earlier failure happened to leave behind.
-        """
-        self.open_sprint()
-        self.board.save_metadata(12, sprint_ref="sprint:1")
-        self.runtime.production_tick()
-        self.writer.comment(
-            role="dispatcher",
-            actor="dispatcher",
-            reference="secretary-510",
-            body="card changed",
-            request_id="transport-refusal-event",
-        )
-        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "send"]:
-                raise HostError("orca terminal send failed: synthetic transport refusal")
-            if args[1:3] == ["terminal", "read"]:
-                return {"terminal": {"tail": ["›"], "nextCursor": "42"}}
-            if args[1:3] == ["terminal", "wait"]:
-                return {"wait": {"condition": "tui-idle", "satisfied": True}}
-            raise AssertionError(args)
-
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            deferred = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(deferred)], ["observer-wake-deferred"])
-        delivery = self.observers()["sprint:1"].delivery
-        self.assertEqual(delivery.wake_failures, 1)
-        evidence = delivery.last_evidence
-        self.assertEqual(evidence["reason"], "transport-refused-body-write")
-        self.assertEqual(evidence["handle"], record.handle)
-        self.assertTrue(evidence["payload_bytes"])
-        self.assertEqual(len(evidence["payload_sha256"]), 16)
-        # The pane was fingerprinted before the send that never happened, so the record can say
-        # what the head looked like when the prompt was lost.
-        self.assertEqual(evidence["readiness_before"], "ready")
-        self.assertEqual(evidence["cursor_before"], "orca:42")
-
     def test_a_busy_delivery_wait_preserves_the_observer_and_its_pending_ack(self) -> None:
         """A stale status-to-send race does not make the owned observer disposable."""
         self.open_sprint()
@@ -1590,43 +1420,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             body="card changed",
             request_id="busy-wake-event",
         )
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
-        waits = [
-            {"wait": {"condition": "tui-idle", "satisfied": True}},
-            HostError(TIMEOUT_WAIT_FAILURE),
-        ]
-        sends: list[list[str]] = []
+        backend = self.real_host_delivering()
+        # The status said it was at its prompt; by the time the wake reached it, it was in a turn.
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        backend.deliver_refusal = DeliverReceipt(status=HEAD_BUSY, reason="this head is in a turn")
 
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "wait"]:
-                answer = waits.pop(0)
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
-            if args[1:3] == ["terminal", "send"]:
-                sends.append(args)
-                return {"send": {"accepted": True, "bytesWritten": 1}}
-            raise AssertionError(args)
-
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            held = self.runtime.production_tick()
+        held = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(held)], ["observer-wake-busy"])
-        self.assertEqual(sends, [], "a busy wait sends no duplicate prompt")
+        self.assertEqual(backend.deliveries, [], "a busy wait sends no duplicate prompt")
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, [])
         after = self.observers()["sprint:1"]
@@ -1638,34 +1441,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(after.delivery.through_event)
         self.assertEqual((after.delivery.wake_attempts, after.delivery.wake_failures), (0, 0))
         self.assertEqual(after.delivery.last_evidence["readiness_state"], "busy")
-        self.assertEqual(after.delivery.last_evidence["reason"], "readiness-busy")
 
         delivery_id = after.delivery.delivery_id
-        working = [False]
-
-        def deliver_after_busy(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "wait"]:
-                return {"wait": {"condition": "tui-idle", "satisfied": not working[0]}}
-            if args[1:3] == ["terminal", "read"]:
-                return {"terminal": {"tail": ["working" if working[0] else "›"], "nextCursor": "1"}}
-            if args[1:3] == ["terminal", "send"]:
-                working[0] = True
-                return {"send": {"accepted": True, "bytesWritten": 1}}
-            raise AssertionError(args)
-
-        with mock.patch.object(real_host, "_run_json", side_effect=deliver_after_busy):
-            sent = self.runtime.production_tick()
+        backend.deliver_refusal = None
+        sent = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(sent)], ["observer-nudged"])
         pending = self.observers()["sprint:1"].delivery
@@ -1677,39 +1456,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """A wake refused after its prompt landed is not sent twice.
 
         The delivery marker only exists in a prompt that reached the head, so a resume naming it
-        is proof of the turn whatever the dispatcher saw of the send. Reachable now that a failure
-        can happen after the prompt is in: the pane goes unanswerable while the head works on it.
+        is proof of the turn whatever the dispatcher saw of the send.
         """
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")
         self.runtime.production_tick()
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-        sends: list[list[str]] = []
-        unanswerable = [False]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "send"]:
-                sends.append(args)
-                unanswerable[0] = True
-                return {}
-            if args[1:3] == ["terminal", "wait"]:
-                if unanswerable[0]:
-                    raise HostError(STALE_HANDLE_WAIT_FAILURE)
-                return {"wait": {"condition": "tui-idle", "satisfied": True}}
-            raise AssertionError(args)
-
+        backend = self.real_host_delivering()
+        backend.deliver_refusal = DeliverReceipt(status=HEAD_GONE, reason="the supervisor stopped answering")
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
@@ -1718,94 +1472,33 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             request_id="post-send-refusal-event",
         )
 
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
-            refused = self.runtime.production_tick()
+        refused = self.runtime.production_tick()
 
-            self.assertEqual([row["action"] for row in self.actions(refused)], ["observer-wake-deferred"])
-            delivery = self.observers()["sprint:1"].delivery
-            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
-            self.assertEqual(len(sends), 2)
+        self.assertEqual([row["action"] for row in self.actions(refused)], ["observer-wake-deferred"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
 
-            # The head had the prompt after all, and says so with this delivery's own markers.
-            entry = {
-                "selected_step": "read board",
-                "selected_why": "card changed",
-                "rejected_alternatives": "wait",
-                "current_task": "secretary-510",
-                "dod_state": "open",
-                "next_safe_step": "resume",
-            }
-            self.acknowledge_delivery(entry, request_id="post-send-refusal-ack")
-            unanswerable[0] = False
-            self.expire_wake_retry()
-            acknowledged = self.runtime.production_tick()
+        # The head had the prompt after all, and says so with this delivery's own markers.
+        entry = {
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510",
+            "dod_state": "open",
+            "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="post-send-refusal-ack")
+        backend.deliver_refusal = None
+        self.expire_wake_retry()
+        acknowledged = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.IDLE)
         self.assertTrue(delivery.acknowledged_resume_id)
         # No second turn for a batch the observer has already answered.
-        self.assertEqual(len(sends), 2)
+        self.assertEqual(backend.deliveries, [])
         self.assertEqual(self.host.observers, ["sprint:1"])
-
-    def test_a_readiness_probe_that_fails_is_not_read_as_a_busy_head(self) -> None:
-        """Through the real `observer_status`: a probe Orca refuses must not read as ordinary work.
-
-        The wake would otherwise sit in `waiting_for_idle` forever, counting no attempts and never
-        reaching either the explicit refusal or the replacement.
-        """
-        self.open_sprint()
-        self.board.save_metadata(12, sprint_ref="sprint:1")
-        self.runtime.production_tick()
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "wait"]:
-                raise HostError(STALE_HANDLE_WAIT_FAILURE)
-            raise AssertionError(args)
-
-        self.writer.comment(
-            role="dispatcher",
-            actor="dispatcher",
-            reference="secretary-510",
-            body="card changed",
-            request_id="unprobeable-pane-event",
-        )
-
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            first = self.runtime.production_tick()
-
-            action = self.actions(first)[0]
-            self.assertEqual(action["action"], "observer-wake-deferred")
-            self.assertEqual(action["status"], "degraded")
-            self.assertIn("observer terminal readiness could not be read", action["reason"])
-            delivery = self.observers()["sprint:1"].delivery
-            self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
-            self.assertEqual(delivery.attempts, 1)
-
-            self.expire_wake_retry()
-            self.runtime.production_tick()
-            self.expire_wake_retry()
-            replaced = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
-        self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
-        self.assertEqual(self.host.observer_nudges, [])
 
     def test_an_adopted_head_with_no_handle_is_replaced_not_waited_on(self) -> None:
         """A tick that died before recording the handle leaves a head nothing can be sent to.
@@ -1852,51 +1545,6 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(record.handle)
         self.assertEqual(record.delivery.stage, DeliveryStage.AWAITING_ACK)
         self.assertEqual(record.delivery.method, "launch")
-
-    def test_a_readiness_probe_timeout_is_an_ordinary_busy_head(self) -> None:
-        """The other half of the same distinction: a busy pane must not cost the sprint its head."""
-        self.open_sprint()
-        self.board.save_metadata(12, sprint_ref="sprint:1")
-        self.runtime.production_tick()
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        record = self.observers()["sprint:1"]
-
-        def run_json(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": record.handle,
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": int((time.time() - 2) * 1000),
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "wait"]:
-                raise HostError(TIMEOUT_WAIT_FAILURE)
-            raise AssertionError(args)
-
-        self.writer.comment(
-            role="dispatcher",
-            actor="dispatcher",
-            reference="secretary-510",
-            body="card changed",
-            request_id="busy-pane-event",
-        )
-
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            waiting = self.runtime.production_tick()
-            self.expire_wake_retry()
-            still_waiting = self.runtime.production_tick()
-
-        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
-        self.assertEqual([row["action"] for row in self.actions(still_waiting)], ["observer-wake-waiting"])
-        delivery = self.observers()["sprint:1"].delivery
-        self.assertEqual(delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
-        self.assertEqual(delivery.attempts, 0)
-        self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_a_terminal_orca_will_not_answer_for_also_ends_in_a_replacement(self) -> None:
         """The other external failure of a wake: bounded retries, then the same replacement path."""
@@ -3505,42 +3153,6 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.observers()["sprint:1"].delivery.stage,
             DeliveryStage.AWAITING_ACK,
         )
-
-    def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
-        """Orca may rotate the handle while retaining leafId, so status must read the alias."""
-        self.open_sprint()
-        self.runtime.production_tick()
-        record = self.observers()["sprint:1"]
-        self.assertEqual(record.leaf, "leaf:observer:sprint:1")
-        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
-        calls: list[list[str]] = []
-        stale_output = int((time.time() - 2) * 1000)
-
-        def run_json(args: list[str]) -> dict:
-            calls.append(args)
-            if args[1:3] == ["terminal", "list"]:
-                return {
-                    "terminals": [
-                        {
-                            "handle": "observer:rotated",
-                            "leafId": record.leaf,
-                            "connected": True,
-                            "lastOutputAt": stale_output,
-                        }
-                    ]
-                }
-            if args[1:3] == ["terminal", "wait"]:
-                return {"wait": {"condition": "tui-idle", "satisfied": True}}
-            raise AssertionError(args)
-
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
-            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
-            grace = self.runtime.production_tick()
-            self.assertEqual([row["action"] for row in self.actions(grace)], ["observer-idle"])
-            self.assertEqual(self.observers()["sprint:1"].state, "idle-grace")
-        waits = [args for args in calls if args[1:3] == ["terminal", "wait"]]
-        self.assertTrue(waits)
-        self.assertEqual(waits[0][waits[0].index("--terminal") + 1], "observer:rotated")
 
     def test_active_card_does_not_relaunch_a_finished_observer_without_a_new_event(self) -> None:
         self.open_sprint()
@@ -5698,44 +5310,7 @@ class ObserverConfigurationTests(unittest.TestCase):
             ObserverRecord(sprint="sprint:1").generation,
         )
 
-    def test_a_busy_pane_survives_the_hosts_non_zero_exit_path(self) -> None:
-        """Through the real runner: Orca exits non-zero for a busy pane, and it is still busy.
-
-        `_run` raises on the exit code before any JSON is parsed, so the only place the answer
-        survives is the text of the failure. Reading it wrong would replace a working observer.
-        """
-        with tempfile.TemporaryDirectory() as root:
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
-            listed = json.dumps(
-                {
-                    "result": {
-                        "terminals": [
-                            {
-                                "handle": "observer:sprint:1",
-                                "connected": True,
-                                "lastOutputAt": 1_753_456_789_123,
-                            }
-                        ]
-                    }
-                }
-            )
-
-            def run(args, **kwargs):
-                if args[1:3] == ["terminal", "list"]:
-                    return subprocess.CompletedProcess(args, 0, stdout=listed, stderr="")
-                if args[1:3] == ["terminal", "wait"]:
-                    # Exactly what the CLI does with a pane it found working: non-zero exit, and
-                    # the answer on stdout.
-                    return subprocess.CompletedProcess(args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr="")
-                raise AssertionError(args)
-
-            with mock.patch.object(dispatcher_host_module._proc, "run_isolated", side_effect=run):
-                status = host.observer_status(record)
-
-        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": False})
-
-    def test_a_pane_nothing_can_be_sent_to_refuses_instead_of_reading_busy(self) -> None:
+    def test_a_record_that_names_no_head_refuses_instead_of_reading_busy(self) -> None:
         """A head that cannot be addressed is not a working one, whatever its pid says."""
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
@@ -5745,77 +5320,47 @@ class ObserverConfigurationTests(unittest.TestCase):
             with self.assertRaises(HostError):
                 host.observer_status(adopted)
 
-            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
-            for terminals in (
-                [],
-                [{"handle": "observer:sprint:1", "connected": False}],
-            ):
-
-                def run_json(args: list[str], answer=terminals) -> dict:
-                    if args[1:3] == ["terminal", "list"]:
-                        return {"terminals": answer}
-                    raise AssertionError(args)
-
-                with mock.patch.object(host, "_run_json", side_effect=run_json), self.assertRaises(HostError):
-                    host.observer_status(record)
-
     def test_real_host_nudge_carries_the_active_delivery_marker(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            workspace = Path(root) / "observer-workspace"
-            workspace.mkdir()
+            host, backend, workspace = _supervised_observer_host(Path(root))
             record = ObserverRecord(
                 sprint="sprint:1",
                 head="codex-observer",
                 workspace=str(workspace),
-                handle="observer:sprint:1",
+                handle="run:observer-1",
+                head_run=_supervised_observer_run(workspace),
                 delivery=ObserverDelivery(
                     delivery_id="delivery-1",
                     through_event="evt-card-1",
                 ),
             )
-            calls: list[list[str]] = []
             owner_decision = "[po]\nclose after secretary-1591; create no new cards\n" + "x" * 70_000
+            seen_at_delivery: list[str] = []
+            backend.on_deliver = lambda: seen_at_delivery.append(
+                (workspace / "SPRINT.md").read_text(encoding="utf-8")
+            )
 
-            def run_json(args: list[str]) -> dict:
-                calls.append(args)
-                if args[1:3] == ["terminal", "list"]:
-                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
-                if args[1:3] == ["terminal", "send"]:
-                    document = workspace / "SPRINT.md"
-                    self.assertTrue(document.is_file())
-                    self.assertIn(owner_decision, document.read_text(encoding="utf-8"))
-                    return {"send": {"accepted": True, "bytesWritten": 1315}}
-                if args[1:3] == ["terminal", "read"]:
-                    return {"terminal": {"tail": ["›"]}}
-                if args[1:3] == ["terminal", "wait"]:
-                    # Ready before the send, working after it: the pane took the prompt.
-                    sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
-                    return {"wait": {"condition": "tui-idle", "satisfied": not sends}}
-                raise AssertionError(args)
-
-            with mock.patch.object(host, "_run_json", side_effect=run_json):
-                outcome = host.nudge_observer(
-                    record,
-                    sprint={
-                        "ref": "sprint:1",
-                        "comments": [
-                            {
-                                "created_at": "2026-09-07T23:00:35Z",
-                                "body": owner_decision,
-                            }
-                        ],
-                        "resume": {"next_safe_step": "create secretary-1592"},
-                    },
-                    change="sprint-entity",
-                )
+            host.nudge_observer(
+                record,
+                sprint={
+                    "ref": "sprint:1",
+                    "comments": [
+                        {
+                            "created_at": "2026-09-07T23:00:35Z",
+                            "body": owner_decision,
+                        }
+                    ],
+                    "resume": {"next_safe_step": "create secretary-1592"},
+                },
+                change="sprint-entity",
+            )
             document_text = (workspace / "SPRINT.md").read_text(encoding="utf-8")
 
-        sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
-        wire_body = sent[sent.index("--text") + 1]
-        self.assertTrue(wire_body.startswith(BRACKETED_PASTE_START))
-        self.assertTrue(wire_body.endswith(BRACKETED_PASTE_END))
-        message = wire_body[len(BRACKETED_PASTE_START) : -len(BRACKETED_PASTE_END)]
+        [(_run, pointer, subject)] = backend.deliveries
+        message = pointer.text
+        self.assertEqual(subject, "observer-wake")
+        # The whole document is on disk before the pointer at it is handed over.
+        self.assertIn(owner_decision, seen_at_delivery[0])
         self.assertNotIn("\n", message)
         self.assertLessEqual(len(message.encode("utf-8")), 256)
         self.assertEqual(message, f"Read {workspace / 'SPRINT.md'} and do its task.")
@@ -5856,198 +5401,6 @@ class ObserverConfigurationTests(unittest.TestCase):
             _, found, rest = corrupted.partition("Keep a ")
             self.assertTrue(found)
             self.assertIn(broad, "Keep a " + rest.split(".", 1)[0])
-        # The pane started a turn, and that alone does not close an observer delivery.
-        self.assertEqual(outcome, "accepted")
-        # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte
-        # count Orca answers with is one stage of delivery, not the whole of it. The post-send
-        # pane probe is first, so a payload still visible in its composer cannot be hidden by a
-        # same-workspace provider turn; only then does the fallback screen get a say.
-        self.assertEqual(
-            [call[1:3] for call in calls],
-            [
-                ["terminal", "list"],
-                ["terminal", "wait"],
-                ["terminal", "wait"],
-                ["terminal", "read"],
-                ["terminal", "send"],
-                ["terminal", "send"],
-                ["terminal", "wait"],
-                ["terminal", "read"],
-                ["terminal", "read"],
-            ],
-        )
-        # The verdict carries the attempt's evidence, and the evidence carries no prompt text.
-        evidence = outcome.evidence.to_json()
-        self.assertEqual(evidence["handle"], "observer:sprint:1")
-        self.assertEqual(evidence["subject"], "observer-wake")
-        self.assertEqual(evidence["stage"], "turn_observed")
-        self.assertEqual(evidence["bytes_written"], 1315)
-        self.assertEqual((evidence["body_write_count"], evidence["submit_count"]), (1, 1))
-        self.assertTrue(evidence["body_write_accepted"])
-        self.assertTrue(evidence["submit_write_accepted"])
-        self.assertTrue(evidence["turn_confirmed"])
-        self.assertEqual(evidence["payload_bytes"], len(message.encode("utf-8")))
-        self.assertNotIn(message[:40], json.dumps(evidence))
-
-    def test_a_wake_a_working_head_took_is_delivered_and_not_a_failure(self) -> None:
-        """sprint:1089: 62 wakes delivered, 62 reported failed, the head replaced 14 times.
-
-        This is that pane. Codex has the wake and is working on it, and every screen signal says
-        otherwise: Orca answers `tui-idle` satisfied for a head that is visibly working, the region
-        after the prompt marker changes between two probes because the TUI repaints its own footer
-        and a running timer into it, and the output cursor does not move while that repaint
-        happens. Under those three the wake had no reachable way to be confirmed. What did happen
-        is that Codex wrote the submitted prompt into its own rollout, which is the proof a launch
-        has always been confirmed by, and the wake now carries it too.
-        """
-        with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root) / "observer-workspace"
-            workspace.mkdir()
-            sessions = Path(root) / "sessions"
-            sessions.mkdir()
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            record = ObserverRecord(
-                sprint="sprint:1089",
-                head="codex-observer",
-                workspace=str(workspace),
-                handle="observer:sprint:1089",
-            )
-            footer = "Improve documentation in @filename gpt-5.6-terra xhigh · ~/observers"
-            reads = [0]
-
-            def record_the_turn() -> None:
-                """Codex persists the submitted prompt a few seconds after the send."""
-                (sessions / "rollout.jsonl").write_text(
-                    "\n".join(
-                        [
-                            json.dumps(
-                                {
-                                    "type": "session_meta",
-                                    "payload": {"cwd": str(workspace.resolve()), "originator": "codex-tui"},
-                                }
-                            ),
-                            json.dumps(
-                                {
-                                    "type": "response_item",
-                                    "timestamp": "2099-01-02T03:04:05Z",
-                                    "payload": {
-                                        "type": "message",
-                                        "role": "user",
-                                        "content": [{"text": "A linked card changed."}],
-                                    },
-                                }
-                            ),
-                        ]
-                    ),
-                    encoding="utf-8",
-                )
-
-            def run_json(args: list[str]) -> dict:
-                if args[1:3] == ["terminal", "list"]:
-                    return {
-                        "terminals": [
-                            {"handle": "observer:sprint:1089", "connected": True},
-                        ]
-                    }
-                if args[1:3] == ["terminal", "send"]:
-                    return {"send": {"accepted": True, "bytesWritten": 858}}
-                if args[1:3] == ["terminal", "wait"]:
-                    # Orca calls this working Codex ready, every single probe.
-                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
-                if args[1:3] == ["terminal", "read"]:
-                    reads[0] += 1
-                    # One read before the send, then a probe per pass of the confirmation loop.
-                    # The timer in the footer moves and nothing else does.
-                    screen = (
-                        [f"› {footer}"]
-                        if reads[0] == 1
-                        else [f"› {footer} Working ({reads[0]}s · esc to interrupt)"]
-                    )
-                    if reads[0] == 3:
-                        record_the_turn()
-                    # The cursor stands still: repainting the bottom block commits no lines.
-                    return {"terminal": {"tail": screen, "nextCursor": "688"}}
-                raise AssertionError(args)
-
-            environment = {"SECRETARY_CODEX_SESSIONS": str(sessions)}
-            clock = [0.0]
-
-            def advance_clock(seconds: float) -> None:
-                clock[0] += seconds
-
-            with (
-                mock.patch.dict(os.environ, environment),
-                mock.patch.object(host, "_run_json", side_effect=run_json),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-                mock.patch(
-                    "secretary.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]
-                ),
-                mock.patch("secretary.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
-                mock.patch(
-                    "secretary.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
-                    0,
-                ),
-            ):
-                # Two passes of the loop with nothing but the pane to go on, and the pane says
-                # nothing on either. Then Codex writes the turn down and the wake is confirmed.
-                outcome = host.nudge_observer(record, sprint={"ref": "sprint:1089", "comments": []})
-
-        evidence = outcome.evidence
-        self.assertEqual(outcome, "confirmed")
-        self.assertEqual(evidence.stage, "acknowledged")
-        self.assertTrue(evidence.turn_confirmed)
-        # Every screen signal stayed exactly as hostile as it was in production.
-        self.assertEqual((evidence.readiness_before, evidence.readiness_after), ("ready", "ready"))
-        self.assertNotEqual(evidence.composer_before, evidence.composer_after)
-        self.assertFalse(evidence.cursor_moved)
-        # The head is not holding the payload: what changed after the marker is the TUI's timer.
-        self.assertFalse(evidence.payload_left_in_composer)
-        self.assertEqual(evidence.reason, "")
-        self.assertEqual(evidence.resends, 0)
-
-    def test_real_host_nudge_resolves_an_observer_alias_by_its_saved_leaf(self) -> None:
-        """The create-time handle need not occur in inventory after the observer is running."""
-        with tempfile.TemporaryDirectory() as root:
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            workspace = Path(root) / "observer-workspace"
-            workspace.mkdir()
-            record = ObserverRecord(
-                sprint="sprint:1",
-                head="codex-observer",
-                workspace=str(workspace),
-                handle="observer:create-time",
-                leaf="leaf-observer",
-            )
-            calls: list[list[str]] = []
-
-            def run_json(args: list[str]) -> dict:
-                calls.append(args)
-                if args[1:3] == ["terminal", "list"]:
-                    return {
-                        "terminals": [
-                            {
-                                "handle": "observer:alias",
-                                "leafId": "leaf-observer",
-                                "connected": True,
-                            }
-                        ]
-                    }
-                if args[1:3] == ["terminal", "send"]:
-                    return {}
-                if args[1:3] == ["terminal", "wait"]:
-                    sent = any(call[1:3] == ["terminal", "send"] for call in calls)
-                    return {"wait": {"condition": "tui-idle", "satisfied": not sent}}
-                raise AssertionError(args)
-
-            with mock.patch.object(host, "_run_json", side_effect=run_json):
-                self.assertEqual(
-                    host.nudge_observer(record, sprint={"ref": "sprint:1", "comments": []}),
-                    "accepted",
-                )
-
-        sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
-        self.assertEqual(sent[sent.index("--terminal") + 1], "observer:alias")
-
     def test_real_host_nudge_api_rejects_a_synchronous_confirm_callback(self) -> None:
         """Observer acknowledgement is out of band and cannot re-enter prompt delivery."""
         with tempfile.TemporaryDirectory() as root:
@@ -6075,76 +5428,52 @@ class ObserverConfigurationTests(unittest.TestCase):
 
         self.assertFalse(reached[0])
 
-    def test_real_host_nudge_refuses_a_wake_the_pane_never_took(self) -> None:
-        """A pane that stays idle swallowed the prompt: retries, then an explicit failure."""
+    def test_real_host_nudge_refuses_a_wake_the_head_never_took(self) -> None:
+        """A wake the backend could not deliver is an explicit failure, never a quiet success."""
         with tempfile.TemporaryDirectory() as root:
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            workspace = Path(root) / "observer-workspace"
-            workspace.mkdir()
+            host, backend, workspace = _supervised_observer_host(Path(root))
+            backend.deliver_refusal = DeliverReceipt(status=HEAD_GONE, reason="the prompt did not start a turn")
             record = ObserverRecord(
                 sprint="sprint:1",
                 head="codex-observer",
                 workspace=str(workspace),
-                handle="observer:sprint:1",
+                handle="run:observer-1",
+                head_run=_supervised_observer_run(workspace),
                 delivery=ObserverDelivery(delivery_id="delivery-3", through_event="evt-card-3"),
             )
-            calls: list[list[str]] = []
 
-            def run_json(args: list[str]) -> dict:
-                calls.append(args)
-                if args[1:3] == ["terminal", "list"]:
-                    return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
-                if args[1:3] == ["terminal", "send"]:
-                    return {}
-                if args[1:3] == ["terminal", "wait"]:
-                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
-                raise AssertionError(args)
-
-            with (
-                mock.patch.object(host, "_run_json", side_effect=run_json),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
-                mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
-                self.assertRaises(HostError) as raised,
-            ):
+            with self.assertRaises(HostError) as raised:
                 host.nudge_observer(record, sprint={"ref": "sprint:1", "comments": []})
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
-        self.assertIn("pane-stayed-ready", str(raised.exception))
-        sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
-        self.assertEqual(len(sends), 4)
-        self.assertNotIn("--enter", sends[0])
-        self.assertEqual([call[call.index("--text") + 1] for call in sends[1:]], ["", "", ""])
-        self.assertTrue(all("--enter" in call for call in sends[1:]))
+        self.assertIn("did not start a turn", str(raised.exception))
+        self.assertEqual(backend.deliveries, [])
 
-    def test_real_host_reads_readiness_from_tui_idle_and_the_output_timestamp(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
-            calls: list[list[str]] = []
 
-            def run_json(args: list[str]) -> dict:
-                calls.append(args)
-                if args[1:3] == ["terminal", "list"]:
-                    return {
-                        "terminals": [
-                            {
-                                "handle": "observer:sprint:1",
-                                "connected": True,
-                                "lastOutputAt": 1_753_456_789_123,
-                            }
-                        ]
-                    }
-                if args[1:3] == ["terminal", "wait"]:
-                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
-                raise AssertionError(args)
+def _supervised_observer_host(root: Path, catalog: FakeCatalog | None = None):
+    """A real host whose heads are on a recording backend, and sprint:1's observer workspace path.
 
-            with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-                status = host.observer_status(record)
+    The path is the one the host places (`<data_dir>/workspaces/observers/<token>`), made as a
+    plain directory: what a test here is about is the host around it, not the git worktree, which
+    `tests.test_observer_git_workspace` cuts for real.
+    """
+    host = CommandHostRuntime(catalog or FakeCatalog(), root / "data", mode="real")  # type: ignore[arg-type]
+    backend = SupervisedBackend().install(host)
+    workspace = Path(host.observer_workspace("sprint:1"))
+    workspace.mkdir(parents=True, exist_ok=True)
+    return host, backend, workspace
 
-        self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": True})
-        self.assertEqual([args[1:3] for args in calls], [["terminal", "list"], ["terminal", "wait"]])
+
+def _supervised_observer_run(workspace: Path, **fields: object) -> dict:
+    return supervised_run(
+        "observer-run-1",
+        profile="codex-observer",
+        role="observer",
+        workspace=str(workspace),
+        task_ref=TaskRef.sprint("sprint:1"),
+        handle="run:observer-1",
+        **fields,
+    )
 
 
 class RealHostStopObserverTests(unittest.TestCase):
@@ -6154,106 +5483,25 @@ class RealHostStopObserverTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host, self.backend, self.workspace = _supervised_observer_host(self.root)
         self.record = ObserverRecord(
             sprint="sprint:1",
             head="observer",
-            handle="term-1",
-            workspace="/ws/observers/sprint-1",
+            handle="run:observer-1",
+            workspace=str(self.workspace),
             head_possible=True,
+            head_run=_supervised_observer_run(self.workspace),
         )
-        self.calls: list[list[str]] = []
-
-    def _run_json(self, args: list[str]) -> dict[str, object]:
-        self.calls.append(args)
-        return {}
-
-    def _refusing(self, step: list[str], message: str):
-        def run_json(args: list[str]) -> dict[str, object]:
-            self.calls.append(args)
-            if args[1:3] == step:
-                raise HostError(message)
-            return {}
-
-        return run_json
-
-    def test_the_head_and_the_workspace_it_was_given_are_both_stopped(self) -> None:
-        """What the bring-up registered, the stop gives back: Orca is left with neither a terminal
-        of this observer nor a worktree for it."""
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
-            self.host.stop_observer(self.record)
-
-        self.assertEqual(
-            self.calls,
-            [
-                [
-                    "orca",
-                    "worktree",
-                    "show",
-                    "--worktree",
-                    "path:/ws/observers/sprint-1",
-                    "--json",
-                ],
-                [
-                    "orca",
-                    "terminal",
-                    "stop",
-                    "--worktree",
-                    "path:/ws/observers/sprint-1",
-                    "--json",
-                ],
-                [
-                    "orca",
-                    "worktree",
-                    "rm",
-                    "--worktree",
-                    "path:/ws/observers/sprint-1",
-                    "--force",
-                    "--json",
-                ],
-            ],
-        )
-
-    def test_a_head_with_no_handle_is_stopped_through_its_workspace(self) -> None:
-        """A head adopted from a launch intent: the handle died with the tick that opened it, and
-        the observer workspace is the only pointer left to its terminals."""
-        adopted = ObserverRecord(
-            sprint="sprint:1",
-            head="observer",
-            workspace="/ws/observers/sprint-1",
-            head_possible=True,
-        )
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
-            self.host.stop_observer(adopted)
-
-        self.assertEqual(
-            [args[1:3] for args in self.calls],
-            [["worktree", "show"], ["terminal", "stop"], ["worktree", "rm"]],
-        )
-
-    def test_a_session_wrapped_observer_is_confirmed_dead_before_its_worktree_is_removed(self) -> None:
-        """Terminal stop cannot kill a `setsid` head by tty alone."""
-        record = ObserverRecord(
-            sprint="sprint:1",
-            head="observer",
-            handle="term-1",
-            workspace="/ws/observers/sprint-1",
-            head_possible=True,
-            pid_file="/tmp/observer.pid",
-        )
-        confirmed: list[str] = []
-        with (
-            mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)),
-            mock.patch.object(
-                self.host, "_confirm_head_process_gone", lambda path, **kwargs: confirmed.append(path)
-            ),
+        self.removed: list[str] = []
+        for name, value in (
+            ("_git_observer_worktree_listed", lambda workspace: True),
+            ("_remove_git_observer_workspace", self.removed.append),
         ):
-            self.host.stop_observer(record)
+            patched = mock.patch.object(self.host, name, side_effect=value)
+            patched.start()
+            self.addCleanup(patched.stop)
 
-        self.assertEqual(confirmed, ["/tmp/observer.pid"])
-        self.assertEqual(self.calls[-1][1:3], ["worktree", "rm"])
-
-    def test_a_live_foreign_observer_heartbeat_fences_workspace_stop_and_worktree_removal(self) -> None:
+    def test_a_live_foreign_observer_heartbeat_fences_the_head_stop_and_worktree_removal(self) -> None:
         pid_file = self.root / "foreign-observer.pid"
         foreign = subprocess.Popen(["sleep", "5"])
 
@@ -6282,9 +5530,9 @@ class RealHostStopObserverTests(unittest.TestCase):
         record = ObserverRecord(
             sprint="sprint:1",
             head="observer",
-            handle="term-1",
+            handle="run:observer-1",
             leaf="leaf-observer",
-            workspace="/ws/observers/sprint-1",
+            workspace=str(self.workspace),
             head_possible=True,
             pid_file=str(pid_file),
             head_run={
@@ -6298,236 +5546,79 @@ class RealHostStopObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "mismatching launch identity"):
                 self.host.stop_observer(record)
 
-        self.assertFalse(self.calls, "no worktree query, terminal stop or worktree removal is allowed")
+        self.assertEqual(self.backend.stops, [], "no head stop is allowed")
+        self.assertEqual(self.removed, [], "no worktree removal is allowed")
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
 
-    def test_a_record_without_a_workspace_still_closes_its_pane(self) -> None:
-        """Records written before the launch intent named a workspace: the handle is all there is."""
+    def test_a_record_without_a_workspace_is_a_legacy_record_and_is_left_alone(self) -> None:
+        """Records written before the launch intent named a workspace: the handle was an Orca pane."""
         legacy = ObserverRecord(sprint="sprint:1", head="observer", handle="term-1")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
+
+        with self.assertRaisesRegex(LegacyDispatcherRecord, "names an Orca pane and no workspace"):
             self.host.stop_observer(legacy)
 
-        self.assertEqual(self.calls, [["orca", "terminal", "close", "--terminal", "term-1", "--json"]])
+        self.assertEqual(self.backend.stops, [])
 
     def test_a_refused_stop_raises_instead_of_reporting_success(self) -> None:
-        run_json = self._refusing(["terminal", "stop"], "orca terminal stop failed: pane is busy")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-            with self.assertRaises(HostError):
-                self.host.stop_observer(self.record)
+        self.backend.stop_refusal = "the head's process outlived the stop it was sent"
+
+        with self.assertRaisesRegex(HostError, "outlived the stop"):
+            self.host.stop_observer(self.record)
+
+        self.assertEqual(self.removed, [], "the worktree stays under a head that would not go")
 
     def test_a_refused_stop_keeps_the_record_and_marks_stop_pending(self) -> None:
         runtime = mock.Mock()
         runtime.host = self.host
-        run_json = self._refusing(["terminal", "stop"], "orca terminal stop failed: pane is busy")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-            self.assertFalse(stop_observer_head(runtime, self.record))
+        self.backend.stop_refusal = "the head's process outlived the stop it was sent"
+
+        self.assertFalse(stop_observer_head(runtime, self.record))
 
         self.assertTrue(self.record.head_possible)
-        self.assertEqual(self.record.workspace, "/ws/observers/sprint-1")
+        self.assertEqual(self.record.workspace, str(self.workspace))
 
-    def test_a_terminal_that_is_stopped_but_a_worktree_that_will_not_go_is_a_failed_stop(
-        self,
-    ) -> None:
+    def test_a_head_that_is_stopped_but_a_worktree_that_will_not_go_is_a_failed_stop(self) -> None:
         """Otherwise the record is dropped while the worktree it named is still registered, and
         nothing is left pointing at it to clean it up."""
         runtime = mock.Mock()
         runtime.host = self.host
-        run_json = self._refusing(["worktree", "rm"], "orca worktree rm failed: worktree is busy")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+        with mock.patch.object(
+            self.host,
+            "_remove_git_observer_workspace",
+            side_effect=HostError(f"the observer workspace at {self.workspace} could not be removed"),
+        ):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
-        self.assertEqual(self.record.workspace, "/ws/observers/sprint-1")
-
-    def test_a_workspace_orca_does_not_know_is_a_head_that_is_already_gone(self) -> None:
-        """What makes the retry of a half-finished stop terminate."""
-        run_json = self._refusing(["worktree", "show"], "orca worktree show failed: selector_not_found")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-            self.host.stop_observer(self.record)
-
-        self.assertEqual([args[1:3] for args in self.calls], [["worktree", "show"]])
+        self.assertEqual(self.backend.stops, [("observer-run-1", "dispatcher")])
+        self.assertEqual(self.record.workspace, str(self.workspace))
 
     def test_an_unreadable_answer_is_not_an_absent_workspace(self) -> None:
-        """Orca down must not read as "nothing is running": that is how a live head loses its
-        record, and the next time the sprint opens a second head is put beside it."""
+        """git failing to list its worktrees must not read as "nothing is running": that is how a
+        live head loses its record, and the next time the sprint opens a second head is put beside it."""
         runtime = mock.Mock()
         runtime.host = self.host
-        run_json = self._refusing(["worktree", "show"], "orca worktree show failed: daemon is unreachable")
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
+        with mock.patch.object(
+            self.host,
+            "_git_observer_worktree_listed",
+            side_effect=HostError("git worktree list failed: fatal: not a git repository"),
+        ):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
         self.assertTrue(self.record.head_possible)
-        self.assertEqual(self.record.workspace, "/ws/observers/sprint-1")
+        self.assertEqual(self.record.workspace, str(self.workspace))
+        self.assertEqual(self.backend.stops, [])
 
     def test_the_pid_file_is_named_before_the_head_exists(self) -> None:
         self.assertEqual(self.host.observer_pid_file("sprint:1"), observer_pid_file("sprint:1"))
 
 
-class RealHostObserverWorkspaceTests(unittest.TestCase):
-    """The real host on the bring-up path: how the observer workspace becomes known to Orca.
-
-    A directory made with `mkdir` is not a worktree selector, so the live bring-up used to die on
-    `selector_not_found`. The shape of the commands is what these tests pin, not the fake's answer.
-    """
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.root = Path(self.tmpdir.name)
-        env = mock.patch.dict(
-            os.environ,
-            {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
-            },
-        )
-        env.start()
-        self.addCleanup(env.stop)
-        self.host = CommandHostRuntime(_ObserverCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
-        self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
-        self.calls: list[list[str]] = []
-        self.shell: list[list[str]] = []
-        self.registered = False
-        self.created_path: str | None = None
-        run_json = mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        )
-        run_json.start()
-        self.addCleanup(run_json.stop)
-        run = mock.patch.object(
-            CommandHostRuntime, "_run", lambda _self, args, label, **kwargs: self._run(args)
-        )
-        run.start()
-        self.addCleanup(run.stop)
-
-    @property
-    def workspace(self) -> str:
-        return self.host.observer_workspace("sprint:1")
-
-    def _run(self, args: list[str]) -> mock.Mock:
-        self.shell.append(args)
-        if args[:2] == ["git", "-C"] and "init" in args:
-            Path(args[2], ".git").mkdir(parents=True, exist_ok=True)
-        return mock.Mock(stdout="", stderr="", returncode=0)
-
-    def _run_json(self, args: list[str]) -> dict[str, object]:
-        self.calls.append(args)
-        if args[1:3] == ["worktree", "show"] and not self.registered:
-            raise HostError("orca worktree show failed: selector_not_found")
-        if args[1:3] == ["worktree", "create"]:
-            path = self.created_path if self.created_path is not None else self.workspace
-            Path(path).mkdir(parents=True, exist_ok=True)
-            return {"worktree": {"path": path}}
-        if args[1:3] == ["terminal", "create"]:
-            return {"handle": "term-obs", "paneKey": "tab-1:leaf-obs"}
-        return {}
-
-    def _prepare(self) -> dict[str, object]:
-        return self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
-
-    def test_the_workspace_is_registered_with_orca_before_the_terminal_is_asked_for(self) -> None:
-        launched = self._prepare()
-
-        repo = self.root / "data" / "dispatcher" / "observer-root" / "observers"
-        self.assertEqual(
-            [args[1:3] for args in self.calls],
-            [
-                ["worktree", "show"],
-                ["repo", "add"],
-                ["worktree", "create"],
-                ["terminal", "create"],
-            ],
-        )
-        self.assertEqual(
-            self.calls[2],
-            [
-                "orca",
-                "worktree",
-                "create",
-                "--repo",
-                f"path:{repo}",
-                "--name",
-                Path(self.workspace).name,
-                "--base-branch",
-                "observers",
-                "--setup",
-                "skip",
-                "--no-parent",
-                "--json",
-            ],
-        )
-        self.assertIn("--worktree", self.calls[3])
-        self.assertEqual(self.calls[3][self.calls[3].index("--worktree") + 1], f"path:{self.workspace}")
-        self.assertEqual(launched["workspace"], self.workspace)
-        self.assertEqual(launched["handle"], "term-obs")
-        self.assertEqual(launched["leaf"], "leaf-obs")
-
-    def test_the_observer_repo_is_its_own_and_not_a_checkout_of_the_project(self) -> None:
-        """The observer reads the board and writes no code. Its workspace is cut from an empty
-        standalone repo, so there is nothing there to commit the project from."""
-        self._prepare()
-
-        repo = self.root / "data" / "dispatcher" / "observer-root" / "observers"
-        self.assertEqual([args[2] for args in self.shell], [str(repo), str(repo)])
-        self.assertIn("init", self.shell[0])
-        self.assertIn("--allow-empty", self.shell[1])
-        project_repo = str(FakeCatalog().binding("secretary")["repo"])
-        self.assertNotIn(project_repo, [args[2] for args in self.shell])
-        self.assertNotIn(f"path:{project_repo}", self.calls[2])
-
-    def test_a_workspace_orca_already_knows_is_reused_by_a_relaunch(self) -> None:
-        self.registered = True
-        Path(self.workspace).mkdir(parents=True, exist_ok=True)
-
-        self._prepare()
-
-        self.assertEqual(
-            [args[1:3] for args in self.calls],
-            [["worktree", "show"], ["terminal", "create"]],
-        )
-        self.assertEqual(self.shell, [])
-
-    def test_a_directory_orca_never_learned_about_is_cleared_not_worked_around(self) -> None:
-        """The state the live defect left behind: `worktree create` would otherwise place the
-        workspace beside it, at a path no record points at."""
-        stale = Path(self.workspace)
-        stale.mkdir(parents=True, exist_ok=True)
-        (stale / "SPRINT.md").write_text("stale\n", encoding="utf-8")
-
-        self._prepare()
-
-        self.assertEqual((stale / "SPRINT.md").read_text(encoding="utf-8").splitlines()[0], "# Sprint")
-
-    def test_a_workspace_placed_somewhere_else_fails_the_bring_up(self) -> None:
-        """The launch intent already names the workspace, and a tick that dies now can only find
-        the head through it."""
-        self.created_path = str(self.root / "workspaces" / "observers" / "elsewhere")
-
-        with self.assertRaises(HostError) as caught:
-            self._prepare()
-
-        self.assertIn("elsewhere", str(caught.exception))
-        self.assertNotIn(["terminal", "create"], [args[1:3] for args in self.calls])
-
-    def test_a_workspace_orca_refuses_to_create_leaves_no_terminal(self) -> None:
-        def run_json(args: list[str]) -> dict[str, object]:
-            if args[1:3] == ["worktree", "create"]:
-                raise HostError("orca worktree create failed: repo is unavailable")
-            return self._run_json(args)
-
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-            with self.assertRaises(HostError):
-                self._prepare()
-
-        self.assertNotIn(["terminal", "create"], [args[1:3] for args in self.calls])
-
-
 class RealHostObserverTeardownTests(unittest.TestCase):
-    """The lifecycle over the real host seam: what a closed sprint gives back to Orca.
+    """The lifecycle over the real host seam: what a closed sprint gives back.
 
-    The bring-up registers the observer workspace before it asks for a terminal, so a failure after
-    that point leaves a registration behind with no head at all. The record has to keep pointing at
-    it, or the sprint closes and the worktree stays in Orca with nothing left to remove it.
+    The bring-up cuts the observer workspace before it starts a head, so a failure after that point
+    leaves a worktree behind with no head at all. The record has to keep pointing at it, or the
+    sprint closes and the worktree stays with nothing left to remove it.
     """
 
     def setUp(self) -> None:
@@ -6542,7 +5633,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
                 "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
                 "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "workspaces"),
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "orca-workspaces"),
             },
         )
         env.start()
@@ -6552,6 +5643,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.catalog = _ObserverCatalog(instance_dir=self.data_dir)
         self.host = CommandHostRuntime(self.catalog, self.data_dir / "host", mode="real")  # type: ignore[arg-type]
         self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
+        self.backend = SupervisedBackend().install(self.host)
         self.audit = task_audit_for(self.board)
         self.runtime = DispatcherRuntime(
             TaskReader(self.board),  # type: ignore[arg-type]
@@ -6562,60 +5654,35 @@ class RealHostObserverTeardownTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
         )
-        self.calls: list[list[str]] = []
+        # The observer's git worktree, as git would answer for it: cut, listed, removed.
         self.registered = False
-        self.terminal_create_fails = False
         self.worktree_create_fails = False
-        run_json = mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        )
-        run_json.start()
-        self.addCleanup(run_json.stop)
+        self.removal_refused = False
+        for name, value in (
+            ("_create_git_observer_workspace", self._create),
+            ("_git_observer_worktree_listed", lambda workspace: self.registered),
+            ("_remove_git_observer_workspace", self._remove),
+        ):
+            patched = mock.patch.object(CommandHostRuntime, name, side_effect=value, autospec=False)
+            patched.start()
+            self.addCleanup(patched.stop)
         run = mock.patch.object(
-            CommandHostRuntime, "_run", lambda _self, args, label, **kwargs: self._run(args)
+            CommandHostRuntime, "_run", lambda _self, args, label, **kwargs: mock.Mock(stdout="", stderr="", returncode=0)
         )
         run.start()
         self.addCleanup(run.stop)
 
-    @property
-    def workspace(self) -> str:
-        return self.host.observer_workspace("sprint:1")
+    def _create(self, workspace: Path) -> Path:
+        if self.worktree_create_fails:
+            raise HostError("git worktree add failed for the observer workspace: fatal: bad object")
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.registered = True
+        return workspace
 
-    def _run(self, args: list[str]) -> mock.Mock:
-        if args[:2] == ["git", "-C"] and "init" in args:
-            Path(args[2], ".git").mkdir(parents=True, exist_ok=True)
-        return mock.Mock(stdout="", stderr="", returncode=0)
-
-    def _run_json(self, args: list[str]) -> dict[str, object]:
-        self.calls.append(args)
-        step = args[1:3]
-        if step == ["worktree", "show"] and not self.registered:
-            raise HostError("orca worktree show failed: selector_not_found")
-        if step == ["worktree", "create"]:
-            if not any("observer" in arg for arg in args):
-                # A card worktree of the same tick's pipeline pass, not the observer's.
-                return {"worktree": {"path": str(self.data_dir / "workspaces" / args[6])}}
-            if self.worktree_create_fails:
-                raise HostError("orca worktree create failed: repo is unavailable")
-            Path(self.workspace).mkdir(parents=True, exist_ok=True)
-            self.registered = True
-            return {"worktree": {"path": self.workspace}}
-        if step == ["worktree", "rm"]:
-            self.registered = False
-            return {}
-        if step == ["terminal", "create"]:
-            if self.terminal_create_fails:
-                raise HostError("orca terminal create failed: selector_not_found")
-            return {"handle": "term-obs"}
-        return {}
-
-    def observer_calls(self) -> list[list[str]]:
-        """The tick's calls about the observer. A tick also runs the card pipeline, whose own
-        worktrees and terminals are not what these tests are about."""
-        return [args for args in self.calls if any("observer" in arg for arg in args)]
-
-    def steps(self) -> list[list[str]]:
-        return [args[1:3] for args in self.observer_calls()]
+    def _remove(self, workspace: str) -> None:
+        if self.removal_refused:
+            raise HostError(f"the observer workspace at {workspace} could not be removed")
+        self.registered = False
 
     def observers(self) -> dict:
         return load_observers(self.runtime.production_state.load())
@@ -6625,16 +5692,19 @@ class RealHostObserverTeardownTests(unittest.TestCase):
             action["action"] for action in result["actions"] if action.get("step") == "observer-reconcile"
         ]
 
-    def close_sprint(self) -> None:
-        self.board.save_sprint_metadata("sprint:1", sprint_status="closed")
-
-    def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
+    def open_sprint(self) -> None:
         self.board.add_sprint(
             "sprint:1",
             status="open",
             sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
         )
-        self.terminal_create_fails = True
+
+    def close_sprint(self) -> None:
+        self.board.save_sprint_metadata("sprint:1", sprint_status="closed")
+
+    def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
+        self.open_sprint()
+        self.backend.start_failure = head_ops.HeadSpawnFailed("the observer head never started")
 
         deferred = self.runtime.production_tick()
 
@@ -6645,69 +5715,38 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertTrue(self.registered)
 
         self.close_sprint()
-        self.calls.clear()
         stopped = self.runtime.production_tick()
 
         self.assertEqual(self.actions(stopped), ["observer-stopped"])
-        self.assertEqual(
-            self.observer_calls(),
-            [
-                ["orca", "worktree", "show", "--worktree", f"path:{self.workspace}", "--json"],
-                ["orca", "terminal", "stop", "--worktree", f"path:{self.workspace}", "--json"],
-                [
-                    "orca",
-                    "worktree",
-                    "rm",
-                    "--worktree",
-                    f"path:{self.workspace}",
-                    "--force",
-                    "--json",
-                ],
-            ],
-        )
         self.assertFalse(self.registered)
         self.assertEqual(self.observers(), {})
 
-    def test_a_bring_up_that_never_registered_a_workspace_leaves_nothing_to_remove(self) -> None:
-        """The other side of it: the stop asks Orca and takes its answer, rather than removing a
-        worktree on the strength of a path the record computed before the host was ever called."""
-        self.board.add_sprint(
-            "sprint:1",
-            status="open",
-            sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
-        )
+    def test_a_bring_up_that_never_cut_a_workspace_leaves_nothing_to_remove(self) -> None:
+        """The stop asks git and takes its answer, rather than removing a worktree on the strength
+        of a path the record computed before the host was ever called."""
+        self.open_sprint()
         self.worktree_create_fails = True
 
         self.runtime.production_tick()
         self.close_sprint()
-        self.calls.clear()
-        stopped = self.runtime.production_tick()
+        with mock.patch.object(CommandHostRuntime, "_remove_git_observer_workspace") as remove:
+            stopped = self.runtime.production_tick()
 
         self.assertEqual(self.actions(stopped), ["observer-stopped"])
-        self.assertEqual(self.steps(), [["worktree", "show"]])
+        remove.assert_not_called()
+        self.assertEqual(self.backend.starts, [])
         self.assertEqual(self.observers(), {})
 
     def test_a_worktree_that_will_not_go_keeps_the_closed_sprint_on_the_books(self) -> None:
         """A refused teardown of a workspace with no head behind it is still a failed stop: the
         record survives as `stop-pending` and the next tick comes back to it."""
-        self.board.add_sprint(
-            "sprint:1",
-            status="open",
-            sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
-        )
-        self.terminal_create_fails = True
+        self.open_sprint()
+        self.backend.start_failure = head_ops.HeadSpawnFailed("the observer head never started")
         self.runtime.production_tick()
         self.close_sprint()
-        refusing = self._run_json
+        self.removal_refused = True
 
-        def run_json(args: list[str]) -> dict[str, object]:
-            if args[1:3] == ["worktree", "rm"]:
-                self.calls.append(args)
-                raise HostError("orca worktree rm failed: worktree is busy")
-            return refusing(args)
-
-        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
-            failed = self.runtime.production_tick()
+        failed = self.runtime.production_tick()
 
         self.assertEqual(self.actions(failed), ["observer-stop-failed"])
         record = self.observers()["sprint:1"]
@@ -6715,6 +5754,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertTrue(record.workspace_live)
         self.assertTrue(self.registered)
 
+        self.removal_refused = False
         retried = self.runtime.production_tick()
 
         self.assertEqual(self.actions(retried), ["observer-stopped"])
@@ -6732,47 +5772,30 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
             },
         )
         env.start()
         self.addCleanup(env.stop)
-        self.host = CommandHostRuntime(_TuiCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host, self.backend, _workspace = _supervised_observer_host(self.root, _TuiCatalog())
         self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
-        self.stops: list[str] = []
-        self.stop_refused = False
-        delivery = mock.patch.object(
-            dispatcher_host_module,
-            "_deliver_tui_prompt",
-            mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered")),
+        self.host._create_git_observer_workspace = lambda workspace: workspace  # type: ignore[method-assign]
+        self.backend.deliver_refusal = DeliverReceipt(
+            status=HEAD_GONE,
+            reason="TUI prompt was not delivered",
+            failure=head_ops.HeadNudgeFailed("TUI prompt was not delivered"),
         )
-        delivery.start()
-        self.addCleanup(delivery.stop)
-        run_json = mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        )
-        run_json.start()
-        self.addCleanup(run_json.stop)
-
-    def _run_json(self, args: list[str]) -> dict[str, object]:
-        if args[:3] == ["orca", "terminal", "create"]:
-            return {"handle": "term-obs"}
-        if args[:3] == ["orca", "terminal", "stop"]:
-            self.stops.append(args[4])
-            if self.stop_refused:
-                raise HostError("orca terminal stop failed: pane is busy")
-            return {}
-        return {}
 
     def _prepare(self) -> None:
         self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")
 
-    def test_a_stopped_terminal_reports_a_bring_up_with_nothing_left_running(self) -> None:
+    def test_a_stopped_head_reports_a_bring_up_with_nothing_left_running(self) -> None:
         with self.assertRaises(ObserverLaunchAborted) as caught:
             self._prepare()
 
-        self.assertEqual(self.stops, [f"path:{self.host.observer_workspace('sprint:1')}"])
+        [(run_id, _actor)] = self.backend.stops
+        self.assertEqual(run_id, self.backend.starts[0]["run"].run_id)
         self.assertEqual(caught.exception.handle, "")
 
     def test_a_failed_launch_delivery_hands_back_its_evidence_under_its_own_subject(self) -> None:
@@ -6782,33 +5805,32 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         failed is not a wake that failed, and neither is a reviewer that would not come up.
         """
         evidence = DeliveryEvidence(
-            handle="term-obs",
+            handle="run:observer",
             stage="payload_written",
             payload_bytes=420,
             payload_sha256="feedfacefeedface",
             reason="payload-left-in-composer",
         )
-        with (
-            mock.patch.object(
-                dispatcher_host_module,
-                "_deliver_tui_prompt",
-                mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered", evidence=evidence)),
-            ),
-            self.assertRaises(ObserverLaunchAborted) as caught,
-        ):
+        self.backend.deliver_refusal = DeliverReceipt(
+            status=HEAD_GONE,
+            reason="TUI prompt was not delivered",
+            failure=head_ops.HeadNudgeFailed("TUI prompt was not delivered", evidence=evidence),
+        )
+
+        with self.assertRaises(ObserverLaunchAborted) as caught:
             self._prepare()
 
         self.assertEqual(caught.exception.evidence["subject"], "observer-launch")
         self.assertEqual(caught.exception.evidence["reason"], "payload-left-in-composer")
         self.assertEqual(caught.exception.evidence["payload_bytes"], 420)
 
-    def test_a_terminal_that_will_not_stop_hands_its_handle_back(self) -> None:
-        self.stop_refused = True
+    def test_a_head_that_will_not_stop_hands_its_handle_back(self) -> None:
+        self.backend.stop_refusal = "the head's process outlived the stop it was sent"
 
         with self.assertRaises(ObserverLaunchAborted) as caught:
             self._prepare()
 
-        self.assertEqual(caught.exception.handle, "term-obs")
+        self.assertTrue(caught.exception.handle)
         self.assertTrue(caught.exception.workspace)
         self.assertTrue(caught.exception.pid_file)
         self.assertIn("stop failed", str(caught.exception))
@@ -6818,9 +5840,9 @@ class ObserverCodexTrustTests(unittest.TestCase):
     """The bring-up answers codex's trust question for the observer workspace.
 
     A real `CommandHostRuntime` over a real `InstanceCatalog`: the launcher renders the command and
-    prepares the workspace, only `orca` is replaced. The git worktree is a real one, cut from the
-    real observer repo the runtime creates, because what codex asks about is the repository root
-    that worktree hangs off and no fake reproduces that shape.
+    prepares the workspace, only the head's backend is a recording stand-in. The git worktree is a
+    real one, cut from the real observer repo the runtime creates, because what codex asks about is
+    the repository root that worktree hangs off and no fake reproduces that shape.
     """
 
     def setUp(self) -> None:
@@ -6844,16 +5866,11 @@ class ObserverCodexTrustTests(unittest.TestCase):
         # This suite's subject is the shared trust write after an independently captured allow;
         # it supplies that boundary explicitly rather than letting profile data imply it.
         self.host.preflight_codex_run = self._trust_attested_run  # type: ignore[method-assign]
-        self.commands: list[str] = []
-        self.registered = False
-        delivery = mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", mock.Mock())
-        delivery.start()
-        self.addCleanup(delivery.stop)
-        run_json = mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        )
-        run_json.start()
-        self.addCleanup(run_json.stop)
+        self.backend = SupervisedBackend().install(self.host)
+
+    @property
+    def commands(self) -> list[str]:
+        return [str(start["command"]) for start in self.backend.starts]
 
     def _trust_attested_run(
         self,
@@ -6875,34 +5892,12 @@ class ObserverCodexTrustTests(unittest.TestCase):
             run_id=run_id,
         )
 
-    def _run_json(self, args: list[str]) -> dict[str, object]:
-        step = args[1:3]
-        if step == ["worktree", "show"]:
-            if self.registered:
-                return {}
-            raise HostError("orca worktree show failed: selector_not_found")
-        if step == ["worktree", "create"]:
-            repo = args[args.index("--repo") + 1].split(":", 1)[1]
-            name = args[args.index("--name") + 1]
-            workspace = str(Path(self.host.observer_workspace("sprint:1")).parent / name)
-            # What `orca worktree create` leaves behind: a git worktree of that repo at that path.
-            self.host._run(  # type: ignore[attr-defined]
-                ["git", "-C", repo, "worktree", "add", "--quiet", "--detach", workspace],
-                "worktree add",
-            )
-            self.registered = True
-            return {"worktree": {"path": workspace}}
-        if step == ["terminal", "create"]:
-            self.commands.append(args[args.index("--command") + 1])
-            return {"handle": "term-obs"}
-        return {}
-
     def test_the_bring_up_trusts_the_repository_root_of_the_observer_workspace(self) -> None:
         self.host.prepare_observer({"ref": "sprint:1"}, "codex-sol-high", prompt="# Sprint\n")
 
         trusted = tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
         workspace = Path(self.host.observer_workspace("sprint:1")).resolve()
-        repo_root = (self.root / "data" / "dispatcher" / "observer-root" / "observers").resolve()
+        repo_root = observer_root_repo(self.root / "data").resolve()
         self.assertEqual(trusted["projects"][str(repo_root)]["trust_level"], "trusted")
         self.assertEqual(trusted["projects"][str(workspace)]["trust_level"], "trusted")
         command = self.commands[0]
@@ -6919,7 +5914,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
 
         launched = self.host.prepare_observer(sprint, "codex-sol-high", prompt="# Sprint 1425\n")
 
-        self.assertEqual(launched["handle"], "term-obs")
+        self.assertTrue(launched["handle"])
         self.assertEqual(len(self.commands), 1)
 
     def test_a_second_bring_up_leaves_the_recorded_trust_alone(self) -> None:

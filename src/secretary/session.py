@@ -28,7 +28,6 @@ from secretary.runtime.head import (
     render_head_command,
     with_pid_heartbeat,
 )
-from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from secretary.runtime.role_env import load_env_file
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"): a bare
@@ -74,18 +73,9 @@ def resolve_profile_id(head: str | None, *, registry: head_registry.Registry | N
 
 def adapter_profile(adapter: str, registry: head_registry.Registry) -> str:
     """The profile a bare adapter name opens: the first role default on that adapter, else the
-    first profile on it in id order. Pty-held variants — a profile that names `local-pty`, or names
-    no runtime and so gets the profile default — are left to an explicit `--head`."""
+    first profile on it in id order."""
     routed = [str(head) for head in registry.role_defaults.values() if isinstance(head, str)]
     candidates = [*routed, *registry.known()]
-    for pid in candidates:
-        profile = registry.profiles.get(pid)
-        if (
-            isinstance(profile, dict)
-            and profile.get("adapter") == adapter
-            and profile.get("runtime", DEFAULT_HEAD_RUNTIME) != LOCAL_PTY_RUNTIME
-        ):
-            return pid
     for pid in candidates:
         profile = registry.profiles.get(pid)
         if isinstance(profile, dict) and profile.get("adapter") == adapter:

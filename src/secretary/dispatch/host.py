@@ -143,7 +143,6 @@ from secretary.dispatch.tui import (
 from secretary.dispatch.tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
 )
-from secretary.dispatch.tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
@@ -154,7 +153,7 @@ from secretary.dispatch.tui import (
     provider_progress_for_run as _provider_progress_for_run,
 )
 from secretary.dispatch.tui import (
-    terminal_turn_started as _terminal_turn_started,
+    provider_turn_started as _provider_turn_started,
 )
 from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,
@@ -165,6 +164,7 @@ from secretary.dispatch.types import (
     HeadLaunchAborted,
     HeadPaneNotReady,
     HostError,
+    LegacyDispatcherRecord,
     ProjectGitAccessError,
     ReviewLaunch,
     review_pane_label,
@@ -273,21 +273,14 @@ from secretary.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
 from secretary.runtime.head_runtime_backends import (
+    LegacyHeadRecordError,
     UnknownHeadRuntimeError,
     build_head_runtime,
     head_runtime_name,
+    is_legacy_record,
 )
-from secretary.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.launch_prefix import pythonpath_prefix
-from secretary.runtime.pane_host import (
-    OrcaSessionHost,
-    Pane,
-    PaneHostError,
-    SessionHost,
-)
-from secretary.runtime.pane_host import (
-    safe_command_label as _safe_command_label,
-)
 from secretary.runtime.paths import configured_product_root
 from secretary.runtime.prompt_document import (
     PromptDocumentError,
@@ -667,8 +660,8 @@ class InstanceCatalog:
 
         Every codex head runs as a TUI and is asked about directory trust before it will take a prompt,
         whatever its role; a head launched into an untrusted root sits on the dialog, never answers
-        Orca's readiness probe and never receives its prompt. This runs before the pane is created:
-        trust, then pane, then readiness, then delivery.
+        the readiness probe and never receives its prompt. This runs before the head is started:
+        trust, then head, then readiness, then delivery.
         """
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
@@ -709,7 +702,12 @@ class InstanceCatalog:
 
 @dataclass(frozen=True)
 class DispatcherHeadTransport:
-    """How this dispatcher delivers to a head and closes its pane, against whatever host it is on."""
+    """What this dispatcher hands a head's backend beside a prompt: who the head is and its hook.
+
+    The backend owns delivery itself (`local-pty` types into the pty it supervises); what it reads
+    here is `before_send`, the one step it performs on the dispatcher's behalf after admission and
+    before the prompt is typed. There is no pane for this dispatcher to deliver into or close.
+    """
 
     runtime: CommandHostRuntime
     workspace: str = ""
@@ -722,55 +720,6 @@ class DispatcherHeadTransport:
     # resume written from the turn it starts, so the weaker of the two must not refuse it.
     ack_out_of_band: bool = False
 
-    def deliver(
-        self,
-        run: head_ops.HeadRun,
-        pointer: head_ops.NudgePointer,
-        *,
-        host: SessionHost,
-        subject: str,
-    ) -> head_ops.HeadDelivery:
-        # The framing is the rendered command's fact, not the profile's: a registry edited since the
-        # launch would frame a prompt for a head this launch never ran, so the launcher's view wins.
-        post_delivery = run
-
-        def handoff_before_send() -> None:
-            nonlocal post_delivery
-            if self.before_send is None:
-                return
-            updated = self.before_send()
-            if updated is not None:
-                post_delivery = head_ops.post_delivery_run(run, updated)
-
-        try:
-            outcome = _deliver_tui_prompt(
-                run.handle,
-                self.workspace,
-                self.prompt_file,
-                host=host,
-                adapter=self.adapter or run.spec.adapter,
-                prompt_text=pointer.text or None,
-                subject=subject,
-                document_path=pointer.document,
-                before_send=handoff_before_send if self.before_send is not None else None,
-                ack_out_of_band=self.ack_out_of_band,
-            )
-        except Exception as exc:
-            # A source may already have been durably bound when a later delivery stage refuses. The
-            # abort path gets this exact run so its intent cannot write the old unbound copy back.
-            exc.head_run = post_delivery
-            raise
-        return head_ops.HeadDelivery(run=post_delivery, outcome=outcome)
-
-    def close(self, run: head_ops.HeadRun, *, host: SessionHost) -> None:
-        self.runtime._close_head_pane(
-            run.handle,
-            run.pid_file,
-            run=run,
-            role=self.role,
-            host=host,
-        )
-
 
 #: Which backend a run, a spec or a name is held by. Shared with the mechanical-role driver rather
 #: than kept here: one reader of the key, as there is one mapping from its value to a backend.
@@ -780,10 +729,10 @@ _head_runtime_name = head_runtime_name
 def _runtime_writes_launch_identity(runtime: Any) -> bool:
     """Whether this backend writes a head's launch-identity heartbeat itself.
 
-    Exactly one layer owns that writer for a head. On `orca-legacy` it is this dispatcher, which
-    wraps the command before the pane runs it; `local-pty`'s supervisor wraps the command it is
+    Exactly one layer owns that writer for a head. `local-pty`'s supervisor wraps the command it is
     handed, so a command this dispatcher had wrapped as well `exec`s the inner writer, which exits,
-    and the head never runs (secretary-1698).
+    and the head never runs (secretary-1698). Only a backend that says it does not write it has this
+    dispatcher wrap the command instead.
     """
     return bool(getattr(runtime, "writes_launch_identity", False))
 
@@ -875,9 +824,7 @@ class CommandHostRuntime:
         # The boundaries a head's life is lived through, one per backend a profile can name. Held
         # rather than rebuilt per access, because the turn leases and the activity epoch are what
         # they hold: a runtime rebuilt on every access would have no memory of the turns it handed
-        # out. Built lazily and cached by name, so a dispatcher whose registry names only
-        # `orca-legacy` never constructs the other one — which is the whole of what "no profile is
-        # on local-pty" costs at runtime.
+        # out. Built lazily and cached by name.
         self._head_runtimes: dict[str, Any] = {}
 
     def configure_codex_provider_ingress(
@@ -1071,11 +1018,10 @@ class CommandHostRuntime:
                 # checkout is gone. No host repairs it and no later tick finds it: this is the one
                 # bring-up family that is about the card rather than the host.
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
-            if self._is_git_workspace(workspace):
-                workspace = self._git_workspaces.create(task, worker_id, seed, expected=workspace)
+            if self.mode == "noop":
+                Path(workspace).mkdir(parents=True, exist_ok=True)
             else:
-                workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
-                self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
+                workspace = self._git_workspaces.create(task, worker_id, seed, expected=workspace)
             self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
@@ -1112,6 +1058,7 @@ class CommandHostRuntime:
     ) -> LaunchedHead:
         """Launch rework in the existing workspace without recreating its branch."""
         self._require_project_available(str(task.get("project") or ""))
+        self._refuse_legacy_record(record, "relaunch the worker of")
         workspace = Path(record.workspace)
         if self.mode == "noop":
             workspace.mkdir(parents=True, exist_ok=True)
@@ -1149,50 +1096,41 @@ class CommandHostRuntime:
             heartbeat_run_id=heartbeat_run_id,
         )
 
-    def observer_workspace(self, reference: str, head: str = "") -> str:
+    def observer_workspace(self, reference: str) -> str:
         """Where one sprint observer runs. Its own directory, never a card workspace and never the
         interactive secretary session's checkout: the observer reads reports and slices cards, it
         owns no branch of the project it watches.
 
-        `head` places a new one: an observer whose profile runs on a supervised runtime gets a plain
-        `git worktree` under `<data_dir>/workspaces/observers/`, any other one (or no head named) an
-        Orca worktree under the Orca root. The launch intent and `prepare_observer` both ask this with
-        the same head, so they name the same path; after launch the recorded path decides.
+        A plain detached `git worktree` of the observer repo under `<data_dir>/workspaces/observers/`
+        (secretary-1705). The launch intent and `prepare_observer` both ask this, so they name the
+        same path; after launch the recorded path decides.
         """
         token = _request_token(reference)
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / token)
-        if head and not self._runs_in_orca_pane(head):
-            return str(self._git_observer_root / token)
-        return str(self._orca_workspaces_root() / OBSERVER_WORKSPACE_DIR / token)
+        return str(self._git_observer_root / token)
 
     @property
     def _git_observer_root(self) -> Path:
         return Path(self.data_dir) / GIT_WORKSPACES_DIR / OBSERVER_WORKSPACE_DIR
 
     def _is_git_observer_workspace(self, workspace: str) -> bool:
-        """Whether an observer workspace is git-managed, read from its recorded path alone.
+        """Whether an observer workspace is one this host made, read from its recorded path alone.
 
-        Exactly `<data_dir>/workspaces/observers/<token>` and not under the Orca root, like a card's
-        git workspace: never the current profile, so a live observer keeps the manager its workspace
-        was made by, and one recorded under `~/orca/workspaces/observers/` stays Orca's.
+        Exactly `<data_dir>/workspaces/observers/<token>`. A recorded path anywhere else — an Orca
+        worktree under `~/orca/workspaces/observers/` — is a legacy record (`_refuse_legacy_observer`).
         """
         if self.mode == "noop" or not workspace:
             return False
         path = _resolved_path(Path(workspace))
         root = _resolved_path(self._git_observer_root)
-        return (
-            path.is_relative_to(root)
-            and len(path.relative_to(root).parts) == 1
-            and not path.is_relative_to(_resolved_path(self._orca_workspaces_root()))
-        )
+        return path.is_relative_to(root) and len(path.relative_to(root).parts) == 1
 
     def _observer_repo(self) -> Path:
         """The repo observer workspaces are cut from: standalone, empty, without a remote.
 
         Created once and shared by every sprint: the observer needs a worktree to run in, not a
-        checkout of the project it watches. Registering it with Orca is the Orca route's own step
-        (`_register_observer_repo`); a git-managed observer workspace never asks Orca about it.
+        checkout of the project it watches.
         """
         repo = observer_root_repo(self.data_dir)
         if not (repo / ".git").is_dir():
@@ -1228,63 +1166,7 @@ class CommandHostRuntime:
             )
         return repo
 
-    def _register_observer_repo(self) -> Path:
-        """The observer repo, registered with Orca: Orca only gives terminals to worktrees of
-        repositories it has registered, so a directory made with `mkdir` gets no terminal at all."""
-        repo = self._observer_repo()
-        self._run_json(["orca", "repo", "add", "--path", str(repo), "--json"])
-        return repo
-
-    def _observer_workspace_registered(self, workspace: str) -> bool:
-        """Whether Orca knows this path as a worktree of its own.
-
-        Only `selector_not_found` reads as "not registered". Any other failure is Orca declining to
-        answer, and an unanswered question must not pass for a free path.
-        """
-        try:
-            self._run_json(["orca", "worktree", "show", "--worktree", f"path:{workspace}", "--json"])
-        except HostError as exc:
-            if "selector_not_found" in str(exc):
-                return False
-            raise
-        return True
-
-    def _create_observer_workspace(self, reference: str) -> Path:
-        """The observer's workspace, registered with Orca and at the path the record already names."""
-        workspace = Path(self.observer_workspace(reference))
-        if self._observer_workspace_registered(str(workspace)):
-            return workspace
-        if workspace.exists():
-            shutil.rmtree(workspace, ignore_errors=True)
-        repo = self._register_observer_repo()
-        result = self._run_json(
-            [
-                "orca",
-                "worktree",
-                "create",
-                "--repo",
-                f"path:{repo}",
-                "--name",
-                workspace.name,
-                "--base-branch",
-                OBSERVER_REPO_BRANCH,
-                "--setup",
-                "skip",
-                "--no-parent",
-                "--json",
-            ]
-        )
-        worktree = result.get("worktree") if isinstance(result.get("worktree"), dict) else result
-        path = worktree.get("path") if isinstance(worktree, dict) else None
-        if not isinstance(path, str) or not path:
-            raise HostError("orca did not return an observer workspace path")
-        if Path(path) != workspace:
-            # The launch intent already names `workspace`, and a tick that dies now can only find the
-            # head through it: a workspace elsewhere is a deferred bring-up, not a head nothing names.
-            raise HostError(f"orca placed the observer workspace at {path}, not {workspace}")
-        return workspace
-
-    def _git_observer_workspace_registered(self, workspace: str) -> bool:
+    def _git_observer_worktree_listed(self, workspace: str) -> bool:
         """Whether git lists this path as a worktree of the observer repo, and it is on disk."""
         repo = observer_root_repo(self.data_dir)
         if not (repo / ".git").is_dir() or not Path(workspace).is_dir():
@@ -1300,8 +1182,8 @@ class CommandHostRuntime:
 
     def _create_git_observer_workspace(self, workspace: Path) -> Path:
         """The observer's workspace as a detached `git worktree` of the observer repo, at the path
-        the launch intent already names. No branch is created and Orca is never asked."""
-        if self._git_observer_workspace_registered(str(workspace)):
+        the launch intent already names. No branch is created."""
+        if self._git_observer_worktree_listed(str(workspace)):
             return workspace
         repo = self._observer_repo()
         if workspace.exists():
@@ -1342,18 +1224,22 @@ class CommandHostRuntime:
         Sprint repositories are canonical source roots and reservations are project ids. Neither
         is the repository authority for this process: the observer worktree is cut from
         ``observer_root_repo``. `recorded_workspace` is the path the launch intent recorded; without one it
-        is `observer_workspace(reference, head)`, which is what the intent computes. A git-managed
-        path is cut with `git worktree`; any other path is today's Orca worktree.
+        is `observer_workspace(reference)`, which is what the intent computes, and it is cut with
+        `git worktree`. A recorded path this host did not make is a legacy record and is refused.
         """
         reference = str(sprint.get("ref") or "")
-        placed = recorded_workspace or self.observer_workspace(reference, head)
+        placed = recorded_workspace or self.observer_workspace(reference)
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))
             workspace.mkdir(parents=True, exist_ok=True)
-        elif self._is_git_observer_workspace(placed):
-            workspace = self._create_git_observer_workspace(Path(placed))
         else:
-            workspace = self._create_observer_workspace(reference)
+            if not self._is_git_observer_workspace(placed):
+                raise LegacyDispatcherRecord(
+                    f"the observer of {reference or 'an unnamed sprint'}",
+                    f"its recorded workspace {placed} is not a git worktree this host owns",
+                    verb="launch",
+                )
+            workspace = self._create_git_observer_workspace(Path(placed))
         self._write_prompt(workspace / OBSERVER_PROMPT_FILE, prompt)
         pid_file = _observer_pid_file(reference)
         run = self._observer_run(head, str(workspace))
@@ -1519,21 +1405,22 @@ class CommandHostRuntime:
         Unconditional: a freeze, a closed sprint, a policy refusal and an emergency replacement all
         mean "end this now", and none of them may be refused because the head happens to be busy.
         What it owes the head runtime afterwards is the forgetting that the `stop` verb does for
-        itself — this teardown is Orca's worktree removal, not that verb, and a runtime that lives
+        itself — this teardown is the worktree removal, not that verb, and a runtime that lives
         as long as the production loop would otherwise keep one epoch, one output mark and one
-        admission entry per head ever launched.
+        admission entry per head ever launched. A legacy observer record is refused, untouched.
         """
         if self.mode == "noop":
             return
+        self._refuse_legacy_observer(record, "stop")
         self._stop_observer_head(record)
         observer_run = self._observer_lifecycle_run(record)
         self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
 
     def _stop_observer_head(self, record: Any) -> None:
-        """Give back the pane, the process and the worktree one observer bring-up took.
+        """Give back the process and the git worktree one observer bring-up took.
 
-        The recorded workspace path picks the route: a git-managed one is checked, and after the
-        confirmed head stop removed, through `git worktree`; any other one through Orca, as always.
+        The worktree is checked, and removed through `git worktree` only after the head's stop was
+        confirmed.
         """
         observer_run = getattr(record, "head_run", {})
         observer_leaf = str(getattr(record, "leaf", "") or "")
@@ -1547,16 +1434,10 @@ class CommandHostRuntime:
         )
         workspace = str(getattr(record, "workspace", "") or "")
         if not workspace:
-            if record.handle:
-                self._close_observer_pane(record, record.handle)
+            # No bring-up got as far as naming a workspace, and a supervised head is raised only
+            # into one: there is no head to stop.
             return
-        git_managed = self._is_git_observer_workspace(workspace)
-        registered = (
-            self._git_observer_workspace_registered(workspace)
-            if git_managed
-            else self._observer_workspace_registered(workspace)
-        )
-        if not registered:
+        if not self._git_observer_worktree_listed(workspace):
             self._confirm_head_process_gone(
                 pid_file,
                 run=observer_run,
@@ -1581,10 +1462,28 @@ class CommandHostRuntime:
             task=sprint_task(getattr(record, "sprint", "")),
             leaf=observer_leaf,
         )
-        if git_managed:
-            self._remove_git_observer_workspace(workspace)
+        self._remove_git_observer_workspace(workspace)
+
+    def _refuse_legacy_observer(self, record: Any, verb: str) -> None:
+        """Raise `LegacyDispatcherRecord` when this observer record was written on Orca.
+
+        Its recorded workspace is not the git worktree this host places, it names a pane handle and
+        no workspace at all (a record from before launch intents named one), or its persisted run
+        is a legacy record.
+        """
+        if self.mode == "noop":
             return
-        self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"])
+        subject = f"the observer of {getattr(record, 'sprint', '') or 'an unnamed sprint'}"
+        workspace = str(getattr(record, "workspace", "") or "")
+        if workspace and not self._is_git_observer_workspace(workspace):
+            raise LegacyDispatcherRecord(
+                subject, f"its workspace {workspace} is not a git worktree this host owns", verb=verb
+            )
+        if not workspace and (getattr(record, "handle", "") or getattr(record, "leaf", "")):
+            raise LegacyDispatcherRecord(subject, "it names an Orca pane and no workspace", verb=verb)
+        run = _durable_head_run(getattr(record, "head_run", None))
+        if run is not None and is_legacy_record(run):
+            raise LegacyDispatcherRecord(subject, f"its head run {run.run_id} is a legacy record", verb=verb)
 
     def observer_activity_epoch(self, record: Any) -> int:
         """This observer head's activity epoch, to hand back to a stop that must only run if quiet.
@@ -1615,15 +1514,13 @@ class CommandHostRuntime:
 
         The check and the teardown are one critical section inside the head runtime: this head's
         epoch still where the caller saw it, the turn settled, admission closed, and only then the
-        teardown — so a delivery cannot land between deciding the head is finished and taking its
-        pane away. The teardown itself is `stop_observer` unchanged, because an observer's stop is
-        Orca's whole-worktree teardown plus its pid confirmation, not a pane close; it runs inside
-        that same section rather than after it.
+        teardown — so a delivery cannot land between deciding the head is finished and taking it
+        away. The teardown itself is `stop_observer` unchanged, because an observer's stop is the
+        whole-worktree teardown plus its pid confirmation; it runs inside that same section rather
+        than after it.
 
         Both facts come from the caller and neither is re-read here. `head_process_alive` is the
-        pid-heartbeat answer the caller already had — this host cannot produce it, because what it
-        can ask Orca about is a pane, and a pane says `busy` for a dead head's leftover shell just
-        as loudly as for a working one.
+        pid-heartbeat answer the caller already had.
         """
         if self.mode == "noop":
             return True
@@ -1735,20 +1632,10 @@ class CommandHostRuntime:
         leaf = str(getattr(record, "leaf", "") or "")
         if not workspace or not (handle or leaf):
             raise HostError("observer has no terminal handle for an event wake")
-        observer_run = self._observer_lifecycle_run(record)
-        if _head_runtime_name(observer_run) == ORCA_LEGACY_RUNTIME:
-            terminals = self._worktree_terminals(workspace)
-            terminal = next((pane for pane in terminals if leaf and pane.leaf == leaf), None)
-            if terminal is None and not leaf:
-                terminal = next((pane for pane in terminals if handle and pane.handle == handle), None)
-            current = terminal.handle if terminal is not None else ""
-            if not current:
-                raise HostError("observer terminal is unavailable for an event wake")
-            waking = replace(observer_run, handle=current)
-        else:
-            # A supervised head owns no pane, so Orca's inventory never lists it: its backend
-            # addresses it by its own run (issue:70562b15a7dc8764437e).
-            waking = observer_run
+        self._refuse_legacy_observer(record, "wake")
+        # A supervised head owns no pane: its backend addresses it by its own run
+        # (issue:70562b15a7dc8764437e).
+        waking = self._observer_lifecycle_run(record)
         delivery = getattr(record, "delivery", None)
         message = _render_observer_wake_context(sprint, change=change, delivery=delivery)
         document = Path(workspace) / OBSERVER_PROMPT_FILE
@@ -1761,8 +1648,8 @@ class CommandHostRuntime:
             adapter = self._prompt_adapter(getattr(record, "run", {}), str(getattr(record, "head", "")))
             # A wake carries both proofs a delivery can have, and either one confirms it. The head
             # is live and working, so the screen evidence this used to rely on alone is the weaker
-            # of them: Orca reports a working Codex as idle, and the pane the wake is delivered
-            # into is precisely the pane that is printing. The provider's own record of the turn
+            # of them: a working Codex can read as idle, and the screen the wake is delivered
+            # into is precisely the one that is printing. The provider's own record of the turn
             # is what a launch has always been confirmed by, and it says the same thing about a
             # wake. What stays out of band is the causal acknowledgement, not the delivery: the
             # observer still quotes the delivery id in the resume it writes from this turn.
@@ -1807,40 +1694,10 @@ class CommandHostRuntime:
         task: str = "",
         leaf: str = "",
     ) -> None:
-        """End the observer this workspace holds, through the backend that observer is held by.
-
-        For a legacy observer this is still one verb for the whole workspace rather than a close
-        per handle: `close_pane` answers `tab_not_found` for a pane the runtime never gave a UI
-        tab, so a per-handle close reports a stop that worked as a stop that failed. An observer
-        raised on a supervised backend owns no pane at all, and is ended by its own run's stop —
-        which is why the choice is made from the persisted run rather than from a default.
-        """
+        """End the observer this workspace holds, by its own run's stop on the backend holding it."""
         if run is not None:
             self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
         self._stop_recorded_heads(workspace, [(run, role or OBSERVER_ROLE)])
-
-    def _close_observer_pane(self, record: Any, handle: str) -> None:
-        """End an observer that is nothing but a pane handle, through the head runtime.
-
-        The record predates the intent naming a workspace, so there is no worktree to take down and
-        no leaf to re-find the pty by: the handle is the whole of what is left. A run already
-        confirmed gone gets a fresh identity, because the stop must not skip a pane the record still
-        names.
-        """
-        run = self._observer_lifecycle_run(record)
-        if run.settled:
-            run = replace(
-                run,
-                run_id=head_ops.new_run_id(),
-                lifecycle=head_ops.SPAWNED,
-                stopped_by=None,
-            )
-        receipt = self.head_runtime_for(run).stop(
-            replace(run, handle=handle, leaf=""),
-            head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
-        )
-        if not receipt.ok:
-            raise HostError(f"observer terminal close failed: {receipt.reason}")
 
     def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
         try:
@@ -1904,15 +1761,14 @@ class CommandHostRuntime:
         }
 
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
-        """Bring the reviewer up as a second pane inside the worker's own worktree.
+        """Bring the reviewer up as a second head inside the worker's own worktree.
 
-        The pane is split off a live pane there rather than created as a new terminal: a plain
-        `terminal create` on a headless serve lands as a background surface no client materialises.
-        Once the reviewer has its pane the worker is shut down and its commit pinned, so the reviewer
-        judges a checkout nothing else is still editing. What that pane is given is a nudge at a
+        Once the reviewer is up the worker is shut down and its commit pinned, so the reviewer
+        judges a checkout nothing else is still editing. What the reviewer is given is a nudge at a
         document written outside the checkout, not the review itself.
         """
         self._require_project_available(str(task.get("project") or ""))
+        self._refuse_legacy_record(record, "launch the reviewer of")
         if not record.workspace:
             raise HostError("review workspace is unavailable")
         workspace = Path(record.workspace)
@@ -1933,17 +1789,14 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             launch_prompt=nudge,
             prompt_document=str(document),
-            # Only an Orca reviewer is a pane to split off the worker's; a supervised one is a second
-            # process in the same checkout, and the pane inventory is not asked about it at all.
-            split_from=self._split_anchor(record) if self._runs_in_orca_pane(record.review_head) else "",
             task=task,
             failover=bool(record.preferred_review_head),
             heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
-                # The retained worker is provably gone (no orca session, pid heartbeat resolves to a
-                # dead pid), so there is no second writer to freeze. The freeze path here would loop
+                # The retained worker is provably gone (its pid heartbeat resolves to a dead pid),
+                # so there is no second writer to freeze. The freeze path here would loop
                 # `review-launch-aborted` over a head that can never confirm suspended.
                 pass
             elif record.worker_continuation.retained:
@@ -1981,6 +1834,7 @@ class CommandHostRuntime:
         intent: dict[str, Any],
     ) -> dict[str, Any]:
         """Retry the document nudge for the exact reviewer a busy launch intent retained."""
+        self._refuse_legacy_record(record, "deliver to the reviewer of")
         if not record.workspace:
             raise HostError("review workspace is unavailable for a retained launch")
         stored_run = intent.get("head_run")
@@ -2016,6 +1870,8 @@ class CommandHostRuntime:
                 ),
                 subject="reviewer-launch",
             )
+        except LegacyDispatcherRecord:
+            raise
         except (TuiDeliveryError, HostError) as exc:
             failure = HostError(f"retained reviewer document nudge was not delivered: {exc}")
             failure.evidence = _delivery_evidence_json(exc, "reviewer-launch")
@@ -2202,77 +2058,51 @@ class CommandHostRuntime:
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         """Where this card's worker checkout lives, new or already cut.
 
-        A checkout that already exists answers for itself: the git-managed one under
-        `<data_dir>/workspaces/<project id>/<worker>`, then the Orca one. Only a card with neither
-        is placed by its heads — under the git root when its worker and reviewer profiles both run
-        on a supervised runtime, and otherwise under the Orca root, whose namespace is Orca's:
-        <root>/<repo registration name>/<worktree name>, where the registration name is the
-        binding's `orca_binding` and not the Secretary project id — the two spellings differ and the
-        id is not what decides where an Orca checkout goes.
+        Always `<data_dir>/workspaces/<project id>/<worker>`, the git worktree `GitWorkspaceManager`
+        places, whatever the card's heads are: placement asks no runtime.
         """
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
-        project = str(task.get("project") or "")
-        root = self._orca_workspaces_root()
-        git_path = self._git_workspace_path(project, worker)
-        if git_path is not None and self._is_git_workspace(str(git_path)):
-            if git_path.exists():
-                return str(git_path)
-            if self._card_heads_supervised(task):
-                # An Orca checkout this card already has keeps it on Orca. Only the binding's own
-                # spelling is looked at: asking Orca for its registration is the call this path is
-                # without. A binding with no `orca_binding` has no Orca checkout to keep.
-                named = self.catalog.binding(project).get("orca_binding")
-                if not (isinstance(named, str) and named and (root / named / worker).exists()):
-                    return str(git_path)
-        return str(root / self._orca_binding_name(project) / worker)
-
-    @staticmethod
-    def _orca_workspaces_root() -> Path:
-        """Where Orca's worktrees are namespaced; `SECRETARY_DISPATCHER_WORKSPACES_ROOT` names only this."""
-        return orca_workspaces_root()
+        return str(self._git_workspaces.path(str(task.get("project") or ""), worker))
 
     @property
     def _git_workspaces(self) -> GitWorkspaceManager:
         return GitWorkspaceManager(self)
 
-    def _git_workspace_path(self, project: str, worker: str) -> Path | None:
-        try:
-            return self._git_workspaces.path(project, worker)
-        except HostError:
-            return None
-
     def _is_git_workspace(self, workspace: str) -> bool:
-        """Whether an existing or placed workspace is git-managed, read from its path alone.
-
-        Never from the card's profiles: a card keeps the manager its checkout was made by even if
-        its profiles or the registry change while it is in flight.
-        """
+        """Whether an existing or placed workspace is git-managed, read from its path alone."""
         if self.mode == "noop" or not workspace:
             return False
-        return self._git_workspaces.owns(workspace, orca_root=self._orca_workspaces_root())
+        return self._git_workspaces.owns(workspace)
 
-    def _card_heads_supervised(self, task: dict[str, Any]) -> bool:
-        """Whether both of this card's heads, as claimed, run on a runtime other than `orca-legacy`.
-
-        A head that cannot be resolved answers no: a card nobody can place on git keeps today's path.
-        """
-        try:
-            heads = (self.catalog.claimed_worker_head(task), self.catalog.claimed_review_head(task))
-        except (HostError, AttributeError, KeyError, TypeError):
+    def _legacy_workspace(self, workspace: str) -> bool:
+        """Whether a recorded card workspace is an Orca worktree: under the Orca workspaces root and
+        not a git worktree this host owns. The root is read to recognise such a record, never to
+        place one."""
+        if self.mode == "noop" or not workspace or self._is_git_workspace(workspace):
             return False
-        return not any(self._runs_in_orca_pane(head) for head in heads)
+        return _resolved_path(Path(workspace)).is_relative_to(_resolved_path(orca_workspaces_root()))
 
-    def _runs_in_orca_pane(self, head: str) -> bool:
-        return _head_runtime_name(self._head_spec(head, "")) == ORCA_LEGACY_RUNTIME
+    def _refuse_legacy_record(self, record: DispatcherRecord, verb: str) -> None:
+        """Raise `LegacyDispatcherRecord` when this card's record was written on Orca.
 
-    def _orca_binding_name(self, project: str) -> str:
-        """The Orca repo registration name this project's workspaces are namespaced by."""
-        binding = self.catalog.binding(project)
-        name = binding.get("orca_binding")
-        if isinstance(name, str) and name:
-            return name
-        return str(self._orca_repo(project).get("displayName") or "")
+        Its workspace is an Orca worktree (`_legacy_workspace`), or a head run it carries is a legacy
+        record. Asked before any launch, delivery, stop or teardown touches the record, so nothing of
+        it is ever driven, stopped through a pane or re-placed silently.
+        """
+        if self.mode == "noop":
+            return
+        subject = f"the dispatcher record of {record.worker or record.head or 'an unnamed card'}"
+        if self._legacy_workspace(record.workspace):
+            raise LegacyDispatcherRecord(
+                subject, f"its workspace {record.workspace} is an Orca worktree", verb=verb
+            )
+        for role, stored in (("worker", record.worker_head_run), ("reviewer", record.review_head_run)):
+            run = _durable_head_run(stored)
+            if run is not None and is_legacy_record(run):
+                raise LegacyDispatcherRecord(
+                    subject, f"its {role} head run {run.run_id} is a legacy record", verb=verb
+                )
 
     def _require_project_available(self, project: str) -> None:
         """Refuse before any project-dependent workspace or head activation."""
@@ -2289,24 +2119,6 @@ class CommandHostRuntime:
             raise HostError(f"project availability for {project!r} is invalid")
         if not availability.allows(project):
             raise HostError(f"project repo for {project!r} is unavailable")
-
-    def _orca_repo(self, project: str) -> dict[str, Any]:
-        """This project's Orca repo registration, resolved from the configured repo path.
-
-        Only orca-legacy heads ask. Nothing registers a project for them any more (reconcile no
-        longer manages Orca repos, and a new binding carries no `orca_binding`), so a project Orca
-        does not know fails the bring-up here rather than being registered on the fly.
-        """
-        repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
-        listing = self._run_json(["orca", "repo", "list", "--json"])
-        repos = listing.get("repos") if isinstance(listing, dict) else None
-        for entry in repos if isinstance(repos, list) else []:
-            path = entry.get("path") if isinstance(entry, dict) else None
-            if isinstance(path, str) and path and _same_repo(Path(path), repo):
-                if not isinstance(entry.get("id"), str) or not entry["id"]:
-                    raise HostError(f"orca registered {repo} without an id")
-                return entry
-        raise HostError(f"project {project} has no Orca registration; run it on a local-pty profile")
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         self._require_production_runtime("release-before")
@@ -2478,11 +2290,11 @@ class CommandHostRuntime:
         """Stop every head of this workspace and let a refusal reach the caller.
 
         The confirmed twin of `stop`: a refused workspace stop is not evidence the head is gone, so a
-        path that opens a replacement afterwards must use this one. `selector_not_found` is the single
-        exception — Orca has no worktree there at all, which is not a refused stop.
+        path that opens a replacement afterwards must use this one. A legacy record is refused.
         """
         if self.mode == "noop" or not record.workspace:
             return
+        self._refuse_legacy_record(record, "stop the heads of")
         heartbeats: list[tuple[str, Any, str, str]] = []
         for kind in ("worker", "review"):
             field = "worker_head_run" if kind == "worker" else "review_head_run"
@@ -2503,34 +2315,19 @@ class CommandHostRuntime:
             )
 
     def _stop_recorded_heads(self, workspace: str, runs: Sequence[tuple[Any, str]]) -> None:
-        """Take one workspace's heads down, each through the backend that head is held by.
+        """Take one workspace's heads down, each by its own run's stop on the backend holding it.
 
-        The one place workspace-scoped cleanup chooses a backend, and it chooses from the durable
-        run the record names rather than from the profile a later registry would resolve or from
-        the product default. That is the same rule the per-head verbs follow: a head raised on one
-        backend has to be stopped through that backend, and a registry repointed while it ran must
-        not send its stop somewhere it never lived.
-
-        A supervised head owns no pane, so nothing about a worktree can end it — it is ended by its
-        own run's `stop`, and a refusal is raised rather than absorbed, because the callers of this
-        are exactly the ones that go on to remove the worktree or open a replacement head.
-
-        Orca's own by-worktree teardown is left for what it is for: a workspace whose heads are
-        legacy ones, which is what that call ends, and a workspace that names no run at all — a
-        bring-up that never got as far as a durable run, or a record written before heads were
-        recorded — where the panes Orca knows about are the only thing there can be to stop. A
-        workspace whose every recorded head is supervised has no pane to give back, and asking
-        Orca to tear it down would be a call about a container this product did not put anything in.
+        The backend is chosen from the durable run the record names, never from the profile a later
+        registry would resolve. A supervised head owns no pane, so nothing about a worktree can end
+        it: a refusal is raised rather than absorbed, because the callers of this are exactly the
+        ones that go on to remove the worktree or open a replacement head. A workspace that names no
+        run has no head to stop: a bring-up that never got as far as a durable run raised nothing.
         """
-        named = [(_durable_head_run(run), role) for run, role in runs]
-        live = [(run, role) for run, role in named if run is not None]
-        for run, role in live:
-            if _head_runtime_name(run) == ORCA_LEGACY_RUNTIME:
-                continue
-            if run.settled:
-                # Its own stop already ran and was committed, so its run directory may be gone;
-                # asking a supervisor that no longer exists would only wait out the confirmation
-                # bound to learn what the record already says.
+        for run, role in ((_durable_head_run(run), role) for run, role in runs):
+            if run is None or run.settled:
+                # A settled run's own stop already ran and was committed, so its run directory may
+                # be gone; asking a supervisor that no longer exists would only wait out the
+                # confirmation bound to learn what the record already says.
                 continue
             receipt = self.head_runtime_for(run).stop(
                 run,
@@ -2538,22 +2335,12 @@ class CommandHostRuntime:
             )
             if not receipt.ok:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
-        if not any(_head_runtime_name(run) == ORCA_LEGACY_RUNTIME for run, _ in live) and (
-            live or self._is_git_workspace(workspace) or self._is_git_observer_workspace(workspace)
-        ):
-            # Every recorded head is supervised, or the workspace is one Orca never made and no
-            # legacy head was ever recorded in it: there is no pane for Orca to give back.
-            return
-        try:
-            self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)
-        except HostError as exc:
-            if "selector_not_found" not in str(exc):
-                raise
 
     def stop_head(self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """Stop one role's head through the head operation, recording who ended it."""
         if self.mode == "noop":
             return
+        self._refuse_legacy_record(record, f"stop the {'reviewer' if kind == 'review' else 'worker'} of")
         if kind == "review":
             self.stop_review_head(record, initiator)
             return
@@ -2589,19 +2376,24 @@ class CommandHostRuntime:
         """This card's reviewer as the head operations see it."""
         stored = record.review_head_run if isinstance(record.review_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
+        runtime = ""
         if stored.get("run_id"):
             try:
                 run = head_ops.HeadRun.from_json(stored)
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
             if run is not None and run.settled and record.owns_head(REVIEW_ROLE):
+                runtime = run.spec.runtime
                 run = None
         if run is None:
+            # A fresh identity keeps the backend a settled run named; a record with no run at all
+            # was written before runs were recorded, and carries the record rule: a legacy one.
             run = head_ops.HeadRun(
                 run_id=head_ops.new_run_id(),
                 spec=HeadSpec(
                     profile_id=record.review_head,
                     adapter=self._prompt_adapter(record.review_run, record.review_head),
+                    **({"runtime": runtime} if runtime else {}),
                 ),
                 workspace=record.workspace,
                 # The reviewer's own worker id is the card's, as the claim built it: `<ref>-<slug>`.
@@ -2662,21 +2454,26 @@ class CommandHostRuntime:
         """This card's worker as the head operations see it."""
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
+        runtime = ""
         if stored.get("run_id"):
             try:
                 run = head_ops.HeadRun.from_json(stored)
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
             if run is not None and run.settled and record.owns_head(WORKER_ROLE):
-                # The record still names a pane while the run says that head was confirmed gone: a
+                # The record still names a head while the run says that head was confirmed gone: a
                 # fresh identity below keeps the stop from skipping a head already confirmed once.
+                runtime = run.spec.runtime
                 run = None
         if run is None:
+            # A fresh identity keeps the backend a settled run named; a record with no run at all
+            # was written before runs were recorded, and carries the record rule: a legacy one.
             run = head_ops.HeadRun(
                 run_id=head_ops.new_run_id(),
                 spec=HeadSpec(
                     profile_id=record.head,
                     adapter=self._prompt_adapter(record.worker_run, record.head),
+                    **({"runtime": runtime} if runtime else {}),
                 ),
                 workspace=record.workspace,
                 # No card reference reaches this call, but the worker id carries one: `<ref>-<slug>`
@@ -2879,8 +2676,8 @@ class CommandHostRuntime:
 
     def teardown(self, record: DispatcherRecord) -> None:
         """Done-path cleanup after a green merge: stop the worktree's heads (killing the
-        worker and reviewer plus their child shells and subagents) and remove the worktree
-        from Orca and git. Never used on rework, which reuses the workspace.
+        worker and reviewer plus their child shells and subagents) and remove the git worktree.
+        Never used on rework, which reuses the workspace.
 
         The stop is the confirmed twin, not the best-effort one, because this is the path that
         removes the worktree next: `stop` absorbs a refusal, and a removal made on the strength of
@@ -2888,9 +2685,12 @@ class CommandHostRuntime:
         which the card's next attempt raises a second head beside the first. The teardown itself
         still does not escape, so a green card reaches Done either way; what a refusal costs is the
         removal, and the worktree is left standing for whoever looks at the head that would not go.
+        A legacy record is the exception: it is refused before anything is stopped or removed, and
+        the release blocks on that refusal rather than tearing an Orca worktree down.
         """
         if self.mode == "noop" or not record.workspace:
             return
+        self._refuse_legacy_record(record, "tear down")
         self._require_production_runtime("cleanup-before-stop")
         self._decide_workspace_environment_ownership(record.workspace)
         try:
@@ -2900,13 +2700,6 @@ class CommandHostRuntime:
         self._require_production_runtime("cleanup-before-worktree-remove")
         if self._is_git_workspace(record.workspace):
             self._git_workspaces.teardown(record.workspace)
-            return
-        try:
-            self._run_json(
-                ["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"]
-            )
-        except HostError:
-            pass
 
     def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
         """Bring `seed` into the project checkout and return the start point a worktree is cut at.
@@ -2930,93 +2723,6 @@ class CommandHostRuntime:
             return seed
         self._remote_git_checked(project, repo, ["fetch", "origin", seed], "git fetch")
         return f"origin/{seed}"
-
-    def _create_workspace(self, project: str, worker_id: str, seed: str, *, expected: str = "") -> str:
-        """Cut the card's worktree from `seed` and accept it only as this card's workspace of this repo.
-
-        `seed` is where the checkout starts, not where the card integrates: an ordinary card seeds
-        from its integration base, and a reslice successor from the predecessor candidate its
-        `workspace.seed_ref` names (secretary-1541).
-
-        What Orca returns is checked against what Orca itself registered — the repo registration this
-        project's binding resolves to, and this card's worker id as the worktree name — and against the
-        `expected` path the launch intent already wrote to disk, so a workspace that landed anywhere
-        else is a deferred bring-up rather than a checkout no later stop or teardown can find. A create
-        that succeeded and then failed any of this is removed before the failure is raised.
-        """
-        if self.mode == "noop":
-            workspace = self.data_dir / "dispatcher" / "workspaces" / worker_id
-            workspace.mkdir(parents=True, exist_ok=True)
-            return str(workspace)
-        self._require_project_available(project)
-        binding = self.catalog.binding(project)
-        repo = Path(str(binding["repo"])).expanduser()
-        if not repo.is_absolute() or not repo.is_dir():
-            raise HostError(f"project repo for {project!r} is unavailable")
-        registration = self._orca_repo(project)
-        start = self._fetch_seed(repo, seed, project=project)
-        result = self._run_json(
-            [
-                "orca",
-                "worktree",
-                "create",
-                "--repo",
-                f"path:{repo}",
-                "--name",
-                worker_id,
-                "--base-branch",
-                start,
-                "--setup",
-                "skip",
-                "--no-parent",
-                "--activate",
-                "--json",
-            ]
-        )
-        worktree = result.get("worktree") if isinstance(result.get("worktree"), dict) else result
-        path = worktree.get("path") if isinstance(worktree, dict) else None
-        if not isinstance(path, str) or not path:
-            raise HostError("orca did not return a workspace path")
-        reason = self._workspace_rejection(path, str(registration["id"]), worker_id, expected)
-        if reason:
-            raise HostError(f"{reason}{self._discard_workspace(path)}")
-        return path
-
-    def _workspace_rejection(self, path: str, repo_id: str, worker_id: str, expected: str) -> str:
-        """Why this returned worktree may not be adopted, or "" when it may.
-
-        A worktree Orca will not describe is a rejection rather than a pass.
-        """
-        try:
-            shown = self._run_json(["orca", "worktree", "show", "--worktree", f"path:{path}", "--json"])
-        except HostError as exc:
-            return f"orca will not describe the worker workspace at {path}: {exc}"
-        worktree = shown.get("worktree") if isinstance(shown.get("worktree"), dict) else shown
-        if not isinstance(worktree, dict):
-            return f"orca did not describe the worker workspace at {path}"
-        if worktree.get("repoId") != repo_id:
-            return (
-                f"orca registered the worker workspace at {path} under repo "
-                f"{worktree.get('repoId')!r}, not this project's repo {repo_id!r}"
-            )
-        if worktree.get("displayName") != worker_id:
-            return (
-                f"orca registered the worker workspace at {path} as "
-                f"{worktree.get('displayName')!r}, not this card's workspace {worker_id!r}"
-            )
-        if expected and not _same_repo(Path(path), Path(expected)):
-            return f"orca placed the worker workspace at {path}, not {expected}"
-        return ""
-
-    def _discard_workspace(self, path: str) -> str:
-        """Remove a worktree that was created but must not be adopted, and say what is left."""
-        if self._is_git_workspace(path):
-            return self._git_workspaces.discard(path)
-        try:
-            self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"])
-        except HostError as exc:
-            return f"; the rejected worktree at {path} could not be removed either: {exc}"
-        return ""
 
     def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
         """Accept only the registered project worktree on this card's worker branch."""
@@ -3255,7 +2961,6 @@ class CommandHostRuntime:
         env_name: str,
         launch_prompt: str | None = None,
         prompt_document: str = "",
-        split_from: str = "",
         task: dict[str, Any] | None = None,
         failover: bool = False,
         heartbeat_run_id: str = "",
@@ -3370,7 +3075,6 @@ class CommandHostRuntime:
             title=title,
             pointer=pointer,
             pid_file=pid_file,
-            split_from=split_from,
             transport=self._head_transport(
                 workspace,
                 prompt_file,
@@ -3422,11 +3126,15 @@ class CommandHostRuntime:
         )
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
-        """The launch shape the run is recorded with, degrading rather than failing a live bring-up."""
+        """The launch shape the run is recorded with, degrading rather than failing a live bring-up.
+
+        A degraded spec is still a head this host raises itself, so it names `local-pty` rather than
+        taking the record rule a hand-built spec otherwise carries.
+        """
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
         except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
-            return HeadSpec(profile_id=head, adapter=adapter or "unknown")
+            return HeadSpec(profile_id=head, adapter=adapter or "unknown", runtime=LOCAL_PTY_RUNTIME)
 
     @staticmethod
     def _task_ref(task: dict[str, Any] | None, role: str, document: str) -> head_ops.TaskRef:
@@ -3537,58 +3245,6 @@ class CommandHostRuntime:
         failure.evidence = evidence
         return failure
 
-    def _close_head_pane(
-        self,
-        handle: str,
-        pid_file: str,
-        *,
-        run: Any = None,
-        role: str = "",
-        task: str = "",
-        leaf: str = "",
-        expected: dict[str, str] | None = None,
-        host: SessionHost,
-    ) -> None:
-        """Close a head's pane through the session host and confirm nothing of it survived.
-
-        The heartbeat decides, not the close: Orca answers `tab_not_found` for a pane it never gave a
-        UI tab, which is every pane a dispatcher-launched head gets on a headless serve. Only when
-        there is no heartbeat to read is a refused close taken at face value.
-        """
-        if run is not None:
-            self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
-        elif pid_file:
-            status = self._head_status(pid_file, expected=expected)
-            if _heartbeat_is_mismatch(status):
-                raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
-        try:
-            host.close_pane(handle)
-        except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
-            status = (
-                self._head_status(
-                    pid_file,
-                    run=run,
-                    role=role,
-                    task=task,
-                    leaf=leaf,
-                    expected=expected,
-                )
-                if pid_file
-                else {"known": False}
-            )
-            if not status.get("known"):
-                raise HostError(f"head terminal close failed: {exc}") from None
-            if _heartbeat_is_mismatch(status):
-                raise HostError("head terminal close found a mismatching launch identity") from None
-        self._confirm_head_process_gone(
-            pid_file,
-            run=run,
-            role=role,
-            task=task,
-            leaf=leaf,
-            expected=expected,
-        )
-
     def _launched(
         self,
         handle: str,
@@ -3660,7 +3316,10 @@ class CommandHostRuntime:
 
         An unknown name cannot arrive from a validated registry (`validate_launch_shape` refuses it
         when the table loads), so reaching this refusal means a record or a caller invented one,
-        and it fails closed by name rather than falling back to a backend the head is not on.
+        and it fails closed by name rather than falling back to a backend the head is not on. A
+        legacy Orca record (`orca-legacy`, or no runtime at all) is refused with
+        `LegacyDispatcherRecord`: no backend is built for it, so it is never launched, delivered to
+        or stopped.
         """
         held = self._head_runtimes.get(name)
         if held is not None:
@@ -3668,10 +3327,11 @@ class CommandHostRuntime:
         try:
             built = build_head_runtime(
                 name,
-                session=lambda: self.session,
                 local_pty_root=self._local_pty_root,
                 head_process_status=_head_process_status,
             )
+        except LegacyHeadRecordError as exc:
+            raise LegacyDispatcherRecord("a head run", str(exc), verb="drive") from exc
         except UnknownHeadRuntimeError as exc:
             raise HostError(str(exc)) from exc
         self._head_runtimes[name] = built
@@ -3686,17 +3346,6 @@ class CommandHostRuntime:
         """
         return self.data_dir / "heads"
 
-    @property
-    def session(self) -> OrcaSessionHost:
-        """The session manager this runtime reads a workspace's pane inventory through.
-
-        Not a lifecycle seam any more: starting, delivering to, observing, draining, stopping and
-        attaching to a head all go through `head_runtime`. What is left is the workspace inventory —
-        which panes exist, which are connected — read to choose a split anchor and to answer
-        diagnostics. A read that names no head is not a head's lifecycle.
-        """
-        return OrcaSessionHost(self._run_json)
-
     def _open_head_pane(self, run: head_ops.HeadRun, title: str, command: str) -> head_ops.HeadRun:
         """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
 
@@ -3704,59 +3353,29 @@ class CommandHostRuntime:
         its launch prompt in front of it through the same boundary, so that the two halves can be
         accounted for separately. `start` with no pointer is exactly that pane and nothing else.
         """
-        try:
-            receipt = self.head_runtime_for(run).start(
-                run.spec,
-                run.workspace,
-                run.task_ref,
-                command=command,
-                title=title,
-                pid_file=run.pid_file,
-                run_id=run.run_id,
-                role=run.role,
-                run=run,
-            )
-        except PaneHostError as exc:
-            raise HostError(str(exc)) from None
+        receipt = self.head_runtime_for(run).start(
+            run.spec,
+            run.workspace,
+            run.task_ref,
+            command=command,
+            title=title,
+            pid_file=run.pid_file,
+            run_id=run.run_id,
+            role=run.role,
+            run=run,
+        )
         if not receipt.ok:
             raise HostError(receipt.reason)
         return receipt.run
 
-    def _split_anchor(self, record: DispatcherRecord) -> str:
-        """Pane to split the reviewer off. The worker's own pane when it is still connected, so
-        both heads of a card end up in one tab; otherwise any live pane in the same worktree.
-        Empty when the worktree has no live pane left — the caller then falls back to creating a
-        terminal, which is less visible but still gets the card reviewed."""
-        connected = [pane for pane in self._worktree_terminals(record.workspace) if pane.connected]
-        if record.worker_leaf:
-            for pane in connected:
-                if pane.leaf == record.worker_leaf:
-                    return pane.handle
-        elif record.handle:
-            for pane in connected:
-                if pane.handle == record.handle:
-                    return record.handle
-        return connected[0].handle if connected else ""
+    def workspace_panes(self, workspace: str) -> list[Any]:
+        """The pane inventory `dispatch.review.command_terminal_status` reads: always empty.
 
-    def _worktree_terminals(self, workspace: str) -> list[Pane]:
-        """Pane inventory for a worktree, or [] when it cannot be read. Callers use it to pick
-        a pane, never to decide a head is dead, so an unreadable inventory degrades into a weaker
-        choice rather than a failed tick."""
-        if self.mode == "noop" or not workspace:
-            return []
-        try:
-            return self._worktree_terminals_or_raise(workspace)
-        except HostError:
-            return []
-
-    def _worktree_terminals_or_raise(self, workspace: str) -> list[Pane]:
-        """Read a worktree inventory when its absence would make a lifecycle decision unsafe."""
-        if self.mode == "noop":
-            return []
-        try:
-            return list(self.session.panes(workspace))
-        except PaneHostError as exc:
-            raise HostError(str(exc)) from None
+        Every head this host raises is supervised and owns no pane, so its status is read from its
+        pid heartbeat and its provider cursor alone, and no session manager is asked.
+        """
+        del workspace
+        return []
 
     def _freeze_worker(self, record: DispatcherRecord) -> None:
         """Shut the worker head down now that the reviewer is up, leaving the workspace untouched.
@@ -3854,6 +3473,7 @@ class CommandHostRuntime:
 
     def prompt_worker_report(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Ask a live worker to run the open round's ordinary report command. Nothing else."""
+        self._refuse_legacy_record(record, "deliver to the worker of")
         status = self._head_status(
             record.worker_pid_file,
             run=record.worker_head_run,
@@ -3879,6 +3499,7 @@ class CommandHostRuntime:
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task."""
+        self._refuse_legacy_record(record, "resume the worker of")
         status = self._head_status(
             record.worker_pid_file,
             run=record.worker_head_run,
@@ -3898,12 +3519,8 @@ class CommandHostRuntime:
             if status.get("stopped"):
                 raise HostError("confirmed retained continuation is no longer running")
             return
-        if not status.get("stopped") and _terminal_turn_started(
-            record.handle,
-            run_json=self._run_json,
-            workspace=str(workspace),
-            since=continuation.sent_at,
-            adapter=adapter,
+        if not status.get("stopped") and (
+            _provider_turn_started(str(workspace), continuation.sent_at, adapter=adapter) is True
         ):
             # The dispatcher may have died after the provider started but before it recorded that
             # confirmation. Returning lets recovery checkpoint it without touching TASK.md.
@@ -3966,6 +3583,7 @@ class CommandHostRuntime:
         before_send: Callable[[], None] | None = None,
     ) -> None:
         """Point this card's live worker at one thing, through the head operation (secretary-1412)."""
+        self._refuse_legacy_record(record, "deliver to the worker of")
         run = self.worker_lifecycle_run(record)
         try:
             receipt = self.head_runtime_for(run).deliver(
@@ -3979,6 +3597,8 @@ class CommandHostRuntime:
                 ),
                 subject=subject,
             )
+        except LegacyDispatcherRecord:
+            raise
         except (TuiDeliveryError, HostError) as exc:
             failure = HostError(f"{what} was not delivered: {exc}")
             failure.evidence = getattr(exc, "evidence", None)
@@ -3989,12 +3609,6 @@ class CommandHostRuntime:
             raise failure from None
         record.worker_head_run = receipt.run.to_json()
         _record_worker_delivery_evidence(record, receipt.delivery)
-
-    def _set_worker_branch(self, workspace: str, branch: str) -> None:
-        if self.mode == "noop":
-            return
-        # Never force-update the target name: a preserved checkout elsewhere can already own it.
-        self._run(["git", "-C", workspace, "branch", "-m", branch], "git branch")
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
@@ -4792,14 +4406,6 @@ class CommandHostRuntime:
     def _run_shell(self, command: str, cwd: Path, label: str) -> None:
         self._run(["bash", "-lc", command], label, cwd=cwd)
 
-    def _run_json(self, args: list[str]) -> dict[str, Any]:
-        completed = self._run(args, _safe_command_label(args))
-        try:
-            loaded = json.loads(completed.stdout or "{}")
-        except ValueError:
-            raise HostError(f"{args[0]} returned invalid JSON") from None
-        return loaded.get("result", loaded) if isinstance(loaded, dict) else {}
-
     def _run(
         self, args: list[str], label: str, *, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -4824,7 +4430,7 @@ class CommandHostRuntime:
             raise HostError(f"{label} failed: {exc}") from None
 
 
-# How long one host child (Orca, Git, a gate or adapter shell) may run before its group is killed.
+# How long one host child (Git, a gate or adapter shell) may run before its group is killed.
 HOST_COMMAND_TIMEOUT_SECONDS = 900
 
 

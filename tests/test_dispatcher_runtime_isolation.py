@@ -490,7 +490,6 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 ),
                 mock.patch.object(host, "_clear_body_file"),
                 mock.patch.object(host, "_review_document", return_value=(document, "review")),
-                mock.patch.object(host, "_split_anchor", return_value=""),
                 mock.patch.object(host, "_launch", side_effect=launch),
                 self.assertRaisesRegex(HostError, "launch reached"),
             ):

@@ -45,6 +45,7 @@ from secretary.projects.integration_base import (
 )
 from secretary.routing_journal import HeadRun, head_run_from_profile
 from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.tasks import TaskError
 from tests.fakes.tasks import CardSeed
 from tests.head_registry import write_installed_pair
@@ -117,6 +118,7 @@ def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> Non
                 profile_id=head,
                 adapter="codex",
                 model="gpt-5.6-terra",
+                runtime=LOCAL_PTY_RUNTIME,
             ),
             workspace=workspace,
             task_ref=task_ref,
@@ -380,10 +382,9 @@ class FakeCatalog:
             "resource": "openai-sub",
             "codex_mode": "tui",
         }
-        # Like the installed registry, every profile names its runtime: a keyless one is `local-pty`
-        # (secretary-1718), and these stand in for the Orca heads this fake host models.
+        # Like the installed registry, every profile names its runtime, and there is one.
         for profile in self.profiles.values():
-            profile["runtime"] = "orca-legacy"
+            profile["runtime"] = "local-pty"
         # Mutable, like the role_defaults block of heads.yaml: an operator can re-point a role
         # while cards are in flight.
         self.role_defaults = {
@@ -865,7 +866,7 @@ class FakeHost:
             "head_run": dict(launched.head_run),
         }
 
-    def observer_workspace(self, reference: str, head: str = "") -> str:
+    def observer_workspace(self, reference: str) -> str:
         return str(self.root / "observers" / reference.replace(":", "-"))
 
     def configure_codex_provider_ingress(self, run, *, persist, stop, block) -> None:
@@ -1000,7 +1001,7 @@ class FakeHost:
         leaf = f"leaf:{handle}"
         head_run = head_ops.HeadRun(
             run_id=heartbeat_run_id or "fake-observer-run",
-            spec=head_ops.HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra"),
+            spec=head_ops.HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra", runtime=LOCAL_PTY_RUNTIME),
             workspace=str(workspace),
             task_ref=head_ops.TaskRef.sprint(reference),
             role="observer",
@@ -1263,7 +1264,7 @@ class FakeHost:
             }
         return head_ops.HeadRun(
             run_id=run_id or f"run-{role}-{self.head_runs}",
-            spec=head_ops.HeadSpec(profile_id=head, adapter=adapter),
+            spec=head_ops.HeadSpec(profile_id=head, adapter=adapter, runtime=LOCAL_PTY_RUNTIME),
             workspace=workspace or str(self.root / f"{task['ref']}-pilot"),
             task_ref=head_ops.TaskRef.card(task["ref"], document=document),
             handle=handle,

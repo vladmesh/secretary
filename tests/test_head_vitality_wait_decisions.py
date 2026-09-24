@@ -818,6 +818,9 @@ class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase)
         from secretary.dispatch import review as dispatcher_review
 
         record = self._live_record()
+        # These are the shapes of a head that was an Orca pane, which only a legacy record still
+        # names (secretary-1722); a supervised head's pid shape carries its provider cursor.
+        record.worker_head_run = {**record.worker_head_run, "head_runtime": "orca-legacy"}
         pane = mock.Mock()
         pane.leaf = record.worker_leaf if matching else "another-worktree-leaf"
         pane.handle = record.handle if matching else "another-handle"

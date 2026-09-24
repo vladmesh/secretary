@@ -130,7 +130,7 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
         environment = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
                 "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
                 "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
             },
@@ -373,7 +373,7 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                    "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
                     "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
                     "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
                 },
@@ -402,7 +402,7 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
         return [json.loads(line)["submitted"].strip() for line in self.record.read_text().splitlines() if line]
 
     def _launch(self) -> tuple[dict[str, Any], ObserverRecord]:
-        workspace = self.root / "workspaces" / "observer"
+        workspace = Path(self.host.observer_workspace("sprint:1459"))
         workspace.mkdir(parents=True)
         with mock.patch.object(CommandHostRuntime, "_create_git_observer_workspace", return_value=workspace):
             launched = self.host.prepare_observer({"ref": "sprint:1459"}, PROFILE, prompt="# Sprint\n")
@@ -642,7 +642,7 @@ class ObserverTaskIdentityTests(unittest.TestCase):
     def test_the_stop_paths_expect_the_single_prefix(self) -> None:
         host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
         record = self._record()
-        record.workspace = str(self.root / "observer")
+        record.workspace = host.observer_workspace("sprint:1459")
         seen: list[str] = []
 
         def remember(*_args: object, **kwargs: object) -> None:
@@ -652,8 +652,8 @@ class ObserverTaskIdentityTests(unittest.TestCase):
             mock.patch.object(CommandHostRuntime, "_guard_head_run", side_effect=remember),
             mock.patch.object(CommandHostRuntime, "_stop_observer_terminals", side_effect=remember),
             mock.patch.object(CommandHostRuntime, "_confirm_head_process_gone", side_effect=remember),
-            mock.patch.object(CommandHostRuntime, "_observer_workspace_registered", return_value=True),
-            mock.patch.object(CommandHostRuntime, "_run_json", return_value={}),
+            mock.patch.object(CommandHostRuntime, "_git_observer_worktree_listed", return_value=True),
+            mock.patch.object(CommandHostRuntime, "_remove_git_observer_workspace"),
         ):
             host._stop_observer_head(record)
 

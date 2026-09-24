@@ -625,37 +625,21 @@ class SeedFetchTests(unittest.TestCase):
 
 
 class _WorktreeHost(CommandHostRuntime):
-    """`_create_workspace` end to end, with Orca's three JSON calls served by real `git worktree`.
+    """The card's git workspace end to end: `GitWorkspaceManager.create` with a real fetch.
 
-    Only the worktree manager is stood in for; the fetch, the start point and the checkout are real,
-    which is the whole point — this is the test that says a successor's workspace really does carry
-    the predecessor's content.
+    Nothing is stood in for: the fetch, the start point, `git worktree add -b` and the acceptance
+    check are real, which is the whole point — this is the test that says a successor's workspace
+    really does carry the predecessor's content. The start point is only recorded.
     """
 
-    def __init__(self, catalog, root: Path, repo: Path) -> None:
+    def __init__(self, catalog, root: Path) -> None:
         super().__init__(catalog, root, mode="real")  # type: ignore[arg-type]
-        self._root = root
-        self._repo = repo
-        self._worktrees: dict[str, str] = {}
         self.start_points: list[str] = []
 
-    def _run_json(self, args, label: str = "") -> dict:  # type: ignore[override]
-        if args[:3] == ["orca", "repo", "list"]:
-            return {"repos": [{"id": "repo-1", "path": str(self._repo)}]}
-        if args[:3] == ["orca", "worktree", "create"]:
-            name = args[args.index("--name") + 1]
-            start = args[args.index("--base-branch") + 1]
-            self.start_points.append(start)
-            path = self._root / "worktrees" / name
-            # `-b` is what Orca does: a named branch at the start point, whether that start point is
-            # a remote-tracking ref or a raw object id — the latter cuts a branch, not a detached HEAD.
-            git(self._repo, "worktree", "add", "--quiet", "-b", f"work/{name}", str(path), start)
-            self._worktrees[str(path)] = name
-            return {"worktree": {"path": str(path)}}
-        if args[:3] == ["orca", "worktree", "show"]:
-            path = args[args.index("--worktree") + 1].removeprefix("path:")
-            return {"worktree": {"repoId": "repo-1", "displayName": self._worktrees.get(path, "")}}
-        raise AssertionError(f"unexpected orca call: {args}")
+    def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
+        start = super()._fetch_seed(repo, seed, project=project)
+        self.start_points.append(start)
+        return start
 
 
 class SeededWorkspaceTests(unittest.TestCase):
@@ -667,12 +651,12 @@ class SeededWorkspaceTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.fixture = _SeedRepo(self.root)
         self.catalog = _Catalog({}, repo=self.fixture.repo)
-        self.host = _WorktreeHost(self.catalog, self.root, self.fixture.repo)
+        self.host = _WorktreeHost(self.catalog, self.root)
 
     def _cut(self, task: dict, worker_id: str) -> Path:
         """Exactly what `prepare_worker` does: seed for the checkout, base for everything else."""
         seed = self.catalog.workspace_seed("secretary", task)
-        return Path(self.host._create_workspace("secretary", worker_id, seed))
+        return Path(self.host._git_workspaces.create(task, worker_id, seed))
 
     def test_a_successor_is_cut_from_the_predecessor_candidate_and_still_integrates_into_main(self) -> None:
         task = {
@@ -690,10 +674,10 @@ class SeededWorkspaceTests(unittest.TestCase):
         self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.fixture.candidate_sha)
         self.assertEqual((workspace / "predecessor.txt").read_text(encoding="utf-8"), "unreleased content\n")
         self.assertEqual(self.host.start_points, [self.fixture.candidate_sha])
-        # An object id start point still leaves the worktree on a branch, not a detached HEAD.
+        # An object id start point still leaves the worktree on the card's branch, not a detached HEAD.
         self.assertEqual(
             git(workspace, "rev-parse", "--abbrev-ref", "HEAD"),
-            "work/codegen-orchestrator-1236-successor",
+            "pipeline/codegen-orchestrator-1236",
         )
         # And nothing about the seed moved where the increment lands.
         self.assertEqual(

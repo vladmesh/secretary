@@ -47,7 +47,7 @@ from typing import Any
 
 from secretary.routing_journal import MODEL_UNKNOWN, RoutingHeadSnapshot
 from secretary.runtime.head import HeadRun, HeadRunError, TaskRefError
-from secretary.runtime.head_runtime_backends import head_runtime_name
+from secretary.runtime.head_runtime_backends import head_runtime_name, is_legacy_record
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.local_pty_head import (
     HEAD_OUTPUT_TAIL_BYTES,
@@ -262,11 +262,13 @@ def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
         "resolved_report_generation": head.resolved_report_generation,
         "runtime": head.runtime or None,
         "local_pty": False,
+        "legacy_record": False,
         "state": UNKNOWN,
         "reason": "",
     }
     if head.runtime and head.runtime != LOCAL_PTY_RUNTIME:
-        return {**row, "reason": LEGACY_NOTICE}
+        # A legacy Orca record is shown as one and never read as a transcript: no supervisor held it.
+        return {**row, "legacy_record": is_legacy_record(head.runtime), "reason": LEGACY_NOTICE}
     identity = _source("run directory", lambda: _identity(root, head.run_id), found=False)
     if not identity["answered"]:
         return {**row, "runtime": LOCAL_PTY_RUNTIME, "local_pty": True, "reason": identity["reason"]}
@@ -279,7 +281,7 @@ def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
             }
         # Nothing but the card's history names this run, and no local-pty supervisor ever held it:
         # every local-pty run leaves its journal under the heads root and nothing sweeps it.
-        return {**row, "runtime": ORCA_LEGACY_RUNTIME, "reason": LEGACY_NOTICE}
+        return {**row, "runtime": ORCA_LEGACY_RUNTIME, "legacy_record": True, "reason": LEGACY_NOTICE}
     if identity.get("task") != f"card:{ref}":
         return {
             **row,

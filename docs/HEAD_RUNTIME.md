@@ -1,10 +1,9 @@
 # Head runtime
 
-A head runs on one of two runtimes, named per head profile by its `runtime` key:
-
-- `orca-legacy`: the head is an Orca pane and Orca owns its process (`OrcaLegacyHeadRuntime`);
-- `local-pty`: a supervisor of this product owns the process group, PTY, socket and journal
-  (`LocalPtyHeadRuntime`).
+A head runs on one runtime, `local-pty`: a supervisor of this product owns the process group, PTY,
+socket and journal (`LocalPtyHeadRuntime`). A head profile may say so with `runtime = "local-pty"`
+or name no runtime. Heads used to run as Orca panes (`orca-legacy`); since A20 step 2 that name is
+only a marker on old durable records, which stay readable and are never launched.
 
 The lifecycle boundary is in [Architecture](ARCHITECTURE.md#head-runtime-ownership); liveness is in
 [Head vitality](HEAD_VITALITY.md). This page records what `local-pty` must do to replace Orca and
@@ -12,17 +11,35 @@ what is left to delete once it has (A20).
 
 ## The runtime default
 
-`secretary.runtime.head_runtimes` owns both facts about an absent `runtime`, and
+`secretary.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and
 `secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
 
-- **Profile.** `DEFAULT_HEAD_RUNTIME` is `local-pty`: a head profile with no `runtime` key is a
-  `local-pty` head (secretary-1718, the last code card of sprint:1459).
+- **Profile.** `HEAD_RUNTIMES` is `("local-pty",)` and `DEFAULT_HEAD_RUNTIME` is `local-pty`: a head
+  profile with no `runtime` key is a `local-pty` head. A profile naming any other runtime, including
+  `orca-legacy`, is refused by `validate_launch_shape` when the registry loads, by profile id, with
+  the fix: set `runtime = "local-pty"` or drop the key. That is the fail-closed upgrade boundary: no
+  profile is rewritten silently. The shipped `heads.toml` names no runtime (secretary-1722).
 - **Record.** `RECORD_RUNTIME_WHEN_ABSENT` is `orca-legacy`: a durable `HeadRun` with no
-  `head_runtime`, and a spec rebuilt by hand from a record that never named one, predate
-  `local-pty` and stay Orca heads. No live record changes meaning.
-- **Explicit pins.** Every profile that stays on Orca until A20 says `runtime = "orca-legacy"`: the
-  five tiers of the shipped `heads.toml` (a test keeps it free of keyless profiles), and the
-  installed registry (instance commit 16f4541b7). So an upgrade changes no live head.
+  `head_runtime`, or with `"orca-legacy"`, and a spec rebuilt by hand from a record that never named
+  one, is a legacy Orca record. `HeadRun.from_json` loads it unchanged and `to_json` writes the same
+  runtime back. `head_runtime_backends.is_legacy_record` is the one predicate for it; `head-status`
+  (`legacy_record: true`) and the web head view ("legacy runtime") show it as legacy.
+- **No backend for a legacy record.** `build_head_runtime` builds only `LocalPtyHeadRuntime`. Asked
+  for a legacy record's runtime it raises `LegacyHeadRecordError` (an `UnknownHeadRuntimeError`), and
+  it never falls back to `local-pty`. So a legacy record is never launched or delivered to.
+- **Dispatcher records.** The dispatcher host places every card and observer in a git worktree and
+  has no Orca path (step 3). A dispatcher record whose workspace is under the Orca workspaces root
+  and is not a git worktree the host owns, or whose worker, reviewer or observer run is a legacy
+  record, is refused by every verb — launch, delivery, stop, teardown — with `LegacyDispatcherRecord`
+  before any child runs or any backend is asked. Its bring-up cause is the card's own contract, so
+  the card goes Blocked with a reason naming the record; it is never torn down through Orca and never
+  re-placed. `head-status`'s pane inventory (step 5) still reads such a record.
+- **Memory access grants.** A grant whose `head_run` is a legacy record loads, so it is never
+  `runtime_identity_malformed` for its runtime alone. It is decided by liveness like any grant: an
+  Orca pane is never alive, so it is denied `runtime_identity_unbound` (no pid file) or
+  `runtime_identity_stale`. The PO memory bridge and the memory health probe build their spec by
+  hand and now name `local-pty`; grants they wrote before that say `orca-legacy` and keep working
+  while their process is alive.
 
 A standing agent's tick with no usable `local-pty` profile fails closed (secretary-1720): it starts
 no head and never falls back to a pane. The causes are: the registry would not load, no profile is
@@ -57,7 +74,7 @@ reason to keep Orca), **open**. Refs are sprint:1459 and sprint:1461 cards and t
 | A continuation reaches a retained (SIGSTOPped) worker | proven live | secretary-1702 (10392c6): the runtime runs the transport's `before_send` (SIGCONT) for a suspended head. Live: "retained worker resumed" on secretary-1703 at 2026-09-24 00:33Z. secretary-1719 runs the same hook for a running head too (row below). |
 | `head-status` reads a local-pty head (pid, heartbeat, lease, supervisor, journal tail) | proven live | secretary-1701 (5a1cba2). Live: secretary-1702's worker at 2026-09-23 23:36Z. |
 | The web shows a head's transcript tail and journal, read-only | merged, live proof pending | secretary-1703 (5b8336e). Live proof waits for the PO upgrade. |
-| A project runs without Orca: optional `orca_binding`, no Orca kind in reconcile or doctor | merged, live proof pending | secretary-1704 (7f092ae). Live proof: a `project add` / `reconcile apply` after the final upgrade. `orca_binding` still has two readers: orca-legacy workspace placement (`dispatch/host.py`) and curator routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and Codex sessions or Claude personal-memory files (`automations/agents/curator/discover.py`, `RouteResolver.resolve`), which does not depend on the runtime. |
+| A project runs without Orca: optional `orca_binding`, no Orca kind in reconcile or doctor | merged, live proof pending | secretary-1704 (7f092ae). Live proof: a `project add` / `reconcile apply` after the final upgrade. Since secretary-1722 `orca_binding` has one reader: curator routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and Codex sessions or Claude personal-memory files (`automations/agents/curator/discover.py`, `RouteResolver.resolve`), which does not depend on the runtime. |
 | The observer workspace is a detached `git worktree` | merged, live proof pending | secretary-1705 (1cbf343). Live proof comes at the next local-pty observer launch. |
 | Background agents run from the product's systemd units, with no Orca automations; the old top-level agents package is deleted | merged, live proof pending | secretary-1706 (6d866de), secretary-1707 (3240db2). Live proof: one tick per agent after the final upgrade. |
 | Role heads get the product venv on `PATH` | merged, live proof pending | secretary-1708 (d83f9b5). Live proof: the next observer, steward, retro and curator heads. |
@@ -72,20 +89,28 @@ reason to keep Orca), **open**. Refs are sprint:1459 and sprint:1461 cards and t
 What stays Orca-only in the product after sprint:1459. Every item becomes deletable only once the
 runtime default is `local-pty`: from then on no profile reaches Orca unless it names
 `orca-legacy`, and A20 removes those profiles first. Delete in this order; each step needs the one
-before it.
+before it. Steps 2 and 3 turned out to need each other (the host's Orca branches ran only on the
+`orca-legacy` backend step 2 removes), so they landed together.
 
 1. **Preconditions (no code).** The runtime-default card is merged and upgraded. The instance has no
    profile on `orca-legacy`, and no live record names Orca: no dispatcher record with a workspace under
    `~/orca/workspaces`, no observer on an Orca worktree, no `HeadRun` on `orca-legacy`. The open
    parity items above are fixed or explicitly accepted.
-2. **The `orca-legacy` runtime.** Drop it from `HEAD_RUNTIMES` and from
-   `head_runtime_backends`, and the explicit `runtime = "orca-legacy"` profiles from the shipped
-   `heads.toml`. Why: after step 1 nothing selects it, and the default no longer does.
-3. **Orca branches in `dispatch/host.py`**: the Orca worktree create, show and rm, `_orca_repo`,
-   `_split_anchor` / `_worktree_terminals`, the observer's Orca worktree and
-   `_register_observer_repo`. Why: the git manager is chosen for every card whose heads are
-   supervised, and later operations route by path, so with no Orca path left on a live record these
-   branches are unreachable. The observer root repo then needs no Orca registration.
+2. **Done (secretary-1722, with step 3; the merge commit is filled in by a later docs card).** The
+   `orca-legacy` runtime. It is dropped from `HEAD_RUNTIMES` and from `head_runtime_backends`, and
+   the explicit `runtime = "orca-legacy"` profiles from the shipped `heads.toml`. Why: after step 1
+   nothing selects it, and the default no longer does. Old records stay readable as legacy records
+   (see [The runtime default](#the-runtime-default)); `runtime/orca_legacy_head.py` is unreferenced
+   by the backend builder until step 6 deletes it.
+3. **Done (secretary-1722, with step 2; the merge commit is filled in by a later docs card).** Orca
+   branches in `dispatch/host.py`: the Orca worktree create, show and rm, `_orca_repo`,
+   `_orca_binding_name`, `_runs_in_orca_pane`, `_split_anchor` / `_worktree_terminals`, the
+   observer's Orca worktree, `_observer_workspace_registered` and `_register_observer_repo`. Every
+   card is placed by `GitWorkspaceManager` and every observer in its detached git worktree, whatever
+   the profiles; the host runs no `orca` argv and imports neither `pane_host` nor
+   `orca_legacy_head`. A legacy dispatcher record is refused (see
+   [The runtime default](#the-runtime-default)). The host still reads the Orca workspaces root, only
+   to recognise such a record. The observer root repo needs no Orca registration.
 4. **Done (secretary-1720; the merge commit is filled in by a later docs card).** Orca branches in
    `automations/runtime/dispatch.py` and `automations/runtime/orca_rpc.py`. A standing agent's
    tick without a `local-pty` head fails closed instead of falling back to a pane. So the pane
@@ -105,7 +130,7 @@ before it.
    (secretary-1710). Why: once the login under the data dir is proven live, no Codex head reads the
    legacy home.
 8. **`orca_binding` and the `orca` records in `host-managed.json`.** `orca_binding` has two
-   readers. Step 3 removes the first, orca-legacy workspace placement. The second is curator
+   readers. Step 3 removed the first, orca-legacy workspace placement (secretary-1722). The second is curator
    routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and
    Codex sessions or Claude personal-memory files: the route boundary adds
    `<workspaces root>/<orca_binding>` to the project, and without it such a source routes to

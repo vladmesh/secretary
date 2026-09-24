@@ -586,10 +586,8 @@ rejects a mismatch as foreign. `plane`, `policy.code_concurrency` and the other 
 over on a repeat `project add`, so refreshing a draft does not reset routing.
 
 `project add` writes no `orca_binding`, and `reconcile apply` makes no Orca call: a new project runs
-on local-pty heads in git workspaces. `orca_binding` is optional legacy. An existing one is kept and
-still names the project's Orca checkout for orca-legacy heads. A card on orca-legacy heads for a
-project with neither `orca_binding` nor an Orca registration fails bring-up with "project <id> has no
-Orca registration; run it on a local-pty profile"; move the card to a local-pty profile.
+on local-pty heads in git workspaces. `orca_binding` is optional legacy. An existing one is kept;
+only curator routing reads it, and card placement never does (secretary-1722).
 
 ### Stale input or an invalid schema
 
@@ -1191,9 +1189,12 @@ resume). Delivery contracts are in
   the modal still appears on the live screen, delivery answers "Skip until next version" a bounded number
   of times; a modal seen only in history refuses with `modal-not-on-screen`. No delivery ever upgrades
   Codex; an unrecognized dialog gets no keystrokes.
-- Reviewer launch splits the worker pane. On `terminal_split_source_not_found` it opens a standalone
-  terminal only if no pane appeared (`reviewer_fallback_reason=terminal_split_source_not_found`); any
-  other split error is fail-closed.
+- The reviewer starts as a second supervised process in the worker's git worktree; there is no pane
+  to split.
+- A record written while heads were Orca panes (its workspace an Orca worktree, or a head run on
+  `orca-legacy`) is refused by every launch, delivery, stop and teardown with a
+  `legacy dispatcher record` reason, and the card goes Blocked naming the record. Nothing is torn down
+  through Orca; clear that checkout by hand once its heads are confirmed gone.
 - A stop the host did not confirm is not a stop: no replacement, no Blocked move, no freeze listing until
   confirmed. Check the session manager: the stop is refused or the process ignores the signal.
 

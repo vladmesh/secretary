@@ -85,7 +85,7 @@ from secretary.runtime.head import (
     with_pid_heartbeat,
 )
 from secretary.runtime.head.identity import head_process_status
-from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
+from secretary.runtime.head_runtime_backends import build_head_runtime
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.state import AgentState
 
@@ -306,14 +306,10 @@ def _resolve_launch(
     except Exception as exc:
         raise NoSupervisedHead(f"head {head!r} could not be resolved to a profile ({exc})") from None
     try:
-        runtime = head_runtime_name(HeadSpec.from_profile(resolved, profile))
+        # `from_profile` refuses every runtime but `local-pty`, so a spec is a supervised head.
+        HeadSpec.from_profile(resolved, profile)
     except Exception as exc:
         raise NoSupervisedHead(f"head profile {resolved!r} will not make a head spec ({exc})") from None
-    if runtime != LOCAL_PTY_RUNTIME:
-        raise NoSupervisedHead(
-            f"head profile {resolved!r} names runtime {runtime!r}; "
-            f"a standing agent is only raised on {LOCAL_PTY_RUNTIME!r}"
-        )
     resolution = LaunchResolution(skill, resolved, profile)
     # Rendered once here, without a card, so a profile whose command will not render is refused
     # before `_TickReports.command` creates a report card for it.
@@ -737,16 +733,6 @@ class LocalPtyDispatchError(RuntimeError):
     """A head this driver holds itself could not be brought up, as its own receipt said so."""
 
 
-def _no_session() -> Any:
-    """The session manager a supervised head never has.
-
-    `build_head_runtime` is handed both dependencies because it is the one mapping for every
-    backend. This driver only ever names the supervised one, and this is what says so out loud
-    instead of opening a route to Orca that nothing here is allowed to use.
-    """
-    raise LocalPtyDispatchError("a supervised head is not held by a session manager")
-
-
 def _local_pty_runtime() -> Any:
     """This driver's supervised backend, built through the product's one name-to-backend mapping.
 
@@ -758,7 +744,6 @@ def _local_pty_runtime() -> Any:
     """
     return build_head_runtime(
         LOCAL_PTY_RUNTIME,
-        session=_no_session,
         local_pty_root=lambda: _installation_data_dir() / "heads",
         head_process_status=head_process_status,
     )

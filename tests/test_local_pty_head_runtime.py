@@ -2229,7 +2229,8 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
                         sites.setdefault(holder.name, set()).add(node.func.id)
 
         self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
-        self.assertEqual(sites["build_head_runtime"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"})
+        # secretary-1722: the Orca backend is no longer built anywhere.
+        self.assertEqual(sites["build_head_runtime"], {"LocalPtyHeadRuntime"})
 
     def test_no_profile_and_no_registry_names_this_backend(self) -> None:
         offenders = []

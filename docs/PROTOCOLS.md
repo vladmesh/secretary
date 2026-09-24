@@ -443,7 +443,7 @@ silence and the card waits.
 
 ### Review infrastructure retries
 
-A reviewer that cannot be started (split pane will not open, reviewer resource unavailable, launch
+A reviewer that cannot be started (its head will not come up, reviewer resource unavailable, launch
 intent unwritable) is a review-stage failure, not a verdict. The card keeps its green gate receipt,
 candidate SHA, report round, request ids and suspended worker session, and the next tick relaunches
 the reviewer against the same evidence: no move through Ready, no worker launch, no gate or broad

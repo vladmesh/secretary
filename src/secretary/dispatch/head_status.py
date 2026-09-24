@@ -64,7 +64,7 @@ from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import head_run_process_status, pid_file_path
 from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.head.identity import HEARTBEAT_DEAD, HEARTBEAT_LIVE_MATCH, head_process_status
-from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
+from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name, is_legacy_record
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.local_pty_head import head_run_journal_read, head_run_supervisor_lease
 from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
@@ -159,7 +159,7 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
             self._inventory[workspace] = orca_workspace_inventory(self._run_json, workspace)
         return self._inventory[workspace]
 
-    def _worktree_terminals_or_raise(self, workspace: str) -> list[Any]:
+    def workspace_panes(self, workspace: str) -> list[Any]:
         # The seam `command_terminal_status` finds by name, answered from the same single reading:
         # the head axis and the pane axis of one row cannot then disagree about which ptys existed.
         return list(self.workspace_inventory(workspace).panes)
@@ -232,6 +232,7 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
             host,
             ref,
             record,
+            run,
             kind=kind,
             role=role,
             panes=panes,
@@ -323,6 +324,7 @@ def _head_row(
     host: Any,
     ref: str,
     record: DispatcherRecord,
+    run: HeadRun | None,
     *,
     kind: str,
     role: str,
@@ -345,8 +347,11 @@ def _head_row(
     row: dict[str, Any] = {
         "ref": ref,
         "role": role,
-        # The legacy case: a head that lives in an Orca pane, read through that pane's inventory.
+        # The legacy case: a head that lived in an Orca pane, read through that pane's inventory.
+        # A legacy record is shown, never launched or delivered to; `legacy_record` says which rows
+        # are one by the product's one predicate (a run with no runtime, or `orca-legacy`).
         "runtime": ORCA_LEGACY_RUNTIME,
+        "legacy_record": is_legacy_record(run),
         "run_id": run_id or None,
         "card_state": record.state,
         "runtime_pane": pane_state,
@@ -730,11 +735,6 @@ def _normalised(path: str) -> str:
     return os.path.abspath(os.path.expanduser(str(path or ""))) if path else ""
 
 
-def _no_session() -> Any:
-    """A supervised head is held by no session manager, and a read of one never asks for it."""
-    raise HostError("a local-pty head has no session manager")
-
-
 #: How many of a supervised head's last journal records a row carries.
 JOURNAL_TAIL_RECORDS = 8
 
@@ -847,6 +847,7 @@ def _supervised_row(
         "ref": ref,
         "role": role,
         "runtime": LOCAL_PTY_RUNTIME,
+        "legacy_record": False,
         "run_id": run.run_id,
         "head": head,
         "proved_by": proved_by,
@@ -919,7 +920,6 @@ def _supervisor_answer(root: Path, run: HeadRun) -> dict[str, Any]:
     try:
         seen = build_head_runtime(
             LOCAL_PTY_RUNTIME,
-            session=_no_session,
             local_pty_root=lambda: root,
             head_process_status=head_process_status,
         ).observe(run)

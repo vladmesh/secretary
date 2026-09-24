@@ -114,8 +114,6 @@ from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatch.tui import (
-    DELIVERY_CONFIRMED,
-    TuiDeliveryError,
     provider_progress_for_run,
 )
 from secretary.dispatch.types import (
@@ -153,6 +151,7 @@ from secretary.routing_journal import (
 )
 from secretary.runtime.head import (
     HEAD_DRAINING,
+    HEAD_GONE,
     HEAD_OK,
     DeliverReceipt,
     HeadCommand,
@@ -163,11 +162,12 @@ from secretary.runtime.head import (
     wrap_role_command,
 )
 from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.prompt_document import (
-    NUDGE_FILE_MODE,
     NUDGE_MAX_BYTES,
     PromptDocumentError,
 )
+from secretary.runtime.tui_delivery import DeliveryEvidence
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, instance_open_sprint_limit
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
@@ -176,6 +176,7 @@ from tests.dispatcher_fixtures import (
     DispatcherRuntimeFixture,
     PromptAfterStartCatalog,
     RecordingReviewHost,
+    SupervisedBackend,
     ensure_attempt,
     write_heartbeat,
 )
@@ -6731,13 +6732,13 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "an infrastructure retry charges the sprint no budget event",
         )
 
-    def test_an_unconfirmed_reviewer_nudge_keeps_the_pane_and_the_exact_green_evidence(self) -> None:
-        """The live failure is a generic HostError from prompt delivery, not HeadPaneNotReady.
+    def test_an_unconfirmed_reviewer_nudge_keeps_the_head_and_the_exact_green_evidence(self) -> None:
+        """The live failure is a generic delivery failure, not HeadPaneNotReady.
 
         The reviewer receives a nudge at a task document, so an unconfirmed delivery is ambiguous
         by construction: the line is short enough that no provider has failed to take one, and the
         classification that would decide otherwise is the one that called 24 delivered prompts
-        failures on the canary. The pane therefore stays open and the bring-up hands it back as an
+        failures on the canary. The head therefore stays up and the bring-up hands it back as an
         abort, which keeps the launch intent for the next tick to adopt or stop. Everything the
         green gate left on the record is untouched, exactly as it was under the infrastructure
         retry this replaces.
@@ -6766,7 +6767,17 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         report_request = self._worker_report_request_id()
         worker_identity = (before.handle, before.worker_leaf, before.worker_pid_file, before.worker_run)
         real_host = RecordingReviewHost(self.data_dir, catalog=PromptAfterStartCatalog())
-        real_host.wait_answer = {"wait": {"condition": "tui-idle", "satisfied": True}}
+        real_host.backend.start_failure = head_ops.HeadSpawnAborted(
+            "the reviewer never started a turn on its nudge",
+            run=None,  # type: ignore[arg-type]
+            evidence=DeliveryEvidence(
+                handle="reviewer",
+                stage="payload_written",
+                payload_bytes=120,
+                payload_sha256="0123456789abcdef",
+                reason="pane-stayed-ready",
+            ),
+        )
         self.runtime.host = real_host
         isolated_bodies = self.data_dir / "pane-stayed-ready-bodies"
         isolated_bodies.mkdir()
@@ -6775,9 +6786,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             mock.patch.object(
                 real_host, "_signal_head", side_effect=AssertionError("unexpected head signal")
             ),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
-            mock.patch("secretary.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
         ):
             held = self.tick()
 
@@ -6786,10 +6794,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("nudge", held["reason"])
         record = self._record_of()
         self.assertEqual(record.state, "review_starting")
+        [start] = real_host.backend.starts
         self.assertEqual(
             record.launch_intent.get("handle"),
-            "term-review",
-            "the intent names the pane, so the next tick adopts that reviewer or stops it",
+            f"run:{start['run'].run_id}",
+            "the intent names the head, so the next tick adopts that reviewer or stops it",
         )
         self.assertEqual(record.gate_attestation, receipt)
         self.assertEqual(record.report_generation, report_generation)
@@ -6800,28 +6809,20 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertEqual(record.review_launch_aborts, 1)
         self.assertEqual(record.review_launch_attempts, 0)
-        # The reviewer's nudge went through the shared delivery boundary, so what that boundary saw
-        # is durable card telemetry rather than a scrubbed sentence: the mode, the document it
-        # pointed at, and the size of the pointer rather than of the review.
+        # What the delivery boundary saw is durable card telemetry rather than a scrubbed sentence.
         self.assertEqual(record.review_delivery_failures, 1)
         evidence = record.review_delivery_evidence
         self.assertEqual(evidence["subject"], "reviewer-launch")
         self.assertEqual(evidence["stage"], "payload_written")
         self.assertEqual(evidence["reason"], "pane-stayed-ready")
-        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
-        self.assertTrue(Path(evidence["document_path"]).is_file())
-        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
-        self.assertEqual(len(evidence["payload_sha256"]), 16)
         self.assertEqual(self._record_of().review_delivery_evidence, evidence, "it survives the state write")
-        closed = [
-            call[call.index("--terminal") + 1]
-            for call in real_host.calls
-            if call[:3] == ["orca", "terminal", "close"]
-        ]
+        # The head was handed a pointer at the document, never the review.
+        self.assertLessEqual(len(start["pointer"].text.encode("utf-8")), NUDGE_MAX_BYTES)
+        self.assertTrue(Path(start["pointer"].document).is_file())
         self.assertEqual(
-            closed,
+            real_host.backend.stops,
             [],
-            "a delivery classification never closes a pane: the head may be working on the nudge",
+            "a delivery classification never stops a head: it may be working on the nudge",
         )
 
     def test_a_reviewer_that_never_starts_blocks_the_card_naming_the_held_candidate(self) -> None:
@@ -10855,9 +10856,9 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
             "codex", prompt_after_start=True, adapter="codex"
         )
         self.host = CommandHostRuntime(catalog, self.root / "data", mode="real")  # type: ignore[arg-type]
-        self.host._create_observer_workspace = lambda _ref: self.workspace  # type: ignore[method-assign]
+        self.host._create_git_observer_workspace = lambda _placed: self.workspace  # type: ignore[method-assign]
         self.host._open_head_pane = lambda run, _title, _command: dataclasses.replace(  # type: ignore[method-assign]
-            run, handle="term:observer", leaf="leaf:observer"
+            run, handle="run:observer", leaf=""
         )
         self.stopped: list[str] = []
         self.host._stop_observer_terminals = (  # type: ignore[method-assign]
@@ -10865,7 +10866,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
         )
 
     def _refuse(self, receipt) -> None:
-        self.host.head_runtime.deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
+        self.host.head_runtime_for(LOCAL_PTY_RUNTIME).deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
 
     def test_a_launch_prompt_refused_by_the_drain_gate_is_not_a_delivered_launch(self) -> None:
         self._refuse(DeliverReceipt(status=HEAD_DRAINING, reason="a drain was requested for this head"))
@@ -10878,11 +10879,10 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
     def test_a_delivered_launch_prompt_is_still_a_delivered_launch(self) -> None:
         run = HeadRun(
             run_id="observer-run-1",
-            spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
+            spec=HeadSpec(profile_id="codex-observer", adapter="codex", runtime=LOCAL_PTY_RUNTIME),
             workspace=str(self.workspace),
             task_ref=TaskRef.sprint("sprint:1462"),
-            handle="term:observer",
-            leaf="leaf:observer",
+            handle="run:observer",
         )
         self._refuse(DeliverReceipt(status=HEAD_OK, run=run))
 
@@ -10895,7 +10895,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
 class ObserverUnconditionalStopTests(unittest.TestCase):
     """secretary-1462: the stop that is not the `stop` verb still owes the runtime its cleanup.
 
-    An observer's real stop is Orca's worktree teardown, so it never reaches `HeadRuntime.stop` and
+    An observer's real stop is the worktree teardown, so it never reaches `HeadRuntime.stop` and
     never reaches the forgetting that verb does for itself. The head runtime is built once per
     `CommandHostRuntime` and lives as long as the production loop, so without this every head the
     loop ever launched leaves an epoch, an output mark and an admission entry behind it.
@@ -10908,28 +10908,28 @@ class ObserverUnconditionalStopTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         root = Path(self.tmpdir.name)
         self.host = CommandHostRuntime(FakeCatalog(), root / "data", mode="real")  # type: ignore[arg-type]
+        workspace = self.host.observer_workspace("sprint:1462")
         self.record = SimpleNamespace(
             sprint="sprint:1462",
             head="codex-observer",
-            handle="term:observer",
-            leaf="leaf:observer",
-            workspace=str(root / "observer-workspace"),
+            handle="run:observer",
+            leaf="",
+            workspace=workspace,
             pid_file="",
             head_run=HeadRun(
                 run_id="observer-run-1462",
-                spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
-                workspace=str(root / "observer-workspace"),
+                spec=HeadSpec(profile_id="codex-observer", adapter="codex", runtime=LOCAL_PTY_RUNTIME),
+                workspace=workspace,
                 task_ref=TaskRef.sprint("sprint:1462"),
                 role="observer",
-                handle="term:observer",
-                leaf="leaf:observer",
+                handle="run:observer",
             ).to_json(),
         )
         self.torn_down: list[Any] = []
         self.host._stop_observer_head = self.torn_down.append  # type: ignore[method-assign]
 
     def test_an_unconditional_observer_stop_leaves_nothing_of_the_head_in_the_runtime(self) -> None:
-        activity = self.host.head_runtime.activity
+        activity = self.host.head_runtime_for(LOCAL_PTY_RUNTIME).activity
         activity.acted("observer-run-1462")
         activity.grant("observer-run-1462", "observer-wake")
         activity.close_admission("observer-run-1462")
@@ -10959,6 +10959,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.document.write_text("# Task secretary-1172\n\nthe round the head is in\n", encoding="utf-8")
         self.pid_file = self.root / "worker.pid"
         self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.backend = SupervisedBackend().install(self.host)
         self.task = {"ref": "secretary-1172", "project": "secretary"}
         self.record = DispatcherRecord(
             worker="secretary-1172-w1",
@@ -10977,7 +10978,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         )
         self.record.worker_head_run = head_ops.HeadRun(
             run_id="report-prompt-run",
-            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex", runtime=LOCAL_PTY_RUNTIME),
             workspace=str(self.workspace),
             task_ref=head_ops.TaskRef.card(self.task["ref"]),
             handle=self.record.handle,
@@ -10992,29 +10993,25 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         )
 
     def test_a_tui_worker_is_sent_the_round_s_prompt_and_nothing_else(self) -> None:
-        delivered = mock.Mock()
+        self.assertIsNone(self.host.prompt_worker_report(self.task, self.record))
 
-        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", delivered):
-            self.assertIsNone(self.host.prompt_worker_report(self.task, self.record))
-
-        self.assertEqual(
-            delivered.call_args.kwargs["prompt_text"],
-            _report_nudge_prompt(3, "secretary-1172"),
-        )
-        self.assertEqual(delivered.call_args.args[0], "term:worker")
+        [(run, pointer, subject)] = self.backend.deliveries
+        self.assertEqual(pointer.text, _report_nudge_prompt(3, "secretary-1172"))
+        self.assertEqual(run.run_id, "report-prompt-run")
+        self.assertEqual(subject, "worker-report")
         # The document the head is being pointed at is the one it already had.
         self.assertIn("the round the head is in", self.document.read_text(encoding="utf-8"))
 
     def test_a_claude_worker_uses_the_same_transport_seam(self) -> None:
         self.record.worker_run = {"adapter": "claude"}
-        delivered = mock.Mock(return_value=DELIVERY_CONFIRMED)
 
-        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", delivered):
-            self.host.prompt_worker_report(self.task, self.record)
+        self.host.prompt_worker_report(self.task, self.record)
 
-        self.assertEqual(delivered.call_args.args[:3], ("term:worker", str(self.workspace), "TASK.md"))
-        self.assertEqual(delivered.call_args.kwargs["adapter"], "claude")
-        self.assertEqual(delivered.call_args.kwargs["prompt_text"], _report_nudge_prompt(3, "secretary-1172"))
+        [transport] = self.backend.transports
+        self.assertEqual((transport.workspace, transport.prompt_file), (str(self.workspace), "TASK.md"))
+        self.assertEqual(transport.adapter, "claude")
+        [(_run, pointer, _subject)] = self.backend.deliveries
+        self.assertEqual(pointer.text, _report_nudge_prompt(3, "secretary-1172"))
 
     def test_an_exec_worker_is_refused_rather_than_typed_at(self) -> None:
         """Its turn is spent; there is no conversation to remind."""
@@ -11048,15 +11045,12 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         ):
             self.host.prompt_worker_report(self.task, self.record)
 
-    def test_a_delivery_the_pane_never_confirmed_reaches_the_caller(self) -> None:
+    def test_a_delivery_the_head_never_confirmed_reaches_the_caller(self) -> None:
         """An unconfirmed send is the caller's failure to act on, never a prompt to assume landed."""
-        refuse = mock.Mock(side_effect=TuiDeliveryError("the pane could not be probed"))
+        self.backend.deliver_refusal = DeliverReceipt(status=HEAD_GONE, reason="the head could not be probed")
 
-        with mock.patch.object(  # noqa: SIM117
-            dispatcher_host_module, "_deliver_tui_prompt", refuse
-        ):
-            with self.assertRaisesRegex(HostError, "report prompt was not delivered"):
-                self.host.prompt_worker_report(self.task, self.record)
+        with self.assertRaisesRegex(HostError, "report prompt was not delivered"):
+            self.host.prompt_worker_report(self.task, self.record)
 
     def test_a_noop_host_addresses_nobody(self) -> None:
         noop = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="noop")  # type: ignore[arg-type]
@@ -12701,24 +12695,39 @@ class _FakeGhMergeHost(CommandHostRuntime):
         return super()._run(args, label, cwd=cwd)
 
 
+class _LocalRepoCatalog(FakeCatalog):
+    """The fake registry, with every project bound to one local checkout."""
+
+    def __init__(self, repo: Path) -> None:
+        super().__init__()
+        self.repo = repo
+
+    def binding(self, project: str) -> dict:
+        return {"repo": str(self.repo), "default_branch": "main"}
+
+
 class GitBranchHost(CommandHostRuntime):
+    """A real host placing a card in a real git worktree of a local checkout with no remote."""
+
     def __init__(self, root: Path, *, audit: object) -> None:
-        super().__init__(FakeCatalog(), root, mode="real", audit=audit)  # type: ignore[arg-type]
+        repo = root / "project"
+        if not (repo / ".git").exists():
+            repo.mkdir(parents=True, exist_ok=True)
+            git(repo, "init", "--initial-branch", "main")
+            git(repo, "config", "user.name", "Test User")
+            git(repo, "config", "user.email", "test@example.invalid")
+            (repo / "README.md").write_text("seed\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "seed")
+        super().__init__(_LocalRepoCatalog(repo), root, mode="real", audit=audit)  # type: ignore[arg-type]
         self.root = root
         self.launched: list[tuple[str, str]] = []
         self.launch_prompts: list[str | None] = []
         self.launch_documents: list[str] = []
 
-    def _create_workspace(self, project: str, worker_id: str, base: str, *, expected: str = "") -> str:
-        workspace = self.root / worker_id
-        workspace.mkdir(parents=True)
-        git(workspace, "init", "--initial-branch", base)
-        git(workspace, "config", "user.name", "Test User")
-        git(workspace, "config", "user.email", "test@example.invalid")
-        (workspace / "README.md").write_text("seed\n", encoding="utf-8")
-        git(workspace, "add", "README.md")
-        git(workspace, "commit", "-m", "seed")
-        return str(workspace)
+    def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
+        # No remote to fetch from: the seed branch is cut locally.
+        return seed
 
     def _run_setup(self, project: str, workspace: str) -> None:
         return None
@@ -12734,7 +12743,6 @@ class GitBranchHost(CommandHostRuntime):
         env_name: str,
         launch_prompt: str | None = None,
         prompt_document: str = "",
-        split_from: str = "",
         task: dict | None = None,
         failover: bool = False,
         heartbeat_run_id: str = "",
@@ -12746,16 +12754,6 @@ class GitBranchHost(CommandHostRuntime):
 
 
 class WorkspaceResumeTests(unittest.TestCase):
-    def test_fresh_workspace_branch_rename_is_not_forced(self) -> None:
-        host = GitBranchHost(Path("/tmp"), audit=task_audit_for(card_store(self, dispatcher_seed())))
-        with mock.patch.object(host, "_run") as run:
-            host._set_worker_branch("/workspace", "pipeline/secretary-510")
-
-        run.assert_called_once_with(
-            ["git", "-C", "/workspace", "branch", "-m", "pipeline/secretary-510"],
-            "git branch",
-        )
-
     def test_prepare_worker_reuses_registered_branch_without_touching_commit_or_wip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

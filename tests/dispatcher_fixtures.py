@@ -21,12 +21,22 @@ from unittest import mock
 from secretary._fsutil import file_lock
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.review import orca_worktree_panes
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import idle_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
+from secretary.runtime.head import (
+    HEAD_ALIVE,
+    HEAD_GONE,
+    HEAD_OK,
+    DeliverReceipt,
+    StartReceipt,
+    StopReceipt,
+)
 from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
 from tests.fanout_fixtures import accepted_transport_run
@@ -481,9 +491,112 @@ class ReviewCatalog(FakeCatalog):
         return HeadCommand(f"run-{role}", prompt_after_start=False)
 
 
+class SupervisedBackend:
+    """A stand-in for the `local-pty` backend that records what the dispatcher host asked of it.
+
+    Every head the dispatcher raises is held by a supervisor of its own (secretary-1722). What a
+    test of the host asserts is what the host does around that backend — the document it writes,
+    the pointer and the pre-send hook it hands over, the run it records, the failure it translates —
+    so this answers each verb the way the real backend's receipt shape does, and remembers the ask.
+
+    `start_failure`, `deliver_refusal` and `stop_refusal` make the next such verb refuse; a delivery
+    refused as busy never runs the caller's pre-send hook, exactly as the real backend refuses
+    before admission.
+    """
+
+    def __init__(self) -> None:
+        self.starts: list[dict[str, Any]] = []
+        self.deliveries: list[tuple[head_ops.HeadRun, head_ops.NudgePointer, str]] = []
+        self.stops: list[tuple[str, str]] = []
+        self.forgotten: list[str] = []
+        self.transports: list[Any] = []
+        self.start_failure: head_ops.HeadOperationError | None = None
+        self.deliver_refusal: DeliverReceipt | None = None
+        self.stop_refusal = ""
+        # Called at the moment a prompt is handed over, after the caller's pre-send hook.
+        self.on_deliver: Any = None
+
+    def _delivered(self, run: head_ops.HeadRun, pointer: head_ops.NudgePointer, transport: Any, subject: str):
+        self.transports.append(transport)
+        hook = getattr(transport, "before_send", None)
+        handed = hook() if hook is not None else None
+        if isinstance(handed, head_ops.HeadRun):
+            run = head_ops.post_delivery_run(run, handed)
+        if self.on_deliver is not None:
+            self.on_deliver()
+        self.deliveries.append((run, pointer, subject))
+        return run
+
+    def start(self, spec, workspace, task_ref, *, run=None, pointer=None, transport=None, **kwargs: Any):
+        self.starts.append(
+            {"spec": spec, "workspace": workspace, "task_ref": task_ref, "run": run, "pointer": pointer, **kwargs}
+        )
+        live = run.rebound(f"run:{run.run_id}", leaf=f"leaf:{run.run_id}")
+        failure = self.start_failure
+        if failure is not None:
+            if isinstance(failure, head_ops.HeadSpawnAborted):
+                failure = head_ops.HeadSpawnAborted(str(failure), run=live, evidence=failure.evidence)
+            status = HEAD_ALIVE if isinstance(failure, head_ops.HeadSpawnAborted) else HEAD_GONE
+            return StartReceipt(status=status, run=live, reason=str(failure), failure=failure)
+        if pointer is None or transport is None:
+            return StartReceipt(status=HEAD_OK, run=live)
+        delivered = self._delivered(live, pointer, transport, str(kwargs.get("subject") or "head-launch"))
+        return StartReceipt(status=HEAD_OK, run=delivered.working())
+
+    def deliver(self, run, pointer, *, transport=None, subject: str = "", **_ignored: Any):
+        if self.deliver_refusal is not None:
+            refusal = self.deliver_refusal
+            return DeliverReceipt(
+                status=refusal.status, run=run, reason=refusal.reason, failure=refusal.failure, evidence=refusal.evidence
+            )
+        delivered = self._delivered(run, pointer, transport, subject)
+        return DeliverReceipt(status=HEAD_OK, run=delivered.working())
+
+    def stop(self, run, initiator, **_ignored: Any):
+        self.stops.append((run.run_id, initiator.actor))
+        finishing = run.finishing(initiator)
+        if self.stop_refusal:
+            return StopReceipt(status=HEAD_ALIVE, run=finishing, reason=self.stop_refusal)
+        return StopReceipt(status=HEAD_OK, run=finishing.exited())
+
+    def forget_head(self, run_id: str) -> None:
+        self.forgotten.append(run_id)
+
+    def install(self, host: CommandHostRuntime) -> SupervisedBackend:
+        host._head_runtimes[LOCAL_PTY_RUNTIME] = self
+        return self
+
+
+def supervised_run(
+    run_id: str,
+    *,
+    profile: str = "codex",
+    adapter: str = "codex",
+    role: str = "worker",
+    workspace: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    """A durable `local-pty` run as a previous tick wrote it down."""
+    task_ref = fields.pop("task_ref", head_ops.TaskRef.card("secretary-1"))
+    return head_ops.HeadRun(
+        run_id=run_id,
+        spec=head_ops.HeadSpec(profile_id=profile, adapter=adapter, runtime=LOCAL_PTY_RUNTIME),
+        workspace=workspace,
+        task_ref=task_ref,
+        role=role,
+        **fields,
+    ).to_json()
+
+
 class RecordingReviewHost(CommandHostRuntime):
-    """CommandHostRuntime with the orca CLI and git stubbed, so the reviewer bring-up runs for
-    real: anchor pick, split, label, worker freeze, pinned commit."""
+    """CommandHostRuntime with git stubbed and its heads on a recording `SupervisedBackend`, so the
+    bring-up, delivery and stop paths run for real above the backend.
+
+    `terminals` is the pane inventory `dispatch.review.command_terminal_status` still reads for a
+    host that has one (the read-only head-status host does, step 5 of A20). The dispatcher host itself
+    has none — `workspace_panes` is always empty there — so this fixture answers it from the Orca
+    inventory stub below only for the liveness tests that are about that reader.
+    """
 
     def __init__(
         self,
@@ -492,25 +605,15 @@ class RecordingReviewHost(CommandHostRuntime):
         catalog=None,
         terminals: list[dict] | None = None,
         fail_ops: set[str] | None = None,
-        split_pane_key: str = "",
-        split_source_missing: bool = False,
-        split_source_missing_after_open: bool = False,
     ) -> None:
         super().__init__(catalog or ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.preflight_codex_run = self._transport_preflight  # type: ignore[method-assign]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
-        self.split_pane_key = split_pane_key
-        self.split_source_missing = split_source_missing
-        self.split_source_missing_after_open = split_source_missing_after_open
-        self.terminals = (
-            [{"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}]
-            if terminals is None
-            else terminals
-        )
-        # What Orca answers a `tui-idle` probe with. The default is a satisfied wait, which is a
-        # pane ready for input.
-        self.wait_answer: dict = {}
+        self.terminals = [] if terminals is None else terminals
+        # What a `tui-idle` probe answers: a satisfied wait, which is a pane ready for input.
+        self.wait_answer: dict | Exception = {}
+        self.backend = SupervisedBackend().install(self)
 
     def _require_workspace_environment(self, workspace: str) -> None:
         """Transport fixtures do not execute candidate Python tooling."""
@@ -551,6 +654,9 @@ class RecordingReviewHost(CommandHostRuntime):
             run_id=run_id,
         )
 
+    def workspace_panes(self, workspace: str) -> list[Any]:
+        return orca_worktree_panes(self._run_json, workspace)
+
     def _run_json(self, args: list[str]) -> dict:
         self.calls.append(args)
         op = args[2] if args[:2] == ["orca", "terminal"] else ""
@@ -558,28 +664,6 @@ class RecordingReviewHost(CommandHostRuntime):
             raise HostError(f"orca terminal {op} failed")
         if op == "list":
             return {"terminals": self.terminals}
-        if op == "split":
-            if self.split_source_missing:
-                if self.split_source_missing_after_open:
-                    self.terminals.append(
-                        {"handle": "term-review", "leafId": "leaf-review", "title": None, "connected": True}
-                    )
-                raise HostError("orca terminal split failed: terminal_split_source_not_found")
-            # The new pane joins the worktree's inventory, which is how the caller resolves its
-            # leafId afterwards.
-            self.terminals.append(
-                {"handle": "term-review", "leafId": "leaf-review", "title": None, "connected": True}
-            )
-            split = {
-                "handle": "term-review",
-                "tabId": "tab-1",
-                "paneRuntimeId": -1,
-            }
-            if self.split_pane_key:
-                split["paneKey"] = self.split_pane_key
-            return {"split": split}
-        if op == "create":
-            return {"terminal": {"handle": "term-created", "paneKey": "tab-1:leaf-created"}}
         if op == "wait":
             if isinstance(self.wait_answer, Exception):
                 raise self.wait_answer
@@ -593,11 +677,9 @@ class RecordingReviewHost(CommandHostRuntime):
             return subprocess.CompletedProcess(args, 0, stdout=f"{exclude}\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="deadbeefcafe0000\n", stderr="")
 
-    def ops(self) -> list[str]:
-        return [call[2] for call in self.calls if call[:2] == ["orca", "terminal"]]
-
-    def call_for(self, op: str) -> list[str]:
-        return next(call for call in self.calls if call[:3] == ["orca", "terminal", op])
+    def pointers(self) -> list[str]:
+        """The text of every prompt pointer the backend was handed, in order."""
+        return [pointer.text for _run, pointer, _subject in self.backend.deliveries]
 
 
 class PromptAfterStartCatalog(ReviewCatalog):

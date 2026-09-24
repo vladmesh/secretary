@@ -52,9 +52,18 @@ from secretary.projects.contract import (
 )
 from secretary.projects.integration_base import resolve_integration_base
 from secretary.runtime import codex_preflight
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import (
+    HEAD_OK,
+    DeliverReceipt,
+    HeadCommand,
+    HeadRun,
+    HeadSpec,
+    StartReceipt,
+    TaskRef,
+)
+from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.host import FakeSessionHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.production_runtime_fixtures import registered_production_runtime
 
@@ -1221,17 +1230,36 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
 class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
     """Drive the dispatcher routes that own the post-delivery write, not their merge helpers."""
 
-    class WorkingSession(FakeSessionHost):
+    class SupervisedHeads:
+        """The `local-pty` backend's delivery contour, as far as this contract reaches.
+
+        A prompt is put in front of a head once it is ready — the moment its provider journal
+        appears — and the dispatcher's pre-send hook runs after admission and before the first byte,
+        exactly where `LocalPtyHeadRuntime._before_send` runs it. The run that hook binds is merged
+        into the receipt the way that backend merges it.
+        """
+
         def __init__(self, on_ready) -> None:
-            super().__init__()
             self.on_ready = on_ready
+            self.sent: list[object] = []
 
-        def wait_idle(self, handle: str, *, timeout_ms: int):
+        def _delivered(self, run: HeadRun, pointer, transport) -> HeadRun:
             self.on_ready()
-            return super().wait_idle(handle, timeout_ms=timeout_ms)
+            hook = getattr(transport, "before_send", None)
+            handed = hook() if hook is not None else None
+            if isinstance(handed, HeadRun):
+                run = head_ops.post_delivery_run(run, handed)
+            self.sent.append(pointer)
+            return run
 
-        def read(self, handle: str, *, limit: int | None = None):
-            return {"terminal": {"tail": ["working", "› "], "nextCursor": "turn-started"}}
+        def start(self, spec, workspace, task_ref, *, run, pointer=None, transport=None, **_ignored):
+            live = run.rebound(f"run:{run.run_id}", leaf=f"leaf:{run.run_id}")
+            if pointer is None or transport is None:
+                return StartReceipt(status=HEAD_OK, run=live)
+            return StartReceipt(status=HEAD_OK, run=self._delivered(live, pointer, transport).working())
+
+        def deliver(self, run, pointer, *, transport=None, subject="", **_ignored):
+            return DeliverReceipt(status=HEAD_OK, run=self._delivered(run, pointer, transport))
 
     class Catalog:
         def __init__(self, fixture: ProductionPostDeliveryHandoffContractTests) -> None:
@@ -1244,8 +1272,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 "effort": "medium",
                 "codex_mode": "tui",
                 "codex_home": str(self.fixture.root),
-                # This contract is the pane path's; a profile that names no runtime is supervised.
-                "runtime": "orca-legacy",
+                "runtime": LOCAL_PTY_RUNTIME,
             }
 
         def head_launch(self, _head: str, _prompt_file: str, **_kwargs) -> HeadCommand:
@@ -1255,7 +1282,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             return "main"
 
         def binding(self, project: str) -> dict[str, str]:
-            return {"repo": str(self.fixture.repo), "orca_binding": project}
+            return {"repo": str(self.fixture.repo)}
 
         def integration_base(self, project: str, override: str | None) -> str:
             return resolve_integration_base(default_branch="main", declared=None, override=override)
@@ -1327,7 +1354,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.moves: list[dict] = []
         self.source_emitted = False
         self.source_events: list[object] = []
-        self.session = self.WorkingSession(self._emit_source)
+        self.session = self.SupervisedHeads(self._emit_source)
         self.host = CommandHostRuntime(  # type: ignore[arg-type]
             self.Catalog(self),
             self.root / "data",
@@ -1339,12 +1366,11 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         )
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
         self.host._run = self._run  # type: ignore[method-assign]
-        self.host._run_json = self._run_json  # type: ignore[method-assign]
-        self.session_patch = mock.patch.object(
-            CommandHostRuntime, "session", property(lambda _host: self.session)
+        self.host._head_runtimes[LOCAL_PTY_RUNTIME] = self.session
+        # The observer's git worktree is not what this contract is about.
+        self.host._create_git_observer_workspace = lambda workspace: (  # type: ignore[method-assign]
+            workspace.mkdir(parents=True, exist_ok=True) or workspace
         )
-        self.session_patch.start()
-        self.addCleanup(self.session_patch.stop)
         self.env = mock.patch.dict(
             os.environ,
             {
@@ -1359,22 +1385,6 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
     def _run(self, args: list[str], _label: str, **_kwargs) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, 0, stdout="contract-sha\n", stderr="")
 
-    def _run_json(self, args: list[str]) -> dict:
-        if args[:3] == ["orca", "terminal", "wait"]:
-            self._emit_source()
-            return {"wait": {"satisfied": True}}
-        if args[:3] == ["orca", "terminal", "read"]:
-            return {"terminal": {"tail": ["working", "› "], "nextCursor": "turn-started"}}
-        if args[:3] == ["orca", "terminal", "send"]:
-            return {"accepted": True, "bytesWritten": len(str(args[args.index("--text") + 1]).encode())}
-        if args[:3] == ["orca", "worktree", "show"]:
-            raise HostError("selector_not_found")
-        if args[:3] == ["orca", "worktree", "create"]:
-            workspace = self.host.observer_workspace("sprint:contract")
-            Path(workspace).mkdir(parents=True, exist_ok=True)
-            return {"worktree": {"path": workspace}}
-        return {}
-
     def _real_preflight(
         self,
         head: str,
@@ -1387,7 +1397,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
     ) -> HeadRun:
         run = HeadRun(
             run_id=run_id,
-            spec=HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra"),
+            spec=HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra", runtime=LOCAL_PTY_RUNTIME),
             workspace=workspace,
             task_ref=task_ref,
             role=role,
@@ -1611,10 +1621,11 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             return_value={"known": True, "match": True, "state": "live-match", "stopped": False},
         ):
             status = dispatcher_review.command_terminal_status(self.host, task, record, kind="worker")
+        # A supervised head has no pane: its liveness is its pid and this exact-run cursor.
+        self.assertEqual(status["reason"], "pid")
         self.assertEqual(status["provider_progress"]["cursor"], progress["cursor"])
-        self.assertGreater(status["last_activity"], 0.0)
         self.assertEqual(self.moves, [])
-        self.assertEqual(len(self.session.sent), 2, "progress did not nudge or replace the worker")
+        self.assertEqual(len(self.session.sent), 1, "progress did not nudge or replace the worker")
 
         # This is the crash boundary after confirmation: adoption reads the exact source already
         # committed to the launch intent rather than reconstructing an unbound local copy.
@@ -1721,7 +1732,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self._assert_bound(record.head_run, role=OBSERVER_ROLE)
         self.assertEqual(record.head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.pending_launch, 1, "the watchdog sees the crash-era intent")
-        # The bring-up's own launch prompt reaches the same session host as everything else since
+        # The bring-up's own launch prompt reaches the same backend as everything else since
         # secretary-1461, so what adoption must not do is measured from where the launch left it.
         sent_by_the_launch = len(self.session.sent)
         with mock.patch.object(

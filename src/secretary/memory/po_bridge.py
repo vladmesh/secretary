@@ -27,6 +27,7 @@ from mcp.types import TextContent
 from secretary.memory import access
 from secretary.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
 from secretary.runtime.head.identity import publish_heartbeat
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 DEFAULT_MEMORY_URL = "http://127.0.0.1:8077/mcp"
 MEMORY_URL_ENV = "SECRETARY_MEMORY_URL"
@@ -60,7 +61,9 @@ def bind_operator(data_dir: str | Path | None = None) -> BridgeBinding:
     pid_path = bindings / "po-bridges" / f"{run_id}.pid"
     run = HeadRun(
         run_id=run_id,
-        spec=HeadSpec(profile_id="memory-po-bridge", adapter="mcp-stdio"),
+        # Named, not defaulted: a hand-built spec carries the record rule and would mark this live
+        # bridge as a legacy Orca record. Its liveness is its own heartbeat, as a local-pty head's is.
+        spec=HeadSpec(profile_id="memory-po-bridge", adapter="mcp-stdio", runtime=LOCAL_PTY_RUNTIME),
         workspace=os.getcwd(),
         task_ref=TaskRef.standing("interactive"),
         role="po",

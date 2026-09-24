@@ -1,10 +1,9 @@
-"""secretary-1700: a card whose heads all run supervised gets a plain `git worktree`, never Orca's.
+"""secretary-1700, secretary-1722: every card gets a plain `git worktree`, never Orca's.
 
-The selection is made once, when the workspace is placed, from the card's claimed worker and
-reviewer profiles; every later operation on that workspace reads its manager back from the path.
-So these tests hold three things: a supervised card's checkout is cut, resumed, discarded, stopped
-and torn down with no `orca` argv at all; a card with a legacy head keeps the Orca path; and a card
-whose Orca checkout already exists stays on Orca even after its profiles move to `local-pty`.
+Placement asks no runtime: whatever a card's worker and reviewer profiles are, its checkout is cut,
+resumed, discarded, stopped and torn down with no `orca` argv at all. A record whose workspace is an
+Orca checkout under the Orca root was written before this was the only placement: it is refused as a
+legacy record, never resumed, re-placed or torn down through Orca.
 
 The host runs in real mode over a real project checkout cloned from a real bare remote; only the
 parts of a bring-up that are not about the workspace (the Python environment, the task document,
@@ -24,7 +23,7 @@ from unittest import mock
 from secretary.dispatch.host import CommandHostRuntime, LaunchedHead
 from secretary.dispatch.launch import CAUSE_WORKSPACE_CONTRACT
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError
+from secretary.dispatch.types import HostError, LegacyDispatcherRecord
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from tests.fakes.dispatcher import FakeCatalog
 from tests.production_runtime_fixtures import registered_production_runtime
@@ -73,34 +72,23 @@ class _Catalog(FakeCatalog):
 
 
 class _RecordingHost(CommandHostRuntime):
-    """Every child the host runs is recorded; an `orca` argv fails the test unless it is allowed."""
+    """Every child the host runs is recorded; an `orca` argv fails the test."""
 
     def __init__(self, catalog: _Catalog, data_dir: Path, root: Path) -> None:
         super().__init__(  # type: ignore[arg-type]
             catalog, data_dir, mode="real", production_runtime=registered_production_runtime(root)
         )
         self.argvs: list[list[str]] = []
-        self.orca_allowed = False
         self.launches: list[dict[str, Any]] = []
 
     def _record(self, args: list[str]) -> None:
         self.argvs.append(list(args))
-        if args and args[0] == "orca" and not self.orca_allowed:
-            raise AssertionError(f"orca was called on a git-managed workspace path: {args}")
+        if args and args[0] == "orca":
+            raise AssertionError(f"orca was called: {args}")
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
-        if args and args[0] == "orca":
-            return subprocess.CompletedProcess(args, 0, "{}", "")
         return super()._run(args, label, cwd=cwd)
-
-    def _run_json(self, args):  # type: ignore[override]
-        self._record(args)
-        if args and args[0] == "orca":
-            # An allowed Orca call is answered here, never by a real CLI: the runner has none, and a
-            # developer's live Orca must not be asked about a temporary directory.
-            return {}
-        return super()._run_json(args)
 
     def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
@@ -224,10 +212,27 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.assertEqual(self.host.restore_workspace(_task(), WORKER), str(self.git_path))
         self._no_orca()
 
-    def test_a_card_with_a_legacy_worker_or_reviewer_keeps_the_orca_path(self) -> None:
-        for task in (_task(worker_head="codex"), _task(review_head="codex-reviewer")):
+    def test_every_card_is_placed_by_git_whatever_its_heads(self) -> None:
+        # The fake registry's own profiles, a supervised pair, and a head the registry cannot
+        # resolve: placement reads none of them.
+        for task in (
+            _task(worker_head="codex", review_head="codex-reviewer"),
+            _task(worker_head="claude-opus", review_head=REVIEW_HEAD),
+            _task(worker_head="no-such-head", review_head="no-such-head"),
+        ):
             with self.subTest(routing=task["routing"]):
-                self.assertEqual(self.host.restore_workspace(task, WORKER), str(self.orca_path))
+                self.assertEqual(self.host.restore_workspace(task, WORKER), str(self.git_path))
+        self.catalog.orca_binding = None
+        self.assertEqual(self.host.restore_workspace(_task(worker_head="codex"), WORKER), str(self.git_path))
+        self._no_orca()
+
+    def test_a_card_on_the_registrys_own_profiles_is_cut_with_no_orca_call(self) -> None:
+        workspace = self._prepare(_task(worker_head="codex", review_head="codex-reviewer"))
+
+        self.assertEqual(workspace, self.git_path)
+        self.assertEqual(git(workspace, "branch", "--show-current"), BRANCH)
+        self.assertIn(workspace.resolve(), self._registered())
+        self._no_orca()
 
     # -- create --------------------------------------------------------------------------------
 
@@ -282,6 +287,15 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.assertEqual(git(self.fixture.repo, "branch", "--list", BRANCH), "")
         self._no_orca()
 
+    def test_a_workspace_the_launch_intent_names_elsewhere_is_refused_before_anything_is_cut(self) -> None:
+        """The launch intent recorded the path first, and a tick that dies can only find the head
+        through it: a placement anywhere else is refused rather than adopted (secretary-820)."""
+        with self.assertRaisesRegex(HostError, f"belongs at {self.git_path}, not"):
+            self.host._git_workspaces.create(_task(), WORKER, "main", expected=str(self.root / "elsewhere"))
+
+        self.assertFalse(self.git_path.exists())
+        self.assertEqual(self.host.argvs, [], "neither fetched nor cut")
+
     # -- stop and teardown ---------------------------------------------------------------------
 
     def test_stop_and_teardown_remove_the_worktree_with_no_orca_call(self) -> None:
@@ -321,102 +335,77 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.assertIn(workspace.resolve(), self._registered())
         self._no_orca()
 
-    def test_a_legacy_card_on_a_project_orca_does_not_know_fails_bring_up(self) -> None:
-        self.catalog.orca_binding = None
-        self.host.orca_allowed = True  # the registry is asked, and answers with no registration
+    # -- a card checked out on Orca is a legacy record --------------------------------------------
 
-        with self.assertRaisesRegex(
-            HostError, f"^project {PROJECT} has no Orca registration; run it on a local-pty profile$"
-        ):
-            self._prepare(_task(worker_head="codex"))
-
-        orca = [argv for argv in self.host.argvs if argv and argv[0] == "orca"]
-        self.assertEqual(orca, [["orca", "repo", "list", "--json"]])
-        self.assertFalse(self.git_path.exists())
-        self.assertFalse(self.orca_root.exists())
-
-    # -- a card created on Orca stays on Orca --------------------------------------------------
-
-    def test_an_orca_workspace_is_resumed_and_torn_down_through_orca_after_profiles_move(self) -> None:
-        # Cut the way Orca cuts it: under the Orca root, named by the binding's registration, on the
-        # card branch. The card's profiles are already both `local-pty`.
+    def test_an_orca_checkout_is_never_resumed_or_torn_down_and_its_record_is_refused(self) -> None:
+        # Cut the way Orca cut it: under the Orca root, named by the binding's registration, on the
+        # card branch.
         self.orca_path.parent.mkdir(parents=True)
         git(self.fixture.repo, "worktree", "add", "--quiet", "-b", BRANCH, str(self.orca_path), "origin/main")
 
-        self.assertEqual(self.host.restore_workspace(_task(), WORKER), str(self.orca_path))
-        self.assertEqual(self._prepare(_task(), require_existing_workspace=True), self.orca_path)
+        # Placement never finds it: the card's place is its git workspace, which is not there.
+        self.assertEqual(self.host.restore_workspace(_task(), WORKER), str(self.git_path))
+        with self.assertRaisesRegex(HostError, "resume workspace is missing") as missing:
+            self._prepare(_task(), require_existing_workspace=True)
+        self.assertEqual(missing.exception.bring_up_cause, CAUSE_WORKSPACE_CONTRACT)
         self.assertFalse(self.git_path.exists())
 
-        self.host.orca_allowed = True
-        self.host.teardown(_record(str(self.orca_path)))
+        # The record that names it is refused by every verb, and nothing is removed.
+        record = _record(str(self.orca_path))
+        self.host.argvs.clear()
+        for verb in (
+            lambda: self.host.teardown(record),
+            lambda: self.host.stop_workspace(record),
+            lambda: self.host.restart_worker(_task(), record),
+            lambda: self.host.start_review(_task(), record),
+        ):
+            with self.assertRaises(LegacyDispatcherRecord) as refused:
+                verb()
+            self.assertIn(str(self.orca_path), str(refused.exception))
+            self.assertEqual(refused.exception.bring_up_cause, CAUSE_WORKSPACE_CONTRACT)
+        self.assertEqual(self.host.argvs, [])
+        self.assertEqual(self.host.launches, [])
+        self.assertIn(self.orca_path.resolve(), self._registered())
 
-        orca = [argv[:3] for argv in self.host.argvs if argv[0] == "orca"]
-        # Orca's own workspace stop first, then Orca's removal: the order `teardown` has always had.
-        self.assertEqual(orca[0], ["orca", "terminal", "stop"])
-        self.assertEqual(orca[-1], ["orca", "worktree", "rm"])
-        self.assertIn(
-            ["orca", "worktree", "rm", "--worktree", f"path:{self.orca_path}", "--force", "--json"],
-            self.host.argvs,
-        )
-        # Orca's removal is Orca's: git was not asked to take this worktree back.
-        self.assertNotIn(
-            ["git", "-C", str(self.fixture.repo), "worktree", "remove", "--force", str(self.orca_path)],
-            self.host.argvs,
-        )
-
-    def test_a_git_workspace_stays_git_after_its_profiles_move_to_legacy(self) -> None:
+    def test_a_git_workspace_is_found_again_whatever_its_profiles_say(self) -> None:
         workspace = self._prepare(_task())
 
         self.assertEqual(self.host.restore_workspace(_task(worker_head="codex"), WORKER), str(workspace))
 
     # -- the reviewer --------------------------------------------------------------------------
 
-    def test_a_supervised_reviewer_starts_in_the_same_workspace_without_the_pane_inventory(self) -> None:
+    def test_the_reviewer_starts_in_the_workers_workspace_with_no_pane_to_split(self) -> None:
         workspace = self._prepare(_task())
-        self.host.launches.clear()
+        for review_head in (REVIEW_HEAD, "codex-reviewer"):
+            with self.subTest(review_head=review_head):
+                self.host.launches.clear()
 
-        with (
-            mock.patch.object(
-                _RecordingHost, "_split_anchor", side_effect=AssertionError("split anchor asked")
-            ),
-            mock.patch.object(
-                _RecordingHost, "_worktree_terminals", side_effect=AssertionError("pane inventory asked")
-            ),
-        ):
-            launched = self.host.start_review(_task(), _record(str(workspace)))
+                launched = self.host.start_review(_task(), _record(str(workspace), review_head=review_head))
 
-        [review] = self.host.launches
-        self.assertEqual(review["workspace"], str(workspace))
-        self.assertEqual(review["head"], REVIEW_HEAD)
-        self.assertEqual(review["split_from"], "")
-        self.assertEqual(launched.commit, self.fixture.main_sha)
+                [review] = self.host.launches
+                self.assertEqual(review["workspace"], str(workspace))
+                self.assertEqual(review["head"], review_head)
+                self.assertNotIn("split_from", review)
+                self.assertEqual(launched.commit, self.fixture.main_sha)
         self._no_orca()
-
-    def test_an_orca_reviewer_still_splits_off_the_workers_pane(self) -> None:
-        workspace = self._prepare(_task())
-        self.host.launches.clear()
-
-        with mock.patch.object(_RecordingHost, "_split_anchor", return_value="pane-1") as anchor:
-            self.host.start_review(_task(), _record(str(workspace), review_head="codex-reviewer"))
-
-        anchor.assert_called_once()
-        self.assertEqual(self.host.launches[0]["split_from"], "pane-1")
 
 
 class GitWorkspaceRootTests(unittest.TestCase):
-    """The git root never claims a path the Orca root holds."""
+    """The git root is read from its shape alone; the Orca root only names a legacy record."""
 
-    def test_an_orca_root_at_or_above_the_git_root_leaves_every_path_to_orca(self) -> None:
+    def test_ownership_is_the_git_shape_and_an_orca_path_is_a_legacy_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)
             host = CommandHostRuntime(FakeCatalog(), data, mode="real")  # type: ignore[arg-type]
-            path = str(data / "workspaces" / PROJECT / WORKER)
-            for orca_root, owned in ((data / "orca", True), (data / "workspaces", False), (data, False)):
-                with (
-                    self.subTest(orca_root=orca_root),
-                    mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(orca_root)}),
-                ):
-                    self.assertEqual(host._is_git_workspace(path), owned)
+            git_path = str(data / "workspaces" / PROJECT / WORKER)
+            orca_path = str(data / "orca" / ORCA_BINDING / WORKER)
+            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(data / "orca")}):
+                self.assertTrue(host._is_git_workspace(git_path))
+                self.assertFalse(host._legacy_workspace(git_path))
+                self.assertFalse(host._is_git_workspace(orca_path))
+                self.assertTrue(host._legacy_workspace(orca_path))
+                # Neither: a path this host did not place and Orca's root does not hold.
+                self.assertFalse(host._legacy_workspace(str(data / "elsewhere" / WORKER)))
 
     def test_only_the_project_and_worker_shape_under_the_git_root_is_git_managed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

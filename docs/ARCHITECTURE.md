@@ -193,14 +193,16 @@ There is no pane path (see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
 
 `HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
-infer success from a pane, a socket write or process existence. The backend is chosen per head
-profile from the closed set `orca-legacy | local-pty`, and
-`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend. What an absent
-key means, who owns that default and when it changes, the `local-pty` parity criteria and the A20
-exit checklist are in [Head runtime](HEAD_RUNTIME.md).
+infer success from a pane, a socket write or process existence. There is one head runtime,
+`local-pty`, and `secretary.runtime.head_runtime_backends` is the only place a name becomes a
+backend. A durable record written while heads were Orca panes (`orca-legacy`, or no runtime) still
+loads and is shown as a legacy record, but no backend is built for it, so it is never launched or
+delivered to. A dispatcher record from that time, one whose workspace is an Orca worktree or whose
+head run is a legacy record, is refused by every host verb (launch, delivery, stop, teardown) with
+one typed error, `LegacyDispatcherRecord`, before anything runs; the card goes Blocked with a reason
+naming the record. What an absent key means, the `local-pty` parity criteria and the A20 exit
+checklist are in [Head runtime](HEAD_RUNTIME.md).
 
-- `OrcaLegacyHeadRuntime` runs heads in Orca panes. Its readiness probe and conditional stop narrow
-  races but cannot make observe-then-stop atomic.
 - `LocalPtyHeadRuntime` runs a per-run supervisor that owns the process group, PTY, Unix socket and
   a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
   frame is the live source for turn, admission and journal sequence; a bounded 64 KiB journal tail is
@@ -220,28 +222,27 @@ Head liveness and recovery rules are in [Head vitality](HEAD_VITALITY.md).
 
 ### Card workspaces
 
-On the Orca backend one card occupies one Orca worktree. The worker has its own terminal. The
-reviewer opens as a split pane in the same worktree; the standalone-terminal fallback and its
-fail-closed rules are in [Operations](OPERATIONS.md#worker-and-reviewer-launch-intent). When review
-starts, the worker's head is stopped and its commit recorded, and the merge gate refuses a green
-verdict if the checkout has moved since. Orca decides where the worktree lives (from the binding's
-legacy `orca_binding`, else Orca's registration for the repo). A project with neither has no Orca
-path: a card on `orca-legacy` heads fails bring-up ("project <id> has no Orca registration; run it
-on a local-pty profile"), and nothing registers the repo on the fly. A returned worktree is accepted only if Orca's record ties it to this project's
-repository and this card's workspace name; otherwise it is removed before bring-up fails. Head
+Every card is placed in a plain `git worktree` on its card branch, cut from the card's seed at
+`<data_dir>/workspaces/<project id>/<worker>` (`dispatch.git_workspace.GitWorkspaceManager`).
+Placement asks no runtime and reads no profile. The launch intent records that path before the
+worktree is cut, and a worktree anywhere else is refused. A returned worktree is accepted only if it
+passes the resumable-workspace check (this project's repository, this card's branch); otherwise it
+is removed, branch included, before bring-up fails. Resume validation, discard, stop and teardown
+read ownership from the path. The worker and the reviewer are two supervised processes in the same
+worktree. When review starts, the worker's head is stopped and its commit recorded, and the merge
+gate refuses a green verdict if the checkout has moved since. Teardown removes the worktree with
+`git worktree remove --force` and `prune`, only after the heads were confirmed stopped. Head
 rendering and delivery are adapter-specific, but not a stable plugin API.
 
-The manager is chosen once, when the workspace is created: a card whose claimed worker and reviewer
-profiles both run on a runtime other than `orca-legacy` gets a plain `git worktree` on its card
-branch at `<data_dir>/workspaces/<project id>/<worker>` (`dispatch.git_workspace`); any other card
-gets an Orca worktree. Resume validation, discard, stop and teardown read the manager from the path
-(under the git root means git), never from current profiles, so a live card keeps its manager. A
-supervised reviewer starts in the same worktree as a second process and never reads Orca's panes.
+A record whose workspace is under the Orca workspaces root (`SECRETARY_DISPATCHER_WORKSPACES_ROOT`,
+else `~/orca/workspaces`) and not a git worktree the host owns was placed by Orca before A20. It is a
+legacy record: the host never resumes, re-places or tears it down (see
+[Head runtime ownership](#head-runtime-ownership)).
 
-A sprint observer follows the same rule. At launch its declared profile's runtime picks the path the
-intent records: a supervised one gets a detached `git worktree` of the observer repo at
-`<data_dir>/workspaces/observers/<token>`, `orca-legacy` today's Orca worktree. Stop, respawn and
-removal read the route from the recorded path, so a live Orca observer record stays on Orca.
+A sprint observer's workspace is a detached `git worktree` of the observer repo at
+`<data_dir>/workspaces/observers/<token>`, recorded by the launch intent before it is cut. Stop,
+respawn and removal read it from the recorded path; a recorded path anywhere else is a legacy
+record.
 
 The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` belongs to the
 project adapter. It claims the environment with an owner record, adds its workspace paths to Git's
@@ -253,8 +254,8 @@ card. Head-visible Secretary commands name the absolute production interpreter w
 
 Before any interactive Codex head launches (worker, reviewer, observer or service agent), one
 preflight answers the CLI's first-run questions: it marks the workspace trusted, appends only missing
-entries, and stops bring-up with a reason if a path is held at a different trust level. Then the pane
-is created, readiness awaited, the prompt delivered and the turn confirmed. A workspace that cannot be
+entries, and stops bring-up with a reason if a path is held at a different trust level. Then the head
+is started, readiness awaited, the prompt delivered and the turn confirmed. A workspace that cannot be
 prepared fails before anything starts. Operator `secretary shell` sessions skip the preflight.
 
 ## The read layer
@@ -375,10 +376,10 @@ passes the same resource-readiness gate as a card claim, uses the ordinary head-
 role environment wrapper, and gets only role-scoped environment, not the whole `runtime.env`.
 
 The observer workspace is cut from a dispatcher-owned empty repository without a remote
-(`<data>/dispatcher/observer-root/observers`, created on first use and registered with Orca only when
-an `orca-legacy` observer launches). It never gets a project checkout. Reconciliation neither creates
+(`<data>/dispatcher/observer-root/observers`, created on first use). It never gets a project
+checkout. Reconciliation neither creates
 nor deletes this repository, and `doctor` accepts its registration only at that path. Stopping ends
-the confirmed head first, then removes the worktree through the manager its path names.
+the confirmed head first, then removes the git worktree.
 
 The launch prompt is rendered from the live sprint entity and points to the `observe-sprint` role
 skill by path without repeating it. The skill lives in `skills/` of this repository, is registered as
@@ -388,9 +389,9 @@ deferred with a reason naming the file.
 
 ### Wakes and delivery
 
-Liveness uses the same pid heartbeat as workers and reviewers. Readiness is Orca's `tui-idle`,
-classified as ready, busy, blocked (dialog) or unanswerable. A head that cannot be addressed or
-probed goes into the bounded failure path, not a wait.
+Liveness uses the same pid heartbeat as workers and reviewers. Readiness is the head runtime's own
+observation of the head (`observe`), read by its run. A head that cannot be addressed or observed
+goes into the bounded failure path, not a wait.
 
 A committed, significant event on a linked card opens a durable delivery batch with an immutable
 high-water mark, written before a nudge or replacement. Only an observer resume carrying that
@@ -403,17 +404,17 @@ failure's bounded evidence (never prompt text) stay on the observer record while
 
 All interactive heads share one delivery path, whichever provider or role:
 
-- The pane receives one short line with the absolute path of a task document (the worker's `TASK.md`,
-  the reviewer's private review document under run artifacts). Nothing from a card description
-  reaches a terminal write.
-- Delivery has observed stages: payload written, Enter taken, turn observed, caller acknowledgement.
-  The pane is fingerprinted before and after the send (composer content and Orca's opaque output
-  cursor). A composer still holding the payload is re-entered, an empty one is rewritten, and an
-  advanced cursor counts as a taken turn. Retries are bounded; host refusals surface as delivery
-  failures with evidence.
+- The head receives one short line with the absolute path of a task document (the worker's
+  `TASK.md`, the reviewer's private review document under run artifacts). Nothing from a card
+  description reaches the head's input.
+- The head runtime delivers it: it waits for the head to settle, types the line, sends Enter as a
+  separate delivery and reports `ok` only once the head's output shows a turn started. The
+  dispatcher's pre-send step (a retained worker's `SIGCONT`, a Codex head's provider-source binding)
+  runs after admission and before the first byte. Refusals surface as delivery failures with
+  evidence.
 - A turn is confirmed from the provider's own local session record (Claude or Codex). The status line
   may confirm a turn but never refute one.
-- An unconfirmed delivery does not close the pane. Bring-up returns an abort with evidence and keeps
+- An unconfirmed delivery does not stop the head. Bring-up returns an abort with evidence and keeps
   the launch intent; the next tick adopts the head or stops it through its retained identity.
 - Reviewer bring-up failures go through one recorder in `start_review`, which stores
   `review_delivery_failures` and `review_delivery_evidence` on the card without changing routing.
@@ -486,10 +487,9 @@ secrets ([Protocols](PROTOCOLS.md#knowledge)).
   managed manifest or a product-written marker. Its kinds are project checkouts and systemd units;
   Orca repo registrations are Orca's own state, which reconcile and `doctor` neither create, check
   nor remove (an `orca` record an older reconcile left in the managed manifest is kept, untouched).
-  A binding's `orca_binding` is optional legacy, read by orca-legacy heads and by curator routing
-  ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none and run on local-pty
-  heads in git workspaces. The observer root's session-manager
-  registration is created lazily by the dispatcher.
+  A binding's `orca_binding` is optional legacy, read only by curator routing
+  ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none. Card placement
+  never reads it.
 - Store-registered secrets reach instance Git only as encrypted envelopes. The raw installation key,
   the recovery phrase and `runtime.env` stay out of Git. Facts, exports and diagnostics carry no
   secrets.

@@ -71,9 +71,12 @@ class HeadSpec:
     #: including on a later tick, because the value travels with the durable run record. Orthogonal
     #: to `adapter`: this says what holds the head, `adapter` says what the head is.
     #:
-    #: A spec built from a profile always says it (`from_profile`, with the profile default). One
-    #: built by hand names no profile: it is a head rebuilt from a record that predates the run
-    #: record or never named a backend, so it carries the record rule rather than the profile one.
+    #: A spec built from a profile always says it (`from_profile`, with the profile default), and a
+    #: profile can only say `local-pty`. One built by hand names no profile: it is a head rebuilt
+    #: from a record that predates the run record or never named a backend, so it carries the
+    #: record rule rather than the profile one — a legacy Orca record, which no backend is built for
+    #: (`head_runtime_backends.is_legacy_record`). A caller that builds a spec by hand for a head it
+    #: holds itself names `local-pty` explicitly.
     runtime: str = RECORD_RUNTIME_WHEN_ABSENT
 
     @property
