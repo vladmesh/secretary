@@ -8,11 +8,10 @@
 # `python3 -P -m secretary automations`, whose composition root injects the board ports; see
 # each agent's cli.py under src/secretary/automations and secretary/runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
-#   100            -> deliberate skip (nothing changed / paused): no new skill dispatch, but still
-#                     run `dispatch --cleanup-only` (triggered-agents-445) so an ephemeral agent's
-#                     already-finished or stuck terminal gets torn down on THIS tick instead of
-#                     waiting for a future tick that happens to have real work — dispatch (and
-#                     every cleanup path inside it) is otherwise never invoked at all on a skip.
+#   100            -> deliberate skip (nothing changed / paused): no new skill dispatch. The gate
+#                     still runs `dispatch --cleanup-only`, which is a no-op exit 0 for every agent
+#                     since the pane lifecycle it tore down was deleted (secretary-1720); the call
+#                     stays so the installed units and this gate need no change.
 #   101            -> the board refused the connection for the client's whole retry window: nothing
 #                     was evaluated, so the tick is deferred rather than answered. This gate waits
 #                     and re-runs the precheck a bounded number of times before giving up with 101.

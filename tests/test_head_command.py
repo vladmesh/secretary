@@ -387,30 +387,19 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
                     render_head_command(registry.profile(pid), prompt=None, workspace="/tmp/ws").command,
                 )
 
-    def test_a_background_agent_with_no_head_still_gets_a_rendered_command(self) -> None:
-        """An agent a registry routes nowhere keeps the bare default-model `claude` invocation.
-        That fallback is the emptiest profile there is, rendered here — not a second place a head
-        command is assembled, which is what it used to be."""
+    def test_a_background_agent_with_no_head_gets_no_command(self) -> None:
+        """secretary-1720: an agent a registry routes nowhere is refused, not launched on a bare
+        default-model `claude` invocation. A supervisor raises a head from its profile's spec, and
+        such a launch has none, so the tick fails closed rather than improvising a command."""
         from secretary.automations.runtime import dispatch
 
         with (
             mock.patch.dict(os.environ, LAUNCH_ENV, clear=True),
             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/curator"}),
             mock.patch.object(dispatch, "_preferred_head", return_value=""),
+            self.assertRaisesRegex(dispatch.NoSupervisedHead, "no head profile is routed to curator"),
         ):
-            skill, command, head, after_start, profile = dispatch._launch_cmd("curator")
-            expected = render_head_command(
-                {"adapter": "claude"},
-                prompt="/curator",
-                role="curator",
-                binding=STANDING_BINDING,
-            ).command
-
-        self.assertEqual(skill, "/curator")
-        self.assertEqual(command, expected)
-        self.assertIsNone(head)
-        self.assertFalse(after_start)
-        self.assertIsNone(profile)
+            dispatch._launch_cmd("curator", snapshot=dispatch.RegistrySnapshot(registry=object()))
 
 
 def _module_paths() -> list[Path]:

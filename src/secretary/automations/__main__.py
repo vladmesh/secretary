@@ -28,36 +28,17 @@ HEALTH_COMPONENTS = ("curator", "retro", "pipeline", "steward")
 class DispatchArguments:
     """The dispatch flags interpreted by both this runner and the composition root.
 
-    This deliberately preserves the legacy loose argv interpretation: a value
-    following ``--generation`` is still eligible to be the variant, because
-    that is what the original one-pass selector did.
+    The variant is the first argument that is not a flag.
     """
 
     cleanup_only: bool
-    finalize: bool
-    spawn_finalizer: bool
-    generation: int | None
     variant: str | None
 
 
 def parse_dispatch_arguments(argv: list[str]) -> DispatchArguments:
     """Return the legacy dispatch interpretation without performing dispatch."""
-    cleanup_only = "--cleanup-only" in argv
-    finalize = "--finalize" in argv
-    spawn_finalizer = "--spawn-finalizer" in argv
-    generation = None
-    if "--generation" in argv:
-        index = argv.index("--generation")
-        if index + 1 < len(argv):
-            try:
-                generation = int(argv[index + 1])
-            except ValueError:
-                generation = None
     return DispatchArguments(
-        cleanup_only=cleanup_only,
-        finalize=finalize,
-        spawn_finalizer=spawn_finalizer,
-        generation=generation,
+        cleanup_only="--cleanup-only" in argv,
         variant=next((arg for arg in argv if not arg.startswith("--")), None),
     )
 
@@ -77,27 +58,16 @@ def main(argv=None) -> int:
         print(f"secretary automations: unknown agent {agent!r} (known: {', '.join(AGENTS)})", file=sys.stderr)
         return 2
     if rest and rest[0] == "dispatch":
-        # Every dispatchable agent here is an LLM head driven by the generic singleton terminal
-        # driver, which keeps one warm claude terminal per agent. Task dispatch itself is not one
-        # of them: it lives in `secretary/dispatch/production.py`, on its own timer.
-        dispatch_args = rest[1:]
-        parsed = parse_dispatch_arguments(dispatch_args)
+        # Every dispatchable agent here is an LLM head driven by the generic singleton head
+        # driver, which raises one supervised head per tick. Task dispatch itself is not one of
+        # them: it lives in `secretary/dispatch/production.py`, on its own timer.
+        parsed = parse_dispatch_arguments(rest[1:])
         from .runtime import dispatch
 
-        if parsed.spawn_finalizer:
-            return dispatch.spawn_finalizer(agent, generation=parsed.generation)
-        if parsed.finalize:
-            # The head's trailer starts a detached helper with `--spawn-finalizer`; this is the
-            # helper's cleanup entrypoint. It never dispatches a skill and needs its own lock
-            # handling (see dispatch.finalize's docstring). `--generation` carries the terminal's
-            # identity so it never stops a replacement a concurrent tick created.
-            return dispatch.finalize(agent, generation=parsed.generation)
         # An optional variant name (e.g. the steward's "deep-sweep", triggered-agents-254)
         # selects a second, differently-scheduled mode of the same agent — see automation.toml's
-        # [variants.<name>] table and dispatch.run's docstring. `--cleanup-only` (triggered-
-        # agents-445) is ta-gate.sh's call on a precheck skip: no variant, no dispatch, just let
-        # an ephemeral agent's finished/stuck terminal get torn down instead of waiting for a
-        # tick that has real work.
+        # [variants.<name>] table and dispatch.run's docstring. `--cleanup-only` is the gate's call
+        # on a precheck skip, and a no-op exit 0 (see dispatch.run).
         return dispatch.run(agent, parsed.variant, cleanup_only=parsed.cleanup_only)
     cli = import_module(f"secretary.automations.agents.{agent}.cli")
     return cli.main(rest)

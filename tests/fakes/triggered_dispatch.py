@@ -6,10 +6,11 @@ from secretary.runtime.pane_host import Pane
 class FakeSessionHost:
     """A session manager for a test: it records what it was asked and answers what it was given.
 
-    The scheduler reaches Orca through `SessionHost` and nothing else (secretary-1416), so a test
-    of what a tick does to its terminals is a test against one of these — no subprocess, no `orca`
+    Code that reaches Orca does so through `SessionHost` and nothing else (secretary-1416), so a
+    test of what it does to its terminals is a test against one of these — no subprocess, no `orca`
     on the box, and every pane verb observable as the call it is rather than as an argument vector
-    somebody has to re-parse.
+    somebody has to re-parse. (The background agents' scheduler it was written for has no pane
+    path since secretary-1720.)
     """
 
     def __init__(

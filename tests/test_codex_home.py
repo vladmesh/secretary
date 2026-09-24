@@ -22,7 +22,6 @@ from unittest import mock
 
 from secretary.automations.agents.curator import discover
 from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
-from secretary.automations.runtime import dispatch as automations_dispatch
 from secretary.dispatch import commands as dispatch_commands
 from secretary.dispatch import tui as dispatcher_tui
 from secretary.runtime import codex_home as codex_home_module
@@ -242,9 +241,9 @@ class LiveSessionCutoverTests(unittest.TestCase):
 
     def assert_every_reader_finds_the_turn(self, sent_at: float) -> None:
         workspace = str(self.workspace)
-        self.assertTrue(automations_dispatch._codex_turn_after(workspace, sent_at))
         latest = pipeline_codex_sessions.latest_activity_for(workspace)
         self.assertIsNotNone(latest)
+        self.assertGreater(latest, sent_at)
         self.assertTrue(dispatcher_tui.provider_turn_started(workspace, sent_at, adapter="codex"))
         self.assertIsNotNone(dispatcher_tui.latest_user_turn_for(workspace, sent_at))
         self.assertTrue(

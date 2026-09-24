@@ -97,6 +97,168 @@ def _imports_automations(relative: str, source: str) -> list[str]:
 
 # The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
 # must not come back, and nothing may import it under its old name.
+# The background agents hold their heads under this product's own supervisor and nothing else
+# (secretary-1720, A20 step 4): no module under `secretary.automations` may reach Orca again —
+# not through the pane host, not through an Orca RPC client of its own, and not by running the
+# `orca` / `orca-cli` binary. `pane_host` and `orca_legacy_head` elsewhere in `secretary` are later
+# steps of A20 and are not held here.
+AUTOMATIONS_SOURCE = "src/secretary/automations/"
+PANE_HOST_MODULE = "secretary.runtime.pane_host"
+ORCA_RPC_NAME = "orca_rpc"
+ORCA_BINARIES = frozenset({"orca", "orca-cli"})
+
+
+def _module_of(relative: str) -> str:
+    """`src/secretary/automations/runtime/dispatch.py` -> `secretary.automations.runtime.dispatch`."""
+    parts = Path(relative).with_suffix("").parts
+    parts = parts[1:] if parts and parts[0] == "src" else parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
+    """Every module an import statement names, relative ones resolved against the file's package."""
+    tree = ast.parse(source, filename=relative)
+    module = _module_of(relative)
+    package = module if relative.endswith("__init__.py") else module.rpartition(".")[0]
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base_parts = package.split(".")
+                base = ".".join(base_parts[: len(base_parts) - (node.level - 1)])
+                target = f"{base}.{node.module}" if node.module else base
+            else:
+                target = node.module or ""
+            found.append((node.lineno, target))
+            found.extend((node.lineno, f"{target}.{alias.name}") for alias in node.names)
+    return found
+
+
+#: The modules whose calls start a process, and the calls of theirs that do (`os.exec*` and
+#: `os.spawn*` by prefix). A string argument of one of these is a command, whatever else it is.
+PROCESS_MODULES = frozenset({"subprocess", "os", "shutil", "asyncio"})
+PROCESS_CALLS = frozenset(
+    {
+        "run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+        "system", "popen", "which", "create_subprocess_exec", "create_subprocess_shell",
+    }
+)
+
+
+def _is_orca_command(text: str) -> bool:
+    """A command string that is `orca` / `orca-cli`, or whose first word is (a path to) either."""
+    words = text.split()
+    return bool(words) and Path(words[0]).name in ORCA_BINARIES
+
+
+def _runs_orca(node: ast.AST) -> bool:
+    """An argument vector or command string whose program is the `orca` / `orca-cli` binary."""
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        first = node.elts[0]
+        return isinstance(first, ast.Constant) and isinstance(first.value, str) and _is_orca_command(first.value)
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and _is_orca_command(node.value)
+
+
+def _starts_a_process(call: ast.Call) -> bool:
+    """Whether a call is one of the process-starting calls, by name and, when dotted, by module."""
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        name = func.attr
+        if not (isinstance(func.value, ast.Name) and func.value.id in PROCESS_MODULES):
+            return False
+    elif isinstance(func, ast.Name):
+        name = func.id
+    else:
+        return False
+    return name in PROCESS_CALLS or name.startswith(("exec", "spawn"))
+
+
+def _automations_orca_routes(relative: str, source: str) -> list[str]:
+    """Every route from a module under `secretary.automations` to Orca, as offender lines."""
+    if not relative.startswith(AUTOMATIONS_SOURCE):
+        return []
+    offenders: set[str] = set()
+    for lineno, module in _imported_modules(relative, source):
+        if _names(module, PANE_HOST_MODULE):
+            offenders.add(f"{relative}:{lineno}: imports {PANE_HOST_MODULE}")
+        if ORCA_RPC_NAME in module.split("."):
+            offenders.add(f"{relative}:{lineno}: imports {ORCA_RPC_NAME}")
+    for node in ast.walk(ast.parse(source, filename=relative)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _names(node.value, PANE_HOST_MODULE) or node.value.endswith("." + ORCA_RPC_NAME):
+                offenders.add(f"{relative}:{node.lineno}: names {node.value}")
+        if isinstance(node, ast.Call) and _starts_a_process(node):
+            called = [*node.args, *(keyword.value for keyword in node.keywords)]
+            if any(_runs_orca(argument) for argument in called):
+                offenders.add(f"{relative}:{node.lineno}: runs the orca binary")
+        if isinstance(node, (ast.List, ast.Tuple)) and _runs_orca(node):
+            offenders.add(f"{relative}:{node.lineno}: builds an orca argument vector")
+    return sorted(offenders)
+
+
+class AutomationsReachNoOrcaTests(unittest.TestCase):
+    """secretary-1720: the background agents' runtime has one backend, and it is not Orca."""
+
+    def test_no_automations_module_reaches_orca(self) -> None:
+        package = ROOT / "src" / "secretary" / "automations"
+        offenders: list[str] = []
+        for path in sorted(package.rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+            offenders.extend(_automations_orca_routes(relative, path.read_text(encoding="utf-8")))
+        self.assertEqual(offenders, [])
+        self.assertFalse((package / "runtime" / "orca_rpc.py").exists())
+        self.assertFalse((package / "runtime" / "finalizer.py").exists())
+
+    def test_each_route_to_orca_is_caught(self) -> None:
+        planted = "src/secretary/automations/runtime/planted.py"
+        for source in (
+            "from secretary.runtime.pane_host import session_host\n",
+            "import secretary.runtime.pane_host\n",
+            "from secretary.runtime import pane_host\n",
+            "from ...runtime import pane_host\n",
+            "def f():\n    from secretary.runtime.pane_host import Pane\n",
+            "from . import orca_rpc\n",
+            "from .orca_rpc import call\n",
+            "import secretary.automations.runtime.orca_rpc as rpc\n",
+            "import importlib\nimportlib.import_module('secretary.runtime.pane_host')\n",
+            "import subprocess\nsubprocess.run('orca')\n",
+            "import subprocess\nsubprocess.run(['orca'])\n",
+            "import subprocess\nsubprocess.run('orca-cli')\n",
+            "import os\nos.system('orca')\n",
+            "import os\nos.execvp('orca', ['orca'])\n",
+            "import os\nos.spawnlp(os.P_WAIT, 'orca-cli', 'orca-cli')\n",
+            "from subprocess import check_output\ncheck_output(args='orca terminal list', shell=True)\n",
+            "import subprocess\nsubprocess.run(['orca', 'terminal', 'list', '--json'])\n",
+            "import subprocess\nsubprocess.run(('/usr/local/bin/orca-cli', 'status'))\n",
+            "import os\nos.system('orca terminal stop --worktree x')\n",
+            "ORCA = ['orca-cli', 'terminal', 'list']\n",
+            "import shutil\nshutil.which('orca')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(_automations_orca_routes(planted, source), source)
+
+    def test_what_is_not_a_route_to_orca_is_left_alone(self) -> None:
+        planted = "src/secretary/automations/agents/curator/planted.py"
+        for source in (
+            # A path component named after the old workspace root is not the binary.
+            "from pathlib import Path\nROOT = Path.home() / 'orca' / 'workspaces'\n",
+            "from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME\n",
+            "import subprocess\nsubprocess.run(['git', 'status'])\n",
+            # A string "orca" handed to a call that starts no process is not a command.
+            "import os\nROOT = os.path.join(os.path.expanduser('~'), 'orca', 'workspaces')\n",
+            "import subprocess\nsubprocess.run(['ls', 'orca'])\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(_automations_orca_routes(planted, source), [])
+        # Outside the package the rule does not apply yet (A20 checklist step 6).
+        self.assertEqual(
+            _automations_orca_routes("src/secretary/dispatch/host.py", "from secretary.runtime import pane_host\n"),
+            [],
+        )
+
+
 RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
 
 
