@@ -193,8 +193,10 @@ retention; curator needs none. The generic triggered-agent runtime owns only the
 `HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
 infer success from a pane, a socket write or process existence. The backend is chosen per head
-profile from the closed set `orca-legacy | local-pty` (absent means `orca-legacy`), and
-`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
+profile from the closed set `orca-legacy | local-pty`, and
+`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend. What an absent
+key means, who owns that default and when it changes, the `local-pty` parity criteria and the A20
+exit checklist are in [Head runtime](HEAD_RUNTIME.md).
 
 - `OrcaLegacyHeadRuntime` runs heads in Orca panes. Its readiness probe and conditional stop narrow
   races but cannot make observe-then-stop atomic.
