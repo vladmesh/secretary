@@ -461,8 +461,8 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
 
 
 def step_codex_home(context: UpgradeContext) -> StepResult:
-    """Seed the non-secret Codex runtime files into `<data_dir>/codex-home` (and the legacy home
-    while it is the active one), so the PO's `codex login` there is the only step the move needs."""
+    """Seed the non-secret Codex runtime files into `<data_dir>/codex-home`, so the PO's `codex login`
+    there is the only step the move needs. The legacy home stays install's, as it always was."""
     if not (context.product_root / "packaging" / "codex-home").is_dir():
         return StepResult("codex-home", "skipped", "no packaging/codex-home in the product checkout")
     data_dir = _data_dir(context)
@@ -477,7 +477,11 @@ def step_codex_home(context: UpgradeContext) -> StepResult:
 
     try:
         seeded = provision_codex_home(
-            context.product_root, context.runtime_user, data_dir=data_dir, runtime_home=context.runtime_home
+            context.product_root,
+            context.runtime_user,
+            data_dir=data_dir,
+            runtime_home=context.runtime_home,
+            legacy=False,
         )
     except InstallError as exc:
         return StepResult("codex-home", "failed", str(exc))

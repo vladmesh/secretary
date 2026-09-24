@@ -182,8 +182,9 @@ Every Codex head launched by the dispatcher, and the `openai-sub` resource probe
 
 Rung 4 keeps live Codex heads logged in until the PO logs in to the new home. It goes away with Orca
 (A20). Install and upgrade (the `codex-home` step) copy `AGENTS.md` and `config.toml` into
-`DATA_DIR/codex-home` if they are missing. They keep doing the same for the legacy home, including
-the managed Memory entry, while it is still the active one. They never copy or write `auth.json`.
+`DATA_DIR/codex-home` if they are missing. Install keeps doing the same for the legacy home,
+including the managed Memory entry, while it is still the active one. Upgrade leaves the legacy home
+alone, as it always has. Neither copies or writes `auth.json`.
 
 Migration runbook, run once as the installation user after an upgrade that includes the `codex-home`
 step:
@@ -2114,7 +2115,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store` | connect as owner and apply Alembic to the shipped head |
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries without touching provider login state |
-| `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`, and into the legacy Orca home while it is active; never `auth.json` ([Codex home](#codex-home-codex_home)) |
+| `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
 | `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
 | `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `secretary-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |

@@ -642,9 +642,8 @@ class CodexHomeMigrationTests(PortableFixture):
         data_home = self.data / "codex-home"
         self.assertEqual((data_home / "AGENTS.md").read_text(encoding="utf-8"), "# portable\n")
         self.assertFalse((data_home / "auth.json").exists())
-        # The legacy home is the owner's, never the invoker's, and still seeded while it is active.
-        legacy = self.home / ".config" / "orca" / "codex-runtime-home" / "home"
-        self.assertTrue((legacy / "AGENTS.md").is_file())
+        # Upgrade never touched the legacy home and still does not; that stays install's.
+        self.assertFalse((self.home / ".config").exists())
         self.assert_invoker_home_untouched()
 
     def test_doctor_shows_the_active_home_and_warns_while_the_migration_is_pending(self) -> None:

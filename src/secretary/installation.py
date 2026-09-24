@@ -1425,6 +1425,7 @@ def provision_codex_home(
     *,
     data_dir: Path | None = None,
     runtime_home: Path | None = None,
+    legacy: bool = True,
 ) -> int:
     """Seed non-secret Codex runtime files while preserving login state.
 
@@ -1433,19 +1434,20 @@ def provision_codex_home(
     login (`codex_preflight.resolve_codex_home`). `auth.json` is never written: logging in is the
     PO's own step, `CODEX_HOME=<data_dir>/codex-home codex login`. `runtime_home` is the account's
     home as the caller already resolved it; unnamed, it is read from the password database.
+    `legacy=False` leaves the legacy home alone, which is what upgrade has always done with it.
     """
     if not installation_user:
         return 0
     home = runtime_home if runtime_home is not None else Path(pwd.getpwnam(installation_user).pw_dir)
-    legacy = home / ".config" / "orca" / "codex-runtime-home" / "home"
+    legacy_home = home / ".config" / "orca" / "codex-runtime-home" / "home"
     targets: list[Path] = []
     if data_dir is not None:
         data_home = Path(data_dir) / CODEX_HOME_DATA_DIRNAME
         targets.append(data_home)
-        if not codex_home_logged_in(data_home):
-            targets.append(legacy)
-    else:
-        targets.append(legacy)
+        if legacy and not codex_home_logged_in(data_home):
+            targets.append(legacy_home)
+    elif legacy:
+        targets.append(legacy_home)
     source = product_root / "packaging" / "codex-home"
     changed = 0
     for target in targets:
