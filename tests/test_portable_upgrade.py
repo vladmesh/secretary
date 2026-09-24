@@ -629,6 +629,52 @@ class PortableInstallationTests(PortableFixture):
         self.assert_hermetic(output)
 
 
+class CodexHomeMigrationTests(PortableFixture):
+    """secretary-1710: upgrade seeds `<data_dir>/codex-home`; doctor names the home heads launch with."""
+
+    def test_upgrade_seeds_the_data_dir_home_copy_once_without_a_login(self) -> None:
+        first = self.run_upgrade()
+        second = self.run_upgrade()
+
+        self.assertTrue(first.ok, first.render())
+        self.assertEqual(self.statuses(first)["codex-home"], "changed", first.render())
+        self.assertEqual(self.statuses(second)["codex-home"], "unchanged", second.render())
+        data_home = self.data / "codex-home"
+        self.assertEqual((data_home / "AGENTS.md").read_text(encoding="utf-8"), "# portable\n")
+        self.assertFalse((data_home / "auth.json").exists())
+        # Upgrade never touched the legacy home and still does not; that stays install's.
+        self.assertFalse((self.home / ".config").exists())
+        self.assert_invoker_home_untouched()
+
+    def test_doctor_shows_the_active_home_and_warns_while_the_migration_is_pending(self) -> None:
+        self.run_upgrade()
+        instance = ["doctor", "--instance", str(self.instance), "--offline"]
+        legacy = Path.home() / ".config" / "orca" / "codex-runtime-home" / "home"
+        data_home = self.data / "codex-home"
+
+        code, text = self.run_cli(instance)
+        json_code, report = self.run_json_cli([*instance, "--json"])
+
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"codex home: {legacy} (legacy fallback)", text)
+        self.assertIn(f"warning: codex home migration pending: {data_home} holds no login", text)
+        self.assertEqual(json_code, 0, report)
+        self.assertEqual(
+            report["codex_home"],
+            {"path": str(legacy), "kind": "legacy", "data_dir_home": str(data_home), "migration_pending": True},
+        )
+
+        (data_home / "auth.json").write_text('{"tokens": "fixture"}\n', encoding="utf-8")
+        code, text = self.run_cli(instance)
+        _json_code, report = self.run_json_cli([*instance, "--json"])
+
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"codex home: {data_home} (data-dir home)", text)
+        self.assertNotIn("migration pending", text)
+        self.assertEqual(report["codex_home"]["kind"], "data-dir")
+        self.assertFalse(report["codex_home"]["migration_pending"])
+
+
 class InstallationOwnerTests(PortableFixture):
     """Whose home an upgrade materializes into, when that is not the caller's.
 

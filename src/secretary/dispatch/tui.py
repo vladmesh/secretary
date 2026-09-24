@@ -19,7 +19,7 @@ from secretary.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )
-from secretary.runtime.codex_preflight import CODEX_HOME_DEFAULT
+from secretary.runtime.codex_home import session_roots
 from secretary.runtime.head import HeadRun, HeadRunError
 from secretary.runtime.pane_host import PaneHost
 from secretary.runtime.tui_delivery import (
@@ -790,26 +790,32 @@ def _claude_projects_root() -> Path:
 
 
 def _session_paths_for(workspace: str, *, session_root: Path | None = None):
-    root = session_root or _sessions_root()
-    if not root.is_dir():
-        return
+    roots = [session_root] if session_root is not None else _sessions_roots()
     wanted = str(Path(workspace).resolve(strict=False))
-    for day_dir in _recent_day_dirs(root):
-        try:
-            files = list(day_dir.glob("*.jsonl"))
-        except OSError:
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
             continue
-        for path in files:
-            if _session_cwd(path) == wanted:
+        for day_dir in _recent_day_dirs(root):
+            try:
+                files = list(day_dir.glob("*.jsonl"))
+            except OSError:
+                continue
+            for path in files:
+                key = path.resolve(strict=False)
+                if key in seen or _session_cwd(path) != wanted:
+                    continue
+                seen.add(key)
                 yield path
 
 
-def _sessions_root() -> Path:
+def _sessions_roots() -> list[Path]:
+    """`SECRETARY_CODEX_SESSIONS`/`TA_CODEX_SESSIONS` alone when set, else every home a live Codex
+    head may be writing into (`codex_home.session_roots`), not only the current one."""
     root = os.environ.get("SECRETARY_CODEX_SESSIONS") or os.environ.get("TA_CODEX_SESSIONS")
     if root:
-        return Path(root)
-    home = os.environ.get("TA_CODEX_HOME") or CODEX_HOME_DEFAULT
-    return Path(home) / "sessions"
+        return [Path(root)]
+    return session_roots()
 
 
 def _session_cwd(path: Path) -> str | None:

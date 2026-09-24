@@ -170,6 +170,50 @@ rg -n 'po_memory|secretary-memory-po-bridge' \
   ~/.config/orca/codex-runtime-home/home/config.toml
 ```
 
+### Codex home (`CODEX_HOME`)
+
+Every Codex head launched by the dispatcher, and the `openai-sub` resource probe, runs with one
+`CODEX_HOME`, resolved at each launch in this order:
+
+1. the profile's `codex_home`;
+2. `TA_CODEX_HOME`;
+3. `DATA_DIR/codex-home`, once it holds a login (a non-empty `auth.json`);
+4. otherwise the legacy Orca home `~/.config/orca/codex-runtime-home/home`.
+
+Rung 3 needs to know the data dir. It comes from `SECRETARY_DATA_DIR`. The production dispatcher
+tick, the background agents and `secretary shell` set that variable for their own run from the
+selected instance, and the web unit sets it in its unit file. A process that has no data dir stays
+on rung 4.
+
+Rung 4 keeps live Codex heads logged in until the PO logs in to the new home. It goes away with Orca
+(A20). Install and upgrade (the `codex-home` step) copy `AGENTS.md` and `config.toml` into
+`DATA_DIR/codex-home` if they are missing. Install keeps doing the same for the legacy home,
+including the managed Memory entry, while it is still the active one. Upgrade leaves the legacy home
+alone, as it always has. Neither copies or writes `auth.json`.
+
+Migration runbook, run once as the installation user after an upgrade that includes the `codex-home`
+step:
+
+```bash
+secretary doctor --offline --instance INSTANCE | grep 'codex home'
+#   codex home: ~/.config/orca/codex-runtime-home/home (legacy fallback)
+#   warning: codex home migration pending: DATA_DIR/codex-home holds no login; ...
+CODEX_HOME=DATA_DIR/codex-home codex login
+secretary doctor --offline --instance INSTANCE | grep 'codex home'
+#   codex home: DATA_DIR/codex-home (data-dir home)
+```
+
+`doctor --json` returns the same answer in `codex_home` (`path`, `kind`, `data_dir_home`,
+`migration_pending`). A pending migration is only a warning and does not change doctor's exit status.
+Nothing else needs to change. Heads launched after the login use the new home, and heads already
+running keep the home they started with. Every session reader scans the `sessions/` of the current home,
+of the legacy home and of the data-dir home, whichever of them exist. So a head that started on the
+legacy home is still found after the login. This covers the watchdog's activity signal, the delivery
+confirmation for service heads, the dispatcher's continuation recovery proof and the curator. Each
+reader counts a session only once. An explicit sessions override (`TA_CODEX_SESSIONS`,
+`SECRETARY_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root while it is set. The
+legacy home is not moved or deleted, and nothing is copied out of it.
+
 ### The PO workspace
 
 The product owner head runs with `DATA_DIR/po` as its working directory (`DATA_DIR` is `data_dir`
@@ -949,6 +993,13 @@ metadata target, then repair from the registered production checkout only:
 
 Substitute the exact registered root for both occurrences. Do not restart or kill heads, rewrite task
 metadata or delete the retained checkout as part of this repair.
+
+`workspace_targeted_editable` covers both workspaces roots: the Orca root
+(`SECRETARY_DISPATCHER_WORKSPACES_ROOT`, default `~/orca/workspaces`) and `DATA_DIR/workspaces`,
+where git-managed card and observer worktrees live. A workspace's owner is read from its path, so the
+real dispatcher refuses to start (`workspace_roots_overlap`, naming both paths) when the two roots
+are equal or one is inside the other. Point `SECRETARY_DISPATCHER_WORKSPACES_ROOT` or the instance
+`data_dir` elsewhere so the two are disjoint.
 
 ## Sprint observer heads
 
@@ -2073,6 +2124,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store` | connect as owner and apply Alembic to the shipped head |
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries without touching provider login state |
+| `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
 | `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
 | `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `secretary-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |

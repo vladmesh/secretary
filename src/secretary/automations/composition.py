@@ -23,6 +23,7 @@ from secretary.board.backend import card_client
 from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.config import instance_data_dir
+from secretary.runtime.codex_home import bound_data_dir
 from secretary.runtime.paths import default_instance_path
 from secretary.runtime.state import BoardUnavailable
 from secretary.tasks import TaskError, TaskReader, TaskWriter
@@ -111,6 +112,12 @@ def _retro(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run ``<agent> <cmd> [args]`` with the agent's board ports wired in."""
+    # An agent's Codex heads resolve their CODEX_HOME against the selected installation's data dir.
+    with bound_data_dir():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         return triggered_main.main(argv)

@@ -64,6 +64,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
+from secretary.runtime.codex_preflight import CODEX_HOME_DATA_DIRNAME, codex_home_logged_in
 from secretary.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from secretary.runtime.shared_state import resolve_pipeline_state_dir
 from secretary.runtime_env import (
@@ -1414,15 +1415,51 @@ def _write_recovery_progress(path: Path, identity: str, **changes: object) -> No
         raise InstallError(f"could not record recovery progress: {exc}") from None
 
 
-def provision_codex_home(product_root: Path, installation_user: str | None) -> int:
-    """Seed non-secret Codex runtime files while preserving login state."""
+# What an install seeds into a CODEX_HOME. Never `auth.json`: the login is the PO's.
+CODEX_HOME_SEEDED_FILES = ("AGENTS.md", "config.toml")
+
+
+def provision_codex_home(
+    product_root: Path,
+    installation_user: str | None,
+    *,
+    data_dir: Path | None = None,
+    runtime_home: Path | None = None,
+    legacy: bool = True,
+) -> int:
+    """Seed non-secret Codex runtime files while preserving login state.
+
+    The installation-owned `<data_dir>/codex-home` is always seeded. The legacy Orca home keeps
+    being seeded and reconciled while it is the active one, i.e. until the data-dir home holds a
+    login (`codex_preflight.resolve_codex_home`). `auth.json` is never written: logging in is the
+    PO's own step, `CODEX_HOME=<data_dir>/codex-home codex login`. `runtime_home` is the account's
+    home as the caller already resolved it; unnamed, it is read from the password database.
+    `legacy=False` leaves the legacy home alone, which is what upgrade has always done with it.
+    """
     if not installation_user:
         return 0
-    account = pwd.getpwnam(installation_user)
-    target = Path(account.pw_dir) / ".config" / "orca" / "codex-runtime-home" / "home"
+    home = runtime_home if runtime_home is not None else Path(pwd.getpwnam(installation_user).pw_dir)
+    legacy_home = home / ".config" / "orca" / "codex-runtime-home" / "home"
+    targets: list[Path] = []
+    if data_dir is not None:
+        data_home = Path(data_dir) / CODEX_HOME_DATA_DIRNAME
+        targets.append(data_home)
+        if legacy and not codex_home_logged_in(data_home):
+            targets.append(legacy_home)
+    elif legacy:
+        targets.append(legacy_home)
     source = product_root / "packaging" / "codex-home"
     changed = 0
-    for name in ("AGENTS.md", "config.toml"):
+    for target in targets:
+        changed += _seed_codex_home(target, source)
+        _set_installation_owner(target, installation_user)
+    return changed
+
+
+def _seed_codex_home(target: Path, source: Path) -> int:
+    """Copy-once `AGENTS.md` and `config.toml` into one CODEX_HOME, reconciling the memory entry."""
+    changed = 0
+    for name in CODEX_HOME_SEEDED_FILES:
         destination = target / name
         if destination.exists():
             if name == "config.toml" and _reconcile_managed_memory_mcp(destination, source / name):
@@ -1430,12 +1467,12 @@ def provision_codex_home(product_root: Path, installation_user: str | None) -> i
             continue
         try:
             contents = (source / name).read_text(encoding="utf-8")
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            # The home will hold a login once the PO runs `codex login` into it.
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
             write_text_atomic(destination, contents)
         except (OSError, RuntimeError) as exc:
             raise InstallError(f"could not provision managed CODEX_HOME: {exc}") from None
         changed += 1
-    _set_installation_owner(target, installation_user)
     return changed
 
 
@@ -1568,7 +1605,7 @@ def _restore_without_credentials(
         recovery_identity=identity,
     )
     result.projects.extend(project_results)
-    seeded = provision_codex_home(_product_root(args), args.installation_user)
+    seeded = provision_codex_home(_product_root(args), args.installation_user, data_dir=data_dir)
     cloned = sum(project.outcome == "cloned" for project in project_results)
     failed = sum(project.outcome == "failed" for project in project_results)
     result.add(
@@ -1803,7 +1840,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 recovery_identity=identity,
             )
             result.projects.extend(project_results)
-            seeded = provision_codex_home(product_root, args.installation_user)
+            seeded = provision_codex_home(product_root, args.installation_user, data_dir=data_dir)
             cloned = sum(project.outcome == "cloned" for project in project_results)
             failed = sum(project.outcome == "failed" for project in project_results)
             project_availability = ProjectAvailability(

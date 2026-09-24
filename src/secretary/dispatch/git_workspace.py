@@ -14,6 +14,7 @@ profiles move mid-round stays on the manager its checkout was made by.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,36 @@ if TYPE_CHECKING:
 
 #: The directory under the data dir that git-managed card workspaces live in.
 WORKSPACES_DIR = "workspaces"
+#: Names the Orca workspaces root, and only it.
+ORCA_WORKSPACES_ROOT_ENV = "SECRETARY_DISPATCHER_WORKSPACES_ROOT"
+
+
+def orca_workspaces_root() -> Path:
+    """Where Orca's worktrees are namespaced: `SECRETARY_DISPATCHER_WORKSPACES_ROOT`, else ~/orca/workspaces."""
+    return Path(os.environ.get(ORCA_WORKSPACES_ROOT_ENV, str(Path.home() / "orca" / "workspaces")))
+
+
+def workspace_roots_overlap(orca_root: Path, data_dir: Path) -> str | None:
+    """Why the Orca root and `<data_dir>/workspaces` cannot both be served, or None when disjoint.
+
+    Ownership of a workspace is read from its path alone (`owns`, `_is_git_observer_workspace`),
+    so two roots that are equal or nest would hand one path to both managers. The dispatcher refuses
+    to start on that rather than let one manager silently win.
+    """
+    orca = _resolved(orca_root)
+    git = _resolved(Path(data_dir) / WORKSPACES_DIR)
+    if orca == git:
+        relation = "are the same directory"
+    elif git.is_relative_to(orca):
+        relation = "overlap: the git workspaces root is inside the Orca workspaces root"
+    elif orca.is_relative_to(git):
+        relation = "overlap: the Orca workspaces root is inside the git workspaces root"
+    else:
+        return None
+    return (
+        f"the Orca workspaces root {orca} and the git workspaces root {git} {relation}; "
+        f"point {ORCA_WORKSPACES_ROOT_ENV} or the instance data_dir elsewhere so neither contains the other"
+    )
 
 
 class GitWorkspaceManager:

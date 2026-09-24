@@ -13,6 +13,7 @@ from pathlib import Path
 from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import DataDirError, instance_data_dir
+from secretary.dispatch.git_workspace import orca_workspaces_root, workspace_roots_overlap
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.types import DispatcherError
@@ -26,6 +27,13 @@ def default_data_dir(instance_path: Path) -> Path:
         raise DispatcherError("invalid_instance", f"invalid instance: {exc}", 2) from None
 
 
+def validate_workspace_roots(data_dir: Path) -> None:
+    """Refuse to run a real host whose Orca and git workspaces roots overlap in either direction."""
+    overlap = workspace_roots_overlap(orca_workspaces_root(), data_dir)
+    if overlap is not None:
+        raise DispatcherError("workspace_roots_overlap", overlap, 2)
+
+
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
 
@@ -35,6 +43,8 @@ def runtime_from_args(
 ) -> DispatcherRuntime:
     instance_path = Path(instance)
     data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
+    if host_mode == "real":
+        validate_workspace_roots(data)
     # DispatcherRuntime also constructs a SprintReader from this client. The client is built by
     # the switch rather than by naming one backend here.
     client = board_client(instance_path, serves=(CARD, SPRINT))

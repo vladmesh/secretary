@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from secretary.runtime import heads as heads_mod
+from secretary.runtime.codex_home import installation_codex_home
 from secretary.runtime.redact import redact
 
 # A single slow or broken probe is killed rather than hanging the dispatcher's tick. Both
@@ -263,13 +263,14 @@ def probe_openai_sub() -> ProbeResult:
     subscription, no per-profile credential). `-s read-only` and a bare "ping" keep it
     side-effect-free and tool-free, so no bypass flag is needed. CODEX_HOME is set explicitly
     because this is a plain subprocess, not a spawned terminal that would inherit it."""
-    env = {**os.environ, "CODEX_HOME": heads_mod.CODEX_HOME}
+    home = installation_codex_home().path
+    env = {**os.environ, "CODEX_HOME": home}
     cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "ping"]
     return _run_subprocess_probe(
         cmd,
         "builtin:openai-sub",
         env=env,
-        display_command=f"CODEX_HOME={heads_mod.CODEX_HOME} {_display_command(cmd)}",
+        display_command=f"CODEX_HOME={home} {_display_command(cmd)}",
     )
 
 

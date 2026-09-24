@@ -25,7 +25,6 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck extra
 
-from .codex_preflight import codex_home
 from .head.command import (
     HeadCommandError,
     validate_launch_shape,
@@ -69,13 +68,6 @@ def registry_path() -> Path:
     if override:
         return Path(override).expanduser()
     return installed_registry_path() or HEADS_TOML
-
-
-# The CODEX_HOME shared by Orca-managed Codex sessions and pipeline heads. One physical home keeps
-# auth refresh, MCP, skills, hooks, and quota probes on the same state. Pinned explicitly because
-# the health probe is a plain subprocess rather than an Orca terminal. Env-overridable so tests can
-# use a throwaway home.
-CODEX_HOME = codex_home({})
 
 
 class HeadRegistryError(HeadCommandError):

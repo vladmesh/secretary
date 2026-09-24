@@ -301,6 +301,62 @@ class ProductionRuntimeTests(unittest.TestCase):
             self.assertEqual(observed.classification, "workspace_targeted_editable")
             self.assertIn("pth_finder", {entry[0] for entry in observed.metadata_targets})
 
+    def test_an_editable_install_in_the_git_workspaces_root_is_workspace_targeted(self) -> None:
+        """secretary-1710: `<data_dir>/workspaces` holds card checkouts too, not only the Orca root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            production = root / "secretary"
+            data_dir = root / "secretary-data"
+            task = data_dir / "workspaces" / "secretary" / "secretary-1710"
+            _fixture(production, "production")
+            _fixture(task, "candidate")
+            python = _venv(production / ".venv")
+            _install(python, production)
+            site_packages = next((production / ".venv" / "lib").glob("python*/site-packages"))
+            for direct in site_packages.glob("secretary-*.dist-info/direct_url.json"):
+                direct.unlink()
+            finder_name = "__editable___secretary_finder"
+            (site_packages / f"{finder_name}.py").write_text(
+                f"MAPPING = {{'secretary': {str(task / 'secretary')!r}}}\n", encoding="utf-8"
+            )
+            (site_packages / "__editable__.secretary.pth").write_text(
+                f"import {finder_name}; {finder_name}.install()\n", encoding="utf-8"
+            )
+            orca_root = root / "orca" / "workspaces"
+
+            observed = ProductionRuntime(
+                str(python),
+                str(production),
+                workspaces_root=str(orca_root),
+                git_workspaces_root=str(data_dir / "workspaces"),
+            ).probe()
+            self.assertEqual(observed.classification, "workspace_targeted_editable", observed.as_dict())
+
+            # The packaged unit names only `--data-dir`; the fence derives the git root from it.
+            with mock.patch.dict(os.environ):
+                os.environ.pop("SECRETARY_DATA_DIR", None)
+                fenced = subprocess.run(
+                    [
+                        str(python),
+                        "-I",
+                        str(PREFLIGHT),
+                        "--product-root",
+                        str(production),
+                        "--interpreter",
+                        str(python),
+                        "--workspaces-root",
+                        str(orca_root),
+                        "--data-dir",
+                        str(data_dir),
+                        "--json",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            self.assertEqual(json.loads(fenced.stdout)["classification"], "workspace_targeted_editable")
+            self.assertNotEqual(fenced.returncode, 0)
+
     def test_symlinks_are_normalized_without_lexical_prefix_confusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

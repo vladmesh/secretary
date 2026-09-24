@@ -19,6 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
+from secretary.runtime.codex_home import session_roots
 from secretary.runtime.paths import default_instance_path, instance_dir
 from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
 
@@ -37,14 +38,11 @@ HERMES_HOME = Path(os.environ.get("TA_HERMES_HOME_DIR", str(Path.home() / ".herm
 HERMES_STATE_DB = HERMES_HOME / "state.db"
 HERMES_MEMORY_DIR = HERMES_HOME / "memories"
 
-# Orca-managed Codex home shared by interactive Orca heads and pipeline Codex heads.
-# Overridable in tests for the same reason as CLAUDE_PROJECTS/HERMES_HOME.
-CODEX_SESSIONS = Path(
-    os.environ.get(
-        "TA_CODEX_SESSIONS_DIR",
-        str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home" / "sessions"),
-    )
-)
+# Sessions of the CODEX_HOMEs pipeline Codex heads run with. Overridable in tests for the same
+# reason as CLAUDE_PROJECTS/HERMES_HOME; unset, every home a head may be writing into is scanned
+# (`codex_home.session_roots`), so the move to `<data_dir>/codex-home` loses no live head's sessions.
+_CODEX_SESSIONS_OVERRIDE = os.environ.get("TA_CODEX_SESSIONS_DIR")
+CODEX_SESSIONS: Path | None = Path(_CODEX_SESSIONS_OVERRIDE) if _CODEX_SESSIONS_OVERRIDE else None
 
 ROUTE_UNKNOWN = "unknown"
 ROUTE_GLOBAL = "global"
@@ -394,10 +392,21 @@ def _codex_meta_from_file(path: Path) -> dict:
 def codex_sessions() -> list[dict]:
     """List Codex session JSONL files as {head, path, session_id, cwd}, self-excluded."""
     out = []
-    if not CODEX_SESSIONS.is_dir():
+    roots = [CODEX_SESSIONS] if CODEX_SESSIONS is not None else session_roots()
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("**/*.jsonl")):
+            key = path.resolve(strict=False)
+            if key not in seen:
+                seen.add(key)
+                files.append(path)
+    if not files:
         return out
     resolver = RouteResolver()
-    for f in sorted(CODEX_SESSIONS.glob("**/*.jsonl")):
+    for f in files:
         meta = _codex_meta_from_file(f)
         cwd = meta["cwd"]
         if _excluded(cwd, meta["session_id"]):

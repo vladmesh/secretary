@@ -17,7 +17,7 @@ from unittest import mock
 
 from secretary import head_health
 from secretary.head_health import HeadHealth
-from secretary.runtime import heads, resource_probe
+from secretary.runtime import codex_preflight, heads, resource_probe
 from secretary.runtime.resource_probe import ProbeResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +110,7 @@ class ProviderFakeTests(unittest.TestCase):
             result = resource_probe.probe_openai_sub()
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "non-zero-exit")
-        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], heads.CODEX_HOME)
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], codex_preflight.codex_home({}))
 
     def test_a_missing_binary_and_a_timeout_are_failures_not_exceptions(self) -> None:
         with mock.patch.object(resource_probe.subprocess, "run", side_effect=FileNotFoundError("claude")):

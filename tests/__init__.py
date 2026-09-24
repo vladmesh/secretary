@@ -28,8 +28,8 @@ state shared by every Codex head on the host -- so any test that reaches a
 worker/reviewer/service bring-up without saying otherwise would record a
 permanent ``trusted`` grant for its own throwaway workspace there, and
 nothing prunes it. ``TA_CODEX_HOME`` is the single seam every one of those
-paths reads (``codex_preflight.codex_home``, ``heads.CODEX_HOME``,
-``dispatcher_tui._sessions_root``), so the suite claims one throwaway home of
+paths reads (``codex_preflight.codex_home``, resolved per launch, and every
+sessions reader built on it), so the suite claims one throwaway home of
 its own for the whole run, before any test module is imported.
 ``tests/test_hermetic_codex.py`` proves it.
 

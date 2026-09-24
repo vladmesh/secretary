@@ -9,6 +9,7 @@ import os
 import pwd
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1674,6 +1675,73 @@ class InstallationTests(unittest.TestCase):
             rendered = (target / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model = "operator-choice"', rendered)
             self.assertIn('bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"', rendered)
+
+    def _codex_product(self, root: Path) -> Path:
+        product = root / "product"
+        source = product / "packaging" / "codex-home"
+        source.mkdir(parents=True)
+        (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+        (source / "config.toml").write_text(
+            'model = "test"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
+            'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n',
+            encoding="utf-8",
+        )
+        return product
+
+    def test_codex_home_seeds_the_data_dir_home_copy_once_and_never_a_login(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = self._codex_product(root)
+            data_dir = root / "data"
+            data_home = data_dir / "codex-home"
+            legacy = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
+            with (
+                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                # Both homes are seeded while the legacy one is still the active one.
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 4)
+                self.assertEqual(sorted(path.name for path in data_home.iterdir()), ["AGENTS.md", "config.toml"])
+                self.assertEqual(sorted(path.name for path in legacy.iterdir()), ["AGENTS.md", "config.toml"])
+                self.assertEqual(stat.S_IMODE(data_home.stat().st_mode), 0o700)
+                (data_home / "config.toml").write_text("operator state\n", encoding="utf-8")
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 0)
+            self.assertEqual((data_home / "config.toml").read_text(encoding="utf-8"), "operator state\n")
+            self.assertFalse((data_home / "auth.json").exists())
+            self.assertFalse((legacy / "auth.json").exists())
+
+    def test_codex_home_reconciles_the_legacy_home_only_while_it_is_active(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = self._codex_product(root)
+            data_dir = root / "data"
+            data_home = data_dir / "codex-home"
+            legacy = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+            unreconciled = 'model = "operator-choice"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
+            legacy.mkdir(parents=True)
+            (legacy / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+            (legacy / "config.toml").write_text(unreconciled, encoding="utf-8")
+            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
+            with (
+                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                # Legacy active: its managed Memory entry is still reconciled, next to the new seed.
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 3)
+                self.assertIn(
+                    'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"',
+                    (legacy / "config.toml").read_text(encoding="utf-8"),
+                )
+                # After the PO's login the data-dir home is the active one and the legacy is left alone.
+                login = '{"tokens": "fixture"}\n'
+                (data_home / "auth.json").write_text(login, encoding="utf-8")
+                (legacy / "config.toml").write_text(unreconciled, encoding="utf-8")
+                (legacy / "AGENTS.md").unlink()
+                self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 0)
+            self.assertEqual((legacy / "config.toml").read_text(encoding="utf-8"), unreconciled)
+            self.assertFalse((legacy / "AGENTS.md").exists())
+            self.assertEqual((data_home / "auth.json").read_text(encoding="utf-8"), login)
 
     def test_root_checks_orca_as_installation_user(self):
         with (

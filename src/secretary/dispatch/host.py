@@ -62,6 +62,7 @@ from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
 from secretary.dispatch.git_workspace import WORKSPACES_DIR as GIT_WORKSPACES_DIR
+from secretary.dispatch.git_workspace import orca_workspaces_root
 from secretary.dispatch.git_workspace import GitWorkspaceManager
 from secretary.dispatch.git_workspace import _resolved as _resolved_path
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
@@ -855,7 +856,9 @@ class CommandHostRuntime:
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
         # than independently guessing an interpreter, checkout or workspace namespace.
-        self.production_runtime = production_runtime or ProductionRuntime.current(configured_product_root())
+        self.production_runtime = production_runtime or ProductionRuntime.current(
+            configured_product_root(), git_workspaces_root=Path(data_dir) / GIT_WORKSPACES_DIR
+        )
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
@@ -2227,9 +2230,7 @@ class CommandHostRuntime:
     @staticmethod
     def _orca_workspaces_root() -> Path:
         """Where Orca's worktrees are namespaced; `SECRETARY_DISPATCHER_WORKSPACES_ROOT` names only this."""
-        return Path(
-            os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces"))
-        )
+        return orca_workspaces_root()
 
     @property
     def _git_workspaces(self) -> GitWorkspaceManager:

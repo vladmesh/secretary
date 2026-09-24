@@ -22,6 +22,7 @@ from pathlib import Path
 from secretary.dispatch.bootstrap import runtime_from_args
 from secretary.dispatch.head_status import head_status
 from secretary.dispatch.types import DispatcherError, HostError
+from secretary.runtime.codex_home import bound_data_dir
 from secretary.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from secretary.tasks import TaskError
 from secretary.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
@@ -250,7 +251,9 @@ def run_head_status(args: argparse.Namespace) -> int:
 def _run_production(args: argparse.Namespace, operation) -> int:
     try:
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
-        result = operation(runtime)
+        # Every Codex head this operation launches resolves its CODEX_HOME against this data dir.
+        with bound_data_dir(runtime.data_dir):
+            result = operation(runtime)
     except (DispatcherError, TaskError) as exc:
         print(
             json.dumps(
