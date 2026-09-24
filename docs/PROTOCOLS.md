@@ -2935,6 +2935,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: active sprints, pipeline controls, provider limits, doctor and server summary, running PO turns |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/tasks/{ref}/heads/{run_id}` | `reads.head_view` | one of the card's local-pty heads, read-only: its terminal's tail as redacted plain text and its journal's tail; a run id the card did not record is 404 |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |
 | GET | `/projects` | `reads.system_snapshot` | registered projects |
 | GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
@@ -2945,6 +2946,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
 | GET | `/api/tasks/{ref}/runs` | `ops.run_list` | every product run of one card |
+| GET | `/api/tasks/{ref}/heads/{run_id}` | `reads.head_view` | the head view's document |
 | GET | `/api/runs/{run_id}` | `ops.run_state` | one run, and where its ending settles |
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |

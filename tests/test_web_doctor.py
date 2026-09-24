@@ -368,7 +368,7 @@ class TheLampTests(TransportFixture):
 
 class TheLampCostsOneCollectionTests(TransportFixture):
     def page_paths(self) -> list[str]:
-        placeholders = {"ref": "secretary-9", "project": "secretary", "session": "s-1"}
+        placeholders = {"ref": "secretary-9", "project": "secretary", "session": "s-1", "run_id": "r-1"}
         paths = []
         for route in ROUTES:
             if not (route.page and route.method == "GET") or route.pattern.startswith("/po"):

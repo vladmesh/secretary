@@ -29,7 +29,7 @@ from tests.web_fakes import Recording, system_snapshot
 #: What a path placeholder is filled with when this test drives the route it belongs to. A route
 #: added with a placeholder nobody listed here fails :meth:`RouteFixture.concrete` rather than being
 #: quietly skipped: an untested page route is exactly what this suite exists to prevent.
-PLACEHOLDERS = {"ref": "secretary-9", "project": "secretary", "session": "s-1"}
+PLACEHOLDERS = {"ref": "secretary-9", "project": "secretary", "session": "s-1", "run_id": "r-1"}
 
 NOW = 1_800_000_000.0
 
@@ -242,6 +242,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
             {
                 "/",
                 "/tasks/secretary-9",
+                "/tasks/secretary-9/heads/r-1",
                 "/sprints",
                 "/sprints/new",
                 "/sprints/secretary-9",
@@ -515,7 +516,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74%", bar)
                 self.assertIn("41%", bar)
-        self.assertEqual(len(paths) * 5, 55, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 60, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:

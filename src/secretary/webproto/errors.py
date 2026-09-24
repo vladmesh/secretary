@@ -84,6 +84,12 @@ class RunNotFound(ReadError):
     code = "not_found"
 
 
+class HeadRunNotFound(ReadError):
+    """The card recorded no head run under this identifier: not its own, or no run at all."""
+
+    code = "not_found"
+
+
 class OwnerConflict(ReadError):
     """Somebody else owns this card, or this run, and a second owner is not created.
 

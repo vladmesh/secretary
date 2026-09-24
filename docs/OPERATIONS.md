@@ -2369,3 +2369,9 @@ called and `pane_channel` is `not_consulted` with its reason.
 Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:
 no lifecycle call, no rebinding, no harder probing.
+
+The web card page lists the card's heads under **Heads** (role, run id, state); each local-pty one links to
+`/tasks/<ref>/heads/<run_id>` (JSON: `/api/tasks/...`), a read-only view with no input or control: the terminal
+tail as redacted plain text (from the supervisor while it runs) and the journal tail. Orca is not used. When a
+supervisor lets go of a run it writes `<data_dir>/heads/<run_id>/output.tail`: the last 64 KiB of raw output,
+owner-only, atomic. A run that ended earlier has none and says "no transcript was kept for this run".

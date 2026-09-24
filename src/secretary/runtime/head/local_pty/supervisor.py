@@ -1127,7 +1127,12 @@ class Supervisor:
         return EXIT_OK
 
     def _shutdown(self) -> None:
-        """Let go of everything, in the order that leaves nothing addressable behind."""
+        """Let go of everything, in the order that leaves nothing addressable behind.
+
+        The output tail is written first, while the socket still answers: a reader that finds the
+        socket gone then finds the tail, and there is no moment when a finished run has neither.
+        """
+        self._persist_output_tail()
         if self._listener is not None:
             try:
                 self._selector.unregister(self._listener)
@@ -1152,6 +1157,59 @@ class Supervisor:
         if self._lock_fd >= 0:
             os.close(self._lock_fd)
             self._lock_fd = -1
+
+    def _persist_output_tail(self) -> None:
+        """Leave the last `OUTPUT_TAIL_BYTES` of the head's output in the run directory.
+
+        Reached from `_shutdown`, so from every ending of a run that was up: the head's own exit, a
+        stop or a drain, a head killed by a signal, and a supervisor that failed after `run.started`.
+        A run that never came up has no transcript to keep; its reason is `startup.error`.
+
+        What the head wrote just before it exited can still be in the pty when the loop sees the
+        exit, so that is read first. The file is written beside its final name and renamed over it,
+        owner-only like everything else here, so a reader sees the whole tail or none of it. Failing
+        to write it is said on stderr and nothing more: the socket and the lock are still to be let
+        go of, and a missing transcript is a smaller loss than a run directory left addressable.
+        """
+        if not self.started:
+            return
+        self._drain_head_output()
+        tail = bytes(self._output[-protocol.OUTPUT_TAIL_BYTES :])
+        target = self.run_dir / protocol.OUTPUT_TAIL_NAME
+        staged = self.run_dir / f".{protocol.OUTPUT_TAIL_NAME}.{os.getpid()}"
+        try:
+            fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            try:
+                view = memoryview(tail)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(staged, target)
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            print(f"supervisor could not keep the output tail: {exc}", file=sys.stderr)
+
+    def _drain_head_output(self) -> None:
+        """Take into the buffer what the pty still holds, without waiting and within a bound.
+
+        Deliberately not `_read_head`: this is the tail's last read, not the loop's, so it opens no
+        turn, pushes nothing to a client and writes nothing to the journal. The bound keeps a head
+        that is still printing — a supervisor failing under a live head — from holding it here.
+        """
+        if self._master < 0:
+            return
+        for _ in range(protocol.OUTPUT_BUFFER_BYTES // _READ_CHUNK + 1):
+            try:
+                chunk = os.read(self._master, _READ_CHUNK)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self._output += chunk
+            if len(self._output) > protocol.OUTPUT_BUFFER_BYTES:
+                del self._output[: len(self._output) - protocol.OUTPUT_BUFFER_BYTES]
 
     def _append(self, kind: str, **fields: Any) -> dict[str, Any]:
         assert self._journal is not None

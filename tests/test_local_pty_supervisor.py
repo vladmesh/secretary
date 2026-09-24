@@ -23,6 +23,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from secretary.dispatch.watchdog import (
@@ -1289,6 +1290,124 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(handle.events().of_kind(RUN_STOPPING)[-1]["initiator"], "observer")
         self._await(lambda: not _alive(handle.head_pid), message="the stopped head survived")
         self._await(lambda: not _alive(handle.supervisor_pid), message="the supervisor survived")
+
+
+    # -- the output tail a finished run keeps (secretary-1703) --------------------------------
+
+    #: Every field `run.exited` carried before the tail existed, and still the only ones.
+    RUN_EXITED_FIELDS: ClassVar[set[str]] = {
+        "schema_version",
+        "seq",
+        "run_id",
+        "kind",
+        "at",
+        "head_pid",
+        "output_bytes",
+        "dropped_bytes",
+        "stopping",
+        "signal",
+        "exit_code",
+    }
+
+    def _await_tail(self, handle: HeadHandle) -> bytes:
+        self._await(
+            lambda: not _alive(handle.supervisor_pid),
+            timeout=15.0,
+            message="the supervisor never let go of its run",
+        )
+        tail = handle.run_dir / protocol.OUTPUT_TAIL_NAME
+        self.assertTrue(tail.is_file(), "the supervisor let go without keeping the output tail")
+        self.assertEqual(tail.stat().st_mode & 0o777, 0o600, "the tail is the head's output: owner-only")
+        self.assertEqual(
+            sorted(path.name for path in handle.run_dir.iterdir() if path.name.startswith(".")),
+            [],
+            "a staged tail was left behind",
+        )
+        exited = handle.events().of_kind(RUN_EXITED)[-1]
+        self.assertEqual(set(exited), self.RUN_EXITED_FIELDS, "the journal's exit record changed shape")
+        return tail.read_bytes()
+
+    def test_a_heads_own_exit_leaves_its_output_tail(self) -> None:
+        handle = self._start(run_id="tail-exit")
+        client = self._client(handle)
+        self._await_output(client, b"SIZE ")
+        self.assertTrue(client.send_input("hello\n")["ok"])
+        self._await_output(client, b"ECHO hello")
+        self.assertTrue(client.send_input("exit 3\n")["ok"])
+        kept = self._await_tail(handle)
+        self.assertIn(b"ECHO hello", kept)
+        self.assertTrue(kept.rstrip().endswith(b"BYE"), f"the last thing the head said is missing: {kept[-80:]!r}")
+        self.assertEqual(handle.events().of_kind(RUN_EXITED)[-1]["exit_code"], 3)
+
+    def test_a_drain_and_a_stop_leave_the_output_tail(self) -> None:
+        handle = self._start(
+            run_id="tail-stop",
+            command=f"{sys.executable} -u -c "
+            "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_DFL);"
+            'print("UP-AND-WAITING",flush=True);time.sleep(600)\'',
+        )
+        client = self._client(handle)
+        self._await_output(client, b"UP-AND-WAITING")
+        self.assertTrue(client.drain("observer")["ok"])
+        self.assertTrue(client.stop("observer")["ok"])
+        self.assertIn(b"UP-AND-WAITING", self._await_tail(handle))
+        self.assertTrue(handle.events().of_kind(RUN_EXITED)[-1]["stopping"])
+
+    def test_a_head_that_crashes_leaves_the_output_tail(self) -> None:
+        handle = self._start(run_id="tail-crash")
+        client = self._client(handle)
+        self.assertTrue(client.send_input("before the crash\n")["ok"])
+        self._await_output(client, b"ECHO before the crash")
+        _kill(handle.head_pid, signal.SIGKILL)
+        self.assertIn(b"ECHO before the crash", self._await_tail(handle))
+        self.assertEqual(handle.events().of_kind(RUN_EXITED)[-1]["signal"], int(signal.SIGKILL))
+
+    def test_the_output_tail_is_bounded_to_its_end(self) -> None:
+        handle = self._start(run_id="tail-bound")
+        client = self._client(handle)
+        self.assertTrue(client.send_input("spew 120\n")["ok"])
+        self._await_output(client, b"SPEWDONE", timeout=15.0)
+        self.assertTrue(client.send_input("quit\n")["ok"])
+        kept = self._await_tail(handle)
+        self.assertEqual(protocol.OUTPUT_TAIL_BYTES, 64 * 1024)
+        self.assertEqual(len(kept), protocol.OUTPUT_TAIL_BYTES, "120 KB of output keeps exactly the bound")
+        self.assertIn(b"SPEWDONE", kept)
+        self.assertTrue(kept.rstrip().endswith(b"BYE"))
+        self.assertNotIn(b"000000 ", kept, "the start of the output is what the bound drops")
+
+    def test_a_supervisor_that_fails_after_the_run_was_up_still_keeps_the_tail(self) -> None:
+        """`run`'s one `finally` is `_shutdown`, and the tail is its first act; a run never up keeps none."""
+        for started, expected in ((True, True), (False, False)):
+            with self.subTest(started=started):
+                run_dir = self.root / f"failed-{started}"
+                run_dir.mkdir()
+                supervisor = supervisor_module.Supervisor(
+                    run_dir=run_dir, run_id="failed", role="worker", task="t", command="true"
+                )
+                supervisor.started = started
+                supervisor._output = bytearray(b"x" * (protocol.OUTPUT_TAIL_BYTES + 10) + b"last words")
+                supervisor._shutdown()
+                tail = run_dir / protocol.OUTPUT_TAIL_NAME
+                self.assertEqual(tail.exists(), expected)
+                if expected:
+                    kept = tail.read_bytes()
+                    self.assertEqual(len(kept), protocol.OUTPUT_TAIL_BYTES)
+                    self.assertTrue(kept.endswith(b"last words"))
+
+    def test_a_tail_that_cannot_be_written_does_not_keep_the_supervisor_from_letting_go(self) -> None:
+        run_dir = self.root / "unwritable"
+        run_dir.mkdir()
+        (run_dir / protocol.OUTPUT_TAIL_NAME).mkdir()  # a directory where the file would be renamed
+        supervisor = supervisor_module.Supervisor(
+            run_dir=run_dir, run_id="unwritable", role="worker", task="t", command="true"
+        )
+        supervisor.started = True
+        supervisor._output = bytearray(b"output")
+        (run_dir / protocol.SUPERVISOR_PID_NAME).write_text("1\n")
+        with mock.patch("sys.stderr"):
+            supervisor._shutdown()
+        self.assertFalse((run_dir / protocol.SUPERVISOR_PID_NAME).exists(), "shutdown stopped at the tail")
+        self.assertEqual([path.name for path in run_dir.iterdir() if path.name.startswith(".")], [])
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):

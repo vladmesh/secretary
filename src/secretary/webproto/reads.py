@@ -1,9 +1,11 @@
-"""The three read operations every transport of this installation answers from.
+"""The read operations every transport of this installation answers from.
 
-`system_snapshot`, `task_snapshot` and `task_events` are the whole surface. A dashboard is one
-system snapshot; a card page is one task snapshot plus a cursor it polls; a Telegram head asking
-"what is running" is the same system snapshot rendered as a message. There is no fourth operation
-here for a future need, and no operation that writes anything at all.
+`system_snapshot`, `task_snapshot` and `task_events` are the surface every transport shares. A
+dashboard is one system snapshot; a card page is one task snapshot plus a cursor it polls; a
+Telegram head asking "what is running" is the same system snapshot rendered as a message.
+`head_view` is the one read added for a need that arrived (secretary-1703): what one of a card's
+local-pty heads printed and journalled, without Orca (:mod:`secretary.webproto.head_view`). No
+operation here writes anything at all.
 
 Everything below is assembled from sources that already exist and already own their meaning --
 `collect_status` for installation health, the validated project bindings for the registry,
@@ -33,10 +35,17 @@ from secretary.dispatch.types import HostError
 from secretary.status import collect_status
 from secretary.tasks import TaskError, TaskReader, task_audit_for
 from secretary.webproto import agents as agent_reads
+from secretary.webproto import head_view as head_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.cursor import Cursor, decode
-from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, ReadError, TaskNotFound
+from secretary.webproto.errors import (
+    HeadRunNotFound,
+    InstallationUnavailable,
+    InvalidCursor,
+    ReadError,
+    TaskNotFound,
+)
 from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
 
 SCHEMA_VERSION = 1
@@ -251,9 +260,10 @@ class ReadLayer(ProtocolBoundary):
         report = self.report()
         data_dir = self.data_dir(report)
         card, card_source = self._card(reference, data_dir, now=now)
-        page = self._tail(reference, data_dir, limit=events, now=now)
+        page, history = self._tail(reference, data_dir, limit=events, now=now)
         attempt, record, attempt_source = self._attempt(reference, data_dir, now=now)
         rows = agent_reads.agent_rows(record, reference) if record is not None else []
+        heads = self._heads(reference, data_dir, record, attempt_source, page.source, history, now=now)
         project = _text(card.get("project")) if card else None
         for row in rows:
             row["project"] = project
@@ -266,6 +276,7 @@ class ReadLayer(ProtocolBoundary):
             "project": self._project_of(report, project),
             "attempt": {"source": attempt_source.to_json(), "value": attempt},
             "agents": {"source": attempt_source.to_json(), "items": rows},
+            "heads": heads,
             "work": _work(card),
             "events": {
                 "source": page.source.to_json(),
@@ -308,18 +319,102 @@ class ReadLayer(ProtocolBoundary):
         page = reader.page(reference, cursor=position, limit=limit, now=now)
         return _events_document(reference, page, now=now, cursor=cursor)
 
-    def _tail(self, ref: str, data_dir: Path, *, limit: int, now: float) -> EventPage:
-        """The opening page of a card's history, from the reader its backend owns.
+    def head_view(self, ref: str, run_id: str) -> dict[str, Any]:
+        """A read-only view of one of the card's local-pty heads: its terminal's tail and its journal.
+
+        `run_id` has to be one the card recorded -- the dispatcher's current worker or reviewer run,
+        or a launch its own history names -- and any other is not found, whatever it looks like. Past
+        that, nothing refuses: every source is read under a guard and a dead one is said as such
+        (:mod:`secretary.webproto.head_view`).
+        """
+        now = self._clock()
+        reference = str(ref or "")
+        if not reference:
+            raise TaskNotFound("a task reference is required")
+        data_dir = self.data_dir()
+        self._card_exists(reference)
+        try:
+            history: tuple[dict[str, Any], ...] | None = self._events(data_dir).history(reference)
+        except _SOURCE_FAILURES as exc:
+            raise InstallationUnavailable(
+                f"this card's history could not be read, so its head runs are not known: {_reason(exc)}"
+            ) from None
+        try:
+            record = self._records(data_dir).get(reference)
+        except _SOURCE_FAILURES as exc:
+            raise InstallationUnavailable(
+                f"the dispatcher production state could not be read: {_reason(exc)}"
+            ) from None
+        heads = head_reads.recorded_heads(record, history)
+        document = head_reads.head_view(
+            reference, str(run_id or ""), heads, self._heads_root(data_dir), observed_at=sources.isoformat(now)
+        )
+        if document is None:
+            raise HeadRunNotFound(f"card {reference} recorded no head run {str(run_id or '')[:80]!r}")
+        return document
+
+    def _tail(
+        self, ref: str, data_dir: Path, *, limit: int, now: float
+    ) -> tuple[EventPage, tuple[dict[str, Any], ...] | None]:
+        """The opening page of a card's history, and the whole of it briefly, from one traversal.
 
         A backend that cannot be established takes this section away and nothing else, exactly as an
         unreadable journal does: a snapshot whose events are unavailable still carries the card, the
-        project and the attempt.
+        project and the attempt. The whole history is what the card's head runs are read from.
         """
         try:
             reader = self._events(data_dir)
         except _SOURCE_FAILURES as exc:
-            return self._unselected(ref, None, exc, data_dir, now=now)
-        return reader.tail(ref, limit=limit, now=now)
+            return self._unselected(ref, None, exc, data_dir, now=now), None
+        return reader.tail_with_history(ref, limit=limit, now=now)
+
+    def _heads_root(self, data_dir: Path) -> Path:
+        """Where local-pty run directories live: the dispatcher's own `local_pty_root`."""
+        return data_dir / "heads"
+
+    def _heads(
+        self,
+        ref: str,
+        data_dir: Path,
+        record: DispatcherRecord | None,
+        record_source: sources.Source,
+        history_source: sources.Source,
+        history: tuple[dict[str, Any], ...] | None,
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        """The card's head runs, each with its state and whether it has a view.
+
+        Read from the dispatcher record and the card's history; when either could not be read the
+        section says so, and still lists what the other one named.
+        """
+        missing = [
+            source.reason or "unreadable"
+            for source in (record_source, history_source)
+            if source.state != sources.AVAILABLE
+        ]
+        heads = head_reads.recorded_heads(record, history)
+        items = head_reads.head_rows(ref, heads, self._heads_root(data_dir))
+        source = (
+            sources.unavailable(
+                "this card's head runs may be incomplete: " + "; ".join(str(reason) for reason in missing),
+                now=now,
+            )
+            if missing
+            else sources.available(now)
+        )
+        return {"source": source.to_json(), "items": items}
+
+    def _card_exists(self, ref: str) -> None:
+        """Refuse a card the board does not hold, so a view is never answered for a card that is not."""
+        try:
+            TaskReader(self._client()).show(ref)
+        except TaskError as exc:
+            if exc.code == "not_found":
+                raise TaskNotFound(f"the board holds no card {ref!r}") from None
+            raise InstallationUnavailable(f"the board could not be read: {exc.message}") from None
+        except _SOURCE_FAILURES as exc:
+            raise InstallationUnavailable(f"the board could not be read: {_reason(exc)}") from None
 
     # -- sections --------------------------------------------------------------------------
 
