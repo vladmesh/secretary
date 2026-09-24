@@ -12,6 +12,7 @@ from unittest import mock
 
 from secretary import sprints
 from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.steward_reports import StewardReportBoard
 from secretary.cli import main
 from secretary.config import load_config
 from secretary.knowledge_write import list_knowledge_documents
@@ -3062,6 +3063,78 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
                 target="issues",
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+
+    def _steward_report(self, slug: str) -> dict:
+        """A report created through the steward's own port, the chain its tick runs."""
+        board = StewardReportBoard(TaskReader(self.client), self.tasks, actor="steward")  # type: ignore[arg-type]
+        reference = board.create_report(project="secretary", title=f"steward: {slug}", slug=slug)
+        return TaskReader(self.client).show(reference)  # type: ignore[arg-type]
+
+    def test_steward_writes_its_own_report_on_a_reserved_project(self) -> None:
+        """secretary-1712: the steward's report is its tick's accounting, not the holding sprint's work."""
+        done = self._steward_report("steward-sweep-done")
+        blocked = self._steward_report("steward-sweep-blocked")
+        self.assertEqual((done["state"], done["sprint"]), ("in_progress", None))
+        # Created In progress for the steward's own tick, it is never the dispatcher's to claim.
+        with self.assertRaises(TaskError) as claimed:
+            self.tasks.claim(role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker")
+        self.assertEqual(claimed.exception.code, "claim_conflict")
+        board = StewardReportBoard(TaskReader(self.client), self.tasks, actor="steward")  # type: ignore[arg-type]
+
+        for card, target in ((done, "done"), (blocked, "blocked")):
+            self.tasks.comment(
+                role="steward",
+                actor="steward",
+                reference=card["ref"],
+                body=f"report for {target}",
+                request_id=f"report-comment-{target}",
+            )
+            board.move_report(reference=card["ref"], target=target, reason=f"sweep closed as {target}")
+            self.assertEqual(TaskReader(self.client).show(card["ref"])["state"], target)  # type: ignore[arg-type]
+
+        events = SqlTaskAudit(self.client).events()
+        self.assertEqual([event for event in events if event["kind"] == "sprint_guard_denied"], [])
+        written = [event for event in events if event.get("ref") in {done["ref"], blocked["ref"]}]
+        self.assertTrue(written)
+        for event in written:
+            self.assertEqual(event["actor"], {"role": "steward", "id": "steward"})
+            self.assertNotIn("sprint_override_reason", event.get("payload") or {})
+
+    def test_steward_writes_on_a_non_report_card_stay_refused(self) -> None:
+        unlinked = self.tasks.create(
+            role="po",
+            actor="operator",
+            project="secretary",
+            task_type="research",
+            title="not a report",
+            request_id="po-unlinked",
+        )["task"]
+        self.tasks.claim(role="dispatcher", actor="dispatcher", reference=unlinked["ref"], worker="worker")
+        linked = self.tasks.create(
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="code",
+            title="sprint work",
+            sprint=self.ref,
+            request_id="observer-linked",
+        )["task"]
+
+        for card in (unlinked, linked):
+            with self.subTest(card=card["ref"]), self.assertRaisesRegex(TaskError, self.ref) as denied:
+                self.tasks.move(
+                    role="steward",
+                    actor="steward",
+                    reference=card["ref"],
+                    target="blocked",
+                    reason="escalated by the steward",
+                )
+            self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+
+        denied_events = [
+            event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_denied"
+        ]
+        self.assertEqual(len(denied_events), 2)
 
     def test_sql_unique_live_reservation_rolls_back_an_unrepresentable_overlap(self) -> None:
         """SQL rejects the impossible duplicate reservation without a partial restore."""
