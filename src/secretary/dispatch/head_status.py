@@ -1,47 +1,38 @@
-"""What the dispatcher's heads in one live workspace are, told apart from what its window shows.
+"""What the dispatcher's heads in one live workspace are: alive, absent or unproven, and why.
 
-An operator who opens a card's workspace and sees no worker pane reads it as "the worker never
-started" and intervenes by hand -- drops the claim, kills the workspace, restarts the card -- and
-destroys live work. The measurement behind ``issue:84c0ae4f796f994a7c1d`` (2026-08-24, card
-secretary-1450) is the counter-example: pty 106 was listed by Orca with ``connected: true``, no
-runtime pane drew it, and the head behind it was working -- live TUI, a growing rollout session,
-delivery accepted, vitality ``healthy_quiet``.
+An operator who opens a card's workspace and sees no head reads it as "the worker never started"
+and intervenes by hand -- drops the claim, kills the workspace, restarts the card -- and destroys
+live work. The measurement behind ``issue:84c0ae4f796f994a7c1d`` (2026-08-24, card
+secretary-1450) was the counter-example: an Orca pane nothing drew, and the head behind it working.
+So this command answers "is the head alive?" from the sources that observe the head, and says
+which of them proved it and which could not answer.
 
-So this module answers two questions per head and keeps them apart:
+Every head the dispatcher raises runs under a `local-pty` supervisor, and its row reads what that
+backend keeps: the pid heartbeat, the supervisor's own answer, its lock and its journal. No pane
+is read for any row (A20 step 5, secretary-1723). A legacy record -- a run on `orca-legacy`, or a
+head identity with no durable run -- is shown as one (`legacy_record`, by the product's one
+predicate `is_legacy_record`) and read through its pid heartbeat alone; it is never inventoried
+through Orca.
 
-    is the head alive?          from the vitality snapshot, and only from it
-    is its runtime pane shown?  from the renderer's own tree, never as evidence about the head
-
-The second question is asked of the thing that actually answers it. `orca terminal list` describes
-ptys and says nothing about what is drawn; the visual-layout tree it returns beside them, with
-`--include-visual-layouts`, is the renderer's own inventory of drawn panes. So visibility here is
-membership: a pty the tree names is drawn, and a pty the inventory lists while no leaf of that tree
-names it is the measured case -- listed, connected, drawn by nothing.
-
-The whole point is the second one can never answer the first. ``head_vitality``'s invariant --
-pane and terminal readings are advisory, fill the ``Turn`` axis alone and are never by themselves
-evidence of death -- is what this command exists to make visible to a human, so it is repeated in
-the output rather than merely obeyed in the code.
+``head_vitality``'s invariant -- pane and terminal readings are advisory and never by themselves
+evidence of death -- is still printed on every row, so an operator reading one needs no module
+knowledge to read it correctly.
 
 Read-only, in the strong sense: it starts nothing, stops nothing, repairs nothing and writes
-neither the dispatcher's state nor the head's. Its host is a transport that can only read, so a
-provider cursor is read from the run already persisted rather than being rebound, and a head whose
-channel cannot answer is reported unproven rather than probed harder.
+neither the dispatcher's state nor the head's, and a head whose channel cannot answer is reported
+unproven rather than probed harder.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import os
-import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from secretary import _proc
 from secretary.dispatch.head_vitality import (
     ProcessState,
     ProgressState,
@@ -53,11 +44,7 @@ from secretary.dispatch.head_vitality import (
 from secretary.dispatch.head_vitality_episode import recovery_outlook
 from secretary.dispatch.host import _durable_head_run
 from secretary.dispatch.observer import load_observers, observer_head_status
-from secretary.dispatch.review import (
-    command_terminal_status,
-    orca_workspace_inventory,
-    pane_matcher,
-)
+from secretary.dispatch.review import command_terminal_status
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.tui import provider_progress_for_persisted_run
 from secretary.dispatch.types import HostError
@@ -67,26 +54,12 @@ from secretary.runtime.head.identity import HEARTBEAT_DEAD, HEARTBEAT_LIVE_MATCH
 from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name, is_legacy_record
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.local_pty_head import head_run_journal_read, head_run_supervisor_lease
-from secretary.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
 # prove, and the honest third that keeps an unanswerable channel from being rounded to either.
 HEAD_ALIVE = "alive"
 HEAD_ABSENT = "absent"
 HEAD_UNPROVEN = "unproven"
-
-# What it may say about that head's runtime pane. Four negative words where one would do, because
-# each names a different fact: "no-runtime-pane" is a pty the inventory lists and the renderer
-# draws nowhere (the case the card exists for), "no-pane" is a pty no inventory answers for at all,
-# "unknown" is a renderer channel that could not decide -- unsupported by this build, silent about
-# this workspace, or naming no identity this pty can be compared by -- and "unavailable" is a pane
-# inventory that refused. None of the four is a word about the head.
-PANE_VISIBLE = "visible"
-PANE_NO_RUNTIME_PANE = "no-runtime-pane"
-PANE_NO_PANE = "no-pane"
-PANE_UNKNOWN = "unknown"
-PANE_UNAVAILABLE = "unavailable"
-PANE_NOT_CONSULTED = "not-consulted"
 
 # Printed on every answer, next to every head. An operator reading a row must not have to know the
 # module invariant to read the row correctly.
@@ -101,68 +74,24 @@ PANE_ADVISORY_INVARIANT = (
 # unsampled source look like a broken one.
 NOT_OBSERVED = "not_observed"
 
-# A channel this answer deliberately did not ask: the pane inventory of a workspace no Orca pane
-# can describe. Distinct from `unavailable` for the same reason as above -- nothing refused.
-NOT_CONSULTED = "not_consulted"
+#: What a legacy row says about itself, in place of anything a pane could have said.
+LEGACY_NOTICE = (
+    "It is a legacy record: shown, never launched or delivered to, and no pane inventory is read for it."
+)
 
 _ROLES = (("worker", "worker"), ("review", "reviewer"))
 
 
 @dataclass
-class ReadOnlyOrcaTransport:
-    """The ``orca terminal`` JSON transport, for an observer that may only read.
+class HeadStatusHost:
+    """Everything `command_terminal_status` asks a host for, answered without a single write.
 
-    The same shape the dispatcher host exposes to `command_terminal_status`, minus everything that
-    could change the session manager's state: this object owns no lifecycle call, so a caller
-    holding one cannot open, close, type into or stop a pane even by mistake.
+    The provider cursor comes from the run already persisted on the record: the dispatcher's own
+    reader may bind a Claude source and commit that binding back onto the record, which is a write,
+    and an observer reports "this channel did not answer" instead of performing one.
     """
 
     mode: str = "real"
-
-    def _run_json(self, args: list[str]) -> dict[str, Any]:
-        try:
-            completed = _proc.run(args, timeout=10)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HostError(f"terminal inventory unavailable: {exc}") from None
-        if completed.returncode:
-            raise HostError("terminal inventory failed")
-        try:
-            payload = json.loads(completed.stdout or "{}")
-        except ValueError:
-            raise HostError("terminal inventory returned invalid JSON") from None
-        return payload.get("result", payload) if isinstance(payload, dict) else {}
-
-
-@dataclass
-class HeadStatusHost(ReadOnlyOrcaTransport):
-    """Everything `command_terminal_status` asks a host for, answered without a single write.
-
-    Two differences from the dispatcher's own host, and both are the point. The worktree inventory
-    is read once and reused, so every head in one workspace is reported against the same pane
-    inventory rather than against three successive ones that may disagree. And the provider cursor
-    comes from the run already persisted on the record: the dispatcher's own reader may bind a
-    Claude source and commit that binding back onto the record, which is a write, and an observer
-    reports "this channel did not answer" instead of performing one.
-    """
-
-    _inventory: dict[str, WorkspaceInventory] = field(default_factory=dict)
-    #: Why the pane inventory is not to be asked at all; empty when it may be.
-    pane_refusal: str = ""
-
-    def workspace_inventory(self, workspace: str) -> WorkspaceInventory:
-        """One reading of the workspace -- its ptys and its renderer tree -- for every head."""
-        if self.pane_refusal:
-            # A workspace no Orca pane describes: a legacy-shaped row in it falls back to its pid
-            # heartbeat, exactly as it would behind an inventory that refused.
-            raise HostError(self.pane_refusal)
-        if workspace not in self._inventory:
-            self._inventory[workspace] = orca_workspace_inventory(self._run_json, workspace)
-        return self._inventory[workspace]
-
-    def workspace_panes(self, workspace: str) -> list[Any]:
-        # The seam `command_terminal_status` finds by name, answered from the same single reading:
-        # the head axis and the pane axis of one row cannot then disagree about which ptys existed.
-        return list(self.workspace_inventory(workspace).panes)
 
     def provider_progress(self, _task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, str]:
         run = record.review_head_run if kind == "review" else record.worker_head_run
@@ -170,7 +99,7 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
 
 
 def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> dict[str, Any]:
-    """Answer, for every head the dispatcher holds in ``workspace``, alive and pane-shown apart.
+    """Answer, for every head the dispatcher holds in ``workspace``, whether it is alive and why.
 
     One row per head identity the dispatcher actually carries for that workspace, so a workspace
     the dispatcher holds nothing in answers with no rows rather than with a guess. Nothing here
@@ -212,34 +141,11 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
         if record.owns_head(kind)
     ]
     observers = _observer_runs(payload, target)
-    host = HeadStatusHost(
-        pane_refusal=_pane_refusal(
-            runtime, target, [run for *_, run in held] + [run for *_, run in observers]
-        )
-    )
-    if host.pane_refusal:
-        panes: list[Any] = []
-        layout: RuntimeLayout | None = None
-        pane_channel = {"state": NOT_CONSULTED, "reason": host.pane_refusal}
-        runtime_pane_channel: dict[str, Any] = {**pane_channel, "supported": False}
-    else:
-        panes, pane_channel, layout = _pane_inventory(host, target)
-        runtime_pane_channel = _layout_channel(layout)
+    host = HeadStatusHost()
     heads = [
         _supervised_card_row(runtime, ref, record, run, kind=kind, role=role, observed_at=observed_at)
         if run is not None and head_runtime_name(run) == LOCAL_PTY_RUNTIME
-        else _head_row(
-            host,
-            ref,
-            record,
-            run,
-            kind=kind,
-            role=role,
-            panes=panes,
-            pane_channel=pane_channel,
-            layout=layout,
-            observed_at=observed_at,
-        )
+        else _legacy_row(host, ref, record, run, kind=kind, role=role, observed_at=observed_at)
         for ref, record, kind, role, run in held
     ]
     heads.extend(_supervised_observer_rows(runtime, observers, observed_at))
@@ -247,8 +153,6 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
         "status": "ok",
         "step": "head-status",
         "workspace": target,
-        "pane_channel": pane_channel,
-        "runtime_pane_channel": runtime_pane_channel,
         "heads": heads,
         "invariant": PANE_ADVISORY_INVARIANT,
         "summary": (
@@ -263,64 +167,7 @@ def _recorded_run(record: DispatcherRecord, kind: str) -> dict[str, Any]:
     return record.review_head_run if kind == "review" else record.worker_head_run
 
 
-def _pane_refusal(runtime: Any, workspace: str, runs: list[HeadRun | None]) -> str:
-    """Why the pane inventory is not read for this workspace, or empty when it is.
-
-    It is read when some head here would be read through a pane: a recorded run on `orca-legacy`,
-    or a head identity with no durable run at all, and -- today's answer for a record older than
-    runs -- a workspace that names no run whatever. It is not read for a workspace whose every
-    recorded head is supervised, which no pane describes, nor for a git worktree the dispatcher cut
-    itself, which Orca never made.
-    """
-    if getattr(runtime.host, "_is_git_workspace", lambda _path: False)(workspace) is True:
-        return (
-            "not consulted: this is a git-managed workspace the dispatcher made, and no Orca pane "
-            "inventory describes it"
-        )
-    if runs and all(run is not None and head_runtime_name(run) == LOCAL_PTY_RUNTIME for run in runs):
-        return (
-            "not consulted: every head recorded in this workspace runs under a local-pty "
-            "supervisor, and none of them owns a pane"
-        )
-    return ""
-
-
-def _pane_inventory(host: Any, workspace: str) -> tuple[list[Any], dict[str, str], RuntimeLayout | None]:
-    """One inventory read for the whole answer, with its refusal kept as a channel fact.
-
-    Two channels come back, not one, and they fail apart: the session manager can list a
-    workspace's ptys perfectly while saying nothing about what its renderer draws. Folding the
-    second refusal into the first would report a readable workspace as unreadable; folding it the
-    other way would report an unread tree as an undrawn pane, which is the same lie this command
-    exists to stop, told from the other side.
-    """
-    try:
-        inventory = host.workspace_inventory(workspace)
-    except HostError as exc:
-        return [], {"state": SourceAvailability.UNAVAILABLE.value, "reason": str(exc)[:240]}, None
-    return list(inventory.panes), {"state": "available", "reason": ""}, inventory.layout
-
-
-def _layout_channel(layout: RuntimeLayout | None) -> dict[str, Any]:
-    """The renderer channel, in the vitality vocabulary: available, or unavailable and why."""
-    if layout is None or not layout.supported or not layout.known_workspace:
-        return {
-            "state": SourceAvailability.UNAVAILABLE.value,
-            "reason": (
-                (layout.reason if layout is not None else "")
-                or "the pane inventory could not be read, so neither could the renderer tree"
-            )[:240],
-            "supported": bool(layout is not None and layout.supported),
-        }
-    return {
-        "state": SourceAvailability.AVAILABLE.value,
-        "reason": "",
-        "supported": True,
-        "drawn_panes": layout.terminal_nodes,
-    }
-
-
-def _head_row(
+def _legacy_row(
     host: Any,
     ref: str,
     record: DispatcherRecord,
@@ -328,34 +175,21 @@ def _head_row(
     *,
     kind: str,
     role: str,
-    panes: list[Any],
-    pane_channel: dict[str, str],
-    layout: RuntimeLayout | None,
     observed_at: float,
 ) -> dict[str, Any]:
-    """One head: what proved it, what could not answer, and separately what the window shows."""
+    """One legacy head: what its pid heartbeat proved, with no pane read for it."""
     run_payload = record.review_head_run if kind == "review" else record.worker_head_run
     run_id = str((run_payload or {}).get("run_id") or "")
-    pane_state, pane_detail = _pane_axis(
-        record,
-        kind=kind,
-        ref=ref,
-        panes=panes,
-        channel=pane_channel,
-        layout=layout,
-    )
     row: dict[str, Any] = {
         "ref": ref,
         "role": role,
-        # The legacy case: a head that lived in an Orca pane, read through that pane's inventory.
-        # A legacy record is shown, never launched or delivered to; `legacy_record` says which rows
-        # are one by the product's one predicate (a run with no runtime, or `orca-legacy`).
+        # A head that lived in an Orca pane, or one with no durable run. A legacy record is shown,
+        # never launched or delivered to; `legacy_record` says which rows are one by the product's
+        # one predicate (a run with no runtime, or `orca-legacy`).
         "runtime": ORCA_LEGACY_RUNTIME,
         "legacy_record": is_legacy_record(run),
         "run_id": run_id or None,
         "card_state": record.state,
-        "runtime_pane": pane_state,
-        "pane": pane_detail,
         "invariant": PANE_ADVISORY_INVARIANT,
     }
     if not run_id:
@@ -484,18 +318,15 @@ def _episode_row(
 _REPORTED_SOURCES = (
     SnapshotSource.PID_HEARTBEAT,
     SnapshotSource.PROVIDER_CURSOR,
-    SnapshotSource.PANE_ADVISORY,
 )
 
 
 def _terminal_status(host: Any, ref: str, record: DispatcherRecord, kind: str) -> tuple[dict[str, Any], str]:
     """The observation the wait tick makes, falling back to the pid heartbeat alone.
 
-    `command_terminal_status` reaches the heartbeat through the pane inventory, so an inventory
-    that refuses takes the whole observation with it -- and an operator looking at a workspace
-    whose session manager is unreachable is exactly the person who must not be told the head is
-    gone. So the refusal is recorded as a fact about that channel and the same pid probe the wait
-    tick would have made is made directly: one source instead of three, and the row says so.
+    `command_terminal_status` refuses a record with no workspace, and an operator looking at such
+    a record is exactly the person who must not be told the head is gone. So the refusal is
+    recorded as a fact about that channel and the same pid probe is made directly.
     """
     try:
         return command_terminal_status(host, {"ref": ref}, record, kind=kind), ""
@@ -510,7 +341,7 @@ def _terminal_status(host: Any, ref: str, record: DispatcherRecord, kind: str) -
             leaf=leaf,
         )
         return {"pid_status": dict(pid_status)}, (
-            f"the pane channel could not be read ({str(exc)[:200]}), so this head was observed "
+            f"the status channel could not be read ({str(exc)[:200]}), so this head was observed "
             "through its pid heartbeat alone"
         )
 
@@ -570,118 +401,11 @@ def _not_observed(source: SnapshotSource) -> dict[str, Any]:
     }
 
 
-def _pane_axis(
-    record: DispatcherRecord,
-    *,
-    kind: str,
-    ref: str,
-    panes: list[Any],
-    channel: dict[str, str],
-    layout: RuntimeLayout | None,
-) -> tuple[str, dict[str, Any] | None]:
-    """Whether this head's pty is drawn in the workspace, as the renderer itself reports it."""
-    if channel.get("state") == NOT_CONSULTED:
-        return PANE_NOT_CONSULTED, None
-    if channel.get("state") != "available":
-        return PANE_UNAVAILABLE, None
-    matches = pane_matcher(record, kind=kind, task_ref=ref)
-    pane = next((candidate for candidate in panes if matches(candidate)), None)
-    if pane is None:
-        return PANE_NO_PANE, None
-    state, reason = _drawn(pane, layout)
-    detail = {
-        "handle": pane.handle,
-        "leaf": pane.leaf,
-        "title": pane.title,
-        "connected": bool(pane.connected),
-        # Supplementary only, and usually absent: the build measured on 2026-08-25 returns no
-        # `paneRuntimeId` from this call. Reported where a host does name it, never relied on.
-        "runtime_pane_id": pane.runtime_pane_id,
-        "renderer_reason": reason,
-    }
-    return state, detail
-
-
-def _drawn(pane: Any, layout: RuntimeLayout | None) -> tuple[str, str]:
-    """Membership of this pty in the renderer tree, and the one honest word for each outcome.
-
-    Identity is the whole difficulty. `terminal list` can hand back a different handle alias for
-    the same pty (`dispatch/state.py:132`), so `leafId` is the primary key and the handle is only
-    a secondary one -- and an identity that cannot be compared at all is `unknown`, never a denial.
-    A negative verdict is therefore licensed only when the key that decides it is usable: a tree
-    that named leaves, or a tree that draws nothing at all.
-    """
-    if layout is None or not layout.supported:
-        return PANE_UNKNOWN, (layout.reason if layout is not None else "") or (
-            "the renderer tree was not read"
-        )
-    if not layout.known_workspace:
-        return PANE_UNKNOWN, layout.reason
-    if pane.leaf and pane.leaf in layout.leaves:
-        return PANE_VISIBLE, ("the renderer tree of this workspace draws a pane with this pty's leaf")
-    if pane.handle and pane.handle in layout.handles:
-        return PANE_VISIBLE, ("the renderer tree of this workspace draws a pane with this pty's handle")
-    empty_tree = layout.terminal_nodes == 0
-    if pane.leaf and (layout.leaves or empty_tree):
-        return PANE_NO_RUNTIME_PANE, (
-            f"the inventory lists this pty and no pane of the workspace's renderer tree "
-            f"({layout.terminal_nodes} drawn) names its leaf"
-        )
-    if not pane.leaf and pane.handle and (layout.handles or empty_tree):
-        return PANE_NO_RUNTIME_PANE, (
-            f"no leaf was ever persisted for this pty and no pane of the renderer tree "
-            f"({layout.terminal_nodes} drawn) names its handle"
-        )
-    return PANE_UNKNOWN, (
-        "the renderer tree named no identity this pty can be compared by, and a handle the "
-        "session "
-        "manager may have aliased is not evidence either way"
-    )
-
-
-# What the pane half of a summary says, and what every answer but "visible" ends in. The closing
-# clause is the whole point of the sentence: it is read by someone standing in front of a
-# workspace that looks empty, and it must leave them unable to conclude anything about the head.
-_NOT_ABOUT_THE_HEAD = "that is a fact about the window, not about the head"
-
-
-def _pane_sentence(row: dict[str, Any]) -> str:
-    """The pane half of the answer, always ending in what it does not mean."""
-    pane = row.get("pane") or {}
-    reason = str(pane.get("renderer_reason") or "")
-    state = row["runtime_pane"]
-    if state == PANE_VISIBLE:
-        return f"Its runtime pane is visible: {reason}."
-    if state == PANE_NO_RUNTIME_PANE:
-        return (
-            f"Its runtime pane is NOT visible: {reason}, and the pty is "
-            f"connected={str(bool(pane.get('connected'))).lower()}, so nothing draws it in the "
-            f"workspace; {_NOT_ABOUT_THE_HEAD}."
-        )
-    if state == PANE_NO_PANE:
-        return f"No pane in the workspace inventory answers to this head; {_NOT_ABOUT_THE_HEAD}."
-    if state == PANE_NOT_CONSULTED:
-        return (
-            "The pane inventory was not consulted for this workspace, so nothing is known about its "
-            "pane; that is a fact about that channel, not about the head."
-        )
-    if state == PANE_UNAVAILABLE:
-        return (
-            "The pane inventory could not be read, so nothing is known about its pane; "
-            "that is a fact about that channel, not about the head."
-        )
-    return (
-        f"Whether its runtime pane is visible is unknown: {reason}; "
-        "that is a fact about that channel, not about the head."
-    )
-
-
 def _summary(row: dict[str, Any]) -> str:
     """One sentence an operator can act on without interpreting anything.
 
-    Deliberately says the head half first and the pane half second, and never lets the second
-    qualify the first: the failure this card exists to stop is a human reading an invisible pane
-    as a missing head.
+    The verdict first, then the quiet half when there is one, then what the row is: a legacy
+    record, about which nothing is read from a pane.
     """
     head = row["head"]
     run = row["run_id"] or "no run id"
@@ -701,14 +425,14 @@ def _summary(row: dict[str, Any]) -> str:
             f"{who} is UNPROVEN: no source proved it either way (unavailable: {dark}). "
             "This is a statement about the observation, not about the head."
         )
-    return f"{verdict} {_episode_sentence(row)}{_pane_sentence(row)}"
+    return f"{verdict} {_episode_sentence(row)}{LEGACY_NOTICE}"
 
 
 def _episode_sentence(row: dict[str, Any]) -> str:
     """The quiet half, said only when there is something an operator has to act on.
 
-    A live head whose progress channel is dark reads as ``alive`` on the head axis and as an
-    ordinary pane on the pane axis, and until secretary-1543 that is all the summary said -- the
+    A live head whose progress channel is dark reads as ``alive`` on the head axis, and until
+    secretary-1543 that is all the summary said -- the
     one line an operator reads named neither the missing channel nor the deadline. It does now,
     and only then: a head with no dark source and no pending rung adds no words.
     """

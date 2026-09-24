@@ -1,6 +1,6 @@
 """The installation's data dir, for the CODEX_HOME resolver that cannot read it itself.
 
-`codex_preflight.resolve_codex_home` takes `<data_dir>/codex-home` once it holds a login, but that
+`codex_preflight.resolve_codex_home` takes `<data_dir>/codex-home` when it holds a login, but that
 module imports nothing else of `secretary`, so it knows the data dir only when it is named or in
 `SECRETARY_DATA_DIR`. This module is the other half: it reads the data dir of the selected
 installation, and binds it into `SECRETARY_DATA_DIR` for the processes that launch Codex heads, so
@@ -16,10 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from secretary.runtime.codex_preflight import (
-    CODEX_HOME_LEGACY_RELATIVE,
     CodexHome,
+    CodexHomeLoginMissing,
     data_dir_codex_home,
-    legacy_codex_home,
     resolve_codex_home,
 )
 
@@ -48,37 +47,51 @@ def selected_data_dir() -> Path | None:
 
 
 def installation_codex_home(profile: Mapping[str, Any] | None = None) -> CodexHome:
-    """The CODEX_HOME this process's installation launches Codex heads with."""
+    """The CODEX_HOME this process's installation launches Codex heads with.
+
+    Raises `CodexHomeLoginMissing` when there is none (`resolve_codex_home`).
+    """
     return resolve_codex_home(profile or {}, data_dir=selected_data_dir())
 
 
-def managed_codex_homes(runtime_home: Path, data_dir: Path | None) -> tuple[Path, ...]:
+def managed_codex_homes(data_dir: Path | None) -> tuple[Path, ...]:
     """Every CODEX_HOME an installation manages, whether or not it exists yet or holds a login.
 
-    The legacy Orca home of the account whose home is `runtime_home`, then `<data_dir>/codex-home`
-    when a data dir is named. Seeding and the Memory-client reconcile take their homes from here,
-    so neither can leave one of them out.
+    `<data_dir>/codex-home` when a data dir is named, and nothing otherwise. Seeding and the
+    Memory-client reconcile take their homes from here, so neither can leave one out. The legacy
+    Orca home is not managed since A20 step 7 (secretary-1723).
     """
-    legacy = runtime_home / CODEX_HOME_LEGACY_RELATIVE
     # Only a named data dir: `data_dir_codex_home(None)` would fall back to this process's own
     # `SECRETARY_DATA_DIR`, which is not necessarily the installation being provisioned.
     data_home = data_dir_codex_home(data_dir) if data_dir is not None else None
-    return (legacy,) if data_home is None else (legacy, data_home)
+    return () if data_home is None else (data_home,)
+
+
+# Read-only, and only here: the `sessions/` of the legacy Orca home. The curator
+# (`automations.agents.curator.discover.codex_sessions`) still has sessions there it has not
+# ingested -- on 2026-09-24 its watermark named 2749 of the 3217 rollouts and not the other 468,
+# written up to 08:38Z that day. Remove this once the curator watermark names every file under it.
+_LEGACY_SESSIONS = Path(".config") / "orca" / "codex-runtime-home" / "home" / "sessions"
 
 
 def session_roots() -> list[Path]:
-    """Every `sessions/` a live Codex head of this installation may be writing its rollout into.
+    """Every `sessions/` a reader of this installation's Codex rollouts has to scan.
 
-    The home a launch would resolve to now comes first, then the legacy home and the data-dir home
-    whenever their `sessions/` exists, each directory once (symlinks resolved). A head keeps the
-    CODEX_HOME it was launched with, so a head that came up on the legacy home keeps writing
-    there after the PO logs in to the data-dir home: a reader that followed only the current
-    home would lose it. Session readers therefore never depend on which home is current.
+    The home a launch would resolve to now comes first (when there is one), then the data-dir home
+    and the legacy Orca home whenever their `sessions/` exists, each directory once (symlinks
+    resolved). No head runs on the legacy home any more; it is read, never written or resolved to,
+    for the sessions the curator has not ingested yet (`_LEGACY_SESSIONS`).
     """
-    candidates = [Path(installation_codex_home().path) / "sessions", Path(legacy_codex_home()) / "sessions"]
+    candidates: list[Path] = []
+    try:
+        candidates.append(Path(installation_codex_home().path) / "sessions")
+    except CodexHomeLoginMissing:
+        # No home a head could run with: a reader still scans whatever sessions exist.
+        pass
     data_home = data_dir_codex_home(selected_data_dir())
     if data_home is not None:
         candidates.append(data_home / "sessions")
+    candidates.append(Path.home() / _LEGACY_SESSIONS)
     roots: list[Path] = []
     seen: set[Path] = set()
     for index, root in enumerate(candidates):

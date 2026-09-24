@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from secretary import _proc, head_registry
+from secretary import head_registry
 from secretary.board.backend import SPRINT, board_client
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
@@ -301,22 +300,12 @@ def _watchdog(record: dict[str, Any], reference: str, kind: str, probe_panels: b
 
 
 class _StatusWatchdogHost:
-    """Read-only adapter for the same pane probe used by the dispatcher watchdog."""
+    """Read-only host for the liveness probe the dispatcher watchdog makes (its pid heartbeat).
+
+    It carries no transport: `command_terminal_status` reads no pane since secretary-1723.
+    """
 
     mode = "real"
-
-    def _run_json(self, args: list[str]) -> dict[str, Any]:
-        try:
-            completed = _proc.run(args, timeout=10)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HostError(f"terminal inventory unavailable: {exc}") from None
-        if completed.returncode:
-            raise HostError("terminal inventory failed")
-        try:
-            payload = json.loads(completed.stdout or "{}")
-        except ValueError:
-            raise HostError("terminal inventory returned invalid JSON") from None
-        return payload.get("result", payload) if isinstance(payload, dict) else {}
 
 
 def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:

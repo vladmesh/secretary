@@ -56,7 +56,7 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant.
 |---|---|---|
 | `pid_heartbeat` | `dispatcher_watchdog.head_process_status` | Process |
 | `provider_cursor` | `dispatcher_tui.provider_progress_for_run` | Progress |
-| `pane_advisory` | pane readiness (`{"idle": bool}`, from `pane_host.Pane`) | Turn |
+| `pane_advisory` | pane readiness (`{"idle": bool}`); no dispatcher status carries it since secretary-1723 removed the pane path | Turn |
 | `execution_child` | `runtime.head.children.read_head_children` (the head's `/proc` descendants) | Progress |
 
 Mappings:

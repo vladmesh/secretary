@@ -1,10 +1,10 @@
-"""Which CODEX_HOME a Codex head runs with, resolved at launch (secretary-1710).
+"""Which CODEX_HOME a Codex head runs with, resolved at launch (secretary-1710, secretary-1723).
 
-The resolver has four rungs: the profile's `codex_home`, `TA_CODEX_HOME`, `<data_dir>/codex-home`
-once it holds a login, and the legacy Orca home. The data-dir home is only chosen with a non-empty
-`auth.json` in it, so the move happens when the PO logs in there and a live Codex head is never
-logged out by a merge. Nothing here reads or writes the live homes: every data dir is a temp dir,
-and the legacy home is only ever compared as a string.
+The resolver has three rungs: the profile's `codex_home`, `TA_CODEX_HOME`, and
+`<data_dir>/codex-home` when it holds a login (a non-empty `auth.json`). With none of them it fails
+closed with `CodexHomeLoginMissing`, whose message names the fix; the legacy Orca home it used to
+fall back to is gone (A20 step 7). Nothing here reads or writes the live homes: every data dir and
+every legacy home is a temp dir.
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ from secretary.runtime import codex_home as codex_home_module
 from secretary.runtime import codex_preflight, heads
 from secretary.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
-    CODEX_HOME_DEFAULT,
     CODEX_HOME_ENV,
-    CODEX_HOME_LEGACY,
     CODEX_HOME_PROFILE,
+    CodexHomeLoginMissing,
+    CodexPreflightError,
     codex_home,
     resolve_codex_home,
 )
-from secretary.runtime.head import render_head_command
+from secretary.runtime.head import HeadCommandError, render_head_command
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "secretary"
 RESOLVERS = {"codex_home", "resolve_codex_home"}
@@ -74,20 +74,27 @@ class ResolverOrderTests(unittest.TestCase):
         home = resolve_codex_home({}, data_dir=self.data_dir)
         self.assertEqual((home.path, home.kind), ("/tmp/env-home", CODEX_HOME_ENV))
 
-    def test_without_a_login_in_the_data_dir_home_the_legacy_home_is_chosen(self) -> None:
-        home = resolve_codex_home({}, data_dir=self.data_dir)
-        self.assertEqual((home.path, home.kind), (CODEX_HOME_DEFAULT, CODEX_HOME_LEGACY))
-        self.assertTrue(home.migration_pending)
+    def test_without_a_login_in_the_data_dir_home_the_resolver_fails_closed_naming_the_fix(self) -> None:
+        """A20 step 7: no fallback to the legacy Orca home, and the refusal says what to do."""
+        with self.assertRaises(CodexHomeLoginMissing) as caught:
+            resolve_codex_home({}, data_dir=self.data_dir)
+        self.assertIsInstance(caught.exception, CodexPreflightError)
+        self.assertEqual(caught.exception.home, self.data_home)
+        message = str(caught.exception)
+        self.assertIn(f"log in under {self.data_home}", message)
+        self.assertIn(f"CODEX_HOME={self.data_home} codex login", message)
+        self.assertIn("copy an auth.json there", message)
+        self.assertNotIn("orca", message)
 
     def test_an_empty_auth_file_is_not_a_login(self) -> None:
         (self.data_home / "auth.json").write_text("", encoding="utf-8")
-        self.assertEqual(codex_home({}, data_dir=self.data_dir), CODEX_HOME_DEFAULT)
+        with self.assertRaises(CodexHomeLoginMissing):
+            codex_home({}, data_dir=self.data_dir)
 
     def test_a_login_in_the_data_dir_home_selects_it(self) -> None:
         self.log_in()
         home = resolve_codex_home({}, data_dir=self.data_dir)
         self.assertEqual((home.path, home.kind), (str(self.data_home), CODEX_HOME_DATA_DIR))
-        self.assertFalse(home.migration_pending)
 
     def test_the_data_dir_comes_from_the_environment_the_launch_carries(self) -> None:
         self.log_in()
@@ -107,7 +114,8 @@ class ResolverOrderTests(unittest.TestCase):
         os.environ["SECRETARY_INSTANCE"] = str(instance)
         # The leaf resolver reads no instance file; the installation helper does, and so does a
         # launching process once it has bound the data dir.
-        self.assertEqual(codex_home({}), CODEX_HOME_DEFAULT)
+        with self.assertRaises(CodexHomeLoginMissing):
+            codex_home({})
         self.assertEqual(codex_home_module.selected_data_dir(), self.data_dir.resolve())
         self.assertEqual(
             codex_home_module.installation_codex_home().path, str(self.data_dir.resolve() / "codex-home")
@@ -116,11 +124,15 @@ class ResolverOrderTests(unittest.TestCase):
             self.assertEqual(codex_home({}), str(self.data_dir.resolve() / "codex-home"))
         self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
 
-    def test_no_selected_installation_keeps_the_legacy_home(self) -> None:
+    def test_no_selected_installation_is_refused_with_the_fix(self) -> None:
         self.log_in()
-        self.assertEqual(codex_home({}), CODEX_HOME_DEFAULT)
         self.assertIsNone(codex_home_module.selected_data_dir())
-        self.assertEqual(codex_home_module.installation_codex_home().path, CODEX_HOME_DEFAULT)
+        for resolve in (lambda: codex_home({}), lambda: codex_home_module.installation_codex_home()):
+            with self.assertRaises(CodexHomeLoginMissing) as caught:
+                resolve()
+            self.assertIsNone(caught.exception.home)
+            self.assertIn("SECRETARY_DATA_DIR", str(caught.exception))
+            self.assertIn("<data_dir>/codex-home", str(caught.exception))
 
     def test_a_bound_data_dir_is_scoped_and_never_replaces_the_operators(self) -> None:
         self.log_in()
@@ -156,8 +168,10 @@ class ResolverOrderTests(unittest.TestCase):
     def test_a_head_launched_after_the_login_renders_the_data_dir_home(self) -> None:
         os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
         workspace = str(self.data_dir.parent.resolve())
-        before = render_head_command({"adapter": "codex"}, workspace=workspace).command
-        self.assertTrue(before.startswith(f"CODEX_HOME={CODEX_HOME_DEFAULT} codex "), before)
+        # Before the login there is no command to render: the renderer refuses with the fix.
+        with self.assertRaises(HeadCommandError) as caught:
+            render_head_command({"adapter": "codex"}, workspace=workspace)
+        self.assertIn(f"CODEX_HOME={self.data_home} codex login", str(caught.exception))
 
         self.log_in()
 
@@ -175,7 +189,13 @@ class ResolverOrderTests(unittest.TestCase):
 
     def test_the_session_readers_put_the_current_home_first(self) -> None:
         os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
-        self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], Path(CODEX_HOME_DEFAULT) / "sessions")
+        # With no login there is no current home, and a reader still scans rather than raising.
+        self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
+        os.environ["TA_CODEX_HOME"] = str(self.data_dir.parent / "env-home")
+        self.assertEqual(
+            pipeline_codex_sessions.sessions_roots()[0], self.data_dir.parent / "env-home" / "sessions"
+        )
+        os.environ.pop("TA_CODEX_HOME")
         self.log_in()
         self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
 
@@ -183,9 +203,8 @@ class ResolverOrderTests(unittest.TestCase):
 class LiveSessionCutoverTests(unittest.TestCase):
     """Session readers never depend on which home is current (secretary-1710, round 3).
 
-    A head keeps the CODEX_HOME it was launched with. One that came up on the legacy home keeps
-    writing its rollout there after the PO logs in to the data-dir home, and the delivery
-    confirmation, the activity signal and the recovery proof must all still find its turns.
+    Since secretary-1723 no head launches on the legacy Orca home, but its `sessions/` is still
+    read, read-only, for the rollouts the curator has not ingested (`codex_home._LEGACY_SESSIONS`).
     """
 
     def setUp(self) -> None:
@@ -220,7 +239,6 @@ class LiveSessionCutoverTests(unittest.TestCase):
         curator = mock.patch.object(discover, "CODEX_SESSIONS", None)
         curator.start()
         self.addCleanup(curator.stop)
-        self.assertEqual(codex_home_module.legacy_codex_home(), str(self.legacy))
 
     def log_in(self) -> None:
         (self.data_home / "auth.json").write_text('{"tokens": "fixture"}\n', encoding="utf-8")
@@ -246,25 +264,23 @@ class LiveSessionCutoverTests(unittest.TestCase):
         self.assertGreater(latest, sent_at)
         self.assertTrue(dispatcher_tui.provider_turn_started(workspace, sent_at, adapter="codex"))
         self.assertIsNotNone(dispatcher_tui.latest_user_turn_for(workspace, sent_at))
-        self.assertTrue(
-            dispatcher_tui.terminal_turn_started("pane", workspace=workspace, since=sent_at, adapter="codex")
-        )
         self.assertEqual([entry["cwd"] for entry in discover.codex_sessions()], [workspace])
 
-    def test_a_head_on_the_legacy_home_is_still_found_after_the_login(self) -> None:
+    def test_a_rollout_left_on_the_legacy_home_is_still_read_but_never_launched_into(self) -> None:
         now = datetime.now(UTC)
         sent_at = (now - timedelta(seconds=30)).timestamp()
-        # Launched before the login: the launch resolves the legacy home and the head writes there.
-        self.assertEqual(codex_home({}), str(self.legacy))
-        self.rollout(self.legacy, "legacy-head", turn_at=now - timedelta(seconds=60))
+        # No login: the launch has no home at all, and never the legacy one.
+        with self.assertRaises(CodexHomeLoginMissing):
+            codex_home({})
 
         self.log_in()
         self.assertEqual(codex_home({}), str(self.data_home))
-        # Its later turn lands in the legacy rollout it has been writing all along.
+        # A rollout an earlier head wrote on the legacy home is read where it lies.
         later = self.rollout(self.legacy, "legacy-head", turn_at=now)
         os.utime(later, (now.timestamp(), now.timestamp()))
 
         self.assert_every_reader_finds_the_turn(sent_at)
+        self.assertIn(self.legacy / "sessions", codex_home_module.session_roots())
 
     def test_a_head_on_the_data_dir_home_is_found(self) -> None:
         self.log_in()

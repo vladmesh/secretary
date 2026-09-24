@@ -46,7 +46,6 @@ from secretary.dispatch.watchdog import (
 from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
-    head_run_binding,
 )
 from secretary.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
@@ -77,7 +76,6 @@ from secretary.runtime.head import operations as head_ops
 from secretary.runtime.head import (
     with_pid_heartbeat,
 )
-from secretary.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 
 def setUpModule() -> None:
@@ -969,175 +967,6 @@ class ReviewLivenessTests(unittest.TestCase):
             heartbeat.update({"boot_id": "dead-process", "proc_starttime_ticks": "0"})
         Path(pid_file_path(kind, self.task["ref"])).write_text(json.dumps(heartbeat), encoding="utf-8")
 
-    def test_an_unreadable_inventory_raises_for_either_role(self) -> None:
-        """secretary-1414: the inventory is the session host's now, and what it cannot read it
-        refuses. A shape this cannot parse says nothing about which panes exist, so it must not
-        arrive as `missing-terminal`: that reads as a dead head and respawns over a live one."""
-        for kind, status in (("worker", "worker_status"), ("review", "review_status")):
-            with self.subTest(kind=kind):
-                host = self._host([])
-                host._run_json = lambda _args: {"ok": False}  # type: ignore[method-assign]
-                record = self._record(review_handle="term-review", review_leaf="leaf-review")
-
-                with self.assertRaises(HostError):
-                    getattr(host, status)(self.task, record)
-
-    def test_an_inventory_of_an_unsupported_shape_is_not_an_empty_worktree(self) -> None:
-        for status in ("worker_status", "review_status"):
-            with self.subTest(status=status):
-                host = self._host([])
-                host._run_json = lambda _args: {"terminals": "not-a-list"}  # type: ignore[method-assign]
-
-                with self.assertRaises(HostError):
-                    getattr(host, status)(self.task, self._record(review_handle="term-review"))
-
-    def test_persisted_handle_survives_the_heads_own_title_rewrite(self) -> None:
-        """A codex head overwrites the terminal title with its own OSC sequence seconds after
-        launch. A title-only check then reads the live reviewer as gone and splits a second one."""
-        host = self._host(
-            [
-                {"handle": "term-review", "leafId": "leaf-review", "title": "codex", "connected": True},
-            ]
-        )
-
-        status = host.review_status(self.task, self._record(review_handle="term-review"))
-        self.assertTrue(status["live"])
-        self.assertFalse(status.get("identity_mismatch"))
-
-    def test_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
-        """`terminal list` can answer with a different handle alias for the same pty, so the leaf
-        is the token that survives it."""
-        host = self._host(
-            [
-                {"handle": "term-alias", "leafId": "leaf-review", "title": "codex", "connected": True},
-            ]
-        )
-
-        record = self._record(review_handle="term-review", review_leaf="leaf-review")
-        status = host.review_status(self.task, record)
-        self.assertTrue(status["live"])
-        self.assertFalse(status.get("identity_mismatch"))
-
-    def test_worker_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
-        host = self._host(
-            [
-                {"handle": "term-alias", "leafId": "leaf-worker", "connected": True},
-            ]
-        )
-
-        record = self._record(worker_leaf="leaf-worker")
-
-        self.assertTrue(host.worker_status(self.task, record)["live"])
-
-    def test_last_output_at_is_converted_from_milliseconds_to_epoch_seconds(self) -> None:
-        host = self._host(
-            [
-                {
-                    "handle": "term-worker",
-                    "leafId": "leaf-worker",
-                    "connected": True,
-                    "lastOutputAt": 1_753_456_789_123,
-                },
-            ]
-        )
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertEqual(status["last_activity"], 1_753_456_789.123)
-
-    def test_invalid_or_missing_last_output_at_has_no_activity(self) -> None:
-        for terminal in (
-            {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-            {
-                "handle": "term-worker",
-                "leafId": "leaf-worker",
-                "connected": True,
-                "lastOutputAt": "not-a-time",
-            },
-        ):
-            with self.subTest(terminal=terminal):
-                status = self._host([terminal]).worker_status(self.task, self._record())
-                self.assertIsNone(status["last_activity"])
-
-    def test_admitted_provider_progress_newer_than_last_output_at_wins(self) -> None:
-        host = self._host(
-            [
-                {
-                    "handle": "term-worker",
-                    "leafId": "leaf-worker",
-                    "connected": True,
-                    "lastOutputAt": 1_753_456_789_123,
-                },
-            ]
-        )
-        host.provider_progress = lambda _task, record, _kind: {
-            "state": "observed",
-            "admission": "accepted",
-            "source": "codex-session",
-            "source_fingerprint": "a" * 32,
-            "cursor": "3:cursor",
-            "head_run_id": record.worker_head_run["run_id"],
-            "head_run_fingerprint": head_run_binding(record.worker_head_run)[1],
-            "observed_at": "1753456800.0",
-        }  # type: ignore[method-assign]
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertEqual(status["last_activity"], 1_753_456_800.0)
-
-    def test_foreign_or_incomplete_provider_evidence_does_not_renew_either_role(self) -> None:
-        """The shared status seam has the same exact-HeadRun admission as continuation liveness."""
-        cases = (
-            (
-                "worker",
-                {},
-                {
-                    "handle": "term-worker",
-                    "leafId": "leaf-worker",
-                    "connected": True,
-                    "lastOutputAt": 1_753_456_789_123,
-                },
-                "identity_mismatch",
-            ),
-            (
-                "review",
-                {"review_handle": "term-review", "review_leaf": "leaf-review"},
-                {
-                    "handle": "term-review",
-                    "leafId": "leaf-review",
-                    "connected": True,
-                    "lastOutputAt": 1_753_456_789_123,
-                },
-                "unavailable",
-            ),
-        )
-        for kind, fields, terminal, expected_state in cases:
-            with self.subTest(kind=kind):
-                record = self._record(**fields)
-                run = record.review_head_run if kind == "review" else record.worker_head_run
-                _, fingerprint = head_run_binding(run)
-                host = self._host([terminal])
-                provider = {
-                    "state": "observed",
-                    "admission": "accepted",
-                    "source": "codex-session",
-                    "source_fingerprint": "a" * 32,
-                    "cursor": "3:cursor",
-                    "head_run_id": run["run_id"],
-                    "head_run_fingerprint": fingerprint,
-                    "observed_at": "1753456800.0",
-                }
-                if kind == "worker":
-                    provider["head_run_id"] = "foreign-worker-run"
-                else:
-                    provider["cursor"] = ""
-                host.provider_progress = lambda _task, _record, _kind, value=provider: value  # type: ignore[method-assign]
-
-                status = getattr(host, f"{kind}_status")(self.task, record)
-
-                self.assertEqual(status["provider_progress"]["state"], expected_state)
-                self.assertEqual(status["last_activity"], 1_753_456_789.123)
-
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host(
             [
@@ -1188,58 +1017,6 @@ class ReviewLivenessTests(unittest.TestCase):
 
         status = host.review_status(self.task, self._record(review_handle="term-review"))
         self.assertFalse(status["live"])
-
-    def test_label_finds_an_orphan_pane_when_no_handle_was_persisted(self) -> None:
-        """The tick that split the pane died before writing the handle to state, so the label is
-        all that is left to recognise it by — and a duplicate reviewer is the cost of missing it."""
-        host = self._host(
-            [
-                {
-                    "handle": "term-review",
-                    "leafId": "leaf-review",
-                    "title": "secretary-651 reviewer",
-                    "connected": True,
-                },
-            ]
-        )
-
-        status = host.review_status(self.task, self._record())
-        self.assertTrue(status["live"])
-        self.assertFalse(status.get("identity_mismatch"))
-
-    def test_connected_worker_pane_with_an_exited_head_process_is_not_live(self) -> None:
-        """secretary-751: Codex crashed and Orca kept the pane's own workspace shell alive. The
-        pane answers connected and even keeps producing output (the shell's own prompt), so only
-        the pid heartbeat tells the watchdog the head itself is gone."""
-        self._write_heartbeat("worker", self._dead_pid())
-        host = self._host(
-            [
-                {
-                    "handle": "term-worker",
-                    "leafId": "leaf-worker",
-                    "connected": True,
-                    "lastOutputAt": 1_753_456_789_123,
-                },
-            ]
-        )
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertFalse(status["live"])
-        self.assertEqual(status["reason"], "process-exited")
-
-    def test_connected_reviewer_pane_with_an_exited_head_process_is_not_live(self) -> None:
-        self._write_heartbeat("review", self._dead_pid())
-        host = self._host(
-            [
-                {"handle": "term-review", "leafId": "leaf-review", "connected": True},
-            ]
-        )
-
-        status = host.review_status(self.task, self._record(review_handle="term-review"))
-
-        self.assertFalse(status["live"])
-        self.assertEqual(status["reason"], "process-exited")
 
     def test_foreign_reviewer_heartbeat_cannot_adopt_a_review_launch(self) -> None:
         """Recovery sees full status, so a live foreign PID is not a reviewing reviewer."""
@@ -1449,35 +1226,6 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertTrue(status["live"])
 
-    def test_a_live_head_reports_whether_its_pane_is_waiting_for_input(self) -> None:
-        """secretary-1063: the timing ceilings do not apply to a pid-confirmed head, so the wait
-        needs the one signal that separates a finished turn from a thinking one."""
-        self._write_heartbeat("worker", self._live_pid())
-        host = self._host(
-            [
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-            ]
-        )
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertTrue(status["idle"])
-        self.assertIn(
-            [
-                "orca",
-                "terminal",
-                "wait",
-                "--terminal",
-                "term-worker",
-                "--for",
-                "tui-idle",
-                "--timeout-ms",
-                str(TUI_IDLE_PROBE_TIMEOUT_MS),
-                "--json",
-            ],
-            host.calls,
-        )
-
     def test_an_adopted_head_with_no_pane_identity_answers_no_work_state(self) -> None:
         """Nothing to probe, so the status says so instead of guessing: the caller falls back to
         its ceilings rather than treating an unprobed head as one that is working."""
@@ -1507,31 +1255,6 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertTrue(status["pid_confirmed"])
         self.assertNotIn("idle", status)
 
-    def test_a_pane_held_in_a_dialog_is_not_working(self) -> None:
-        self._write_heartbeat("worker", self._live_pid())
-        host = self._host(
-            [
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-            ]
-        )
-        host.wait_answer = {"wait": {"satisfied": False, "blockedReason": "trust dialog"}}
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertTrue(status["idle"])
-        self.assertEqual(status["idle_reason"], "dialog")
-
-    def test_a_working_pane_is_not_idle(self) -> None:
-        self._write_heartbeat("worker", self._live_pid())
-        host = self._host(
-            [
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-            ]
-        )
-        host.wait_answer = {"wait": {"satisfied": False}}
-
-        self.assertFalse(host.worker_status(self.task, self._record())["idle"])
-
     def test_readiness_is_not_probed_without_a_confirmed_head_process(self) -> None:
         """Without the heartbeat the ordinary ceilings still run, and a probe per waiting tick
         would buy nothing."""
@@ -1545,19 +1268,6 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertNotIn("idle", status)
         self.assertNotIn("wait", [call[2] for call in host.calls if call[:2] == ["orca", "terminal"]])
-
-    def test_pid_file_not_written_yet_falls_back_to_ordinary_liveness(self) -> None:
-        """Nothing has written the heartbeat file yet (a launch mid-flight, or a raw
-        SECRETARY_DISPATCHER_*_COMMAND override that never will). That is not evidence of death."""
-        host = self._host(
-            [
-                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
-            ]
-        )
-
-        status = host.worker_status(self.task, self._record())
-
-        self.assertTrue(status["live"])
 
 
 class ProductionPauseTests(unittest.TestCase):

@@ -71,7 +71,6 @@ from secretary.restore import (
     restore_state,
 )
 from secretary.runtime.codex_home import managed_codex_homes
-from secretary.runtime.codex_preflight import codex_home_logged_in
 from secretary.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from secretary.runtime.shared_state import resolve_pipeline_state_dir
 from secretary.runtime_env import (
@@ -1427,17 +1426,13 @@ def provision_codex_home(
     installation_user: str | None,
     *,
     data_dir: Path | None = None,
-    runtime_home: Path | None = None,
-    legacy: bool = True,
 ) -> int:
-    """Seed non-secret Codex runtime files while preserving login state.
+    """Seed non-secret Codex runtime files into `<data_dir>/codex-home`, preserving login state.
 
-    The installation-owned `<data_dir>/codex-home` is always seeded. The legacy Orca home keeps
-    being seeded and reconciled while it is the active one, i.e. until the data-dir home holds a
-    login (`codex_preflight.resolve_codex_home`). `auth.json` is never written: logging in is the
-    PO's own step, `CODEX_HOME=<data_dir>/codex-home codex login`. `runtime_home` is the account's
-    home as the caller already resolved it; unnamed, it is read from the password database.
-    `legacy=False` leaves the legacy home alone, which is what upgrade has always done with it.
+    That is the one CODEX_HOME the installation manages (`codex_home.managed_codex_homes`); the
+    legacy Orca home is not seeded or reconciled since A20 step 7 (secretary-1723). `auth.json` is
+    never written: logging in is the PO's own step, `CODEX_HOME=<data_dir>/codex-home codex login`,
+    and without it `codex_preflight.resolve_codex_home` refuses to launch a Codex head.
 
     A `config.toml` seeded here gets the full PO-bridge entry in the same step
     (`memory.client_config.seed_codex_home`, which `reconcile_clients` seeds through too), so the home
@@ -1447,11 +1442,9 @@ def provision_codex_home(
     """
     if not installation_user:
         return 0
-    home = runtime_home if runtime_home is not None else Path(pwd.getpwnam(installation_user).pw_dir)
-    legacy_home, *data_homes = managed_codex_homes(home, None if data_dir is None else Path(data_dir))
-    targets: list[Path] = list(data_homes)
-    if legacy and not any(codex_home_logged_in(data_home) for data_home in data_homes):
-        targets.append(legacy_home)
+    targets = managed_codex_homes(None if data_dir is None else Path(data_dir))
+    if not targets:
+        return 0
     source = packaged_codex_home(product_root)
     bridge = (bridge_executable(product_root), Path(data_dir)) if data_dir is not None else None
     changed = 0

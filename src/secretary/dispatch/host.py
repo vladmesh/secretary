@@ -3368,15 +3368,6 @@ class CommandHostRuntime:
             raise HostError(receipt.reason)
         return receipt.run
 
-    def workspace_panes(self, workspace: str) -> list[Any]:
-        """The pane inventory `dispatch.review.command_terminal_status` reads: always empty.
-
-        Every head this host raises is supervised and owns no pane, so its status is read from its
-        pid heartbeat and its provider cursor alone, and no session manager is asked.
-        """
-        del workspace
-        return []
-
     def _freeze_worker(self, record: DispatcherRecord) -> None:
         """Shut the worker head down now that the reviewer is up, leaving the workspace untouched.
 

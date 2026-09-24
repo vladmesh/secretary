@@ -5,7 +5,6 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from typing import ClassVar
 from unittest import mock
 
 from secretary.dispatch.host import CommandHostRuntime
@@ -28,21 +27,14 @@ from secretary.dispatch.tui import (
     SENDABILITY_UNESTABLISHED,
     TuiDeliveryError,
     bind_claude_provider_progress_source,
-    classify_pre_delivery,
     claude_project_dir_name,
-    deliver_interactive_prompt,
     delivery_readiness_state,
     delivery_receipt_state,
-    dialog_is_live,
     latest_claude_user_turn_for,
     latest_user_turn_for,
-    live_screen,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
     provider_turn_started,
-    terminal_readiness,
-    terminal_turn_started,
-    turn_started_confirm,
 )
 from secretary.dispatch.types import HostError
 from secretary.dispatch.worker_lifecycle import ContinuationProviderCondition
@@ -55,7 +47,15 @@ from tests.dispatcher_fixtures import SupervisedBackend
 from tests.fanout_fixtures import accepted_transport_run
 from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.runtime.tui_delivery import DeliveryEvidence, composer_holds_payload
+from secretary.runtime.tui_delivery import (
+    DeliveryEvidence,
+    classify_pre_delivery,
+    composer_holds_payload,
+    deliver_interactive_prompt,
+    dialog_is_live,
+    live_screen,
+    terminal_readiness,
+)
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -362,30 +362,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertTrue(outcome.evidence.turn_confirmed)
         self.assertGreaterEqual(callback_calls[0], 1)
 
-    def test_claude_turn_detection_accepts_real_status_lines(self) -> None:
-        def run_json(command: list[str]) -> dict:
-            return {
-                "terminal": {
-                    "tail": [
-                        "The completed response says it was thinking while working.",
-                        "✻ Forming... (4s · ↑ 13.2k tokens)",
-                    ]
-                }
-            }
-
-        self.assertTrue(terminal_turn_started("term-claude", adapter="claude", run_json=run_json))
-
-        def completed_run_json(command: list[str]) -> dict:
-            return {
-                "terminal": {
-                    "tail": [
-                        "The completed response says it was thinking while working.",
-                    ]
-                }
-            }
-
-        self.assertFalse(terminal_turn_started("term-claude", adapter="claude", run_json=completed_run_json))
-
     def test_readiness_tells_a_busy_pane_from_one_that_cannot_be_probed(self) -> None:
         """A refused probe is its own answer: it is neither a ready pane nor a working one."""
 
@@ -616,54 +592,6 @@ class CodexUserTurnRecordTests(unittest.TestCase):
             provider_turn_started(str(self.workspace), 1.0, adapter="shell", session_root=self.sessions)
         )
 
-    def test_a_journal_that_can_answer_is_not_second_guessed_by_the_screen(self) -> None:
-        """`confirm` asks the provider, and the screen only when there is no provider to ask.
-
-        `_screen_started_turn` looks for the word `Working` anywhere in the retained window, so a
-        pane that has worked once keeps saying yes forever. As a fallback for an unknown provider
-        that is the best there is; as a second opinion after a journal that said "not yet" it is a
-        confirmation criterion that confirms everything, which is exactly what a delivery proof
-        must not be.
-        """
-        screen_reads = 0
-
-        def run_json(args: list[str]) -> dict:
-            nonlocal screen_reads
-            if args[1:3] == ["terminal", "read"]:
-                screen_reads += 1
-                return {"terminal": {"tail": ["Working (12s · esc to interrupt)", "›"]}}
-            raise AssertionError(args)
-
-        self.write_session(
-            self.record(
-                "response_item",
-                {"type": "message", "role": "user", "content": [{"text": "wake"}]},
-            )
-        )
-        recorded = latest_user_turn_for(str(self.workspace), 0.0, session_root=self.sessions)
-        confirm = turn_started_confirm(
-            "term-observer",
-            str(self.workspace),
-            "codex",
-            run_json=run_json,
-            session_root=self.sessions,
-        )
-
-        self.assertTrue(confirm(recorded - 1))
-        self.assertFalse(confirm(recorded + 1))
-        self.assertEqual(screen_reads, 0)
-
-        # And with no journal to read, the screen is all there is, so it is asked.
-        blind = turn_started_confirm(
-            "term-observer",
-            str(self.root / "elsewhere"),
-            "codex",
-            run_json=run_json,
-            session_root=self.sessions,
-        )
-        self.assertTrue(blind(recorded + 1))
-        self.assertEqual(screen_reads, 1)
-
 
 class ClaudeTranscriptPathTests(unittest.TestCase):
     """Where Claude Code keeps a workspace's transcripts, checked against where it keeps them.
@@ -715,9 +643,9 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
     def test_an_underscore_workspace_is_confirmed_by_its_transcript_alone(self) -> None:
         """The delivery criterion, on the shape of workspace the incident was reported against.
 
-        The pane is painting nothing this confirmation could recognise, and it does not have to:
-        the user turn Claude persisted after the send is the proof, and it is read from the
-        directory Claude actually writes.
+        The user turn Claude persisted after the send is the proof, and it is read from the
+        directory Claude actually writes. (Until secretary-1723 this went through the pane's
+        `turn_started_confirm`; the provider journal half it proved is `provider_turn_started`.)
         """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "codegen_orchestrator" / "codegen-orchestrator-1166"
@@ -738,16 +666,11 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            # A pane with nothing on it: no spinner, no status line, no glyph of any generation.
-            def run_json(command: list[str]) -> dict:
-                return {"terminal": {"tail": ["", "❯"]}}
-
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
-                confirm = turn_started_confirm("term-claude", str(workspace), "claude", run_json=run_json)
-                self.assertTrue(confirm(1.0))
+                self.assertTrue(provider_turn_started(str(workspace), 1.0, adapter="claude"))
                 # Everything the criterion says is about the boundary: a turn older than the send
-                # is not this delivery's, and no screen glyph can make it one.
-                self.assertFalse(confirm(4102462000.0))
+                # is not this delivery's.
+                self.assertFalse(provider_turn_started(str(workspace), 4102462000.0, adapter="claude"))
 
     def test_a_transcript_under_the_old_folder_name_is_not_read(self) -> None:
         """The path the reader used to look under is not a second place to look.
@@ -789,57 +712,6 @@ def _recorded_cwd(project: Path) -> str:
         except OSError:
             continue
     return ""
-
-
-class ClaudeScreenHintTests(unittest.TestCase):
-    """The screen is a hint about a foreign TUI, and it is only ever read as one.
-
-    The pattern it used to be pinned to — one of five spinner glyphs, then a word, then a
-    parenthesised `(4s · ↑ 13.2k tokens)` — matched nothing Claude 2.1.227 paints, and while it
-    silently matched nothing it was also the only thing masking the transcript-path defect. The
-    lines below are what `orca terminal read` really returned from a working Claude pane on
-    2026-08-11, alternate-screen overlay and all.
-    """
-
-    LIVE_STATUS_LINES: ClassVar = [
-        "· Tempering…e /btw to ask a 9u ck side question without interrupting Claude's current work",
-        "✽ Tempering…e /btw to ask a 5u ck side question without)interrupting Claude's current work",
-        "● Tempering…e /btw5to ask a 6u ck side question without)interrupting Claude's current work",
-        "✢ Tempering…e /btw5to ask a 6u ck side question without)interrupting Claude's current work",
-        # The version whose suffix survives, and the one the incident report quoted.
-        "✻ Forming... (4s · ↑ 13.2k tokens)",
-        "●─Bloviating…──2──(12.4k tokens)",
-    ]
-
-    def screen(self, *lines: str):
-        def run_json(_command: list[str]) -> dict:
-            return {"terminal": {"tail": list(lines)}}
-
-        return run_json
-
-    def test_every_status_line_a_live_claude_pane_paints_is_a_turn(self) -> None:
-        for line in self.LIVE_STATUS_LINES:
-            with self.subTest(line=line):
-                self.assertTrue(
-                    terminal_turn_started(
-                        "term-claude", adapter="claude", run_json=self.screen("Claude Code", line)
-                    )
-                )
-
-    def test_a_pane_that_is_not_working_is_not_read_as_working(self) -> None:
-        for line in (
-            "The completed response says it was thinking while working.",
-            "⏺ Read(TASK.md)",
-            "  ⎿  Read 131 lines",
-            "❯ ",
-            "",
-        ):
-            with self.subTest(line=line):
-                self.assertFalse(
-                    terminal_turn_started(
-                        "term-claude", adapter="claude", run_json=self.screen("Claude Code", line)
-                    )
-                )
 
 
 class TuiCatalog:

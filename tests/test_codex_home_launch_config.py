@@ -30,7 +30,7 @@ from secretary import upgrade
 from secretary.installation import provision_codex_home
 from secretary.memory.client_config import bridge_executable, reconcile_clients
 from secretary.runtime.codex_home import managed_codex_homes
-from secretary.runtime.codex_preflight import resolve_codex_home
+from secretary.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home
 from secretary.runtime.head.command import render_head_command
 from tests.fakes.upgrade import FakeUnitInstaller
 
@@ -132,10 +132,10 @@ class _ManagedHomes(unittest.TestCase):
         self.user = getpass.getuser()
 
     def homes(self) -> tuple[Path, ...]:
-        return managed_codex_homes(self.runtime_home, self.data_dir)
+        return managed_codex_homes(self.data_dir)
 
     def seed_and_reconcile(self) -> None:
-        provision_codex_home(self.product, self.user, data_dir=self.data_dir, runtime_home=self.runtime_home)
+        provision_codex_home(self.product, self.user, data_dir=self.data_dir)
         reconcile_clients(self.product, self.runtime_home, self.data_dir)
 
     def old_stub_home(self) -> Path:
@@ -147,7 +147,7 @@ class _ManagedHomes(unittest.TestCase):
     def logged_in_data_home_without_config(self) -> Path:
         """The reviewer's case: a login in `<data_dir>/codex-home` and nothing else. The resolver
         selects it on the login alone."""
-        home = self.homes()[1]
+        home = self.homes()[0]
         home.mkdir(parents=True)
         (home / "auth.json").write_text(API_KEY_LOGIN, encoding="utf-8")
         return home
@@ -201,7 +201,7 @@ class CodexHomeLaunchConfigTests(_ManagedHomes):
                 )
 
     def test_a_home_seeded_alone_already_parses_as_launched(self) -> None:
-        provision_codex_home(self.product, self.user, data_dir=self.data_dir, runtime_home=self.runtime_home)
+        provision_codex_home(self.product, self.user, data_dir=self.data_dir)
 
         for home in self.homes():
             with self.subTest(home=home.name):
@@ -233,7 +233,7 @@ class CodexHomeLaunchConfigTests(_ManagedHomes):
         self.assertEqual(launch_config_defects(stub, self.workspace), ["as launched: po_memory"])
 
     def test_reconcile_writes_the_entry_into_a_seeded_data_dir_home_that_lacks_it(self) -> None:
-        data_home = self.homes()[1]
+        data_home = self.homes()[0]
         data_home.mkdir(parents=True)
         (data_home / "config.toml").write_text('model = "operator-choice"\n\n' + OLD_STUB, encoding="utf-8")
 
@@ -289,8 +289,13 @@ class CodexHomeLaunchConfigTests(_ManagedHomes):
                 (outcome,) = self.run_upgrade_steps(upgrade.step_memory_clients)
 
                 self.assertEqual(outcome.status, "changed", outcome)
+                if not logged_in:
+                    # No login, so no home a head could be launched in (secretary-1723).
+                    with self.assertRaises(CodexHomeLoginMissing):
+                        self.selectable_home()
+                    continue
                 selected = self.selectable_home()
-                self.assertEqual(selected, self.homes()[1 if logged_in else 0])
+                self.assertEqual(selected, self.homes()[0])
                 self.assertEqual(launch_config_defects(selected / "config.toml", self.workspace), [])
 
 

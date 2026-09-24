@@ -5,9 +5,10 @@ trust before it takes a prompt. The product answers that question by writing `co
 `CODEX_HOME` the head will run with, before the pane exists — so from that card on, *any* test that
 reaches a worker, reviewer or service bring-up performs a write, whether or not it thought about
 trust. With no `codex_home` in the fixture registry and no `TA_CODEX_HOME` in the environment, that
-write lands in `~/.config/orca/codex-runtime-home/home/config.toml`: installation state shared by
-every Codex head on the host, where a permanent `trusted` grant for a since-deleted `/tmp` workspace
-would accumulate one entry per suite run with nothing to prune it.
+write lands in the installation's `<data_dir>/codex-home/config.toml` wherever `SECRETARY_DATA_DIR`
+names one (the legacy `~/.config/orca/...` home until secretary-1723): installation state shared
+by every Codex head on the host, where a permanent `trusted` grant for a since-deleted `/tmp`
+workspace would accumulate one entry per suite run with nothing to prune it.
 
 `tests/__init__.py` closes that by claiming one throwaway `TA_CODEX_HOME` for the whole run before
 any test module is imported. These tests prove the default is actually installed, that an ordinary
@@ -41,6 +42,18 @@ REGISTRY = {
 }
 
 
+def _installation_homes() -> list[Path]:
+    """The CODEX_HOMEs of this host's installation that a bring-up without the suite's seam could
+    write into: the data-dir home of an ambient `SECRETARY_DATA_DIR`, and the legacy Orca home the
+    resolver fell back to before secretary-1723 (still installation state, if nobody writes it now).
+    """
+    homes = [Path.home() / ".config" / "orca" / "codex-runtime-home" / "home"]
+    data_dir = os.environ.get("SECRETARY_DATA_DIR")
+    if data_dir:
+        homes.append(Path(data_dir).expanduser() / codex_preflight.CODEX_HOME_DATA_DIRNAME)
+    return homes
+
+
 def _config_stat(path: Path) -> tuple[int, int] | None:
     """Enough of a file's identity to tell "untouched" from "rewritten", without reading it."""
     try:
@@ -56,10 +69,10 @@ class HermeticCodexHomeTests(unittest.TestCase):
 
         self.assertEqual(suite_home, _SUITE_CODEX_HOME)
         self.assertTrue(suite_home.is_dir())
-        # Not the installation's own home, and not anywhere underneath it.
-        installation_home = Path(codex_preflight.CODEX_HOME_DEFAULT)
-        self.assertNotEqual(suite_home, installation_home)
-        self.assertFalse(suite_home.is_relative_to(installation_home))
+        # Not an installation's own home, and not anywhere underneath one.
+        for installation_home in _installation_homes():
+            self.assertNotEqual(suite_home, installation_home)
+            self.assertFalse(suite_home.is_relative_to(installation_home))
         # Every reader resolves the seam at the call, so all of them put the suite's home first.
         # (Readers also scan the installation homes that exist, read-only, for live heads.)
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
@@ -76,8 +89,8 @@ class HermeticCodexHomeTests(unittest.TestCase):
         ordinary launcher test does, and they have to be safe without the test knowing that a Codex
         bring-up writes anything at all.
         """
-        installation_config = Path(codex_preflight.CODEX_HOME_DEFAULT) / codex_preflight.CODEX_CONFIG_FILE
-        before = _config_stat(installation_config)
+        installation_configs = [home / codex_preflight.CODEX_CONFIG_FILE for home in _installation_homes()]
+        before = [_config_stat(config) for config in installation_configs]
         written: list[Path] = []
         real_save = codex_preflight._save_codex_config
 
@@ -114,7 +127,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
             self.assertIn(str(workspace.resolve()), trusted)
             self.assertIn('trust_level = "trusted"', trusted)
 
-        self.assertEqual(_config_stat(installation_config), before)
+        self.assertEqual([_config_stat(config) for config in installation_configs], before)
 
     def test_a_test_can_still_own_its_codex_home_locally(self) -> None:
         """The escape hatch the rest of the suite already uses: a local patch shadows the default

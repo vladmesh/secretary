@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.head_status import HeadStatusHost, head_status
+from secretary.dispatch.head_status import head_status
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.observer import (
@@ -38,7 +38,6 @@ from secretary.dispatch.observer import (
     put_observers,
 )
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import (
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,
@@ -323,7 +322,7 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
                 self.assertLess(time.monotonic(), deadline, answer)
                 time.sleep(0.05)
 
-        self.assertEqual(answer["pane_channel"]["state"], "not_consulted")
+        self.assertNotIn("pane_channel", answer)
         rows = {row["role"]: row for row in answer["heads"]}
         self.assertEqual(sorted(rows), ["reviewer", "worker"])
         for role, run in (("worker", worker), ("reviewer", reviewer)):
@@ -448,8 +447,7 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
         runtime.data_dir = self.root / "data"
         runtime.production_state.load.return_value = payload
         runtime.production_state.records.return_value = {}
-        with mock.patch.object(HeadStatusHost, "workspace_inventory", side_effect=HostError("no orca here")):
-            answer = head_status(runtime, workspace=record.workspace)
+        answer = head_status(runtime, workspace=record.workspace)
 
         self.assertEqual(len(answer["heads"]), 1, answer)
         row = answer["heads"][0]

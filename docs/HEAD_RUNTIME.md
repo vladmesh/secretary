@@ -33,7 +33,8 @@ what is left to delete once it has (A20).
   record, is refused by every verb — launch, delivery, stop, teardown — with `LegacyDispatcherRecord`
   before any child runs or any backend is asked. Its bring-up cause is the card's own contract, so
   the card goes Blocked with a reason naming the record; it is never torn down through Orca and never
-  re-placed. `head-status`'s pane inventory (step 5) still reads such a record.
+  re-placed. `head-status` shows such a record as legacy (`runtime: orca-legacy`,
+  `legacy_record: true`) through its pid heartbeat alone; it reads no pane inventory (step 5).
 - **Memory access grants.** A grant whose `head_run` is a legacy record loads, so it is never
   `runtime_identity_malformed` for its runtime alone. It is decided by liveness like any grant: an
   Orca pane is never alive, so it is denied `runtime_identity_unbound` (no pid file) or
@@ -79,7 +80,7 @@ reason to keep Orca), **open**. Refs are sprint:1459 and sprint:1461 cards and t
 | Background agents run from the product's systemd units, with no Orca automations; the old top-level agents package is deleted | merged, live proof pending | secretary-1706 (6d866de), secretary-1707 (3240db2). Live proof: one tick per agent after the final upgrade. |
 | Role heads get the product venv on `PATH` | merged, live proof pending | secretary-1708 (d83f9b5). Live proof: the next observer, steward, retro and curator heads. |
 | The steward files proposals in Issues | merged, live proof pending | secretary-1709 (d148fa5). Live proof: the next steward tick that proposes. |
-| Codex heads use a `CODEX_HOME` under the data dir; card and observer workspace roots are disjoint | merged, live proof pending | secretary-1710 (ca96b09). Live proof waits for the Codex login under the data dir (a PO action). |
+| Codex heads use a `CODEX_HOME` under the data dir; card and observer workspace roots are disjoint | proven live | secretary-1710 (ca96b09); secretary-1723 removed the legacy rung. Live on 2026-09-24: `secretary doctor` reports `codex home: /home/dev/secretary-data/codex-home (data-dir home)`, every live Codex process has `CODEX_HOME=/home/dev/secretary-data/codex-home`, no `*.jsonl` under the legacy home's `sessions/` was written after 12:00Z (newest 08:38Z), and `resolve_codex_home` resolves all six installed Codex profiles to `/home/dev/secretary-data/codex-home` (`data-dir`). |
 | The Codex provider-ingress `before_send` (`bind_before_delivery`) runs for a running head | merged, live proof pending | secretary-1719: `LocalPtyHeadRuntime._before_send` runs the transport's `before_send` once per admitted delivery, after admission and before the first byte, whatever the head's stop state (it ran for a suspended head only). The run the hook returns is merged into the receipt as the transport's handoff merges it (`post_delivery_run`). Live proof: the next Codex head on `local-pty` with a provider source. |
 | Vitality does not read a working resumed worker as stalled | merged, live proof pending | secretary-1719. Cause: `command_terminal_status` read the provider cursor only for a head in Orca's pane inventory, so a `local-pty` head's episode aged on the pid alone. Its `reason: "pid"` status now carries the run's provider cursor. secretary-1703's worker read `suspected_stall` (01:16Z) and `confirmed_stall` (01:21Z) while its supervisor journal logged output every minute. Live proof: the next retained-then-continued `local-pty` worker. |
 | The dashboard shows the steward's "Needs a human" | accepted | issue:57ddd3549f21eff1abda option (a) is merged: the steward files proposals in Issues (secretary-1709, d148fa5). The steward's own report stays readable on its Blocked report card and in the web's read-only head view of its transcript and journal (secretary-1703, 5b8336e). The dashboard showing it is a web feature, not something Orca gave a head, so it does not block removing Orca. The issue stays open for option (c). |
@@ -117,18 +118,31 @@ before it. Steps 2 and 3 turned out to need each other (the host's Orca branches
    lifecycle (`PANE_FALLBACK_RUNTIME`, warm reuse, ghost reap, watchdog restart, finalizer
    trailer) and `orca_rpc.py` are deleted. `tests/test_architecture.py` keeps every module under
    `secretary.automations` free of `pane_host`, `orca_rpc` and the `orca` / `orca-cli` binary.
-5. **The pane inventory in `dispatch/head_status.py`.** Why: it is read only for a run on
-   `orca-legacy` or an Orca workspace; every other row already reads the supervisor and sets
-   `pane_channel: not_consulted`.
+5. **Done (secretary-1723).** The pane inventory in `dispatch/head_status.py`. Every supervised row
+   reads the supervisor as before; a legacy record is shown as legacy (`is_legacy_record`) through its
+   pid heartbeat, with no pane inventory. The `pane_channel`, `runtime_pane_channel`, `runtime_pane`
+   and `pane` fields are gone.
 6. **`runtime/orca_legacy_head.py`, then `runtime/pane_host.py`.** Why: only the `orca-legacy`
    backend constructs them. Remove the pane-host importers first (`runtime/tui_delivery.py`,
    `runtime/agent_prompt_transport.py`, `runtime/head/operations.py`, `dispatch/tui.py`,
    `dispatch/review.py`): each keeps a pane path only for Orca. `automations/runtime/finalizer.py`
    is already deleted, with its `--spawn-finalizer` / `--finalize` flags (done: secretary-1720).
-7. **The legacy `CODEX_HOME` rung** (`~/.config/orca/codex-runtime-home/home`) in
+   **The `dispatch/` half is done (secretary-1723):** `command_terminal_status` reads the pid
+   heartbeat and the exact-run provider cursor and no pane, the `workspace_panes` seam is gone, and
+   `dispatch/tui.py` keeps the delivery vocabulary and the provider-journal readers but no pane or
+   screen path. No module under `secretary.dispatch` imports `pane_host`
+   (`tests/test_architecture.py`, `DispatchReadsNoPaneTests`). The runtime half and the deletions
+   remain.
+7. **Done (secretary-1723).** The legacy `CODEX_HOME` rung (`~/.config/orca/.../home`) in
    `codex_preflight.resolve_codex_home`, and its readers in `upgrade.py` and `installation.py`
-   (secretary-1710). Why: once the login under the data dir is proven live, no Codex head reads the
-   legacy home.
+   (secretary-1710). With no profile `codex_home`, no `TA_CODEX_HOME` and no data-dir login the
+   resolver raises `CodexHomeLoginMissing`, whose message names the fix; `secretary doctor` reports it
+   as a red finding (`codex_home_login_missing`) when an installed profile runs Codex. Seeding and the
+   Memory-client reconcile manage `<data_dir>/codex-home` only. One read-only reader is left:
+   `runtime/codex_home.py` `session_roots` still scans the legacy home's `sessions/`, because the
+   curator had not ingested 468 of its 3217 rollouts on 2026-09-24; it goes once the curator's
+   watermark names every one. The legacy home itself is not moved or deleted (a PO action, if
+   ever).
 8. **`orca_binding` and the `orca` records in `host-managed.json`.** `orca_binding` has two
    readers. Step 3 removed the first, orca-legacy workspace placement (secretary-1722). The second is curator
    routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and

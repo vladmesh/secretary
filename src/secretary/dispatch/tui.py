@@ -1,12 +1,16 @@
-"""Codex TUI prompt delivery for dispatcher-launched heads."""
+"""What the dispatcher reads about its heads' prompts and progress from the provider's own journal.
+
+The delivery vocabulary (`runtime.tui_delivery`) is re-exported for the dispatch modules that
+classify a delivery receipt. Nothing here reads a pane: the pane half -- the Orca prompt path and
+the screen fallback that guessed a started turn from a pane's text -- is gone with the pane
+inventory (A20 step 6, secretary-1723).
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import re
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,7 +25,6 @@ from secretary.runtime.claude_sessions import (
 )
 from secretary.runtime.codex_home import session_roots
 from secretary.runtime.head import HeadRun, HeadRunError
-from secretary.runtime.pane_host import PaneHost
 from secretary.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
@@ -47,21 +50,9 @@ from secretary.runtime.tui_delivery import (
     STAGE_PAYLOAD_WRITTEN,
     STAGE_TURN_OBSERVED,
     DeliveryEvidence,
-    DeliveryOutcome,
-    RunJson,
     TuiDeliveryError,
-    classify_pre_delivery,
-    composer_fingerprint,
-    deliver_interactive_prompt,
     delivery_readiness_state,
     delivery_receipt_state,
-    dialog_is_live,
-    live_screen,
-    output_cursor,
-    read_pane_text,
-    strip_ansi,
-    terminal_readiness,
-    wait_for_tui_idle,
 )
 
 __all__ = [
@@ -89,119 +80,17 @@ __all__ = [
     "STAGE_PAYLOAD_WRITTEN",
     "STAGE_TURN_OBSERVED",
     "DeliveryEvidence",
-    "DeliveryOutcome",
-    "RunJson",
     "TuiDeliveryError",
     "bind_claude_provider_progress_source",
-    "classify_pre_delivery",
     "claude_project_dir_name",
-    "composer_fingerprint",
-    "deliver_interactive_prompt",
-    "deliver_tui_prompt",
     "delivery_readiness_state",
     "delivery_receipt_state",
-    "dialog_is_live",
     "latest_claude_user_turn_for",
     "latest_user_turn_for",
-    "live_screen",
-    "output_cursor",
     "prepare_claude_provider_progress_source",
     "provider_progress_for_run",
     "provider_turn_started",
-    "read_terminal_text",
-    "strip_ansi",
-    "terminal_readiness",
-    "terminal_turn_started",
-    "turn_started_confirm",
-    "wait_for_tui_idle",
 ]
-
-_CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
-# Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
-# transcript word such as "working" or "thinking" is not enough to say a new turn started.
-#
-# What is stable about that line across versions is its shape: some decoration, then a capitalised
-# gerund closed by an ellipsis — `Forming...`, `Thinking…`, `Tempering…`, `Bloviating…`. What is not
-# stable is anything else about it. The previous pattern pinned the spinner to `[✻✽✢✶·]` and
-# required a parenthesised `(4s · ↑ 13.2k tokens)` suffix; Claude 2.1.227 cycles `●` through that
-# spinner too, and the line Orca's pane read returns is an overlay of the alternate screen —
-# `· Tempering…e /btw to ask a 9u ck side question…` — in which the suffix is painted over. So the
-# pattern stopped matching anything at all, and the last screen-side hint died on a version bump.
-# It is only a hint: what proves a Claude turn is the user record the provider persists, and the
-# roles that use this never let a screen that says nothing decide the fate of a pane.
-_CLAUDE_TURN_RE = re.compile(r"(?m)^[^\w\n]*[A-Z][A-Za-z]*(?:…|\.\.\.)")
-
-
-def deliver_tui_prompt(
-    handle: str,
-    workspace: str,
-    prompt_file: str,
-    *,
-    run_json: RunJson | None = None,
-    host: PaneHost | None = None,
-    adapter: str = "codex",
-    session_root: Path | None = None,
-    prompt_text: str | None = None,
-    subject: str = "",
-    document_path: str = "",
-    before_send: Callable[[], None] | None = None,
-    ack_out_of_band: bool = False,
-) -> DeliveryOutcome:
-    """Deliver one provider TUI prompt through the shared transport and confirmation path.
-
-    `ack_out_of_band` is the caller's own statement that its acknowledgement arrives elsewhere -- the
-    observer wake quotes the delivery id in the resume it writes from the turn it just started. It
-    changes nothing about the confirmation this path performs and only says that stage 3 alone is
-    enough evidence for this caller.
-    """
-    if prompt_text is not None:
-        prompt = prompt_text
-    else:
-        try:
-            prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
-    return deliver_interactive_prompt(
-        handle,
-        prompt,
-        run_json=run_json,
-        host=host,
-        adapter=adapter,
-        confirm=turn_started_confirm(
-            handle, workspace, adapter, run_json=run_json, host=host, session_root=session_root
-        ),
-        ack_out_of_band=ack_out_of_band,
-        subject=subject,
-        document_path=document_path,
-        before_send=before_send,
-    )
-
-
-def turn_started_confirm(
-    handle: str,
-    workspace: str,
-    adapter: str,
-    *,
-    run_json: RunJson | None = None,
-    host: PaneHost | None = None,
-    session_root: Path | None = None,
-) -> Callable[[float], bool]:
-    """The worker and reviewer delivery criterion, on whichever head that role was given.
-
-    The provider's journal answers first and, when it can answer at all, alone. The screen is the
-    fallback for a head whose provider keeps no journal this dispatcher can find, and it has to be:
-    `_screen_started_turn` searches a retained window for the word `Working`, and a pane that has
-    ever worked keeps saying it. Used as a second opinion after a journal that says "not yet", it
-    is not a criterion — it is a yes for every pane that was ever busy.
-    """
-
-    def confirm(sent_at: float) -> bool:
-        recorded = provider_turn_started(workspace, sent_at, adapter=adapter, session_root=session_root)
-        if recorded is not None:
-            return recorded
-        return terminal_turn_started(handle, run_json=run_json, host=host, adapter=adapter)
-
-    return confirm
 
 
 def provider_turn_started(
@@ -216,7 +105,7 @@ def provider_turn_started(
     Three answers, because two would have to lie about one of them: ``True`` is a turn the provider
     wrote down, ``False`` is a journal that exists and does not hold one yet, and ``None`` is no
     journal to read — an adapter that keeps none, or a head whose sessions are not where this
-    dispatcher looks. Only the third leaves a caller with nothing better than the screen.
+    dispatcher looks. Only the third leaves a caller with no proof either way.
     """
     if not workspace or not since:
         return None
@@ -229,39 +118,6 @@ def provider_turn_started(
             return None
         return bool(latest_user_turn_for(workspace, since, session_root=session_root))
     return None
-
-
-def terminal_turn_started(
-    handle: str,
-    *,
-    run_json: RunJson | None = None,
-    host: PaneHost | None = None,
-    workspace: str = "",
-    since: float = 0.0,
-    adapter: str = "",
-    session_root: Path | None = None,
-) -> bool:
-    """Whether an interactive provider pane already accepted a prompt into a turn.
-
-    Claude and Codex both persist their user turns locally, and when recovery knows the delivery
-    boundary that durable record is the proof; the screen is a secondary hint.
-
-    Secondary in both directions. A screen showing a turn underway is worth believing, and a screen
-    showing nothing is worth nothing: a repainting TUI read through a pane snapshot can be between
-    frames or in an alternate-screen overlay. No caller may take the `False` this returns as proof
-    that a head did not get its prompt.
-    """
-    if workspace and since:
-        if adapter == "claude":
-            return bool(latest_claude_user_turn_for(workspace, since))
-        if adapter == "codex":
-            return bool(latest_user_turn_for(workspace, since, session_root=session_root))
-    return _screen_started_turn(read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter)
-
-
-def read_terminal_text(handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None) -> str:
-    """The pane's text, read the one way the delivery boundary reads it."""
-    return read_pane_text(handle, run_json=run_json, host=host)
 
 
 def latest_user_turn_for(
@@ -910,11 +766,3 @@ def _is_user_turn(record: dict[str, Any]) -> bool:
         and payload.get("type") == "message"
         and payload.get("role") == "user"
     )
-
-
-def _screen_started_turn(screen: str, *, adapter: str = "") -> bool:
-    if adapter == "claude":
-        return bool(_CLAUDE_TURN_RE.search(screen))
-    marker = screen.rfind("\u203a")
-    status_area = screen[:marker] if marker >= 0 else screen
-    return bool(_CODEX_WORKING_RE.search(status_area))

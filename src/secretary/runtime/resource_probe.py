@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.runtime.codex_home import installation_codex_home
+from secretary.runtime.codex_preflight import CodexHomeLoginMissing
 from secretary.runtime.redact import redact
 
 # A single slow or broken probe is killed rather than hanging the dispatcher's tick. Both
@@ -263,7 +264,11 @@ def probe_openai_sub() -> ProbeResult:
     subscription, no per-profile credential). `-s read-only` and a bare "ping" keep it
     side-effect-free and tool-free, so no bypass flag is needed. CODEX_HOME is set explicitly
     because this is a plain subprocess, not a spawned terminal that would inherit it."""
-    home = installation_codex_home().path
+    try:
+        home = installation_codex_home().path
+    except CodexHomeLoginMissing as e:
+        # No login to probe with is a failed probe, and its message names the fix.
+        return ProbeResult(False, "builtin:openai-sub", status="no-login", exception=_exception_text(e))
     env = {**os.environ, "CODEX_HOME": home}
     cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "ping"]
     return _run_subprocess_probe(
