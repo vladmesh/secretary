@@ -62,7 +62,7 @@ class RoleVocabularyTests(unittest.TestCase):
         self.assertEqual(set(_role_choices(EDIT_ROLES)), {role.value for role in EDIT_ROLES})
         self.assertEqual(
             {role.value for role in PROPOSAL_CREATE_ROLES},
-            {"worker", "reviewer", "retro"},
+            {"worker", "reviewer", "retro", "steward"},
         )
 
     def test_card_transition_registry_uses_the_canonical_role_type(self) -> None:

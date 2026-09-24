@@ -178,8 +178,8 @@ reason `completion evidence missing` naming the absent marker, and its workspace
 The PO may create a card of any kind (`code`, `research`, `infra`) with no `--sprint`, in Ready, on
 any project, including one an open sprint reserves, and may move and edit it without
 `--sprint-override` (see [The sprint guard](#the-sprint-guard)). Other roles keep their rules: the
-observer creates only cards of its own sprint, the steward's execution card needs an open sprint, and
-worker, reviewer and retro create only proposals.
+observer creates only cards of its own sprint, the steward creates its report card In progress, and
+worker, reviewer, retro and steward otherwise create only proposals.
 
 Whether such a card runs is decided once, at admission, before the claim. The dispatcher asks the same
 reserved-project index the write guard reads (seeded from the sprints board when it was never written,
@@ -694,8 +694,11 @@ python3 -P -m secretary task create --role po --project PROJECT --type code --ti
 With `--sprint`, the sprint must be open and the project one of its reservations (a closed sprint and
 an unreserved project are separate errors, both before any backend write). Without it, only the PO
 creates an execution task (see [Cards outside a sprint](#cards-outside-a-sprint)); for other roles it
-requires `--sprint`. `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
-roles create only proposals in Issues, which a PO triages to Ready.
+requires `--sprint`. `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer, retro
+and steward roles create only proposals in Issues, which a PO triages to Ready. The steward's one other
+create is its report card In progress (research, a slug, no sprint); a steward proposal is refused in
+any other column (`role_forbidden`) or with a sprint on a reserved project (`sprint_write_forbidden`),
+as a retro proposal is, and its audit names the steward as the creator.
 
 Without `--ref`, `task create` allocates `PROJECT-N` from the project's board-wide high-water mark
 over open and closed cards. Any reference, allocated or given, is checked as unclaimed before it is

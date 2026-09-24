@@ -1948,6 +1948,43 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertBoardUnchanged(before)
 
+    def test_steward_proposes_in_issues_and_is_audited_as_the_creator(self) -> None:
+        """secretary-1709: outside its report, the steward creates proposals as retro does."""
+        created = self.writer.create(
+            role="steward",
+            actor="steward",
+            project="secretary",
+            task_type="code",
+            title="Finding from the sweep",
+            description="non-urgent improvement",
+            target="issues",
+            request_id="steward-proposal",
+        )
+
+        self.assertEqual(created["task"]["state"], "issues")
+        self.assertEqual(self.card(created["task"]["ref"])["state"], "issues")
+        event = self.writer.audit.committed_event("steward-proposal")
+        assert event is not None
+        self.assertEqual(event["kind"], "created")
+        self.assertEqual(event["actor"], {"role": "steward", "id": "steward"})
+        self.assertNotIn("steward_report", event["payload"])
+
+    def test_steward_create_outside_issues_is_refused_as_for_every_proposal_role(self) -> None:
+        for role in ("worker", "reviewer", "retro", "steward"):
+            with self.subTest(role=role):
+                before = self.board_snapshot()
+                with self.assertRaisesRegex(TaskError, "only proposals in Issues") as raised:
+                    self.writer.create(
+                        role=role,
+                        actor=role,
+                        project="secretary",
+                        task_type="code",
+                        title="Continuation",
+                        target="ready",
+                    )
+                self.assertEqual(raised.exception.code, "role_forbidden")
+                self.assertBoardUnchanged(before)
+
     def _failed_claim(self, request_id: str, worker: str = "secretary-468-runtime") -> None:
         """A claim whose column move is refused: the whole attempt leaves nothing behind."""
         with (

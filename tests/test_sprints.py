@@ -3205,6 +3205,26 @@ class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
         ]
         self.assertEqual([event["payload"]["sprint"] for event in events], [self.ref])
 
+    def test_a_steward_proposal_with_a_sprint_is_refused_as_a_retro_one_is(self) -> None:
+        """secretary-1709: a proposal carries no sprint, whichever proposal role files it."""
+        for role in ("retro", "steward"):
+            for sprint in (self.ref, ""):
+                with (
+                    self.subTest(role=role, sprint=sprint),
+                    self.assertRaisesRegex(TaskError, self.ref) as denied,
+                ):
+                    self.tasks.create(
+                        role=role,
+                        actor=role,
+                        project="secretary",
+                        task_type="code",
+                        title="finding",
+                        target="issues",
+                        sprint=sprint,
+                        request_id=f"{role}-proposal-{sprint or 'unlinked'}",
+                    )
+                self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+
     def test_a_project_no_sprint_reserves_is_unaffected(self) -> None:
         created = self.tasks.create(
             role="retro",

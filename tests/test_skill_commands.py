@@ -23,6 +23,7 @@ from secretary.cli import build_parser
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 RETRO_SKILL = SKILLS / "roles" / "retro" / "retro" / "SKILL.md"
+STEWARD_SKILL = SKILLS / "roles" / "steward" / "steward" / "SKILL.md"
 
 # `python3 -P -m secretary <words>`: the words up to the first flag, placeholder or punctuation.
 _COMMAND = re.compile(r"python3 -P -m secretary\b(?P<rest>[^\n`]*)")
@@ -44,6 +45,20 @@ def _commands(text: str) -> list[list[str]]:
             words.append(token)
         commands.append(words)
     return commands
+
+
+def _task_blocks(text: str) -> list[str]:
+    """Each `secretary task` command of a text with its backslash-continued lines."""
+    blocks: list[str] = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if "python3 -P -m secretary task " not in line:
+            continue
+        block = [line]
+        while block[-1].rstrip().endswith("\\") and index + len(block) < len(lines):
+            block.append(lines[index + len(block)])
+        blocks.append("\n".join(block))
+    return blocks
 
 
 def _subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser] | None:
@@ -134,19 +149,6 @@ class RetroSkillPermissionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = RETRO_SKILL.read_text(encoding="utf-8")
 
-    def _task_blocks(self) -> list[str]:
-        """Each `secretary task` command with its backslash-continued lines."""
-        blocks: list[str] = []
-        lines = self.text.splitlines()
-        for index, line in enumerate(lines):
-            if "python3 -P -m secretary task " not in line:
-                continue
-            block = [line]
-            while block[-1].rstrip().endswith("\\") and index + len(block) < len(lines):
-                block.append(lines[index + len(block)])
-            blocks.append("\n".join(block))
-        return blocks
-
     def test_the_retired_pipeline_cli_is_gone_from_the_skill(self) -> None:
         self.assertNotIn("pipeline list", self.text)
         self.assertNotIn(" idea", self.text)
@@ -156,7 +158,7 @@ class RetroSkillPermissionTests(unittest.TestCase):
         self.assertIn(Role.RETRO, CREATE_ROLES)
         self.assertIn(Role.RETRO, PROPOSAL_CREATE_ROLES)
         self.assertEqual(CARD_TRANSITIONS[Role.RETRO], frozenset())
-        blocks = self._task_blocks()
+        blocks = _task_blocks(self.text)
         verbs = {_commands(block)[0][1] for block in blocks}
         self.assertEqual(verbs, {"list", "create"})
         for block in blocks:
@@ -171,6 +173,26 @@ class RetroSkillPermissionTests(unittest.TestCase):
                 self.assertIn("--project", block)
                 self.assertIn("--type", block)
                 self.assertIn("--title", block)
+
+
+class StewardSkillProposalTests(unittest.TestCase):
+    """secretary-1709: the steward creates only proposals in Issues, with no sprint."""
+
+    def setUp(self) -> None:
+        self.text = STEWARD_SKILL.read_text(encoding="utf-8")
+
+    def test_every_steward_create_is_a_proposal_in_issues(self) -> None:
+        self.assertIn(Role.STEWARD, CREATE_ROLES)
+        self.assertIn(Role.STEWARD, PROPOSAL_CREATE_ROLES)
+        creates = [block for block in _task_blocks(self.text) if _commands(block)[0][1:2] == ["create"]]
+        self.assertTrue(creates)
+        for block in creates:
+            self.assertIn("--role steward", block)
+            self.assertIn("--state issues", block)
+            self.assertNotIn("--sprint", block)
+            self.assertIn("--project", block)
+            self.assertIn("--type", block)
+            self.assertIn("--title", block)
 
 
 if __name__ == "__main__":
