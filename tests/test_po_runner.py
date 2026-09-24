@@ -19,7 +19,13 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.po import store as po_store
-from secretary.po.runner import PoRunner, codex_thread_id, process_identity
+from secretary.po.runner import (
+    PoRunner,
+    claude_resolved_model,
+    codex_resolved_model,
+    codex_thread_id,
+    process_identity,
+)
 from secretary.po.store import PoStore, PoStoreError, TurnInProgress
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually
 from tests.sql_backend_fixtures import PostgresBoard
@@ -86,11 +92,19 @@ class PoRunnerTests(unittest.TestCase):
         self.addCleanup(self.stop_everything)
 
     def make_runner(self) -> PoRunner:
+        # A Codex home of the test's own: the fake writes its rollouts there, and the runner reads
+        # a turn's model from there, never from the one on this host.
+        codex_home = str(self.root / "codex-home")
         return PoRunner(
             self.store,
             self.data,
             executables=self.executables,
-            env={**os.environ, "FAKE_LOG": str(self.log)},
+            env={
+                **os.environ,
+                "FAKE_LOG": str(self.log),
+                "CODEX_HOME": codex_home,
+                "FAKE_CODEX_HOME": codex_home,
+            },
         )
 
     def stop_everything(self) -> None:
@@ -482,6 +496,108 @@ class PoRunnerTests(unittest.TestCase):
         seen = turn(explicit)
         self.assertEqual(Path(seen["python3"]), system / "python3")
         self.assertEqual(seen["module"], "1")
+
+    # --- effort and the resolved model -----------------------------------------------------
+
+    def test_a_claude_effort_is_passed_on_every_turn_and_the_turn_keeps_the_full_model_id(self) -> None:
+        session = self.runner.create_session("claude", "opus", "high")
+        self.assertEqual(self.store.session(session.session_id).effort, "high")
+
+        first = self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+        second = self.settle(session.session_id, self.runner.send(session.session_id, "two").seq)
+
+        for call in self.calls():
+            argv = call["argv"]
+            self.assertEqual(
+                argv[argv.index("--model") : argv.index("--model") + 4],
+                ["--model", "opus", "--effort", "high"],
+            )
+        # The session's own model, not the subagent's that `modelUsage` also names.
+        self.assertEqual(
+            (first.resolved_model, second.resolved_model), ("claude-opus-5-5", "claude-opus-5-5")
+        )
+        self.assertEqual(self.store.session(session.session_id).resolved_model, "claude-opus-5-5")
+        self.assertEqual(self.store.sessions()[0].resolved_model, "claude-opus-5-5")
+
+    def test_a_default_effort_passes_no_flag(self) -> None:
+        session = self.runner.create_session("claude", "sonnet")
+        self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+
+        self.assertEqual(self.store.session(session.session_id).effort, po_store.DEFAULT_EFFORT)
+        self.assertNotIn("--effort", self.calls()[0]["argv"])
+
+    def test_a_codex_effort_is_a_config_override_and_the_model_comes_from_the_rollout(self) -> None:
+        session = self.runner.create_session("codex", "gpt-5.6-terra", "xhigh")
+
+        first = self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+        second = self.settle(session.session_id, self.runner.send(session.session_id, "two").seq)
+
+        for call in self.calls():
+            argv = call["argv"]
+            index = argv.index("-m")
+            self.assertEqual(
+                argv[index : index + 4], ["-m", "gpt-5.6-terra", "-c", "model_reasoning_effort=xhigh"]
+            )
+        self.assertEqual(self.calls()[1]["argv"][:2], ["exec", "resume"])
+        self.assertEqual((first.resolved_model, second.resolved_model), ("gpt-5.6-terra", "gpt-5.6-terra"))
+
+    def test_a_codex_turn_with_no_rollout_resolves_nothing(self) -> None:
+        self.runner.env.pop("FAKE_CODEX_HOME")
+        session = self.runner.create_session("codex", "gpt-5.5")
+
+        turn = self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+
+        self.assertEqual(turn.state, po_store.COMPLETED)
+        self.assertIsNone(turn.resolved_model)
+        self.assertIsNone(self.store.session(session.session_id).resolved_model)
+
+    def test_a_create_request_id_is_bound_to_its_effort(self) -> None:
+        session, created = self.runner.create_session_request("claude", "opus", "req-1", "high")
+        again, created_again = self.runner.create_session_request("claude", "opus", "req-1", "high")
+        self.assertEqual((created, created_again, again.session_id), (True, False, session.session_id))
+        with self.assertRaises(po_store.RequestConflict):
+            self.runner.create_session_request("claude", "opus", "req-1", "low")
+        # An id recorded before efforts existed bound (operation, cli, model): `default` keeps that.
+        self.assertEqual(
+            po_store.session_fingerprint("claude", "opus"),
+            po_store._digest([po_store.SESSION_CREATE, "claude", "opus"]),
+        )
+
+
+class ResolvedModelParsingTests(unittest.TestCase):
+    def test_claude_names_the_first_model_usage_key_of_the_last_result(self) -> None:
+        first = json.dumps({"type": "result", "result": "a", "modelUsage": {"claude-fable-5-1": {}}})
+        relaunched = json.dumps(
+            {
+                "type": "result",
+                "result": "b",
+                "modelUsage": {"claude-opus-5-5[1m]": {}, "claude-haiku-4-5": {}},
+            }
+        )
+        self.assertEqual(claude_resolved_model(first), "claude-fable-5-1")
+        self.assertEqual(claude_resolved_model(first + "\n" + relaunched + "\n"), "claude-opus-5-5[1m]")
+        self.assertIsNone(claude_resolved_model(json.dumps({"type": "result", "result": "c"})))
+        self.assertIsNone(claude_resolved_model("not json"))
+
+    def test_codex_reads_the_last_turn_context_of_the_threads_rollout(self) -> None:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        rollout = home / "sessions" / "2026" / "09" / "14" / "rollout-2026-09-14T09-43-36-thread-1.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in (
+                    {"type": "session_meta", "payload": {"id": "thread-1"}},
+                    {"type": "turn_context", "payload": {"model": "gpt-5.6-sol", "effort": "low"}},
+                    {"type": "turn_context", "payload": {"model": "gpt-5.6-terra", "effort": "high"}},
+                )
+            )
+            + "\n{truncated",
+            encoding="utf-8",
+        )
+        self.assertEqual(codex_resolved_model(home, "thread-1"), "gpt-5.6-terra")
+        self.assertIsNone(codex_resolved_model(home, "thread-2"))
+        self.assertIsNone(codex_resolved_model(home, None))
 
 
 class CodexThreadIdTests(unittest.TestCase):

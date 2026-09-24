@@ -513,6 +513,59 @@ class SprintStateTests(SprintProtocolFixture):
         self.assertEqual(launch["record"]["head"], OBSERVER_PROFILE)
         self.assertTrue(launch["record"]["alive"])
 
+    def test_each_role_names_its_profile_with_the_model_and_effort_it_pins(self) -> None:
+        """The page shows a role's model without joining the sprint against the registry itself."""
+        reference = self.reference_of(self.create(worker=WORKER_PROFILE))
+        layer = self.reads()
+
+        watched = layer.sprint_state(reference)["work"]["head_profiles"]
+        items = layer.sprint_list()["sprints"]["items"]
+        listed = next(item for item in items if item["ref"] == reference)["head_profiles"]
+
+        self.assertEqual(listed, watched)
+        self.assertEqual(watched["source"]["name"], "heads")
+        self.assertEqual(
+            watched["observer"],
+            {
+                "profile": OBSERVER_PROFILE,
+                "via": "declared",
+                "registered": True,
+                "label": "codex · gpt-5.6-terra · high effort",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+            },
+        )
+        self.assertEqual(
+            (watched["worker"]["profile"], watched["worker"]["via"], watched["worker"]["model"]),
+            (WORKER_PROFILE, "pinned", "opus"),
+        )
+        self.assertIsNone(watched["worker"]["effort"])
+        # An unpinned reviewer is the dispatcher's choice per card, not a profile of this sprint.
+        self.assertEqual(
+            (watched["reviewer"]["profile"], watched["reviewer"]["via"], watched["reviewer"]["registered"]),
+            (None, "unset", False),
+        )
+
+    def test_the_observer_profile_is_the_one_its_record_launched(self) -> None:
+        reference = self.reference_of(self.create())
+        self._observer_record(reference, alive=True)
+
+        observer = self.reads().sprint_state(reference)["work"]["head_profiles"]["observer"]
+
+        self.assertEqual((observer["profile"], observer["via"]), (OBSERVER_PROFILE, "launched"))
+
+    def test_a_head_registry_nobody_can_read_blanks_only_the_profiles(self) -> None:
+        reference = self.reference_of(self.create())
+        (self.instance / "heads" / "heads.yaml").write_text("{", encoding="utf-8")
+
+        document = self.reads().sprint_state(reference)
+
+        profiles = document["work"]["head_profiles"]
+        self.assertEqual(profiles["source"]["state"], "unavailable")
+        self.assertEqual((profiles["observer"], profiles["worker"], profiles["reviewer"]), (None, None, None))
+        self.assertEqual(document["sprint"]["source"]["state"], "available")
+
     def test_a_dispatcher_state_nobody_can_read_is_unavailable_and_never_not_started(self) -> None:
         reference = self.reference_of(self.create())
         (self.data_dir / "dispatcher" / "production-state.json").write_text("{", encoding="utf-8")
@@ -885,6 +938,8 @@ class CurrentCardStateTests(SprintWorkFixture):
 
         self.assertEqual(standing["transition"], TRANSITION_RECORDED)
         self.assertEqual(standing["card"], self.card)
+        # The title rides on the Pipeline listing entry the state is read from.
+        self.assertEqual(standing["title"], "the current card")
         self.assertEqual(standing["state"], "in_progress")
         self.assertEqual(standing["since"], self.LAST)
         self.assertEqual(standing["age_seconds"], 9000.0)
@@ -2180,6 +2235,7 @@ class SectionSeamTests(SprintProtocolFixture):
             "degraded_cards",
             "checks",
             "waiting",
+            "head_profiles",
         }
         marks = {"cards", "journal", "liveness", "installation"}
         observer = {"observer.declared", "observer.launch"}

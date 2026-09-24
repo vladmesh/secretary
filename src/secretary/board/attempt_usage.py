@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome
+from secretary.board.models import (
+    TOKEN_DIMENSIONS,
+    AttemptUsageOutcome,
+    check_attempt_usage_resolved,
+)
 from secretary.board.roles import Role
 
 
@@ -19,6 +23,10 @@ class AttemptUsagePhase(StrEnum):
 
 
 _ATTEMPT_USAGE_ROLES = frozenset({Role.WORKER, Role.REVIEWER})
+
+# Fields added after `attempt.usage` was released. An occurrence written before them reads with an
+# unknown resolved model and effort, which is what it is; every new occurrence writes all three.
+_RESOLVED_FIELDS = frozenset({"resolved_model", "resolved_models", "resolved_effort"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +89,12 @@ class AttemptUsagePayload:
     tokens: TokenAccount
     session_totals: TokenAccount
     phase_baseline: TokenAccount
+    # What the provider journal says actually ran, session-wide through this phase's end: every
+    # distinct model id in order of last use (the last is `resolved_model`) and the last reasoning
+    # effort. Empty when the journal was not read or named none; never copied from `model`.
+    resolved_model: str = ""
+    resolved_models: tuple[str, ...] = ()
+    resolved_effort: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
@@ -117,6 +131,7 @@ class AttemptUsagePayload:
         for name in ("tokens", "session_totals", "phase_baseline"):
             if not isinstance(getattr(self, name), TokenAccount):
                 raise ValueError(f"attempt usage {name} must be a TokenAccount")
+        check_attempt_usage_resolved(self.resolved_model, self.resolved_models, self.resolved_effort)
 
         if self.outcome is AttemptUsageOutcome.COLLECTED:
             if self.session_totals.empty:
@@ -168,6 +183,9 @@ class AttemptUsagePayload:
             "tokens": self.tokens.to_data(),
             "session_totals": self.session_totals.to_data(),
             "phase_baseline": self.phase_baseline.to_data(),
+            "resolved_model": self.resolved_model,
+            "resolved_models": list(self.resolved_models),
+            "resolved_effort": self.resolved_effort,
         }
 
     def reason(self) -> str:
@@ -201,7 +219,7 @@ class AttemptUsagePayload:
             "session_totals",
             "phase_baseline",
         }
-        if set(data) != required:
+        if not required <= set(data) <= required | _RESOLVED_FIELDS:
             raise ValueError("attempt usage payload has an unsupported field set")
         try:
             tokens_raw = data["tokens"]
@@ -230,6 +248,15 @@ class AttemptUsagePayload:
                 tokens=TokenAccount.from_data(tokens_raw),
                 session_totals=TokenAccount.from_data(totals_raw),
                 phase_baseline=TokenAccount.from_data(baseline_raw),
+                resolved_model=data.get("resolved_model", ""),
+                resolved_models=_models(data.get("resolved_models", [])),
+                resolved_effort=data.get("resolved_effort", ""),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid attempt usage payload: {exc}") from None
+
+
+def _models(value: Any) -> tuple[str, ...]:
+    if isinstance(value, list):
+        return tuple(value)
+    raise ValueError("attempt usage resolved_models must be a list")

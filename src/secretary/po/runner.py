@@ -13,6 +13,12 @@ The CLIs own their conversation memory, addressed by their native flags:
   creation, later turns ``--resume <uuid>``; ``--output-format json`` carries the final answer.
 * Codex: turn 1 ``codex exec --json``, whose event stream names the ``thread_id`` the session then
   keeps; later turns ``codex exec resume <thread_id>``. ``-o`` writes the final answer to a file.
+
+A session's reasoning effort, unless it is ``default``, is passed on every turn: ``--effort <level>``
+to Claude, ``-c model_reasoning_effort=<level>`` to Codex. What model a turn actually ran is kept on
+the turn: Claude's result object keys ``modelUsage`` by full model id, the session's own model first
+and any subagent's after it; Codex's event stream names no model, so it is read from the
+``turn_context`` of the thread's rollout under ``$CODEX_HOME/sessions`` (``~/.codex`` by default).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from typing import Any
 from secretary.po.store import (
     CLIS,
     COMPLETED,
+    DEFAULT_EFFORT,
     FAILED,
     INTERRUPTED,
     RUNNING,
@@ -40,6 +47,7 @@ from secretary.po.store import (
     Turn,
 )
 from secretary.po.workspace import workspace_dir
+from secretary.runtime.provider_models import codex_rollout_path, codex_session_models
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -107,17 +115,7 @@ def _kill_group(pid: int) -> None:
 
 def claude_final_answer(stdout: str) -> tuple[str | None, str | None]:
     """The final answer from ``--output-format json``, or ``None`` and why there is none."""
-    candidates: list[Any] = []
-    text = stdout.strip()
-    try:
-        candidates.append(json.loads(text))
-    except ValueError:
-        for line in reversed(text.splitlines()):
-            try:
-                candidates.append(json.loads(line))
-            except ValueError:
-                continue
-    for document in candidates:
+    for document in _json_documents(stdout):
         if not isinstance(document, dict) or document.get("type", "result") != "result":
             continue
         result = document.get("result")
@@ -127,6 +125,56 @@ def claude_final_answer(stdout: str) -> tuple[str | None, str | None]:
             return result.strip(), None
         return None, "claude's result object carries no final answer"
     return None, "claude printed no result object"
+
+
+def claude_resolved_model(stdout: str) -> str | None:
+    """The session's own model from ``--output-format json``: the first ``modelUsage`` key.
+
+    Claude Code keys ``modelUsage`` by the full model id each model ran under (`claude-opus-5-5`, or
+    `claude-opus-5-5[1m]` with the long context), the session's model first and the models its
+    subagents ran after it.
+    """
+    for document in _json_documents(stdout):
+        if not isinstance(document, dict) or document.get("type", "result") != "result":
+            continue
+        usage = document.get("modelUsage")
+        if isinstance(usage, dict):
+            return next((key for key in usage if isinstance(key, str) and key.strip()), None)
+        return None
+    return None
+
+
+def codex_resolved_model(codex_home: Path | str, thread_id: str | None) -> str | None:
+    """The model the last turn of a Codex thread ran, from its rollout's ``turn_context``."""
+    path = codex_rollout_path(codex_home, thread_id or "")
+    if path is None:
+        return None
+    try:
+        text = path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return codex_session_models(_json_documents(text, whole=False)).model or None
+
+
+def _json_documents(text: str, *, whole: bool = True) -> list[Any]:
+    """The JSON value `text` is, else every line that parses: last line first, or in order without `whole`.
+
+    A turn relaunched with `--resume` appends a second result object to the same stdout, so the one
+    that counts is the last.
+    """
+    text = text.strip()
+    if whole:
+        try:
+            return [json.loads(text)]
+        except ValueError:
+            pass
+    found: list[Any] = []
+    for line in text.splitlines():
+        try:
+            found.append(json.loads(line))
+        except ValueError:
+            continue
+    return list(reversed(found)) if whole else found
 
 
 def codex_thread_id(stdout: str) -> str | None:
@@ -202,18 +250,22 @@ class PoRunner:
 
     # --- sessions ---------------------------------------------------------------------------
 
-    def create_session(self, cli: str, model: str) -> Session:
-        return self._create(cli, model, None)[0]
+    def create_session(self, cli: str, model: str, effort: str = DEFAULT_EFFORT) -> Session:
+        return self._create(cli, model, effort, None)[0]
 
-    def create_session_request(self, cli: str, model: str, request_id: str) -> tuple[Session, bool]:
+    def create_session_request(
+        self, cli: str, model: str, request_id: str, effort: str = DEFAULT_EFFORT
+    ) -> tuple[Session, bool]:
         """`create_session` under a form's request id; the flag says whether this call created it."""
-        return self._create(cli, model, request_id)
+        return self._create(cli, model, effort, request_id)
 
-    def _create(self, cli: str, model: str, request_id: str | None) -> tuple[Session, bool]:
+    def _create(self, cli: str, model: str, effort: str, request_id: str | None) -> tuple[Session, bool]:
         if cli not in CLIS:
             raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
         if not model.strip():
             raise RunnerError("a PO session needs a model")
+        if not effort.strip():
+            raise RunnerError(f"a PO session needs an effort, {DEFAULT_EFFORT!r} for the CLI's own")
         return self.store.claim_session(
             session_id=str(uuid.uuid4()),
             cli=cli,
@@ -221,6 +273,7 @@ class PoRunner:
             cwd=str(self.workspace),
             cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
             request_id=request_id,
+            effort=effort.strip(),
         )
 
     def files(self, session_id: str, seq: int) -> TurnFiles:
@@ -246,6 +299,7 @@ class PoRunner:
                 "json",
                 "--model",
                 session.model,
+                *self._effort_options(session),
                 "--dangerously-skip-permissions",
             ]
             if established:
@@ -255,6 +309,7 @@ class PoRunner:
             "--json",
             "-m",
             session.model,
+            *self._effort_options(session),
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "-o",
@@ -263,6 +318,15 @@ class PoRunner:
         if session.cli_session_id:
             return [executable, "exec", "resume", *options, session.cli_session_id, "-"]
         return [executable, "exec", *options, "-C", session.cwd, "-"]
+
+    @staticmethod
+    def _effort_options(session: Session) -> list[str]:
+        """The effort flag of this session's CLI, or none for `default`."""
+        if session.effort == DEFAULT_EFFORT:
+            return []
+        if session.cli == "claude":
+            return ["--effort", session.effort]
+        return ["-c", f"model_reasoning_effort={session.effort}"]
 
     # --- turns ------------------------------------------------------------------------------
 
@@ -514,18 +578,31 @@ class PoRunner:
         self._capture_thread_id(session, files.stdout, stdout)
         if session.cli == "claude":
             answer, missing = claude_final_answer(stdout)
+            resolved = claude_resolved_model(stdout)
         else:
             answer, missing = self._codex_final_answer(files)
+            resolved = codex_resolved_model(
+                self.codex_home(), session.cli_session_id or codex_thread_id(stdout)
+            )
         if code != 0:
             reason = f"{session.cli} exited with status {code}"
             tail = self._stderr_tail(files)
             if tail:
                 reason += f": {tail}"
-            self.store.finish_turn(session.session_id, seq, FAILED, reason)
+            self.store.finish_turn(session.session_id, seq, FAILED, reason, resolved_model=resolved)
         elif answer is None:
-            self.store.finish_turn(session.session_id, seq, FAILED, missing or "no final answer")
+            self.store.finish_turn(
+                session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
+            )
         else:
-            self.store.complete_turn(session.session_id, seq, answer)
+            self.store.complete_turn(session.session_id, seq, answer, resolved_model=resolved)
+
+    def codex_home(self) -> Path:
+        """The Codex home a turn runs with: `$CODEX_HOME` of the turn environment, else `~/.codex`."""
+        configured = self.env.get("CODEX_HOME")
+        if configured:
+            return Path(configured)
+        return Path(self.env.get("HOME") or Path.home()) / ".codex"
 
     @staticmethod
     def _codex_final_answer(files: TurnFiles) -> tuple[str | None, str | None]:
@@ -563,6 +640,8 @@ __all__ = [
     "RunnerError",
     "TurnFiles",
     "claude_final_answer",
+    "claude_resolved_model",
+    "codex_resolved_model",
     "codex_thread_id",
     "process_identity",
     "runs_dir",

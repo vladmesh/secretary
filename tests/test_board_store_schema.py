@@ -89,6 +89,7 @@ REVISIONS = (
     "0012_request_read_indexes",
     "0013_budget_candidates",
     "0014_neutral_extension_bag",
+    "0015_po_effort_resolved_model",
 )
 
 
@@ -462,6 +463,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0012_request_read_indexes",
                 "0013_budget_candidates",
                 "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -712,6 +714,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0012_request_read_indexes",
                 "0013_budget_candidates",
                 "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
             ),
         )
 
@@ -1080,7 +1083,10 @@ class BoardStoreSchemaTests(unittest.TestCase):
     def test_0014_is_what_a_dry_run_of_a_0013_store_owes(self) -> None:
         connection = self.at_0013()
 
-        self.assertEqual(self.run_migrations(connection, dry_run=True), ("0014_neutral_extension_bag",))
+        self.assertEqual(
+            self.run_migrations(connection, dry_run=True),
+            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model"),
+        )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
 
     def test_0014_moves_every_current_bag_onto_the_neutral_key_and_loses_nothing(self) -> None:
@@ -1108,7 +1114,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.request(connection, "done-retention-committed", "committed")
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+        self.assertEqual(
+            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+        )
 
         self.assertEqual(
             self.extensions_of(connection),
@@ -1176,13 +1184,17 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.request(connection, "card-move-staged", "staged")
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+        self.assertEqual(
+            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+        )
 
     def test_0014_has_no_downgrade(self) -> None:
         from alembic import command
 
         connection = self.at_0013()
-        self.assertEqual(self.run_migrations(connection), ("0014_neutral_extension_bag",))
+        self.assertEqual(
+            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+        )
 
         with self.assertRaisesRegex(NotImplementedError, "forward-only"):
             command.downgrade(
@@ -1190,7 +1202,30 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
             )
         connection.rollback()
-        self.assertEqual(migrate.current_revision(connection), "0014_neutral_extension_bag")
+        self.assertEqual(migrate.current_revision(connection), "0015_po_effort_resolved_model")
+
+    # --- 0015: a PO session's effort and each turn's resolved model -----------------------------
+
+    def test_0015_opens_every_existing_session_at_the_default_effort(self) -> None:
+        connection = self.at_0013()
+        connection.exec_driver_sql(
+            "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state) "
+            "VALUES ('s-1', 'claude', 'opus', '/po', now(), 'open')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_turns (session_id, seq, started_at, finished_at, state, stdout_path) "
+            "VALUES ('s-1', 1, now(), now(), 'completed', '/runs/turn-0001.stdout')"
+        )
+        connection.commit()
+
+        self.run_migrations(connection)
+
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT effort FROM po_sessions").fetchall(), [("default",)]
+        )
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT resolved_model FROM po_turns").fetchall(), [(None,)]
+        )
 
 
 if __name__ == "__main__":

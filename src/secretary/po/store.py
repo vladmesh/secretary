@@ -1,5 +1,5 @@
 """PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`,
-`0010_po_session_close`).
+`0010_po_session_close`, `0015_po_effort_resolved_model`).
 
 One short connection per operation: the runner's waiter threads settle turns concurrently, and a
 connection shared between them would serialize exactly what must not be serialized. Every state
@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 CLIS = ("claude", "codex")
+# The reasoning effort that passes the CLI no effort flag: it runs with its own configured one.
+DEFAULT_EFFORT = "default"
 SESSION_OPEN = "open"
 SESSION_CLOSED = "closed"
 
@@ -80,9 +82,13 @@ class Session:
     # Set together by :meth:`PoStore.close_session`, exactly when `state` is closed.
     closed_at: datetime | None = None
     closed_by: str | None = None
+    # Chosen at creation (0015); every session opened before it is `default`.
+    effort: str = DEFAULT_EFFORT
     # Only :meth:`PoStore.sessions` fills these two; a single-session read leaves them None.
     first_message: str | None = None
     last_activity_at: datetime | None = None
+    # The model the session's latest turn that reported one ran, filled by the two session reads.
+    resolved_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,8 @@ class Turn:
     pid: int | None
     process_identity: str | None
     reason: str | None
+    # The model the CLI reported it ran for this turn, null when it reported none (0015).
+    resolved_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,15 +126,25 @@ class PoRequest:
     created_at: datetime
 
 
-_SESSION_COLUMNS = "session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by"
-_TURN_COLUMNS = "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason"
+_SESSION_COLUMNS = (
+    "session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by, effort"
+)
+_TURN_COLUMNS = "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason, resolved_model"
+# The latest model a turn of session `s` reported, for the two session reads.
+_RESOLVED_MODEL = (
+    "(SELECT r.resolved_model FROM po_turns r WHERE r.session_id = s.session_id "
+    "AND r.resolved_model IS NOT NULL ORDER BY r.seq DESC LIMIT 1)"
+)
 _FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
 _REQUEST_COLUMNS = "request_id, operation, fingerprint, session_id, seq, created_at"
 
 
-def session_fingerprint(cli: str, model: str) -> str:
-    """What a session-create request id is bound to: the operation, the CLI and the model."""
-    return _digest([SESSION_CREATE, cli, model])
+def session_fingerprint(cli: str, model: str, effort: str = DEFAULT_EFFORT) -> str:
+    """What a session-create request id is bound to: the operation, the CLI, the model and the effort.
+
+    A `default` effort is left out, so an id recorded before efforts existed binds the same inputs.
+    """
+    return _digest([SESSION_CREATE, cli, model] + ([] if effort == DEFAULT_EFFORT else [effort]))
 
 
 def send_fingerprint(session_id: str, text: str) -> str:
@@ -203,10 +221,17 @@ class PoStore:
     # --- sessions ---------------------------------------------------------------------------
 
     def create_session(
-        self, *, session_id: str, cli: str, model: str, cwd: str, cli_session_id: str | None
+        self,
+        *,
+        session_id: str,
+        cli: str,
+        model: str,
+        cwd: str,
+        cli_session_id: str | None,
+        effort: str = DEFAULT_EFFORT,
     ) -> Session:
         return self.claim_session(
-            session_id=session_id, cli=cli, model=model, cwd=cwd, cli_session_id=cli_session_id
+            session_id=session_id, cli=cli, model=model, cwd=cwd, cli_session_id=cli_session_id, effort=effort
         )[0]
 
     def claim_session(
@@ -218,9 +243,10 @@ class PoStore:
         cwd: str,
         cli_session_id: str | None,
         request_id: str | None = None,
+        effort: str = DEFAULT_EFFORT,
     ) -> tuple[Session, bool]:
         """The new session, or the one `request_id` already created; the flag is True when this call did."""
-        fingerprint = session_fingerprint(cli, model)
+        fingerprint = session_fingerprint(cli, model, effort)
         with self._transaction() as connection:
             if request_id is not None:
                 known = self._known_request(connection, request_id, SESSION_CREATE, fingerprint)
@@ -230,22 +256,24 @@ class PoStore:
                     ).fetchone()
                     return Session(*row), False
             row = connection.execute(
-                "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state, cli_session_id) "
-                f"VALUES (%s, %s, %s, %s, now(), %s, %s) RETURNING {_SESSION_COLUMNS}",
-                (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id),
+                "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state, cli_session_id, effort) "
+                f"VALUES (%s, %s, %s, %s, now(), %s, %s, %s) RETURNING {_SESSION_COLUMNS}",
+                (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id, effort),
             ).fetchone()
             if request_id is not None:
                 self._record_request(connection, request_id, SESSION_CREATE, fingerprint, session_id, None)
         return Session(*row), True
 
     def session(self, session_id: str) -> Session:
+        columns = ", ".join(f"s.{column}" for column in _SESSION_COLUMNS.split(", "))
         with self._transaction() as connection:
             row = connection.execute(
-                f"SELECT {_SESSION_COLUMNS} FROM po_sessions WHERE session_id = %s", (session_id,)
+                f"SELECT {columns}, {_RESOLVED_MODEL} FROM po_sessions s WHERE s.session_id = %s",
+                (session_id,),
             ).fetchone()
         if row is None:
             raise SessionNotFound(f"there is no PO session {session_id}")
-        return Session(*row)
+        return Session(*row[:-1], resolved_model=row[-1])
 
     def sessions(self, state: str = SESSION_OPEN) -> list[Session]:
         """Every session in `state` (open by default) with its first owner message and last activity.
@@ -260,7 +288,8 @@ class PoStore:
         columns = ", ".join(f"s.{column}" for column in _SESSION_COLUMNS.split(", "))
         with self._transaction() as connection:
             rows = connection.execute(
-                f"SELECT {columns}, o.text, GREATEST(s.created_at, t.at, f.at) AS last_activity_at "
+                f"SELECT {columns}, o.text, GREATEST(s.created_at, t.at, f.at) AS last_activity_at, "
+                f"{_RESOLVED_MODEL} "
                 "FROM po_sessions s "
                 "LEFT JOIN (SELECT session_id, max(GREATEST(started_at, finished_at)) AS at "
                 "FROM po_turns GROUP BY session_id) t ON t.session_id = s.session_id "
@@ -392,13 +421,15 @@ class PoStore:
             )
             return cursor.rowcount == 1
 
-    def complete_turn(self, session_id: str, seq: int, answer: str) -> bool:
+    def complete_turn(
+        self, session_id: str, seq: int, answer: str, *, resolved_model: str | None = None
+    ) -> bool:
         """The agent's final answer into the feed and the turn `completed`, or nothing at all."""
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE po_turns SET state = %s, finished_at = now() "
+                "UPDATE po_turns SET state = %s, finished_at = now(), resolved_model = %s "
                 "WHERE session_id = %s AND seq = %s AND state = %s",
-                (COMPLETED, session_id, seq, RUNNING),
+                (COMPLETED, resolved_model, session_id, seq, RUNNING),
             )
             if cursor.rowcount != 1:
                 return False
@@ -409,14 +440,16 @@ class PoStore:
             )
             return True
 
-    def finish_turn(self, session_id: str, seq: int, state: str, reason: str) -> bool:
+    def finish_turn(
+        self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
+    ) -> bool:
         if state not in (FAILED, INTERRUPTED):
             raise ValueError(f"a turn is finished as failed or interrupted, not {state}")
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE po_turns SET state = %s, finished_at = now(), reason = %s "
+                "UPDATE po_turns SET state = %s, finished_at = now(), reason = %s, resolved_model = %s "
                 "WHERE session_id = %s AND seq = %s AND state = %s",
-                (state, reason, session_id, seq, RUNNING),
+                (state, reason, resolved_model, session_id, seq, RUNNING),
             )
             return cursor.rowcount == 1
 
@@ -463,6 +496,7 @@ __all__ = [
     "AGENT",
     "CLIS",
     "COMPLETED",
+    "DEFAULT_EFFORT",
     "FAILED",
     "INTERRUPTED",
     "OWNER",

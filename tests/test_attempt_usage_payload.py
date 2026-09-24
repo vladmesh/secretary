@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from secretary.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
@@ -114,6 +115,31 @@ class AttemptUsagePayloadTests(unittest.TestCase):
         occurrence = AttemptUsageOccurrence("request-1", event, False)
 
         self.assertEqual(occurrence.payload, payload)
+
+    def test_an_occurrence_written_before_the_resolved_fields_reads_them_as_unknown(self) -> None:
+        data = self._payload().to_data()
+        for name in ("resolved_model", "resolved_models", "resolved_effort"):
+            data.pop(name)
+
+        payload = AttemptUsagePayload.from_data(data)
+
+        self.assertEqual(
+            (payload.resolved_model, payload.resolved_models, payload.resolved_effort), ("", (), "")
+        )
+
+    def test_the_resolved_model_is_the_last_one_the_session_used(self) -> None:
+        payload = replace(
+            self._payload(),
+            resolved_model="gpt-5.6-terra",
+            resolved_models=("gpt-5.6-sol", "gpt-5.6-terra"),
+            resolved_effort="high",
+        )
+        data = payload.to_data()
+
+        self.assertEqual(data["resolved_models"], ["gpt-5.6-sol", "gpt-5.6-terra"])
+        self.assertEqual(AttemptUsagePayload.from_data(data), payload)
+        with self.assertRaisesRegex(ValueError, "last of resolved_models"):
+            replace(payload, resolved_model="gpt-5.6-sol")
 
     def test_unknown_fields_fail_closed(self) -> None:
         data = self._payload().to_data()

@@ -4,6 +4,12 @@ Each fake logs its argv, cwd and stdin to `$FAKE_LOG`, prints an event stream th
 and a tool call beside the final answer, and changes behaviour on words in the owner's message:
 `SLEEP` keeps the turn running with a child in its process group, `FAIL` exits non-zero, `SILENT`
 exits zero without a final answer, `NOPERSIST` makes Claude save no conversation.
+
+Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
+by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
+subagent's after it), and Codex appends a `turn_context` naming `-m` and the
+`model_reasoning_effort` override to a rollout under `$FAKE_CODEX_HOME/sessions`, only when that is
+set, so a test never writes into a real Codex home.
 """
 
 from __future__ import annotations
@@ -11,6 +17,8 @@ from __future__ import annotations
 import time
 
 SETTLE_SECONDS = 30
+# The full id the fake Claude reports for each alias it may be given.
+FAKE_CLAUDE_RESOLVED = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5", "fable": "claude-fable-5-1"}
 
 FAKE_CLAUDE = r"""#!/usr/bin/env python3
 import json, os, subprocess, sys, time
@@ -47,8 +55,11 @@ if "FAIL" in prompt:
     sys.exit(3)
 if "SILENT" in prompt:
     sys.exit(0)
+model = argv[argv.index("--model") + 1]
+resolved = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5", "fable": "claude-fable-5-1"}.get(model, model)
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                  "session_id": session, "result": f"claude {flag} {session}: {prompt}"}))
+                  "session_id": session, "result": f"claude {flag} {session}: {prompt}",
+                  "modelUsage": {resolved: {"outputTokens": 7}, "claude-haiku-4-5": {"outputTokens": 1}}}))
 """
 
 FAKE_CODEX = r"""#!/usr/bin/env python3
@@ -62,6 +73,14 @@ resume = argv[:2] == ["exec", "resume"]
 thread = argv[-2] if resume else "019a-fake-thread"
 out = argv[argv.index("-o") + 1]
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
+home = os.environ.get("FAKE_CODEX_HOME")
+if home:
+    effort = next((value.split("=", 1)[1] for value in argv if value.startswith("model_reasoning_effort=")), "medium")
+    rollout = os.path.join(home, "sessions", "2026", "09", "22", f"rollout-2026-09-22T00-00-00-{thread}.jsonl")
+    os.makedirs(os.path.dirname(rollout), exist_ok=True)
+    with open(rollout, "a") as handle:
+        context = {"model": argv[argv.index("-m") + 1], "effort": effort}
+        handle.write(json.dumps({"type": "turn_context", "payload": context}) + "\n")
 print(json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "THINKING-SECRET"}}), flush=True)
 print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "TOOL-CALL-SECRET"}}), flush=True)
 if "SLEEP" in prompt:

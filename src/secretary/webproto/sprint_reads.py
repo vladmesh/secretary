@@ -121,6 +121,7 @@ from secretary.product_issues import ProductIssueStore, registered_projects
 from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
+    EXECUTOR_PINNED,
     NONE_SPELLING,
     OBSERVER_FIELD,
     ObserverMetadataError,
@@ -490,10 +491,13 @@ class SprintSections(SectionSet):
                 return None
             _reference, entry = _card_of(sprint, linked)
             state = str((entry or {}).get("state") or "") or None
+            # The title rides on the same Pipeline listing entry the state is read from.
+            title = str((entry or {}).get("title") or "") or None
             event = _last_transition(events, card)
             if event is None:
                 return {
                     "card": card,
+                    "title": title,
                     "state": state,
                     "since": None,
                     "age_seconds": None,
@@ -506,6 +510,7 @@ class SprintSections(SectionSet):
             moment = str(event.get("occurred_at") or "") or None
             return {
                 "card": card,
+                "title": title,
                 "state": state,
                 "since": moment,
                 "age_seconds": _elapsed(moment, now),
@@ -528,6 +533,61 @@ class SprintSections(SectionSet):
                 "card": card,
                 "reason": reading.source.reason,
             },
+        )
+
+    def head_profiles(self, read: SourceSet) -> Section:
+        """The head profile each of this sprint's roles runs on, with the model and effort it pins.
+
+        Joined here against the installed registry so a page never joins a sprint against it itself.
+        The observer is the head the dispatcher's observer record names when it holds one
+        (`launched`), else the profile the row declares (`declared`, or `none` for a sprint that
+        runs without one). A worker or reviewer is the profile the row pins (`pinned`); an unpinned
+        role is `unpinned` with no profile, because the dispatcher then picks per card and that choice
+        is the card's (`task_snapshot` `heads`), not the sprint's. The model is the one the profile
+        configures; what a CLI resolved it to is only ever known per card.
+        """
+
+        def roles(sprint: _Sprint, registry: dict[str, Any], launched: str) -> dict[str, Any] | None:
+            row = sprint[0]
+            if row is None:
+                return None
+            profiles = {str(item.get("id")): item for item in registry.get("items") or []}
+            declared = _declared_observer(row)
+            value = declared["value"] or {}
+            if launched:
+                observer = _head_profile(profiles, launched, "launched")
+            elif declared["profile"]:
+                observer = _head_profile(profiles, declared["profile"], "declared")
+            else:
+                observer = _head_profile(
+                    profiles, None, "none" if value.get("kind") == "none" else "undeclared"
+                )
+            executors = row.get("executors") if isinstance(row.get("executors"), dict) else {}
+            executors = executors or stored_executors({})
+            found = {"observer": observer}
+            for role in EXECUTOR_FIELDS:
+                state = executors.get(role) if isinstance(executors.get(role), dict) else {}
+                if state.get("state") == EXECUTOR_PINNED:
+                    found[role] = _head_profile(profiles, str(state.get("profile") or "") or None, "pinned")
+                else:
+                    found[role] = _head_profile(profiles, None, str(state.get("state") or "unpinned"))
+            return found
+
+        def with_record(
+            sprint: _Sprint, registry: dict[str, Any], production: _Production
+        ) -> dict[str, Any] | None:
+            reference, _status, _current = _subject(sprint)
+            record = production.observers.get(reference) or {}
+            return roles(sprint, registry, str(record.get("head") or ""))
+
+        return read.decide(
+            Rule(SOURCE_HEADS, (SOURCE_SPRINTS, SOURCE_HEADS, SOURCE_LIVENESS), with_record),
+            Rule(
+                SOURCE_HEADS,
+                (SOURCE_SPRINTS, SOURCE_HEADS),
+                lambda sprint, registry: roles(sprint, registry, ""),
+            ),
+            blank={"observer": None, "worker": None, "reviewer": None},
         )
 
     def decision(self, read: SourceSet, freshness: Section) -> Section:
@@ -1401,6 +1461,7 @@ class SprintReadLayer(ProtocolBoundary):
             "degraded_cards": SECTIONS.degraded_cards(sprint),
             "checks": SECTIONS.checks(sprint),
             "waiting": SECTIONS.waiting(sprint),
+            "head_profiles": SECTIONS.head_profiles(sprint),
         }
 
     def _observer(self, sprint: SourceSet) -> dict[str, Any]:
@@ -1504,7 +1565,17 @@ class SprintReadLayer(ProtocolBoundary):
                 None,
             )
         return SourceSet(
-            [installation, sprints, cards, journal, liveness, self._reservations(data_dir, now=now)]
+            [
+                installation,
+                sprints,
+                cards,
+                journal,
+                liveness,
+                self._reservations(data_dir, now=now),
+                # Last: only `head_profiles` consults it, and a registry that will not answer must not
+                # be the refusal any other section is attributed to.
+                self._head_profiles(now=now),
+            ]
         )
 
     def _reservations(self, data_dir: Path, *, now: float) -> Reading:
@@ -2001,6 +2072,7 @@ def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:
 #: current card, a sprint that ended, a journal nobody could read, and the section's own blank.
 _STANDING_BLANK: dict[str, Any] = {
     "card": None,
+    "title": None,
     "state": None,
     "since": None,
     "age_seconds": None,
@@ -2246,6 +2318,24 @@ def _profile_label(profile_id: str, profile: dict[str, Any]) -> str:
     if effort:
         parts.append(f"{effort} effort")
     return " · ".join(parts)
+
+
+def _head_profile(profiles: dict[str, dict[str, Any]], profile: str | None, via: str) -> dict[str, Any]:
+    """One role's profile as `SprintSections.head_profiles` answers it, joined against the registry.
+
+    A profile the registry no longer describes keeps its id and says so with `registered` false: the
+    sprint still names it, and nothing here may invent what it would have pinned.
+    """
+    entry = profiles.get(profile) if profile else None
+    return {
+        "profile": profile,
+        "via": via,
+        "registered": entry is not None,
+        "label": entry.get("label") if entry else None,
+        "adapter": entry.get("adapter") if entry else None,
+        "model": entry.get("model") if entry else None,
+        "effort": entry.get("effort") if entry else None,
+    }
 
 
 def _observer_eligibility(profile_id: str, eligible: set[str]) -> tuple[bool, str | None]:

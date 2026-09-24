@@ -49,6 +49,30 @@
         "invariant": {"type": "string"}
       }
     },
+    "head": {
+      "type": "object",
+      "description": "One head run the card recorded: its identity and liveness from the dispatcher record and the run directory its supervisor kept, its launch configuration from the routing snapshot that recorded it, and what the CLI actually resolved from that run's latest `attempt.usage` occurrence. The resolved fields are null (and `resolved_models` empty) until a phase of the run finished, or for an occurrence written before `attempt.usage` carried them.",
+      "required": ["ref", "role", "run_id", "head", "current", "attempt", "adapter", "model", "model_source", "effort", "resolved_model", "resolved_models", "resolved_effort", "resolved_report_generation", "runtime", "state", "reason"],
+      "properties": {
+        "ref": {"type": "string"},
+        "role": {"type": "string"},
+        "run_id": {"type": "string"},
+        "head": {"type": ["string", "null"]},
+        "current": {"type": "boolean"},
+        "attempt": {"type": ["integer", "null"]},
+        "adapter": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "model_source": {"type": "string"},
+        "effort": {"type": ["string", "null"]},
+        "resolved_model": {"type": ["string", "null"]},
+        "resolved_models": {"type": "array", "items": {"type": "string"}},
+        "resolved_effort": {"type": ["string", "null"]},
+        "resolved_report_generation": {"type": ["integer", "null"]},
+        "runtime": {"type": ["string", "null"]},
+        "state": {"enum": ["running", "finished", "unknown"]},
+        "reason": {"type": "string"}
+      }
+    },
     "event": {
       "type": "object",
       "required": ["cursor", "typed", "kind", "ref", "occurred_at", "actor", "reason", "outcome", "transition", "related_refs", "data"],
@@ -154,7 +178,7 @@
     },
     "task": {
       "type": "object",
-      "required": ["schema_version", "kind", "observed_at", "ref", "card", "project", "attempt", "agents", "work", "events"],
+      "required": ["schema_version", "kind", "observed_at", "ref", "card", "project", "attempt", "agents", "heads", "work", "events"],
       "properties": {
         "schema_version": {"const": 1},
         "kind": {"const": "task"},
@@ -185,6 +209,14 @@
           "properties": {
             "source": {"$ref": "#/$defs/source"},
             "items": {"type": "array", "items": {"$ref": "#/$defs/agent"}}
+          }
+        },
+        "heads": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {"type": "array", "items": {"$ref": "#/$defs/head"}}
           }
         },
         "work": {

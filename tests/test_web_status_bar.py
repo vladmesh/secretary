@@ -342,7 +342,7 @@ class BarLayoutTests(RouteFixture):
 
 class BarReadingTests(RouteFixture):
     def bar(self, section: dict[str, Any] | None) -> str:
-        return bar_of(f'<main></main>{pages._limits_bar_of(section)}')
+        return bar_of(f"<main></main>{pages._limits_bar_of(section)}")
 
     def section(self, providers: list[dict[str, Any]]) -> dict[str, Any]:
         return {"available": True, "reason": None, "document": usage_document(providers)}
@@ -376,7 +376,9 @@ class BarReadingTests(RouteFixture):
     def test_a_window_is_drawn_as_one_group_of_name_percentage_and_countdown(self) -> None:
         """What belongs to one window is inside one element, in that order and with one separator."""
         bar = self.bar(
-            self.section([provider("claude", "Claude", windows=[window("5-hour", 73.0, "2026-09-20T13:06:00Z")])])
+            self.section(
+                [provider("claude", "Claude", windows=[window("5-hour", 73.0, "2026-09-20T13:06:00Z")])]
+            )
         )
         self.assertIn(
             '<span class="window"><span class="win-name">5-hour</span><b>73%</b>'
@@ -537,13 +539,14 @@ class BarCostsNoExtraReadTests(RouteFixture):
         self.assertEqual(self.fetched.count(CLAUDE_USAGE_URL), 2)
         self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 2)
 
-    def test_the_dashboard_panel_and_the_bar_are_one_read_rather_than_two(self) -> None:
+    def test_the_dashboard_draws_the_limits_once_from_one_read(self) -> None:
         app = self.app(provider_usage=self.layer)
         page = self.get("/", app=app)
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
-        # Both presentations of the same document are on the page: the panel and the bar.
-        self.assertIn("Usage limits", page)
+        # The bar is the one place the windows are drawn; the dashboard keeps no panel repeating it.
+        self.assertNotIn("Usage limits", page)
         self.assertIn("74%", bar_of(page))
+        self.assertEqual(page.count("74%"), 1)
 
 
 # -- criterion 6: what keeps the bar current never discards what somebody is typing --------------
@@ -558,10 +561,10 @@ class BarRefreshTests(RouteFixture):
                 self.assertIn("data-refresh-toggle", bar_of(page))
                 self.assertIn(pages._REFRESH_SCRIPT, page)
 
-    def test_the_dashboard_keeps_its_own_switch_and_it_is_the_same_switch(self) -> None:
+    def test_the_dashboard_has_the_bar_switch_and_no_second_one(self) -> None:
         page = self.get("/")
-        self.assertIn('<input type="checkbox" id="auto-refresh" data-refresh-toggle>', page)
-        self.assertEqual(page.count('<input type="checkbox"'), 2, "the two switches, and no third")
+        self.assertNotIn('id="auto-refresh"', page)
+        self.assertEqual(page.count('<input type="checkbox"'), 1, "the bar's switch, and no other")
 
     def test_the_reload_is_refused_while_a_form_has_focus_or_holds_typed_text(self) -> None:
         """The rule the /po composer depends on, read out of the one script that reloads a page.
@@ -671,30 +674,30 @@ class PercentRenderingTests(unittest.TestCase):
                 self.assertEqual(pages._percent(absent), "—")
 
 
-class BothPlacesDrawTheSameResetTests(RouteFixture):
-    """Criterion 1: the bar and the dashboard panel are one rule, not two spellings of one."""
+class TheBarDrawsTheResetTests(RouteFixture):
+    """Criterion 1: the bar is the one place a reset is drawn, and it draws it by one rule."""
 
-    def test_the_bar_and_the_panel_render_the_reset_identically(self) -> None:
+    def test_the_bar_renders_each_reset_as_the_time_left(self) -> None:
         page = self.get("/")
-        drawn = '<span class="resets" title="2026-09-20T18:00:00Z">6h 0m left</span>'
-        self.assertIn(drawn, bar_of(page))
-        panel = page[page.index("Usage limits") : page.index('<footer class="statusbar"')]
-        self.assertIn(drawn, panel)
-        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4d 12h left</span>', panel)
+        bar = bar_of(page)
+        self.assertIn('<span class="resets" title="2026-09-20T18:00:00Z">6h 0m left</span>', bar)
+        self.assertIn('<span class="resets" title="2026-09-25T00:00:00Z">4d 12h left</span>', bar)
+        main = page[page.index("<main>") : page.index('<footer class="statusbar"')]
+        self.assertNotIn('class="resets"', main)
 
     def test_neither_place_prints_an_iso_moment_as_the_text_of_the_reset(self) -> None:
         page = self.get("/")
         self.assertNotIn(">2026-09-20T18:00:00Z<", page)
         self.assertNotIn("resets 2026-09-20T18:00:00Z", page)
 
-    def test_a_panel_window_with_no_moment_says_so_in_the_same_words_as_the_bar(self) -> None:
+    def test_a_window_with_no_moment_says_so_in_words_once(self) -> None:
         self.usage = Recording(
             usage_snapshot=usage_document(
                 [provider("claude", "Claude", windows=[{"name": "5-hour", "remaining_percent": 74.0}])]
             )
         )
         page = self.get("/")
-        self.assertEqual(page.count(pages.NO_RESET_RECORDED), 2, "once on the bar, once in the panel")
+        self.assertEqual(page.count(pages.NO_RESET_RECORDED), 1, "once, on the bar")
 
 
 # -- the two findings folded in from secretary-1645's review -------------------------------------

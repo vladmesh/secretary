@@ -81,6 +81,57 @@ def _event(ref: str, kind: str, *, ordinal: int) -> dict:
     }
 
 
+def _routing(ref: str, attempt: int, phase: str, heads: list[dict], *, ordinal: int) -> dict:
+    """One routing telemetry record as `TaskWriter.routing` commits it: a generic audit record."""
+    return {
+        "event_id": f"evt-{ref}-{ordinal}",
+        "schema_version": 1,
+        "kind": "routing",
+        "occurred_at": "2026-09-06T00:00:00Z",
+        "outcome": "success",
+        "actor": {"role": "dispatcher", "id": "secretary-production"},
+        "ref": ref,
+        "request_id": f"req-{ref}-{ordinal}",
+        "payload": {
+            "attempt": attempt,
+            "attempt_id": f"attempt-{attempt}",
+            "phase": phase,
+            "outcome": "",
+            "heads": heads,
+        },
+    }
+
+
+def _usage(ref: str, *, ordinal: int, attempt: int, **resolved: object) -> dict:
+    """One committed `attempt.usage` occurrence of a worker phase that named its models."""
+    empty = dict.fromkeys(("input", "cache_input", "cache_read_input", "output", "reasoning"))
+    record = _event(ref, "attempt.usage", ordinal=ordinal)
+    record["data"] = {
+        "attempt": attempt,
+        "attempt_id": f"attempt-{attempt}",
+        "phase": "worker",
+        "role": "worker",
+        "report_generation": 1,
+        "head": "claude-opus",
+        "adapter": "claude",
+        "model": "opus",
+        "model_source": "profile",
+        "session_id": "session-1",
+        "session_id_reason": "",
+        "launch_id": "run-1",
+        "outcome": "usage_absent",
+        "detail": "",
+        "source_kind": "claude_session_jsonl",
+        "records": 0,
+        "skipped_records": 0,
+        "tokens": dict(empty),
+        "session_totals": dict(empty),
+        "phase_baseline": dict(empty),
+        **resolved,
+    }
+    return record
+
+
 def _production(data_dir: Path, records: dict) -> None:
     (data_dir / "dispatcher" / "production-state.json").write_text(
         json.dumps({"phase": "production", "records": records}), encoding="utf-8"
@@ -485,6 +536,127 @@ class TaskSnapshotTests(ReadLayerFixture):
             self.layer().task_events("secretary-510", snapshot["events"]["next_cursor"])["items"],
             [],
         )
+
+    def test_heads_say_what_each_run_was_launched_with_and_what_actually_ran(self) -> None:
+        """One row per run: the configured alias beside the resolved model, joined by launch id."""
+        first = {
+            "role": "worker",
+            "head": "claude-opus",
+            "adapter": "claude",
+            "model": "opus",
+            "model_source": "profile",
+            "effort": "medium",
+            "launch_id": "run-0",
+        }
+        worker = {**first, "effort": "high", "launch_id": "run-1"}
+        reviewer = {
+            "role": "reviewer",
+            "head": "codex",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "model_source": "profile",
+            "effort": "xhigh",
+            "launch_id": "run-2",
+        }
+        _journal(
+            self.board,
+            [
+                _routing("secretary-510", 1, "worker", [first], ordinal=1),
+                # The first run's occurrence names another model; it stays on that run's row.
+                _usage(
+                    "secretary-510",
+                    ordinal=2,
+                    attempt=1,
+                    launch_id="run-0",
+                    resolved_model="claude-fable-5-1",
+                    resolved_models=["claude-fable-5-1"],
+                    resolved_effort="medium",
+                ),
+                _routing("secretary-510", 2, "worker", [worker], ordinal=3),
+                _usage(
+                    "secretary-510",
+                    ordinal=4,
+                    attempt=2,
+                    launch_id="run-1",
+                    resolved_model="claude-opus-5-5",
+                    resolved_models=["claude-haiku-4-5", "claude-opus-5-5"],
+                    resolved_effort="high",
+                ),
+                _routing("secretary-510", 2, "review", [reviewer], ordinal=5),
+            ],
+        )
+        _production(
+            self.data_dir,
+            {
+                "secretary-510": {
+                    "attempt_id": "attempt-2",
+                    "state": "validate",
+                    "head": "claude-opus",
+                    "worker_pid_file": str(self.tmp / "worker.pid"),
+                    "worker_head_run": {"run_id": "run-1", "lifecycle": "working"},
+                    "worker_run": worker,
+                }
+            },
+        )
+
+        snapshot = self.layer().task_snapshot("secretary-510")
+
+        self.assertEqual(validate(snapshot, "web-read", "task"), [])
+        self.assertEqual(snapshot["heads"]["source"]["state"], "available")
+        rows = {row["run_id"]: row for row in snapshot["heads"]["items"]}
+        self.assertEqual(set(rows), {"run-0", "run-1", "run-2"})
+        self.assertEqual(
+            {key: rows["run-1"][key] for key in ("role", "attempt", "head", "adapter", "model", "model_source", "effort")},
+            {
+                "role": "worker",
+                "attempt": 2,
+                "head": "claude-opus",
+                "adapter": "claude",
+                "model": "opus",
+                "model_source": "profile",
+                "effort": "high",
+            },
+        )
+        self.assertEqual(
+            {key: rows["run-1"][key] for key in ("resolved_model", "resolved_models", "resolved_effort", "resolved_report_generation")},
+            {
+                "resolved_model": "claude-opus-5-5",
+                "resolved_models": ["claude-haiku-4-5", "claude-opus-5-5"],
+                "resolved_effort": "high",
+                "resolved_report_generation": 1,
+            },
+        )
+        self.assertTrue(rows["run-1"]["current"])
+        # The earlier run keeps what it resolved; nothing of it leaks onto the later run.
+        self.assertEqual((rows["run-0"]["attempt"], rows["run-0"]["resolved_model"]), (1, "claude-fable-5-1"))
+        self.assertFalse(rows["run-0"]["current"])
+        # The reviewer launched and has not finished a phase yet: configured, nothing resolved.
+        self.assertEqual(rows["run-2"]["effort"], "xhigh")
+        self.assertIsNone(rows["run-2"]["resolved_model"])
+        self.assertEqual(rows["run-2"]["resolved_models"], [])
+
+    def test_an_occurrence_written_before_the_resolved_fields_resolves_nothing(self) -> None:
+        worker = {
+            "role": "worker",
+            "head": "codex",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "launch_id": "run-1",
+        }
+        _journal(
+            self.board,
+            [
+                _routing("secretary-510", 1, "worker", [worker], ordinal=1),
+                _usage("secretary-510", ordinal=2, attempt=1, launch_id="run-1"),
+            ],
+        )
+
+        (row,) = self.layer().task_snapshot("secretary-510")["heads"]["items"]
+
+        self.assertEqual(
+            (row["model"], row["resolved_model"], row["resolved_effort"]), ("gpt-5.6-terra", None, None)
+        )
+        self.assertEqual(row["resolved_report_generation"], 1)
 
     def test_a_blocked_report_keeps_its_classification(self) -> None:
         self.board.replace_comments(12, [

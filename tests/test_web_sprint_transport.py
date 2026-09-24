@@ -305,9 +305,7 @@ class FakeSprintOps:
             raise self.refusal
         known = {head["id"] for head in HEADS if head["observer"]}
         if observer != "none" and observer not in known:
-            raise ValidationRefused(
-                f"{observer!r} is not a head profile of this installation's registry"
-            )
+            raise ValidationRefused(f"{observer!r} is not a head profile of this installation's registry")
         for pinned in (worker, reviewer):
             if pinned is not None and pinned not in {head["id"] for head in HEADS}:
                 raise ValidationRefused(f"{pinned!r} is not a head profile of this installation")
@@ -372,7 +370,9 @@ class SprintTransportFixture(unittest.TestCase):
         self.sprint_reads = FakeSprintReads()
         self.sprint_ops = FakeSprintOps(self.sprint_reads)
         self.ops = RecordingOps()
-        self.app = WebApp(RecordingOps(), self.ops, self.sprint_reads, self.sprint_ops, *(RecordingOps() for _ in range(4)))
+        self.app = WebApp(
+            RecordingOps(), self.ops, self.sprint_reads, self.sprint_ops, *(RecordingOps() for _ in range(4))
+        )
 
     # -- driving it --------------------------------------------------------------------------
 
@@ -388,9 +388,7 @@ class SprintTransportFixture(unittest.TestCase):
                 flat += [(name, one) for one in value]
             else:
                 flat.append((name, value))
-        return self.app.handle(
-            "POST", path, body=urlencode(flat).encode("utf-8"), headers=headers
-        )
+        return self.app.handle("POST", path, body=urlencode(flat).encode("utf-8"), headers=headers)
 
     def text_of(self, response) -> str:
         return response.body.decode("utf-8")
@@ -481,7 +479,13 @@ class SprintFormTests(SprintTransportFixture):
         other = options_document()
         other["products"]["items"] = [{"id": "orca", "label": "Orca", "ref": "product:9", "projects": []}]
         other["issues"]["items"] = [
-            {"ref": "issue:orca", "label": "orca needs a bridge", "product": "orca", "kind": None, "priority": None}
+            {
+                "ref": "issue:orca",
+                "label": "orca needs a bridge",
+                "product": "orca",
+                "kind": None,
+                "priority": None,
+            }
         ]
         other["heads"]["items"] = [
             {
@@ -766,6 +770,48 @@ class SprintPageTests(SprintTransportFixture):
             with self.subTest(expected=expected):
                 self.assertIn(expected, markup)
 
+    def test_the_observers_call_is_drawn_once_and_the_resume_tab_keeps_only_the_rest(self) -> None:
+        entry = {
+            "selected_step": "Keep the card in progress",
+            "selected_why": "the gate is red on a fixture defect",
+            "rejected_alternatives": "do not reslice",
+            "next_safe_step": "let the worker fix it",
+            "dod_state": "no item is closed",
+            "recorded_at": "2026-09-06T00:00:00Z",
+        }
+        markup = self.page(
+            sprint_document(
+                resume=entry,
+                work={"decision": {"entry": entry, "freshness": {"value": {"fresh": True}}}},
+            )
+        )
+        for said in (
+            "Keep the card in progress",
+            "the gate is red on a fixture defect",
+            "let the worker fix it",
+        ):
+            with self.subTest(said=said):
+                self.assertEqual(markup.count(said), 1, "the call panel draws it; the resume tab does not")
+        self.assertIn("no item is closed", markup)
+        self.assertIn("why · rejected alternatives", markup)
+
+    def test_the_definition_of_done_is_rendered_from_its_markdown_in_a_tab(self) -> None:
+        document = sprint_document()
+        document["sprint"]["value"]["definition_of_done"] = "## Done\n\n- **one** item\n- two"
+        markup = self.page(document)
+        self.assertIn('<label for="tab-sprint-sprint:1-1">Definition of done</label>', markup)
+        self.assertIn("<strong>one</strong>", markup)
+        self.assertNotIn("<pre>## Done", markup)
+
+    def test_the_declared_observer_is_named_once_when_the_dispatcher_holds_it(self) -> None:
+        record = {"head": OBSERVER_PROFILE, "heartbeat_state": "pid"}
+        markup = self.page(sprint_document(launch="running", record=record))
+        main = markup[markup.index("<main>") : markup.index("</main>")]
+        self.assertEqual(main.count(f'<span class="ref">{OBSERVER_PROFILE}</span>'), 1)
+        self.assertNotIn("not the declared head", main)
+        other = self.page(sprint_document(launch="running", record={**record, "head": "claude-opus"}))
+        self.assertIn("not the declared head", other)
+
     def test_the_page_says_where_the_current_card_stands_and_since_when(self) -> None:
         """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""
         markup = self.page(
@@ -960,16 +1006,16 @@ class CrossOriginTests(SprintTransportFixture):
         return [
             (
                 "/api/runs/start",
-                json.dumps(
-                    {"ref": "secretary-1", "request_id": "r", "profile": WORKER_PROFILE}
-                ).encode("utf-8"),
+                json.dumps({"ref": "secretary-1", "request_id": "r", "profile": WORKER_PROFILE}).encode(
+                    "utf-8"
+                ),
                 "run_start",
             ),
             (
                 "/api/runs/review",
-                json.dumps(
-                    {"request_id": "r", "profile": REVIEWER_PROFILE, "worker_run_id": "pr-1"}
-                ).encode("utf-8"),
+                json.dumps({"request_id": "r", "profile": REVIEWER_PROFILE, "worker_run_id": "pr-1"}).encode(
+                    "utf-8"
+                ),
                 "run_review",
             ),
             ("/sprints", urlencode(list(self.valid().items()), doseq=True).encode("utf-8"), ""),
@@ -1002,9 +1048,7 @@ class CrossOriginTests(SprintTransportFixture):
     def test_the_services_own_pages_still_post(self) -> None:
         for path, body, _operation in self.mutations():
             with self.subTest(path=path):
-                response = self.post(
-                    path, body, {"Origin": f"https://{self.HOST}", "Host": self.HOST}
-                )
+                response = self.post(path, body, {"Origin": f"https://{self.HOST}", "Host": self.HOST})
                 self.assertNotEqual(response.status, 403)
         self.assertEqual(self.sprint_ops.created, ["sprint:1"])
 
@@ -1013,9 +1057,7 @@ class CrossOriginTests(SprintTransportFixture):
         self.assertIsNone(
             cross_origin_reason({"Origin": "https://secretary.example", "Host": "secretary.example"})
         )
-        self.assertIsNone(
-            cross_origin_reason({"Origin": "http://127.0.0.1:8787", "Host": "127.0.0.1:8787"})
-        )
+        self.assertIsNone(cross_origin_reason({"Origin": "http://127.0.0.1:8787", "Host": "127.0.0.1:8787"}))
 
     def test_a_port_that_differs_is_another_origin(self) -> None:
         self.assertIsNotNone(
@@ -1050,13 +1092,17 @@ class CrossOriginTests(SprintTransportFixture):
         body = urlencode(list(self.valid().items()), doseq=True)
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-        connection.request("POST", "/sprints", body=body, headers={**headers, "Origin": "https://attacker.example"})
+        connection.request(
+            "POST", "/sprints", body=body, headers={**headers, "Origin": "https://attacker.example"}
+        )
         refused = connection.getresponse()
         refused.read()
         self.assertEqual(refused.status, 403)
         self.assertEqual(self.sprint_ops.created, [])
 
-        connection.request("POST", "/sprints", body=body, headers={**headers, "Origin": f"http://{host}:{port}"})
+        connection.request(
+            "POST", "/sprints", body=body, headers={**headers, "Origin": f"http://{host}:{port}"}
+        )
         opened = connection.getresponse()
         opened.read()
         self.assertEqual(opened.status, 303)
@@ -1087,7 +1133,9 @@ class RealLayerFormTests(SprintProtocolFixture):
 
     def setUp(self) -> None:
         super().setUp()
-        self.app = WebApp(RecordingOps(), RecordingOps(), self.reads(), self.ops(), *(RecordingOps() for _ in range(4)))
+        self.app = WebApp(
+            RecordingOps(), RecordingOps(), self.reads(), self.ops(), *(RecordingOps() for _ in range(4))
+        )
 
     # -- driving it --------------------------------------------------------------------------
 
@@ -1168,9 +1216,7 @@ class RealLayerFormTests(SprintProtocolFixture):
 
         reissued = self.request_id_of(markup)
         self.assertNotEqual(reissued, dict(first)["request_id"])
-        corrected = self.replace(
-            self.replace(first, "observer", PROTOCOL_OBSERVER), "request_id", reissued
-        )
+        corrected = self.replace(self.replace(first, "observer", PROTOCOL_OBSERVER), "request_id", reissued)
         opened = self.submit(corrected)
         self.assertEqual(opened.status, 303)
         self.assertEqual(len(self.sprint_rows()), 1)
