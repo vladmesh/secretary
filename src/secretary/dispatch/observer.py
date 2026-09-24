@@ -2462,6 +2462,8 @@ def _launch_observer(
             # and the head can hand it another sprint's name.
             identity=observer_binding(record.sprint or ref, record.generation),
             heartbeat_run_id=str(record.head_run.get("run_id") or ""),
+            # The path the intent above fixed on disk: a record that already names one keeps it.
+            recorded_workspace=record.workspace,
         )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no
@@ -2711,14 +2713,15 @@ def _write_launch_intent(
     """Fix this launch on disk before the host is called. Returns the failure, or None on success.
 
     The workspace and pid file are asked of the host rather than taken from its answer: they are
-    path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
-    mid-launch never sees. The intent also says the workspace may become registered with Orca, which
-    outlives the launch, and the stop is what gives it back.
+    path arithmetic over the sprint reference and the head's runtime, and the answer is exactly what
+    a tick that dies mid-launch never sees. The intent also says the workspace may become a
+    registered worktree (Orca's or git's, by its path), which outlives the launch, and the stop is
+    what gives it back.
     """
     previous = record.to_json()
     now = time.time()
     try:
-        workspace = record.workspace or str(runtime.host.observer_workspace(ref))
+        workspace = record.workspace or str(runtime.host.observer_workspace(ref, head))
         pid_file = record.pid_file or str(runtime.host.observer_pid_file(ref))
     except Exception as exc:
         # Without the workspace the head could not be found again, and without the pid file its

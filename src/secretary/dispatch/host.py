@@ -61,7 +61,9 @@ from secretary.dispatch.gate_receipt import (
 from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
+from secretary.dispatch.git_workspace import WORKSPACES_DIR as GIT_WORKSPACES_DIR
 from secretary.dispatch.git_workspace import GitWorkspaceManager
+from secretary.dispatch.git_workspace import _resolved as _resolved_path
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.helpers import (
     _decision_record_line,
@@ -197,6 +199,7 @@ from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.infra import git_worktree
 from secretary.infra.github_credential import (
     PROJECT_ACCESS_REFUSALS,
     CredentialError,
@@ -1143,23 +1146,50 @@ class CommandHostRuntime:
             heartbeat_run_id=heartbeat_run_id,
         )
 
-    def observer_workspace(self, reference: str) -> str:
+    def observer_workspace(self, reference: str, head: str = "") -> str:
         """Where one sprint observer runs. Its own directory, never a card workspace and never the
         interactive secretary session's checkout: the observer reads reports and slices cards, it
-        owns no branch of the project it watches."""
+        owns no branch of the project it watches.
+
+        `head` places a new one: an observer whose profile runs on a supervised runtime gets a plain
+        `git worktree` under `<data_dir>/workspaces/observers/`, any other one (or no head named) an
+        Orca worktree under the Orca root. The launch intent and `prepare_observer` both ask this with
+        the same head, so they name the same path; after launch the recorded path decides.
+        """
+        token = _request_token(reference)
         if self.mode == "noop":
-            return str(self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / _request_token(reference))
-        root = Path(
-            os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces"))
+            return str(self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / token)
+        if head and not self._runs_in_orca_pane(head):
+            return str(self._git_observer_root / token)
+        return str(self._orca_workspaces_root() / OBSERVER_WORKSPACE_DIR / token)
+
+    @property
+    def _git_observer_root(self) -> Path:
+        return Path(self.data_dir) / GIT_WORKSPACES_DIR / OBSERVER_WORKSPACE_DIR
+
+    def _is_git_observer_workspace(self, workspace: str) -> bool:
+        """Whether an observer workspace is git-managed, read from its recorded path alone.
+
+        Exactly `<data_dir>/workspaces/observers/<token>` and not under the Orca root, like a card's
+        git workspace: never the current profile, so a live observer keeps the manager its workspace
+        was made by, and one recorded under `~/orca/workspaces/observers/` stays Orca's.
+        """
+        if self.mode == "noop" or not workspace:
+            return False
+        path = _resolved_path(Path(workspace))
+        root = _resolved_path(self._git_observer_root)
+        return (
+            path.is_relative_to(root)
+            and len(path.relative_to(root).parts) == 1
+            and not path.is_relative_to(_resolved_path(self._orca_workspaces_root()))
         )
-        return str(root / OBSERVER_WORKSPACE_DIR / _request_token(reference))
 
     def _observer_repo(self) -> Path:
         """The repo observer workspaces are cut from: standalone, empty, without a remote.
 
-        Orca only gives terminals to worktrees of repositories it has registered, so a directory made
-        with `mkdir` gets no terminal at all. The observer needs that registration, not a checkout of
-        the project it watches, hence a repo of its own created once and shared by every sprint.
+        Created once and shared by every sprint: the observer needs a worktree to run in, not a
+        checkout of the project it watches. Registering it with Orca is the Orca route's own step
+        (`_register_observer_repo`); a git-managed observer workspace never asks Orca about it.
         """
         repo = observer_root_repo(self.data_dir)
         if not (repo / ".git").is_dir():
@@ -1193,6 +1223,12 @@ class CommandHostRuntime:
                 ],
                 "observer repo commit",
             )
+        return repo
+
+    def _register_observer_repo(self) -> Path:
+        """The observer repo, registered with Orca: Orca only gives terminals to worktrees of
+        repositories it has registered, so a directory made with `mkdir` gets no terminal at all."""
+        repo = self._observer_repo()
         self._run_json(["orca", "repo", "add", "--path", str(repo), "--json"])
         return repo
 
@@ -1217,7 +1253,7 @@ class CommandHostRuntime:
             return workspace
         if workspace.exists():
             shutil.rmtree(workspace, ignore_errors=True)
-        repo = self._observer_repo()
+        repo = self._register_observer_repo()
         result = self._run_json(
             [
                 "orca",
@@ -1245,6 +1281,45 @@ class CommandHostRuntime:
             raise HostError(f"orca placed the observer workspace at {path}, not {workspace}")
         return workspace
 
+    def _git_observer_workspace_registered(self, workspace: str) -> bool:
+        """Whether git lists this path as a worktree of the observer repo, and it is on disk."""
+        repo = observer_root_repo(self.data_dir)
+        if not (repo / ".git").is_dir() or not Path(workspace).is_dir():
+            return False
+        listed = self._observer_git(["worktree", "list", "--porcelain"], repo)
+        if listed.returncode != 0:
+            raise HostError(f"git worktree list failed: {_tail((listed.stderr or listed.stdout or '').strip())}")
+        target = _resolved_path(Path(workspace))
+        return any(
+            line.startswith("worktree ") and _resolved_path(Path(line[len("worktree ") :])) == target
+            for line in (listed.stdout or "").splitlines()
+        )
+
+    def _create_git_observer_workspace(self, workspace: Path) -> Path:
+        """The observer's workspace as a detached `git worktree` of the observer repo, at the path
+        the launch intent already names. No branch is created and Orca is never asked."""
+        if self._git_observer_workspace_registered(str(workspace)):
+            return workspace
+        repo = self._observer_repo()
+        if workspace.exists():
+            shutil.rmtree(workspace, ignore_errors=True)
+        # A directory removed without git's knowledge leaves a registration `add` would refuse.
+        self._observer_git(["worktree", "prune"], repo)
+        result = git_worktree.add(self._observer_git, repo, workspace, OBSERVER_REPO_BRANCH)
+        if result.returncode != 0:
+            detail = _tail((result.stderr or result.stdout or "").strip())
+            git_worktree.remove(self._observer_git, repo, workspace)
+            raise HostError(f"git worktree add failed for the observer workspace: {detail}")
+        return workspace
+
+    def _remove_git_observer_workspace(self, workspace: str) -> None:
+        """Take a stopped observer's git worktree back: `worktree remove --force`, then `prune`."""
+        if not git_worktree.remove(self._observer_git, observer_root_repo(self.data_dir), Path(workspace)):
+            raise HostError(f"the observer workspace at {workspace} could not be removed")
+
+    def _observer_git(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        return self.run_capture(["git", "-C", str(cwd), *argv], "observer git workspace")
+
     def observer_pid_file(self, reference: str) -> str:
         """Where this sprint's observer heartbeat writes its pid."""
         return _observer_pid_file(reference)
@@ -1257,17 +1332,23 @@ class CommandHostRuntime:
         prompt: str,
         identity: dict[str, str] | None = None,
         heartbeat_run_id: str = "",
+        recorded_workspace: str = "",
     ) -> dict[str, Any]:
         """Bring one observer up in the dedicated observer repository.
 
         Sprint repositories are canonical source roots and reservations are project ids. Neither
         is the repository authority for this process: the observer worktree is cut from
-        ``observer_root_repo`` by ``_create_observer_workspace`` below.
+        ``observer_root_repo``. `recorded_workspace` is the path the launch intent recorded; without one it
+        is `observer_workspace(reference, head)`, which is what the intent computes. A git-managed
+        path is cut with `git worktree`; any other path is today's Orca worktree.
         """
         reference = str(sprint.get("ref") or "")
+        placed = recorded_workspace or self.observer_workspace(reference, head)
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))
             workspace.mkdir(parents=True, exist_ok=True)
+        elif self._is_git_observer_workspace(placed):
+            workspace = self._create_git_observer_workspace(Path(placed))
         else:
             workspace = self._create_observer_workspace(reference)
         self._write_prompt(workspace / OBSERVER_PROMPT_FILE, prompt)
@@ -1446,7 +1527,11 @@ class CommandHostRuntime:
         self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
 
     def _stop_observer_head(self, record: Any) -> None:
-        """Give Orca back the pane, the process and the worktree one observer bring-up took."""
+        """Give back the pane, the process and the worktree one observer bring-up took.
+
+        The recorded workspace path picks the route: a git-managed one is checked, and after the
+        confirmed head stop removed, through `git worktree`; any other one through Orca, as always.
+        """
         observer_run = getattr(record, "head_run", {})
         observer_leaf = str(getattr(record, "leaf", "") or "")
         pid_file = str(getattr(record, "pid_file", "") or "")
@@ -1462,7 +1547,13 @@ class CommandHostRuntime:
             if record.handle:
                 self._close_observer_pane(record, record.handle)
             return
-        if not self._observer_workspace_registered(workspace):
+        git_managed = self._is_git_observer_workspace(workspace)
+        registered = (
+            self._git_observer_workspace_registered(workspace)
+            if git_managed
+            else self._observer_workspace_registered(workspace)
+        )
+        if not registered:
             self._confirm_head_process_gone(
                 pid_file,
                 run=observer_run,
@@ -1487,6 +1578,9 @@ class CommandHostRuntime:
             task=sprint_task(getattr(record, "sprint", "")),
             leaf=observer_leaf,
         )
+        if git_managed:
+            self._remove_git_observer_workspace(workspace)
+            return
         self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"])
 
     def observer_activity_epoch(self, record: Any) -> int:
@@ -2444,7 +2538,7 @@ class CommandHostRuntime:
             if not receipt.ok:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
         if not any(_head_runtime_name(run) == ORCA_LEGACY_RUNTIME for run, _ in live) and (
-            live or self._is_git_workspace(workspace)
+            live or self._is_git_workspace(workspace) or self._is_git_observer_workspace(workspace)
         ):
             # Every recorded head is supervised, or the workspace is one Orca never made and no
             # legacy head was ever recorded in it: there is no pane for Orca to give back.

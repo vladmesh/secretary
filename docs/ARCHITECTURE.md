@@ -230,6 +230,11 @@ gets an Orca worktree. Resume validation, discard, stop and teardown read the ma
 (under the git root means git), never from current profiles, so a live card keeps its manager. A
 supervised reviewer starts in the same worktree as a second process and never reads Orca's panes.
 
+A sprint observer follows the same rule. At launch its declared profile's runtime picks the path the
+intent records: a supervised one gets a detached `git worktree` of the observer repo at
+`<data_dir>/workspaces/observers/<token>`, `orca-legacy` today's Orca worktree. Stop, respawn and
+removal read the route from the recorded path, so a live Orca observer record stays on Orca.
+
 The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` belongs to the
 project adapter. It claims the environment with an owner record, adds its workspace paths to Git's
 `info/exclude`, and never writes production package paths into either environment. One immutable
@@ -362,10 +367,10 @@ passes the same resource-readiness gate as a card claim, uses the ordinary head-
 role environment wrapper, and gets only role-scoped environment, not the whole `runtime.env`.
 
 The observer workspace is cut from a dispatcher-owned empty repository without a remote
-(`<data>/dispatcher/observer-root/observers`, created on first use and registered with Orca). It never
-gets a project checkout. Reconciliation neither creates nor deletes this repository, and `doctor`
-accepts its registration only at that path. Stopping closes all terminals of the workspace, then
-removes the worktree registration.
+(`<data>/dispatcher/observer-root/observers`, created on first use and registered with Orca only when
+an `orca-legacy` observer launches). It never gets a project checkout. Reconciliation neither creates
+nor deletes this repository, and `doctor` accepts its registration only at that path. Stopping ends
+the confirmed head first, then removes the worktree through the manager its path names.
 
 The launch prompt is rendered from the live sprint entity and points to the `observe-sprint` role
 skill by path without repeating it. The skill lives in `skills/` of this repository, is registered as

@@ -861,7 +861,7 @@ class FakeHost:
             "head_run": dict(launched.head_run),
         }
 
-    def observer_workspace(self, reference: str) -> str:
+    def observer_workspace(self, reference: str, head: str = "") -> str:
         return str(self.root / "observers" / reference.replace(":", "-"))
 
     def configure_codex_provider_ingress(self, run, *, persist, stop, block) -> None:
@@ -977,6 +977,7 @@ class FakeHost:
         prompt: str,
         identity: dict[str, str] | None = None,
         heartbeat_run_id: str = "",
+        recorded_workspace: str = "",
     ) -> dict:
         self.calls.append("prepare_observer")
         self.observer_identities.append(dict(identity or {}))
