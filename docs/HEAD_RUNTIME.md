@@ -34,7 +34,7 @@ merge commits on `main`.
 | A continuation reaches a retained (SIGSTOPped) worker | proven live | secretary-1702 (10392c6): the runtime runs the transport's `before_send` (SIGCONT) for a suspended head. Live: "retained worker resumed" on secretary-1703 at 2026-09-24 00:33Z. |
 | `head-status` reads a local-pty head (pid, heartbeat, lease, supervisor, journal tail) | proven live | secretary-1701 (5a1cba2). Live: secretary-1702's worker at 2026-09-23 23:36Z. |
 | The web shows a head's transcript tail and journal, read-only | merged, live proof pending | secretary-1703 (5b8336e). Live proof waits for the PO upgrade. |
-| A project runs without Orca: optional `orca_binding`, no Orca kind in reconcile or doctor | merged, live proof pending | secretary-1704 (7f092ae). Live proof: a `project add` / `reconcile apply` after the final upgrade. `orca_binding` still has two readers: orca-legacy workspace placement (`dispatch/host.py`) and the curator's routing of historical sessions (`automations/agents/curator/discover.py`, `RouteResolver.resolve`), which does not depend on the runtime. |
+| A project runs without Orca: optional `orca_binding`, no Orca kind in reconcile or doctor | merged, live proof pending | secretary-1704 (7f092ae). Live proof: a `project add` / `reconcile apply` after the final upgrade. `orca_binding` still has two readers: orca-legacy workspace placement (`dispatch/host.py`) and curator routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and Codex sessions or Claude personal-memory files (`automations/agents/curator/discover.py`, `RouteResolver.resolve`), which does not depend on the runtime. |
 | The observer workspace is a detached `git worktree` | merged, live proof pending | secretary-1705 (1cbf343). Live proof comes at the next local-pty observer launch. |
 | Background agents run from the product's systemd units, with no Orca automations; the old top-level agents package is deleted | merged, live proof pending | secretary-1706 (6d866de), secretary-1707 (3240db2). Live proof: one tick per agent after the final upgrade. |
 | Role heads get the product venv on `PATH` | merged, live proof pending | secretary-1708 (d83f9b5). Live proof: the next observer, steward, retro and curator heads. |
@@ -77,20 +77,21 @@ before it.
    (secretary-1710). Why: once the login under the data dir is proven live, no Codex head reads the
    legacy home.
 8. **`orca_binding` and the `orca` records in `host-managed.json`.** `orca_binding` has two
-   readers. Step 3 removes the first, orca-legacy workspace placement. The second is the curator:
-   its route boundary adds `<workspaces root>/<orca_binding>` to the project, so a historical Claude
-   or Codex session whose cwd is under `~/orca/workspaces/<orca_binding>` routes to that project.
-   Without the binding it routes to `unknown`, whatever the head runtime. So "no live Orca head" is
-   not enough. The binding may be dropped only when the curator no longer needs it, that is, either:
-   - (a) the curator's watermark is past every session whose cwd is under `~/orca/workspaces/`, and
-     no such session source is retained; or
-   - (b) curator routing has another way to map those historical paths, for example a path-prefix
-     map kept in the instance. Choosing (b) is a product decision, taken as its own change outside
-     A20's deletions.
+   readers. Step 3 removes the first, orca-legacy workspace placement. The second is curator
+   routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and
+   Codex sessions or Claude personal-memory files: the route boundary adds
+   `<workspaces root>/<orca_binding>` to the project, and without it such a source routes to
+   `unknown`, whatever the head runtime. So "no live Orca head" is not enough.
 
-   Take this step only after (a) or (b) holds. Reconcile and doctor already ignore the leftover
-   `orca` records. Durable formats stay loadable: the loader keeps accepting and ignoring the key and
-   the record until the instance drops them (a PO edit).
+   The binding may be dropped only after curator routing no longer needs it: curator routing maps
+   every path under the Orca workspaces root to its project without reading `orca_binding`, for
+   example through a path-prefix map kept in the instance. Whether and how to build that is a
+   separate product decision, outside A20's deletions. Until then `orca_binding` stays on existing
+   bindings. That is harmless: it is optional, and new projects do not get it.
+
+   Reconcile and doctor already ignore the leftover `orca` records. Durable formats stay loadable:
+   the loader keeps accepting and ignoring the key and the record until the instance drops them (a
+   PO edit).
 9. **Host coupling.** The units' `After=orca-server.service` (`packaging/systemd/*.service`),
    doctor's `orca-server.service` expectation (`host.py`), bootstrap's Orca AppImage and `xvfb`
    install (`bootstrap.py`), and the Orca state dirs in `backup.py`. Why: after steps 2–8 no tick,
@@ -103,7 +104,7 @@ before it.
 11. **Role worktrees under `~/orca/workspaces/secretary/{curator,pipeline,retro,steward}`**
     (`data.py`, `cli.py`, the automations' default `TA_WORKSPACE`). An Orca-flavoured path with no
     Orca dependency, so it does not block removing Orca; move them under the data dir in A20 or later.
-    The curator also reads `~/orca/workspaces` by path, whatever the runtime: it is the base of the
-    step-8 boundaries, and historical observer sessions under `~/orca/workspaces/observers/<token>`
-    route by their sprint's reservations. Move or retire that root only under step 8's condition, (a)
-    or (b).
+    The curator also routes by the `~/orca/workspaces` root, whatever the runtime: it is the base of
+    the step-8 boundaries, and sources under `~/orca/workspaces/observers/<token>` route by their
+    sprint's reservations. Move or retire that root only under step 8's condition: curator routing
+    no longer needs it.
