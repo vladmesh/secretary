@@ -12,7 +12,7 @@ from unittest import mock
 from secretary import upgrade
 from secretary.backup_policy import FULL_POLICY, should_skip_data_entry
 from secretary.host_apply import HostCommandError, SystemdUnitInstaller, UnitProcessIdentity
-from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.fakes.upgrade import FakeUnitInstaller
 
 WEB_UNIT = "secretary-web.service"
 UNIT_TEXT = b"[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n"
@@ -47,7 +47,6 @@ class WebProcessReceiptTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=self.units,
-            orca=FakeRegistrar(),
             automations=None,
             pull=False,
             report=self.report,

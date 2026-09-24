@@ -253,6 +253,40 @@ class SchemaInvalidTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertTrue(any(e.path.startswith("host.units") for e in errors), errors)
 
+    def test_binding_orca_binding_is_optional_legacy(self):
+        without = {key: value for key, value in VALID_BINDING.items() if key != "orca_binding"}
+        self.assertEqual(validate(without, "project-binding", "b.yaml"), [])
+        self.assertEqual(validate(VALID_BINDING, "project-binding", "b.yaml"), [])
+        empty = {**VALID_BINDING, "orca_binding": ""}
+        self.assertTrue(any(e.path == "orca_binding" for e in validate(empty, "project-binding", "b.yaml")))
+
+    def test_bindings_with_and_without_orca_binding_both_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text(
+                "version: 1\nname: example\ndata_dir: /var/lib/secretary-data\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            projects = instance / "projects"
+            projects.mkdir()
+            (projects / "legacy.yaml").write_text(
+                "id: legacy\nrepo: /srv/legacy\norca_binding: legacy_repo\nenabled: false\n"
+                "adapter: legacy\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+            (projects / "fresh.yaml").write_text(
+                "id: fresh\nrepo: /srv/fresh\nenabled: false\nadapter: fresh\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+
+            report = validate_instance(instance)
+
+        self.assertTrue(report.ok, report.errors)
+        by_id = {binding["id"]: binding for binding in report.bindings}
+        self.assertEqual(by_id["legacy"]["orca_binding"], "legacy_repo")
+        self.assertNotIn("orca_binding", by_id["fresh"])
+
     def test_host_empty_units_need_no_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)
         data["host"] = {"units": []}

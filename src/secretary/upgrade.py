@@ -61,8 +61,6 @@ from secretary.host import (
 from secretary.host_apply import (
     ApplyInputs,
     HostCommandError,
-    LiveOrcaRegistrar,
-    OrcaRegistrar,
     SystemdUnitInstaller,
     UnitInstaller,
     UnitProcessIdentity,
@@ -129,7 +127,6 @@ class UpgradeContext:
     base_branch: str
     dry_run: bool
     units: UnitInstaller
-    orca: OrcaRegistrar
     automations: OrcaAutomationClient
     host_fixture: Path | None = None
     pull: bool = True
@@ -936,11 +933,7 @@ def step_host(context: UpgradeContext) -> StepResult:
     except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
     expected = build_expectations(report.bindings, report.host, availability=context.project_availability)
-    source = (
-        FixtureHostSource(context.host_fixture)
-        if context.host_fixture
-        else LiveHostSource(orca_user=context.runtime_user)
-    )
+    source = FixtureHostSource(context.host_fixture) if context.host_fixture else LiveHostSource()
     collected = source.collect(expected)
     if collected.errors:
         reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))
@@ -957,14 +950,11 @@ def step_host(context: UpgradeContext) -> StepResult:
             manifest_path=manifest,
             packaged=packaged,
             runtime_user=context.runtime_user,
-            project_availability=context.project_availability,
         ),
         units=context.units,
-        orca=context.orca,
         dry_run=context.dry_run,
     )
-    pending = [change for change in result.changes if change.action not in {"unchanged", "deferred"}]
-    deferred = [change for change in result.changes if change.action == "deferred"]
+    pending = [change for change in result.changes if change.action != "unchanged"]
     if result.conflicts:
         names = ", ".join(change.name for change in result.conflicts)
         return StepResult("host", "failed", f"unowned names in our namespace: {names}")
@@ -981,10 +971,7 @@ def step_host(context: UpgradeContext) -> StepResult:
         for change in pending
     )
     if not pending:
-        detail = f"{len(result.changes)} resources reconciled"
-        if deferred:
-            detail += f"; {len(deferred)} unavailable project registrations deferred"
-        return StepResult("host", "unchanged", detail)
+        return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
     detail = ", ".join(f"{change.action} {change.name}" for change in pending)
     return StepResult("host", "changed", detail)
 
@@ -1681,7 +1668,6 @@ def run_upgrade(args) -> int:
         base_branch=args.base_branch,
         dry_run=args.dry_run,
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(orca_user),
         automations=OrcaAutomationClient(orca_user),
         host_fixture=Path(args.host_fixture) if args.host_fixture else None,
         pull=not args.no_pull,

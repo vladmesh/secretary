@@ -10,6 +10,7 @@ from pathlib import Path
 from secretary._fsutil import directory_lock, write_text_atomic
 from secretary.config import validate_instance
 from secretary.host import (
+    KINDS,
     FixtureHostSource,
     LiveHostSource,
     build_expectations,
@@ -51,7 +52,7 @@ def run_reconcile_plan(args) -> int:
     collected = source.collect(expected)
     if collected.errors:
         print("secretary reconcile plan: host inventory unavailable")
-        for kind in ("projects", "units", "orca repos"):
+        for kind in KINDS:
             if reason := collected.errors.get(kind):
                 print(f"  {kind}: unavailable: {reason}")
         return 2
@@ -125,37 +126,8 @@ def run_reconcile_adopt(args) -> int:
             print("secretary reconcile adopt: " + problem)
             return 2
         return _record_adoption(args, report, resource)
-    if resource.kind != "orca":
-        print("secretary reconcile adopt: resource kind has no verifiable adoption identity")
-        return 2
-    try:
-        expected_repo = json.loads(resource.spec)["repo"]
-    except (ValueError, KeyError, TypeError):
-        print("secretary reconcile adopt: desired resource identity is invalid")
-        return 2
-    source = LiveHostSource()
-    live_paths, reason = source.orca_repo_paths()
-    if reason:
-        print("secretary reconcile adopt: live Orca inventory unavailable: " + reason)
-        return 2
-    live_repo = live_paths.get(resource.name)
-    if live_repo is None:
-        print("secretary reconcile adopt: desired Orca registration is missing")
-        return 2
-    expected_path = Path(expected_repo).expanduser()
-    if not expected_path.is_absolute():
-        print("secretary reconcile adopt: desired repo path must be absolute")
-        return 2
-    try:
-        normalized_expected = str(expected_path.resolve(strict=False))
-    except (OSError, RuntimeError):
-        print("secretary reconcile adopt: desired repo path could not be normalized")
-        return 2
-    if live_repo != normalized_expected:
-        print("secretary reconcile adopt: Orca registration repo path does not match desired state")
-        return 2
-
-    return _record_adoption(args, report, resource)
+    print("secretary reconcile adopt: resource kind has no verifiable adoption identity")
+    return 2
 
 
 def _verify_unit_identity(resource, unit_dir: Path) -> str:
@@ -224,7 +196,6 @@ def run_reconcile_apply(args) -> int:
     """Bring the host to the instance config. This is the write half of plan."""
     from secretary.host_apply import (
         ApplyInputs,
-        LiveOrcaRegistrar,
         SystemdUnitInstaller,
         apply_host,
     )
@@ -246,7 +217,7 @@ def run_reconcile_apply(args) -> int:
         # Reconciling against a half-read host would read a missing unit as
         # "absent" and reinstall over whatever is really there.
         print("secretary reconcile apply: host inventory unavailable")
-        for kind in ("projects", "units", "orca repos"):
+        for kind in KINDS:
             if reason := collected.errors.get(kind):
                 print(f"  {kind}: unavailable: {reason}")
         return 2
@@ -271,7 +242,6 @@ def run_reconcile_apply(args) -> int:
             runtime_user=runtime_user,
         ),
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(),
         dry_run=args.dry_run,
     )
     for line in result.render():

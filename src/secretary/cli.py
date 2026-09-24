@@ -44,6 +44,7 @@ from secretary.head_health import (
 from secretary.head_registry import HeadRegistryConfigError, installed_heads, read_source
 from secretary.host import (
     CollectResult,
+    KINDS,
     FixtureHostSource,
     KindDiff,
     LiveHostSource,
@@ -305,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "take an enabled binding back down to a disabled draft: keep plane, policy, remote "
-            "and orca_binding, drop the canonical adapter, and require provision and gate again"
+            "and a legacy orca_binding, drop the canonical adapter, and require provision and gate again"
         ),
     )
     _add_env_instance(
@@ -1720,7 +1721,7 @@ def print_host_inventory(
 
     print()
     print("host inventory: read-only")
-    for kind in ("projects", "units", "orca repos"):
+    for kind in KINDS:
         reason = collected.errors.get(kind)
         if reason:
             print(f"{kind}:")
@@ -1748,7 +1749,6 @@ def collect_host_inventory(report, args: argparse.Namespace):
         report.instance,
         report.bindings,
         packaged=packaged,
-        data_dir=report.data_dir,
     )
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)

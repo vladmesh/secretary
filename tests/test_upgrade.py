@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -43,6 +44,7 @@ from secretary.head_registry import (
 from secretary.host import (
     CollectResult,
     HostInventory,
+    PlannedResource,
     SystemdLayout,
     build_plan,
     component_enabled,
@@ -55,7 +57,7 @@ from secretary.host import (
 from secretary.host_apply import ApplyInputs, apply_host
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime import heads
-from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
 from secretary.head_health import HeadReadiness, resolve_head_chain
 
@@ -260,7 +262,6 @@ class ApplyHostTests(unittest.TestCase):
         instance=None,
         bindings=(),
         runtime_user: str | None = None,
-        project_availability: ProjectAvailability | None = None,
     ) -> ApplyInputs:
         return ApplyInputs(
             instance=instance or instance_config(self.data),
@@ -270,13 +271,12 @@ class ApplyHostTests(unittest.TestCase):
             manifest_path=self.manifest,
             packaged=self.packaged,
             runtime_user=runtime_user,
-            project_availability=project_availability or ProjectAvailability(),
         )
 
     def test_empty_host_is_installed_enabled_and_recorded(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
+        units = FakeUnitInstaller()
 
-        result = apply_host(self.inputs(HostInventory()), units=units, orca=orca)
+        result = apply_host(self.inputs(HostInventory()), units=units)
 
         self.assertTrue(result.ok, result.errors)
         self.assertIn(("install", "secretary-example.timer"), units.calls)
@@ -296,7 +296,6 @@ class ApplyHostTests(unittest.TestCase):
             result = apply_host(
                 self.inputs(HostInventory(), runtime_user="operator"),
                 units=FakeUnitInstaller(),
-                orca=FakeRegistrar(),
             )
 
         self.assertTrue(result.ok, result.errors)
@@ -317,7 +316,6 @@ class ApplyHostTests(unittest.TestCase):
             result = apply_host(
                 self.inputs(HostInventory(), runtime_user="operator"),
                 units=FakeUnitInstaller(),
-                orca=FakeRegistrar(),
             )
 
         self.assertTrue(result.ok, result.errors)
@@ -339,7 +337,6 @@ class ApplyHostTests(unittest.TestCase):
             result = apply_host(
                 self.inputs(inventory, managed=desired, runtime_user="operator"),
                 units=FakeUnitInstaller(),
-                orca=FakeRegistrar(),
             )
 
         self.assertTrue(result.ok, result.errors)
@@ -351,21 +348,21 @@ class ApplyHostTests(unittest.TestCase):
         self.manifest.write_text("not json", encoding="utf-8")
         before = self.manifest.read_bytes()
 
-        result = apply_host(self.inputs(HostInventory()), units=FakeUnitInstaller(), orca=FakeRegistrar())
+        result = apply_host(self.inputs(HostInventory()), units=FakeUnitInstaller())
 
         self.assertFalse(result.ok)
         self.assertIn("managed manifest is not valid JSON", result.errors)
         self.assertEqual(self.manifest.read_bytes(), before)
 
     def test_second_run_against_the_reconciled_host_changes_nothing(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
-        apply_host(self.inputs(HostInventory()), units=units, orca=orca)
+        units = FakeUnitInstaller()
+        apply_host(self.inputs(HostInventory()), units=units)
         managed, error = strict_manifest(self.manifest)
         self.assertEqual(error, "")
         installed = HostInventory(units=set(units.files))
         units.calls.clear()
 
-        result = apply_host(self.inputs(installed, managed), units=units, orca=orca)
+        result = apply_host(self.inputs(installed, managed), units=units)
 
         self.assertTrue(result.ok)
         self.assertFalse(result.changed)
@@ -373,10 +370,10 @@ class ApplyHostTests(unittest.TestCase):
         self.assertEqual({c.action for c in result.changes}, {"unchanged"})
 
     def test_an_unowned_name_in_our_namespace_aborts_before_any_write(self):
-        units, orca = FakeUnitInstaller(present={"secretary-example.timer": b"hand written"}), FakeRegistrar()
+        units = FakeUnitInstaller(present={"secretary-example.timer": b"hand written"})
         inventory = HostInventory(units={"secretary-example.timer"})
 
-        result = apply_host(self.inputs(inventory), units=units, orca=orca)
+        result = apply_host(self.inputs(inventory), units=units)
 
         self.assertFalse(result.ok)
         self.assertEqual([c.name for c in result.conflicts], ["secretary-example.timer"])
@@ -385,18 +382,18 @@ class ApplyHostTests(unittest.TestCase):
         self.assertEqual(units.files["secretary-example.timer"], b"hand written")
 
     def test_a_conflict_anywhere_stops_the_units_that_would_have_been_fine(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
+        units = FakeUnitInstaller()
         inventory = HostInventory(units={"secretary-legacy.timer"})
 
-        result = apply_host(self.inputs(inventory), units=units, orca=orca)
+        result = apply_host(self.inputs(inventory), units=units)
 
         self.assertFalse(result.ok)
         self.assertEqual(units.calls, [])
 
     def test_dry_run_reports_the_same_changes_and_writes_nothing(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
+        units = FakeUnitInstaller()
 
-        preview = apply_host(self.inputs(HostInventory()), units=units, orca=orca, dry_run=True)
+        preview = apply_host(self.inputs(HostInventory()), units=units, dry_run=True)
 
         self.assertTrue(preview.ok)
         self.assertEqual({c.action for c in preview.changes}, {"create"})
@@ -404,14 +401,14 @@ class ApplyHostTests(unittest.TestCase):
         self.assertFalse(self.manifest.exists())
 
     def test_a_dropped_component_is_disabled_removed_and_forgotten(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
-        apply_host(self.inputs(HostInventory()), units=units, orca=orca)
+        units = FakeUnitInstaller()
+        apply_host(self.inputs(HostInventory()), units=units)
         managed, _ = strict_manifest(self.manifest)
         installed = HostInventory(units=set(units.files))
         units.calls.clear()
         shed = instance_config(self.data, components={"example": {"enabled": False}})
 
-        result = apply_host(self.inputs(installed, managed, instance=shed), units=units, orca=orca)
+        result = apply_host(self.inputs(installed, managed, instance=shed), units=units)
 
         self.assertTrue(result.ok, result.errors)
         self.assertIn(("disable", "secretary-example.timer"), units.calls)
@@ -423,70 +420,49 @@ class ApplyHostTests(unittest.TestCase):
         self.assertNotIn("secretary-example.timer", recorded)
 
     def test_a_failed_install_is_never_recorded_as_managed(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
+        units = FakeUnitInstaller()
         units.fail_on = {"secretary-example.timer"}
 
-        result = apply_host(self.inputs(HostInventory()), units=units, orca=orca)
+        result = apply_host(self.inputs(HostInventory()), units=units)
 
         self.assertFalse(result.ok)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
         self.assertNotIn("secretary-example.timer", recorded)
 
-    def test_orca_registration_is_created_from_the_binding(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
+    def test_a_binding_with_a_legacy_orca_binding_registers_nothing(self):
+        units = FakeUnitInstaller()
         binding = {"id": "demo", "repo": "/srv/demo", "orca_binding": "demo", "enabled": True}
 
-        apply_host(self.inputs(HostInventory(), bindings=[binding]), units=units, orca=orca)
+        with mock.patch("secretary._proc.run") as run:
+            result = apply_host(self.inputs(HostInventory(), bindings=[binding]), units=units)
 
-        self.assertEqual(orca.added, [("demo", "/srv/demo")])
+        self.assertTrue(result.ok, result.errors)
+        run.assert_not_called()
+        self.assertFalse([change for change in result.changes if change.kind != "unit"])
+        recorded = {resource.kind for resource in strict_manifest(self.manifest)[0]}
+        self.assertEqual(recorded, {"unit"})
 
-    def test_an_orca_deletion_is_refused_rather_than_silently_recorded(self):
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
-        binding = {"id": "demo", "repo": "/srv/demo", "orca_binding": "demo", "enabled": True}
-        apply_host(self.inputs(HostInventory(), bindings=[binding]), units=units, orca=orca)
+    def test_a_legacy_managed_orca_record_is_kept_and_never_deleted(self):
+        """A registration an older reconcile recorded is Orca's own state: left alone, still recorded."""
+        units = FakeUnitInstaller()
+        apply_host(self.inputs(HostInventory()), units=units)
         managed, _ = strict_manifest(self.manifest)
-        inventory = HostInventory(units=set(units.files), orca_repos={"demo"})
-
-        result = apply_host(self.inputs(inventory, managed), units=units, orca=orca)
-
-        self.assertFalse(result.ok)
-        self.assertTrue(any("no repo removal command" in error for error in result.errors), result.errors)
-        recorded = {r.name for r in strict_manifest(self.manifest)[0]}
-        self.assertIn("demo", recorded)
-
-    def test_failed_retry_preserves_registered_project_while_healthy_project_continues(self):
-        alpha = {"id": "alpha", "repo": "/srv/alpha", "orca_binding": "alpha", "enabled": True}
-        beta = {"id": "beta", "repo": "/srv/beta", "orca_binding": "beta", "enabled": True}
-        units, orca = FakeUnitInstaller(), FakeRegistrar()
-
-        apply_host(
-            self.inputs(HostInventory(), bindings=[alpha]),
-            units=units,
-            orca=orca,
+        spec = '{"binding":"demo","repo":"/srv/demo"}'
+        value = json.dumps(["orca:project:demo", "orca", "demo", spec], separators=(",", ":"))
+        legacy = PlannedResource(
+            "orca:project:demo", "orca", "demo", spec, hashlib.sha256(value.encode()).hexdigest()
         )
-        managed, error = strict_manifest(self.manifest)
-        self.assertEqual(error, "")
-        inventory = HostInventory(units=set(units.files), orca_repos={"alpha"})
+        self.manifest.write_text(manifest_text([*managed, legacy]), encoding="utf-8")
+        binding = {"id": "demo", "repo": "/srv/demo", "orca_binding": "demo", "enabled": True}
 
         result = apply_host(
-            self.inputs(
-                inventory,
-                managed,
-                bindings=[alpha, beta],
-                project_availability=ProjectAvailability(frozenset({"alpha"})),
-            ),
+            self.inputs(HostInventory(units=set(units.files)), [*managed, legacy], bindings=[binding]),
             units=units,
-            orca=orca,
         )
 
         self.assertTrue(result.ok, result.errors)
-        self.assertEqual(
-            [change.action for change in result.changes if change.logical_id == "orca:project:alpha"],
-            ["unchanged"],
-        )
-        self.assertIn(("beta", "/srv/beta"), orca.added)
-        recorded = {resource.name for resource in strict_manifest(self.manifest)[0]}
-        self.assertEqual(recorded & {"alpha", "beta"}, {"alpha", "beta"})
+        self.assertFalse([change for change in result.changes if change.kind == "orca"])
+        self.assertIn(legacy, strict_manifest(self.manifest)[0])
 
 
 class AutomationSpecTests(unittest.TestCase):
@@ -643,7 +619,6 @@ class UpgradeStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=units,
-            orca=FakeRegistrar(),
             automations=None,
             report=_Report(),
         )
@@ -698,32 +673,34 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("invalid instance data_dir", result.detail)
 
-    def test_host_step_counts_present_unavailable_registration_drift_as_deferred(self):
+    def test_host_step_leaves_a_legacy_orca_registration_alone(self):
+        """An unavailable project's legacy Orca record is neither planned, deferred nor deleted."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data_dir = root / "data"
             data_dir.mkdir()
-            old = {
+            binding = {
                 "id": "alpha",
-                "repo": "/srv/alpha",
+                "repo": "/srv/recovered-alpha",
                 "orca_binding": "alpha-repo",
                 "enabled": True,
             }
-            changed = {**old, "repo": "/srv/recovered-alpha"}
-            managed = build_plan({}, [old], packaged=[])
-            (data_dir / "host-managed.json").write_text(
-                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in managed]}),
-                encoding="utf-8",
+            spec = '{"binding":"alpha-repo","repo":"/srv/alpha"}'
+            value = json.dumps(["orca:project:alpha", "orca", "alpha-repo", spec], separators=(",", ":"))
+            legacy = PlannedResource(
+                "orca:project:alpha", "orca", "alpha-repo", spec, hashlib.sha256(value.encode()).hexdigest()
             )
+            manifest = data_dir / "host-managed.json"
+            manifest.write_text(manifest_text([legacy]), encoding="utf-8")
             report = SimpleNamespace(
                 data_dir=data_dir,
                 instance={},
-                bindings=[changed],
+                bindings=[binding],
                 host={},
                 instance_path=root / "instance" / "instance.yaml",
             )
             source = mock.Mock()
-            source.collect.return_value = CollectResult(inventory=HostInventory(orca_repos={"alpha-repo"}))
+            source.collect.return_value = CollectResult(inventory=HostInventory())
             context = self.context(
                 FakeUnitInstaller(),
                 instance_path=report.instance_path.parent,
@@ -734,11 +711,14 @@ class UpgradeStepTests(unittest.TestCase):
             with (
                 mock.patch("secretary.upgrade.resolve_packaged", return_value=[]),
                 mock.patch("secretary.upgrade.LiveHostSource", return_value=source),
+                mock.patch("secretary._proc.run") as run,
             ):
                 result = upgrade.step_host(context)
 
-        self.assertEqual(result.status, "unchanged")
-        self.assertIn("1 unavailable project registrations deferred", result.detail)
+            self.assertEqual(result.status, "unchanged", result.detail)
+            self.assertNotIn("deferred", result.detail)
+            run.assert_not_called()
+            self.assertEqual(strict_manifest(manifest)[0], [legacy])
 
     def test_no_upgrade_step_is_about_a_transport(self):
         names = [step.__name__ for step in upgrade.STEPS]
@@ -1509,7 +1489,6 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            orca=FakeRegistrar(),
             automations=None,
             report=_Report(),
         )
@@ -1910,7 +1889,6 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
                 upgrade, "resolve_runtime_owner", return_value=("operator", Path("/home/operator"))
             ),
             mock.patch.object(upgrade.os, "geteuid", return_value=euid),
-            mock.patch.object(upgrade, "LiveOrcaRegistrar", remember("orca")),
             mock.patch.object(upgrade, "OrcaAutomationClient", remember("automations")),
             mock.patch.object(upgrade, "SystemdUnitInstaller", mock.Mock()),
             mock.patch.object(upgrade, "run_steps", return_value=upgrade.UpgradeResult()),
@@ -1921,11 +1899,11 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
 
     def test_root_run_reaches_orca_through_the_runtime_user(self):
         """Root has no Orca runtime of its own; the automations step must not call the CLI as root."""
-        self.assertEqual(self.build_context(euid=0), {"orca": "operator", "automations": "operator"})
+        self.assertEqual(self.build_context(euid=0), {"automations": "operator"})
 
     def test_unprivileged_run_calls_orca_directly(self):
         """`runuser` is root's tool: an owner running the upgrade is already the right account."""
-        self.assertEqual(self.build_context(euid=1000), {"orca": None, "automations": None})
+        self.assertEqual(self.build_context(euid=1000), {"automations": None})
 
 
 class HealthUnitNameTests(unittest.TestCase):
@@ -2147,7 +2125,6 @@ class InstanceHeadCanonTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            orca=FakeRegistrar(),
             automations=None,
             report=_Report(),
         )

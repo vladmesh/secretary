@@ -2124,7 +2124,7 @@ class CommandHostRuntime:
             if self._card_heads_supervised(task):
                 # An Orca checkout this card already has keeps it on Orca. Only the binding's own
                 # spelling is looked at: asking Orca for its registration is the call this path is
-                # without, and every enabled binding names `orca_binding` anyway.
+                # without. A binding with no `orca_binding` has no Orca checkout to keep.
                 named = self.catalog.binding(project).get("orca_binding")
                 if not (isinstance(named, str) and named and (root / named / worker).exists()):
                     return str(git_path)
@@ -2196,7 +2196,12 @@ class CommandHostRuntime:
             raise HostError(f"project repo for {project!r} is unavailable")
 
     def _orca_repo(self, project: str) -> dict[str, Any]:
-        """This project's Orca repo registration, resolved from the configured repo path."""
+        """This project's Orca repo registration, resolved from the configured repo path.
+
+        Only orca-legacy heads ask. Nothing registers a project for them any more (reconcile no
+        longer manages Orca repos, and a new binding carries no `orca_binding`), so a project Orca
+        does not know fails the bring-up here rather than being registered on the fly.
+        """
         repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
         listing = self._run_json(["orca", "repo", "list", "--json"])
         repos = listing.get("repos") if isinstance(listing, dict) else None
@@ -2206,7 +2211,7 @@ class CommandHostRuntime:
                 if not isinstance(entry.get("id"), str) or not entry["id"]:
                     raise HostError(f"orca registered {repo} without an id")
                 return entry
-        raise HostError(f"project {project!r} repo {repo} is not registered with orca")
+        raise HostError(f"project {project} has no Orca registration; run it on a local-pty profile")
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         self._require_production_runtime("release-before")

@@ -108,7 +108,7 @@
         "orca_repos": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
-          "description": "Orca repos this installation claims on the host. Read by host.build_expectations into the same expectation set as host.units, for 'reconcile plan'/'reconcile apply', the host step of upgrade and 'restore-reconcile'; on those paths the collector enumerates registered repos without consulting it. Doctor derives Orca repo parity from the plan (host.build_doctor_expectations) and does not read this field."
+          "description": "Legacy and ignored. Orca repo registrations are no longer part of the host surface: reconcile, the host step of upgrade, 'restore-reconcile' and doctor neither read this field nor create, check or remove Orca repos. Kept so existing instance files still validate."
         },
         "components": {
           "type": "object",

@@ -14,12 +14,14 @@ from secretary import cli, host_commands
 from secretary.cli import main
 from secretary.config import validate_instance
 from secretary.host import (
+    KINDS,
     SHIPPED_PACKAGING_ROOT,
     CollectResult,
     Expectations,
     FixtureHostSource,
     HostInventory,
     LiveHostSource,
+    PlannedResource,
     SystemdLayout,
     build_doctor_expectations,
     build_expectations,
@@ -35,7 +37,6 @@ from secretary.host import (
     _CmdResult as CmdResult,
 )
 from secretary.host_apply import resolve_packaged, resolve_systemd_layout
-from secretary.projects.availability import ProjectAvailability
 from tests.orca_fixtures import legacy_orca_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,55 +87,19 @@ class ExpectationTests(unittest.TestCase):
         bindings = [
             {"id": "outside", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"},
         ]
-        expected = build_doctor_expectations(
-            instance,
-            bindings,
-            data_dir=Path("/var/lib/secretary-data"),
-        )
+        expected = build_doctor_expectations(instance, bindings)
         self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
         self.assertIn("secretary-dispatcher-production.timer", expected.units)
-        self.assertEqual(expected.orca_repos, {"widget"})
-        self.assertEqual(
-            expected.lazy_orca_repos,
-            {"observers": "/var/lib/secretary-data/dispatcher/observer-root/observers"},
-        )
 
-    def test_observer_root_is_lazily_managed_only_with_production_dispatcher(self):
-        enabled = {
-            "data_dir": "/srv/secretary-data",
-            "host": {"unit_prefix": "secretary-"},
-        }
+    def test_doctor_compares_projects_and_units_only(self):
+        """Orca repo registrations are Orca's own state: doctor has no section for them."""
         expected = build_doctor_expectations(
-            enabled,
-            [],
-            packaged=[],
-            data_dir=Path("/srv/secretary-data"),
-        )
-        empty = inventory(expected, HostInventory())
-        self.assertEqual(empty["orca repos"].missing_on_host, [])
-        self.assertEqual(empty["orca repos"].unmanaged_on_host, [])
-
-        repo = "/srv/secretary-data/dispatcher/observer-root/observers"
-        present = inventory(
-            expected,
-            HostInventory(orca_repos={"observers"}, orca_repo_paths={"observers": repo}),
-        )
-        self.assertEqual(present["orca repos"].matched, ["observers"])
-        self.assertEqual(present["orca repos"].unmanaged_on_host, [])
-
-        disabled = build_doctor_expectations(
-            {
-                "data_dir": "/srv/secretary-data",
-                "host": {
-                    "unit_prefix": "secretary-",
-                    "components": {"dispatcher-production": {"enabled": False}},
-                },
-            },
-            [],
+            {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}},
+            [{"id": "widget", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"}],
             packaged=[],
         )
-        self.assertEqual(disabled.lazy_orca_repos, {})
-        self.assertNotIn("secretary-dispatcher-production.timer", disabled.units)
+        self.assertEqual(KINDS, ("projects", "units"))
+        self.assertEqual(set(inventory(expected, HostInventory())), set(KINDS))
 
     def test_observer_root_does_not_change_reconcile_plan(self):
         instance = {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}}
@@ -143,8 +108,6 @@ class ExpectationTests(unittest.TestCase):
             desired,
             HostInventory(
                 units={resource.name for resource in desired if resource.kind == "unit"},
-                orca_repos={"observers"},
-                orca_repo_paths={"observers": "/srv/secretary-data/dispatcher/observer-root/observers"},
             ),
             desired,
             "secretary-",
@@ -152,27 +115,6 @@ class ExpectationTests(unittest.TestCase):
         self.assertTrue(changes)
         self.assertTrue(all(change.action == "unchanged" for change in changes))
         self.assertNotIn("observers", {change.name for change in changes})
-
-    def test_observer_root_name_at_another_path_stays_unmanaged(self):
-        expected = build_doctor_expectations(
-            {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}},
-            [],
-            packaged=[],
-            data_dir=Path("/srv/secretary-data"),
-        )
-        diff = inventory(
-            expected,
-            HostInventory(
-                orca_repos={"observers", "someone-else"},
-                orca_repo_paths={
-                    "observers": "/srv/not-secretary/observers",
-                    "someone-else": "/srv/someone-else",
-                },
-            ),
-        )["orca repos"]
-        self.assertEqual(diff.matched, [])
-        self.assertEqual(diff.missing_on_host, [])
-        self.assertEqual(diff.unmanaged_on_host, ["observers", "someone-else"])
 
     def test_doctor_checks_relative_checkout_path(self):
         repo = "missing-relative-doctor-checkout"
@@ -212,25 +154,24 @@ class ExpectationTests(unittest.TestCase):
         exp = build_expectations([{"id": "x", "repo": "git@example.invalid:acme/widget.git"}], {})
         self.assertEqual(exp.projects, {"widget"})
 
-    def test_host_block_feeds_units_and_repos(self):
+    def test_host_block_feeds_units_and_ignores_legacy_orca_repos(self):
         exp = build_expectations(
             [],
             {"units": ["u-a", "u-b"], "orca_repos": ["r-a"], "unit_prefix": "u-"},
         )
         self.assertEqual(exp.units, {"u-a", "u-b"})
-        self.assertEqual(exp.orca_repos, {"r-a"})
         self.assertEqual(exp.unit_prefix, "u-")
+        self.assertFalse(hasattr(exp, "orca_repos"))
 
     def test_diff_partitions_names(self):
-        expected = Expectations(projects={"a", "b"}, units={"u"}, orca_repos={"r1", "r2"})
-        actual = HostInventory(projects={"b", "c"}, units={"u"}, orca_repos={"r1", "r3"})
+        expected = Expectations(projects={"a", "b"}, units={"u"})
+        actual = HostInventory(projects={"b", "c"}, units={"u"})
         result = inventory(expected, actual)
+        self.assertEqual(set(result), {"projects", "units"})
         self.assertEqual(result["projects"].matched, ["b"])
         self.assertEqual(result["projects"].missing_on_host, ["a"])
         self.assertEqual(result["projects"].unmanaged_on_host, ["c"])
         self.assertEqual(result["units"].matched, ["u"])
-        self.assertEqual(result["orca repos"].missing_on_host, ["r2"])
-        self.assertEqual(result["orca repos"].unmanaged_on_host, ["r3"])
 
     def test_foreign_unit_is_not_an_unmanaged_conflict(self):
         expected = Expectations(units={"secretary-memory.service"}, foreign_units={"secretary-other.service"})
@@ -281,7 +222,6 @@ class FixtureSourceTests(unittest.TestCase):
         self.assertEqual(actual.projects, {"/srv/projects/example-project", "/srv/projects/stray-project"})
         # Full unit file names, exactly as systemctl list-unit-files prints them.
         self.assertEqual(actual.units, {"secretary-pipeline.service", "secretary-retro.timer"})
-        self.assertEqual(actual.orca_repos, {"example-project", "secretary", "extra-repo"})
 
     def test_legacy_project_directories_keep_fixture_paths(self):
         import tempfile
@@ -303,14 +243,13 @@ class FixtureSourceTests(unittest.TestCase):
         self.assertEqual(result.errors, {})
         self.assertEqual(result.inventory.projects, set())
         self.assertEqual(result.inventory.units, set())
-        self.assertEqual(result.inventory.orca_repos, set())
 
     def test_missing_root_is_unavailable_not_empty(self):
         # A root that does not exist was never read: every kind must be marked
         # unavailable instead of reporting an empty host (the fixture fail-open).
         source = FixtureHostSource(REPO_ROOT / "tests" / "fixtures" / "does-not-exist")
         result = source.collect(Expectations())
-        self.assertEqual(set(result.errors), {"projects", "units", "orca repos"})
+        self.assertEqual(set(result.errors), {"projects", "units"})
 
     def test_invalid_utf8_marks_only_that_fixture_kind_unavailable(self):
         import tempfile
@@ -539,14 +478,14 @@ class ReconcilePlanTests(unittest.TestCase):
             def collect(self, expected):
                 return CollectResult(
                     HostInventory(),
-                    {"units": "systemctl not found", "orca repos": "orca not found"},
+                    {"units": "systemctl not found", "projects": "host.projects_root is not a directory"},
                 )
 
         with unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=FakeLiveHost()):
             code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE)])
         self.assertEqual(code, 2, output)
         self.assertIn("units: unavailable: systemctl not found", output)
-        self.assertIn("orca repos: unavailable: orca not found", output)
+        self.assertIn("projects: unavailable: host.projects_root is not a directory", output)
 
     def test_cli_plan_reports_an_unreadable_managed_manifest(self):
         class FakeLiveHost:
@@ -646,7 +585,6 @@ class ReconcilePlanTests(unittest.TestCase):
                 "secretary-dispatcher-production.service",
                 "secretary-dispatcher-production.timer",
             },
-            orca_repos={"project_id"},
         )
         instance["heads"][0]["model"] = "new"
         bindings[0]["repo"] = "/srv/new-path"
@@ -656,24 +594,48 @@ class ReconcilePlanTests(unittest.TestCase):
         ]
         self.assertEqual({change.action for change in changes}, {"update"})
 
-    def test_plan_rejects_enabled_binding_without_explicit_orca_binding(self):
+    def test_plan_accepts_an_enabled_binding_without_orca_binding(self):
         errors = plan_input_errors({}, [{"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True}])
-        self.assertEqual(errors, ["enabled binding requires explicit orca_binding"])
+        self.assertEqual(errors, [])
 
-    def test_disabled_inventory_binding_can_own_orca_registration(self):
-        bindings = [
-            {
-                "id": "inventory-project",
-                "repo": "/srv/inventory-project",
-                "orca_binding": "inventory-project",
-                "enabled": False,
-            }
-        ]
-        desired = build_plan({}, bindings, packaged=[])
-        self.assertEqual(
-            [(resource.logical_id, resource.name) for resource in desired],
-            [("orca:project:inventory-project", "inventory-project")],
+    def test_a_binding_with_a_legacy_orca_binding_plans_no_orca_registration(self):
+        for enabled in (True, False):
+            bindings = [
+                {
+                    "id": "inventory-project",
+                    "repo": "/srv/inventory-project",
+                    "orca_binding": "inventory-project",
+                    "enabled": enabled,
+                }
+            ]
+            with self.subTest(enabled=enabled):
+                self.assertEqual(build_plan({}, bindings, packaged=[]), [])
+                self.assertEqual(plan_input_errors({}, bindings, packaged=[]), [])
+
+    def test_a_legacy_managed_orca_record_is_left_alone(self):
+        """A registration an older reconcile recorded is Orca's own state: never deleted, never planned."""
+        legacy = PlannedResource(
+            "orca:project:alpha",
+            "orca",
+            "alpha-repo",
+            '{"binding":"alpha-repo","repo":"/srv/alpha"}',
+            hashlib.sha256(
+                json.dumps(
+                    [
+                        "orca:project:alpha",
+                        "orca",
+                        "alpha-repo",
+                        '{"binding":"alpha-repo","repo":"/srv/alpha"}',
+                    ],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
         )
+        binding = {"id": "alpha", "repo": "/srv/alpha", "orca_binding": "alpha-repo", "enabled": True}
+
+        changes = plan_changes(build_plan({}, [binding], packaged=[]), HostInventory(), [legacy])
+
+        self.assertEqual(changes, [])
 
     def test_plan_rejects_heads_without_unit_prefix(self):
         errors = plan_input_errors({"heads": [{"role": "worker", "model": "test"}]}, [])
@@ -690,11 +652,6 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn(
             "duplicate desired logical_id: systemd:head:worker", plan_input_errors(duplicate_heads, [])
         )
-        bindings = [
-            {"id": "alpha", "repo": "/srv/a", "orca_binding": "shared", "enabled": True},
-            {"id": "beta", "repo": "/srv/b", "orca_binding": "shared", "enabled": True},
-        ]
-        self.assertIn("duplicate desired resource name: orca shared", plan_input_errors({}, bindings))
 
     def test_renamed_managed_resource_is_deleted_alongside_create(self):
         old_instance = {"host": {"unit_prefix": "old-"}, "heads": [{"role": "worker", "model": "test"}]}
@@ -716,71 +673,6 @@ class ReconcilePlanTests(unittest.TestCase):
             [("create", "new-worker.service"), ("delete", "old-worker.service")],
         )
 
-    def test_unavailable_desired_project_preserves_its_registered_managed_resource(self):
-        binding = {
-            "id": "alpha",
-            "repo": "/srv/alpha",
-            "orca_binding": "alpha-repo",
-            "enabled": True,
-        }
-        managed = build_plan({}, [binding], packaged=[])
-        actual = HostInventory(orca_repos={"alpha-repo"})
-        unavailable = ProjectAvailability(frozenset({"alpha"}))
-
-        changes = plan_changes(
-            managed,
-            actual,
-            managed,
-            project_availability=unavailable,
-        )
-
-        self.assertEqual(
-            [(change.logical_id, change.action) for change in changes],
-            [("orca:project:alpha", "unchanged")],
-        )
-
-    def test_unavailable_desired_project_defers_replacement_without_deleting_old_registration(self):
-        old = {
-            "id": "alpha",
-            "repo": "/srv/alpha",
-            "orca_binding": "alpha-repo",
-            "enabled": True,
-        }
-        changed = {**old, "repo": "/srv/recovered-alpha", "orca_binding": "recovered-alpha"}
-
-        changes = plan_changes(
-            build_plan({}, [changed], packaged=[]),
-            HostInventory(orca_repos={"alpha-repo"}),
-            build_plan({}, [old], packaged=[]),
-            project_availability=ProjectAvailability(frozenset({"alpha"})),
-        )
-
-        self.assertEqual(
-            [(change.name, change.action) for change in changes],
-            [("recovered-alpha", "deferred")],
-        )
-
-    def test_unavailable_present_project_reports_same_name_drift_as_deferred(self):
-        old = {
-            "id": "alpha",
-            "repo": "/srv/alpha",
-            "orca_binding": "alpha-repo",
-            "enabled": True,
-        }
-        changed = {**old, "repo": "/srv/recovered-alpha"}
-
-        changes = plan_changes(
-            build_plan({}, [changed], packaged=[]),
-            HostInventory(orca_repos={"alpha-repo"}),
-            build_plan({}, [old], packaged=[]),
-            project_availability=ProjectAvailability(frozenset({"alpha"})),
-        )
-
-        self.assertEqual(
-            [(change.logical_id, change.action) for change in changes],
-            [("orca:project:alpha", "deferred")],
-        )
-
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
         instance = {
             "host": {"unit_prefix": "secretary-"},
@@ -793,7 +685,6 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(
             [resource.name for resource in desired],
             [
-                "project_id",
                 "secretary-dispatcher-production.service",
                 "secretary-dispatcher-production.timer",
                 "secretary-worker.service",
@@ -805,7 +696,6 @@ class ReconcilePlanTests(unittest.TestCase):
                 "secretary-dispatcher-production.service",
                 "secretary-dispatcher-production.timer",
             },
-            orca_repos={"project_id"},
         )
         first = plan_changes(desired, actual, [])
         second = plan_changes(desired, actual, [])
@@ -957,7 +847,6 @@ class ReconcilePlanTests(unittest.TestCase):
             fixture = root / "host"
             fixture.mkdir()
             (fixture / "units.txt").write_text("secretary-worker.service\n", encoding="utf-8")
-            (fixture / "orca-repos.txt").write_text("project_id\n", encoding="utf-8")
             manifest = root / "managed.json"
             manifest.write_text(
                 json.dumps(
@@ -981,7 +870,9 @@ class ReconcilePlanTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (fixture / "units.txt").write_text(
-                "secretary-worker.service\nsecretary-retired.service\n", encoding="utf-8"
+                "secretary-worker.service\nsecretary-retired.service\n"
+                "secretary-dispatcher-production.timer\n",
+                encoding="utf-8",
             )
             before = manifest.read_bytes()
             argv = [
@@ -1000,7 +891,9 @@ class ReconcilePlanTests(unittest.TestCase):
             self.assertEqual(first[0], 1)
             self.assertIn("update systemd:head:worker", first[1])
             self.assertIn("delete systemd:head:retired", first[1])
-            self.assertIn("conflict orca:project:project-id", first[1])
+            self.assertIn("conflict systemd:dispatcher:production.timer", first[1])
+            # The binding's legacy orca_binding plans nothing: reconcile has no Orca resources.
+            self.assertNotIn("orca", first[1])
             self.assertEqual(manifest.read_bytes(), before)
 
     def test_cli_plan_reports_foreign_resource_under_unit_prefix(self):
@@ -1063,6 +956,11 @@ class ReconcilePlanTests(unittest.TestCase):
 
 
 class ReconcileAdoptTests(unittest.TestCase):
+    """Adoption records one verified desired resource. Units are the only kind with an identity."""
+
+    LOGICAL_ID = "systemd:unit:secretary-curator.timer"
+    UNIT = "secretary-curator.timer"
+
     @staticmethod
     def _record(logical_id: str, kind: str, name: str, spec: str) -> dict[str, str]:
         value = json.dumps([logical_id, kind, name, spec], separators=(",", ":"))
@@ -1075,6 +973,7 @@ class ReconcileAdoptTests(unittest.TestCase):
         }
 
     def _instance(self, root: Path) -> tuple[Path, Path]:
+        """An instance with a legacy-bound project, and a unit dir holding the shipped curator timer."""
         instance = root / "instance"
         (instance / "projects").mkdir(parents=True)
         data = root / "data"
@@ -1094,80 +993,63 @@ class ReconcileAdoptTests(unittest.TestCase):
             "default_branch: main\n",
             encoding="utf-8",
         )
-        return instance, repo
+        report = validate_instance(instance)
+        packaged = host_commands.resolve_installed_packaged(
+            report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir
+        )
+        unit_dir = root / "units"
+        unit_dir.mkdir()
+        shipped = next(unit for unit in packaged if unit.name == self.UNIT)
+        (unit_dir / self.UNIT).write_bytes(shipped.content)
+        return instance, unit_dir
 
-    def _live(self, paths):
-        class FakeLiveHost:
-            def orca_repo_paths(self):
-                return paths, ""
-
-        return FakeLiveHost()
+    def _argv(self, instance: Path, unit_dir: Path, *extra: str, logical_id: str = "") -> list[str]:
+        return [
+            "reconcile",
+            "adopt",
+            "--instance",
+            str(instance),
+            "--logical-id",
+            logical_id or self.LOGICAL_ID,
+            "--unit-dir",
+            str(unit_dir),
+            *extra,
+        ]
 
     def test_preview_requires_confirmation_and_does_not_write(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, unit_dir = self._instance(root)
             manifest = root / "managed.json"
-            with unittest.mock.patch.object(
-                host_commands,
-                "LiveHostSource",
-                return_value=self._live({"project-live": str(repo.resolve())}),
-            ):
-                code, output = run_cli(
-                    [
-                        "reconcile",
-                        "adopt",
-                        "--instance",
-                        str(instance),
-                        "--logical-id",
-                        "orca:project:project",
-                        "--managed-manifest",
-                        str(manifest),
-                    ]
-                )
+            code, output = run_cli(self._argv(instance, unit_dir, "--managed-manifest", str(manifest)))
             self.assertEqual(code, 0, output)
             self.assertIn("preview only", output)
             self.assertFalse(manifest.exists())
-            self.assertEqual(sorted(path.name for path in root.iterdir()), ["instance", "repo"])
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["instance", "repo", "units"])
 
     def test_confirmed_adopt_is_idempotent_and_plan_becomes_unchanged(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, unit_dir = self._instance(root)
             manifest = root / "managed.json"
-            argv = [
-                "reconcile",
-                "adopt",
-                "--instance",
-                str(instance),
-                "--logical-id",
-                "orca:project:project",
-                "--managed-manifest",
-                str(manifest),
-                "--yes",
-            ]
-            with unittest.mock.patch.object(
-                host_commands,
-                "LiveHostSource",
-                return_value=self._live({"project-live": str(repo.resolve())}),
-            ):
-                first = run_cli(argv)
-                before = manifest.read_bytes()
-                second = run_cli(argv)
+            argv = self._argv(instance, unit_dir, "--managed-manifest", str(manifest), "--yes")
+            first = run_cli(argv)
+            before = manifest.read_bytes()
+            second = run_cli(argv)
             self.assertEqual(first[0], 0, first[1])
             self.assertEqual(second[0], 0, second[1])
             self.assertEqual(manifest.read_bytes(), before)
             payload = json.loads(before)
             self.assertEqual(payload["version"], 1)
-            self.assertEqual([row["logical_id"] for row in payload["resources"]], ["orca:project:project"])
+            self.assertEqual([row["logical_id"] for row in payload["resources"]], [self.LOGICAL_ID])
 
             fixture = root / "host"
             fixture.mkdir()
-            (fixture / "orca-repos.txt").write_text("project-live\n", encoding="utf-8")
+            (fixture / "units.txt").write_text(self.UNIT + "\n", encoding="utf-8")
             code, output = run_cli(
                 [
                     "reconcile",
@@ -1181,34 +1063,20 @@ class ReconcileAdoptTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(code, 0, output)
-            self.assertIn("unchanged orca:project:project", output)
+            self.assertIn(f"unchanged {self.LOGICAL_ID}", output)
 
-    def test_adopt_rejects_missing_or_mismatched_live_identity(self):
+    def test_adopt_rejects_a_missing_or_foreign_installed_unit(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, _repo = self._instance(root)
-            base = [
-                "reconcile",
-                "adopt",
-                "--instance",
-                str(instance),
-                "--logical-id",
-                "orca:project:project",
-                "--yes",
-            ]
-            for paths, message in (
-                ({}, "is missing"),
-                ({"project-live": str(root / "other")}, "does not match"),
-            ):
-                with (
-                    self.subTest(message=message),
-                    unittest.mock.patch.object(
-                        host_commands, "LiveHostSource", return_value=self._live(paths)
-                    ),
-                ):
-                    code, output = run_cli(base)
+            instance, unit_dir = self._instance(root)
+            for content, message in ((None, "is missing"), (b"hand written\n", "does not match")):
+                (unit_dir / self.UNIT).unlink(missing_ok=True)
+                if content is not None:
+                    (unit_dir / self.UNIT).write_bytes(content)
+                with self.subTest(message=message):
+                    code, output = run_cli(self._argv(instance, unit_dir, "--yes"))
                 self.assertEqual(code, 2, output)
                 self.assertIn(message, output)
             self.assertFalse((root / "data" / "host-managed.json").exists())
@@ -1218,58 +1086,36 @@ class ReconcileAdoptTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, _ = self._instance(root)
-            code, output = run_cli(
-                [
-                    "reconcile",
-                    "adopt",
-                    "--instance",
-                    str(instance),
-                    "--logical-id",
-                    "orca:project:missing",
-                    "--yes",
-                ]
-            )
-            self.assertEqual(code, 2, output)
-            self.assertIn("not in desired state", output)
+            instance, unit_dir = self._instance(root)
+            # The legacy-bound project plans no Orca registration, so there is nothing to adopt for it.
+            for logical_id in ("orca:project:missing", "orca:project:project"):
+                with self.subTest(logical_id=logical_id):
+                    code, output = run_cli(self._argv(instance, unit_dir, "--yes", logical_id=logical_id))
+                    self.assertEqual(code, 2, output)
+                    self.assertIn("not in desired state", output)
 
     def test_adopt_rejects_drifted_existing_owned_record(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, unit_dir = self._instance(root)
             manifest = root / "managed.json"
             manifest.write_text(
                 json.dumps(
                     {
                         "version": 1,
                         "resources": [
-                            self._record("orca:project:project", "orca", "old-name", "{}"),
+                            self._record(self.LOGICAL_ID, "unit", "old-name", "{}"),
                         ],
                     }
                 ),
                 encoding="utf-8",
             )
             before = manifest.read_bytes()
-            with unittest.mock.patch.object(
-                host_commands,
-                "LiveHostSource",
-                return_value=self._live({"project-live": str(repo.resolve())}),
-            ):
-                code, output = run_cli(
-                    [
-                        "reconcile",
-                        "adopt",
-                        "--instance",
-                        str(instance),
-                        "--logical-id",
-                        "orca:project:project",
-                        "--managed-manifest",
-                        str(manifest),
-                        "--yes",
-                    ]
-                )
+            code, output = run_cli(
+                self._argv(instance, unit_dir, "--managed-manifest", str(manifest), "--yes")
+            )
             self.assertEqual(code, 2, output)
             self.assertIn("has drifted", output)
             self.assertEqual(manifest.read_bytes(), before)
@@ -1279,8 +1125,9 @@ class ReconcileAdoptTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, unit_dir = self._instance(root)
             manifest = root / "managed.json"
+            argv = self._argv(instance, unit_dir, "--managed-manifest", str(manifest), "--yes")
             cases = [
                 ("not-json", "not valid JSON"),
                 (
@@ -1301,24 +1148,7 @@ class ReconcileAdoptTests(unittest.TestCase):
                     manifest.unlink(missing_ok=True)
                     manifest.write_text(body, encoding="utf-8")
                     before = manifest.read_bytes()
-                    with unittest.mock.patch.object(
-                        host_commands,
-                        "LiveHostSource",
-                        return_value=self._live({"project-live": str(repo.resolve())}),
-                    ):
-                        code, output = run_cli(
-                            [
-                                "reconcile",
-                                "adopt",
-                                "--instance",
-                                str(instance),
-                                "--logical-id",
-                                "orca:project:project",
-                                "--managed-manifest",
-                                str(manifest),
-                                "--yes",
-                            ]
-                        )
+                    code, output = run_cli(argv)
                     self.assertEqual(code, 2, output)
                     self.assertIn(message, output)
                     self.assertEqual(manifest.read_bytes(), before)
@@ -1326,24 +1156,7 @@ class ReconcileAdoptTests(unittest.TestCase):
             target.write_text('{"version": 1, "resources": []}', encoding="utf-8")
             manifest.unlink()
             manifest.symlink_to(target)
-            with unittest.mock.patch.object(
-                host_commands,
-                "LiveHostSource",
-                return_value=self._live({"project-live": str(repo.resolve())}),
-            ):
-                code, output = run_cli(
-                    [
-                        "reconcile",
-                        "adopt",
-                        "--instance",
-                        str(instance),
-                        "--logical-id",
-                        "orca:project:project",
-                        "--managed-manifest",
-                        str(manifest),
-                        "--yes",
-                    ]
-                )
+            code, output = run_cli(argv)
             self.assertEqual(code, 2, output)
             self.assertIn("must not be a symlink", output)
 
@@ -1352,46 +1165,24 @@ class ReconcileAdoptTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, unit_dir = self._instance(root)
             manifest = root / "managed.json"
+            # A registration an older reconcile recorded is still valid state, and survives untouched.
             neighbor = self._record("orca:project:neighbor", "orca", "neighbor", "{}")
             manifest.write_text(json.dumps({"version": 1, "resources": [neighbor]}), encoding="utf-8")
-            argv = [
-                "reconcile",
-                "adopt",
-                "--instance",
-                str(instance),
-                "--logical-id",
-                "orca:project:project",
-                "--managed-manifest",
-                str(manifest),
-                "--yes",
-            ]
-            with unittest.mock.patch.object(
-                host_commands,
-                "LiveHostSource",
-                return_value=self._live({"project-live": str(repo.resolve())}),
-            ):
-                code, output = run_cli(argv)
+            argv = self._argv(instance, unit_dir, "--managed-manifest", str(manifest), "--yes")
+            code, output = run_cli(argv)
             self.assertEqual(code, 0, output)
             self.assertEqual(
                 [row["logical_id"] for row in json.loads(manifest.read_text())["resources"]],
-                ["orca:project:neighbor", "orca:project:project"],
+                ["orca:project:neighbor", self.LOGICAL_ID],
             )
 
-            before = manifest.read_bytes()
             # Force a new record so the write path is exercised again.
             manifest.write_text(json.dumps({"version": 1, "resources": [neighbor]}), encoding="utf-8")
             before = manifest.read_bytes()
-            with (
-                unittest.mock.patch.object(
-                    host_commands,
-                    "LiveHostSource",
-                    return_value=self._live({"project-live": str(repo.resolve())}),
-                ),
-                unittest.mock.patch.object(
-                    host_commands, "write_text_atomic", side_effect=RuntimeError("injected publish failure")
-                ),
+            with unittest.mock.patch.object(
+                host_commands, "write_text_atomic", side_effect=RuntimeError("injected publish failure")
             ):
                 code, output = run_cli(argv)
             self.assertEqual(code, 2, output)
@@ -1410,7 +1201,11 @@ class LiveSourceErrorTests(unittest.TestCase):
         """A LiveHostSource whose _run replies from a {tool: _CmdResult} map."""
 
         class FakeHost(LiveHostSource):
+            def __init__(self):
+                self.calls = []
+
             def _run(self, cmd):
+                self.calls.append(cmd)
                 return responses[cmd[0]]
 
         return FakeHost()
@@ -1422,11 +1217,11 @@ class LiveSourceErrorTests(unittest.TestCase):
                 "orca": _cmd(ran=False, reason="orca not found"),
             }
         )
-        result = host.collect(Expectations(units={"u-a"}, unit_prefix="u-", orca_repos={"r-a"}))
-        self.assertIn("units", result.errors)
-        self.assertIn("orca repos", result.errors)
+        result = host.collect(Expectations(units={"u-a"}, unit_prefix="u-"))
+        self.assertEqual(set(result.errors), {"units"})
         self.assertEqual(result.inventory.units, set())
-        self.assertEqual(result.inventory.orca_repos, set())
+        # Orca's repo registry is not part of the host inventory, so it is never asked.
+        self.assertFalse([cmd for cmd in host.calls if cmd[0] == "orca"])
 
     def test_systemctl_no_match_is_empty_not_error(self):
         # list-unit-files exits 1 with empty stderr when nothing matches: that
@@ -1524,58 +1319,6 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertNotIn("units", result.errors)
         diff = inventory(expected, result.inventory)
         self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-retro.service"])
-
-    def test_orca_non_zero_exit_is_a_failure(self):
-        host = self._host(
-            {
-                "systemctl": _cmd(stdout=""),
-                "orca": _cmd(returncode=1, stderr="cannot reach daemon"),
-            }
-        )
-        result = host.collect(Expectations(orca_repos={"r"}))
-        self.assertIn("orca repos", result.errors)
-
-    def test_orca_json_paths_are_normalized_and_duplicates_fail(self):
-        root = Path("/tmp") / "orca-json-path"
-        payload = json.dumps(
-            {
-                "result": {
-                    "repos": [
-                        {"displayName": "one", "path": str(root / "a" / ".." / "repo")},
-                    ]
-                }
-            }
-        )
-        host = self._host({"orca": _cmd(stdout=payload), "systemctl": _cmd()})
-        paths, error = host.orca_repo_paths()
-        self.assertEqual(error, "")
-        self.assertEqual(paths, {"one": str((root / "repo").resolve(strict=False))})
-
-        duplicate = json.dumps(
-            {
-                "result": {
-                    "repos": [
-                        {"displayName": "one", "path": "/srv/a"},
-                        {"displayName": "one", "path": "/srv/b"},
-                    ]
-                }
-            }
-        )
-        host = self._host({"orca": _cmd(stdout=duplicate), "systemctl": _cmd()})
-        self.assertEqual(host.orca_repo_paths()[1], "orca returned duplicate registration names")
-
-    def test_orca_inventory_keeps_paths_for_lazy_observer_ownership(self):
-        repo = "/srv/secretary-data/dispatcher/observer-root/observers"
-        host = self._host(
-            {
-                "orca": _cmd(stdout=f"id-1 observers {repo}\n"),
-                "systemctl": _cmd(stdout=""),
-            }
-        )
-        expected = Expectations(lazy_orca_repos={"observers": repo})
-        collected = host.collect(expected)
-        self.assertEqual(collected.inventory.orca_repo_paths, {"observers": repo})
-        self.assertEqual(inventory(expected, collected.inventory)["orca repos"].matched, ["observers"])
 
     def test_declared_projects_without_root_is_unavailable(self):
         expected = Expectations(projects={"a"}, projects_root="")
@@ -1810,7 +1553,7 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("state: production-owner", output)
         self.assertNotIn("dispatcher findings", output)
 
-    def test_host_inventory_reports_three_sections(self):
+    def test_host_inventory_reports_projects_and_units_sections(self):
         code, output = run_cli(
             [
                 "doctor",
@@ -1831,9 +1574,8 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("units:\n  matched: (none)", output)
         self.assertIn("missing-on-host: secretary-curator.service", output)
         self.assertIn("secretary-retro.timer", output)
-        # orca repos
-        self.assertIn("orca repos:\n  matched: (none)", output)
-        self.assertIn("extra-repo", output)
+        # Orca repo registrations are Orca's own state: no section, no comparison.
+        self.assertNotIn("orca repos", output)
         self.assertIn("status: findings", output)
 
     def test_doctor_reports_missing_canonical_resources_and_runtime_drift(self):
@@ -1867,8 +1609,10 @@ class DoctorHostCliTests(unittest.TestCase):
             code, output = run_cli(["doctor", "--instance", str(instance), "--host-fixture", str(fixture)])
 
         self.assertEqual(code, 1, output)
-        self.assertIn("missing-on-host: demo", output)
         self.assertIn("secretary-dispatcher-production.service", output)
+        # The binding's legacy orca_binding still loads, and doctor has no Orca-repo section for it.
+        self.assertIn("projects:\n  matched: " + str(repo), output)
+        self.assertNotIn("orca repos", output)
 
     def test_doctor_fixture_does_not_match_checkout_by_basename(self):
         import tempfile
@@ -2012,8 +1756,8 @@ class DoctorHostCliTests(unittest.TestCase):
         class StubSource(LiveHostSource):
             def collect(self, expected):
                 return CollectResult(
-                    inventory=HostInventory(orca_repos={"secretary"}),
-                    errors={"orca repos": "orca not found"},
+                    inventory=HostInventory(),
+                    errors={"units": "systemctl not found"},
                 )
 
         original = cli.LiveHostSource
@@ -2024,7 +1768,7 @@ class DoctorHostCliTests(unittest.TestCase):
             cli.LiveHostSource = original
 
         self.assertEqual(code, 2, output)
-        self.assertIn("orca repos:\n  unavailable: orca not found", output)
+        self.assertIn("units:\n  unavailable: systemctl not found", output)
         self.assertIn("status: host inventory incomplete", output)
         # A kind that did read is still reported normally.
         self.assertIn("projects:\n  matched", output)
@@ -2099,7 +1843,6 @@ class DoctorHostCliTests(unittest.TestCase):
             # A secret sitting inside a project dir must never be opened or printed.
             (project / ".env").write_text(f"API_KEY={secret}\n", encoding="utf-8")
             (fixture / "units.txt").write_text("secretary-pipeline\n", encoding="utf-8")
-            (fixture / "orca-repos.txt").write_text("secretary\n", encoding="utf-8")
 
             code, output = run_cli(
                 [

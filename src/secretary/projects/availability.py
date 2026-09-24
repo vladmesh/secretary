@@ -17,10 +17,6 @@ class ProjectAvailability:
     def allows(self, project_id: str) -> bool:
         return project_id not in self.unavailable
 
-    def blocks_resource(self, logical_id: str) -> bool:
-        prefix = "orca:project:"
-        return logical_id.startswith(prefix) and not self.allows(logical_id.removeprefix(prefix))
-
     @classmethod
     def inspect(cls, bindings: Iterable[dict[str, Any]]) -> ProjectAvailability:
         unavailable: set[str] = set()

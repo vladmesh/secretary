@@ -906,7 +906,6 @@ class BoardStoreSchemaTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            orca=None,
             automations=None,
         )
 

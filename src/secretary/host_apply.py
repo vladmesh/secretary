@@ -52,7 +52,6 @@ from secretary.host import (
     plan_input_errors,
     strict_manifest,
 )
-from secretary.projects.availability import ProjectAvailability
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -284,33 +283,6 @@ def _process_start_ticks(pid: int) -> int | None:
     return start_ticks if start_ticks > 0 else None
 
 
-class OrcaRegistrar(ABC):
-    @abstractmethod
-    def add(self, name: str, repo: str) -> None: ...
-
-
-class LiveOrcaRegistrar(OrcaRegistrar):
-    timeout_seconds = 60
-
-    def __init__(self, user: str | None = None):
-        self.user = user
-
-    def add(self, name: str, repo: str) -> None:
-        argv = ["orca", "repo", "add", "--path", repo]
-        if self.user:
-            argv = ["runuser", "--user", self.user, "--", *argv]
-        try:
-            result = _proc.run(argv, timeout=self.timeout_seconds)
-        except FileNotFoundError:
-            raise HostCommandError(f"register {name}: orca not found") from None
-        except subprocess.TimeoutExpired:
-            raise HostCommandError(f"register {name}: orca timed out") from None
-        except OSError:
-            raise HostCommandError(f"register {name}: orca could not run") from None
-        if result.returncode != 0:
-            raise HostCommandError(f"register {name}: orca exited {result.returncode}")
-
-
 @dataclass(frozen=True)
 class ApplyInputs:
     """Everything a reconcile needs, resolved once by the caller."""
@@ -322,7 +294,6 @@ class ApplyInputs:
     manifest_path: Path
     packaged: list[PackagedUnit]
     runtime_user: str | None = None
-    project_availability: ProjectAvailability = field(default_factory=ProjectAvailability)
 
 
 def resolve_packaged(
@@ -461,7 +432,6 @@ def apply_host(
     inputs: ApplyInputs,
     *,
     units: UnitInstaller,
-    orca: OrcaRegistrar,
     dry_run: bool = False,
 ) -> ApplyResult:
     """Reconcile the host to the instance. Fails closed on any conflict."""
@@ -482,7 +452,6 @@ def apply_host(
         inputs.managed,
         prefix if isinstance(prefix, str) else "",
         foreign_units(host),
-        inputs.project_availability,
     )
     result = ApplyResult(changes=changes, dry_run=dry_run)
     result.conflicts = [change for change in changes if change.action == "conflict"]
@@ -513,11 +482,11 @@ def apply_host(
     reload_needed = False
 
     for change in changes:
-        if change.action in {"unchanged", "deferred"}:
+        if change.action == "unchanged":
             continue
         try:
             touched_units = _apply_change(
-                change, desired_by_id, managed_by_id.get(change.logical_id), packaged_by_name, units, orca
+                change, managed_by_id.get(change.logical_id), packaged_by_name, units
             )
         except HostCommandError as exc:
             result.errors.append(str(exc))
@@ -555,11 +524,9 @@ def apply_host(
 
 def _apply_change(
     change: PlanChange,
-    desired_by_id: dict[str, PlannedResource],
     owned: PlannedResource | None,
     packaged_by_name: dict[str, PackagedUnit],
     units: UnitInstaller,
-    orca: OrcaRegistrar,
 ) -> bool:
     """Materialize one change. Returns True when systemd needs a reload."""
     if change.kind == "unit":
@@ -575,16 +542,6 @@ def _apply_change(
             raise HostCommandError(f"install {change.name}: no unit of that name is shipped by this product")
         units.install(unit)
         return True
-    if change.kind == "orca":
-        if change.action == "delete":
-            # Orca has no repo-removal command, so pretending to delete would
-            # silently leave the registration in place and record it as gone.
-            raise HostCommandError(
-                f"unregister {change.name}: Orca has no repo removal command; remove it by hand"
-            )
-        resource = desired_by_id[change.logical_id]
-        orca.add(change.name, _repo_of(resource))
-        return False
     raise HostCommandError(f"{change.kind} {change.name}: unsupported resource kind")
 
 
@@ -612,16 +569,6 @@ def _settle_units(
         if unit is None or not unit.installable:
             continue
         units.enable(change.name)
-
-
-def _repo_of(resource: PlannedResource) -> str:
-    try:
-        repo = json.loads(resource.spec)["repo"]
-    except (ValueError, KeyError, TypeError):
-        raise HostCommandError(f"register {resource.name}: desired repo path is missing") from None
-    if not isinstance(repo, str) or not repo:
-        raise HostCommandError(f"register {resource.name}: desired repo path is missing")
-    return repo
 
 
 def _write_manifest(
@@ -675,8 +622,6 @@ __all__ = [
     "ApplyInputs",
     "ApplyResult",
     "HostCommandError",
-    "LiveOrcaRegistrar",
-    "OrcaRegistrar",
     "SystemdUnitInstaller",
     "UnitInstaller",
     "UnitProcessIdentity",

@@ -47,7 +47,6 @@ from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutE
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
 from secretary.host_apply import (
-    LiveOrcaRegistrar,
     SystemdUnitInstaller,
     resolve_runtime_owner,
 )
@@ -1125,7 +1124,6 @@ def materialize_host(
         base_branch="main",
         dry_run=False,
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(installation_user),
         automations=OrcaAutomationClient(installation_user),
         host_fixture=host_fixture,
         pull=False,

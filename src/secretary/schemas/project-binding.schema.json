@@ -25,7 +25,7 @@
     "orca_binding": {
       "type": "string",
       "minLength": 1,
-      "description": "Explicit durable Orca registration name. It is never derived from id or repo and may be present while task routing remains disabled."
+      "description": "Optional legacy Orca registration name, read only by orca-legacy heads to find the project's existing Orca checkout. New projects have none, and reconcile neither creates, checks nor removes Orca registrations. It is never derived from id or repo."
     },
     "curator_roots": {
       "type": "array",

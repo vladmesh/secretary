@@ -1,7 +1,8 @@
 """Desired host state and read-only host inventory.
 
-Compares what an instance config describes against what is on the host across three resource
-kinds: project repos, systemd units and Orca repo registrations. Nothing here changes the host,
+Compares what an instance config describes against what is on the host across two resource
+kinds: project repos and systemd units. Orca repo registrations are Orca's own state and no longer
+part of the host surface. Nothing here changes the host,
 and no source reads config values or secrets — only resource *names*.
 
 Desired state has two declarative inputs: the instance config says which components this
@@ -24,11 +25,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from secretary import _proc
-from secretary.observer_root import observer_root_repo
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime.paths import component_enabled, configured_product_root
 
-KINDS = ("projects", "units", "orca repos")
+KINDS = ("projects", "units")
 UNIT_SUFFIXES = (".service", ".timer")
 # The units this checkout ships. Like the role-skill manifest constant, it is what tests about the
 # shipped canon read and never the fallback a host command lands on: the units an installation is
@@ -188,10 +188,9 @@ def build_plan(
 ) -> list[PlannedResource]:
     """Render the supported host surface without consulting the live host.
 
-    Heads produce systemd services; every enabled component of the shipped unit catalogue produces
-    its unit; project bindings with an explicit ``orca_binding`` produce Orca registrations. That is
-    independent from ``enabled``, which gates task routing after onboarding: an inventory-only project
-    may still need a durable Orca registration.
+    Heads produce systemd services and every enabled component of the shipped unit catalogue
+    produces its unit. Project bindings produce nothing here: a legacy ``orca_binding`` names an
+    Orca registration that reconcile neither creates, checks nor removes.
     """
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
@@ -215,18 +214,6 @@ def build_plan(
         if component_enabled(host, "dispatcher-production"):
             result.extend(_production_dispatcher_units(prefix, digests))
         result.extend(_packaged_component_units(host, packaged))
-    for binding in bindings:
-        if not isinstance(binding, dict):
-            continue
-        project_id = binding.get("id")
-        name = binding.get("orca_binding")
-        if not isinstance(project_id, str) or not isinstance(name, str):
-            continue
-        logical_id = f"orca:project:{project_id}"
-        repo = binding.get("repo")
-        if not isinstance(repo, str):
-            continue
-        result.append(_resource(logical_id, "orca", name, {"repo": repo, "binding": name}))
     # A declared foreign unit is outside this installation's ownership even
     # when its name overlaps a product-shipped unit. Keep that boundary in the
     # canonical desired state so reconcile and doctor cannot disagree about it.
@@ -304,13 +291,6 @@ def plan_input_errors(
     if isinstance(heads, list) and heads and not isinstance(prefix, str):
         return ["host.unit_prefix is required when heads are configured"]
     errors: list[str] = []
-    for binding in bindings:
-        if (
-            isinstance(binding, dict)
-            and binding.get("enabled")
-            and not isinstance(binding.get("orca_binding"), str)
-        ):
-            errors.append("enabled binding requires explicit orca_binding")
     desired = build_plan(instance, bindings, packaged=packaged)
     logical_ids: set[str] = set()
     names: set[tuple[str, str]] = set()
@@ -396,6 +376,8 @@ def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
     logical_ids: set[str] = set()
     names: set[tuple[str, str]] = set()
     for resource in resources:
+        # An "orca" record is a registration an older reconcile adopted or created. It stays
+        # valid state, left alone: reconcile no longer plans, checks or deletes Orca repos.
         if resource.kind not in {"unit", "orca"} or not resource.spec:
             return [], "managed manifest contains non-canonical resource records"
         value = json.dumps(
@@ -434,11 +416,14 @@ def plan_changes(
     managed: Iterable[PlannedResource],
     unit_prefix: str = "",
     declared_foreign: Iterable[str] = (),
-    project_availability: ProjectAvailability = ProjectAvailability(),
 ) -> list[PlanChange]:
-    """Classify changes. A name match is a conflict unless exact state owns it."""
+    """Classify changes. A name match is a conflict unless exact state owns it.
+
+    Only units are planned. A legacy managed ``orca`` record has no host inventory to match, so it
+    is never deleted: the registration it names is Orca's own state.
+    """
     declared_foreign = set(declared_foreign)
-    actual_names = {"unit": actual.units, "orca": actual.orca_repos}
+    actual_names = {"unit": actual.units}
     # Do not let an older manifest record pull a now-declared foreign unit back
     # under management through the deletion pass below.
     managed_by_id = {
@@ -455,12 +440,7 @@ def plan_changes(
     for resource in desired_by_id.values():
         present = resource.name in actual_names[resource.kind]
         owned = managed_by_id.get(resource.logical_id)
-        unavailable = project_availability.blocks_resource(resource.logical_id)
-        if unavailable and not present:
-            action = "deferred"
-        elif unavailable and owned and owned.kind == resource.kind and owned.name == resource.name:
-            action = "deferred" if owned.fingerprint != resource.fingerprint else "unchanged"
-        elif not present:
+        if not present:
             action = "create"
         elif owned and owned.kind == resource.kind and owned.name == resource.name:
             action = "update" if owned.fingerprint != resource.fingerprint else "unchanged"
@@ -472,10 +452,8 @@ def plan_changes(
         renamed = desired_resource and (
             resource.kind != desired_resource.kind or resource.name != desired_resource.name
         )
-        if (
-            not project_availability.blocks_resource(logical_id)
-            and (desired_resource is None or renamed)
-            and resource.name in actual_names.get(resource.kind, set())
+        if (desired_resource is None or renamed) and resource.name in actual_names.get(
+            resource.kind, set()
         ):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
@@ -498,9 +476,7 @@ class HostInventory:
 
     projects: set[str] = field(default_factory=set)
     units: set[str] = field(default_factory=set)
-    orca_repos: set[str] = field(default_factory=set)
     unit_states: dict[str, tuple[str, str]] = field(default_factory=dict)
-    orca_repo_paths: dict[str, str] = field(default_factory=dict)
     # systemd's LastTriggerUSec per probed timer ("n/a" when it never fired): the evidence that a
     # schedule ran, which `enabled`/`active` of a waiting timer cannot give.
     timer_triggers: dict[str, str] = field(default_factory=dict)
@@ -512,8 +488,6 @@ class Expectations:
 
     projects: set[str] = field(default_factory=set)
     units: set[str] = field(default_factory=set)
-    orca_repos: set[str] = field(default_factory=set)
-    lazy_orca_repos: dict[str, str] = field(default_factory=dict)
     unit_prefix: str = ""
     projects_root: str = ""
     foreign_units: set[str] = field(default_factory=set)
@@ -579,7 +553,6 @@ def build_expectations(
     return Expectations(
         projects=projects,
         units=set(_str_list(host.get("units"))),
-        orca_repos=set(_str_list(host.get("orca_repos"))),
         unit_prefix=host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else "",
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
     )
@@ -594,7 +567,6 @@ def build_doctor_expectations(
     bindings: Iterable[dict[str, Any]],
     *,
     packaged: Iterable[PackagedUnit] | None = None,
-    data_dir: Path | None = None,
 ) -> Expectations:
     """Derive doctor parity from reconcile's canonical desired state."""
     bindings = list(bindings)
@@ -634,21 +606,9 @@ def build_doctor_expectations(
         else:
             runtime[name] = (True, True)
     runtime["orca-server.service"] = (False, True)
-    lazy_orca_repos: dict[str, str] = {}
-    if component_enabled(host, "dispatcher-production") and data_dir is not None:
-        try:
-            repo = observer_root_repo(data_dir).resolve(strict=False)
-        except (OSError, RuntimeError):
-            # Instance validation normally prevents this. An unreadable path is
-            # not evidence that the dispatcher's lazy repo is missing.
-            pass
-        else:
-            lazy_orca_repos[repo.name] = str(repo)
     return Expectations(
         projects=projects,
         units=units,
-        orca_repos={resource.name for resource in desired if resource.kind == "orca"},
-        lazy_orca_repos=lazy_orca_repos,
         unit_prefix=prefix,
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
@@ -674,31 +634,7 @@ def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDi
     return {
         "projects": _diff(expected.projects, actual.projects),
         "units": _diff(expected.units, actual.units - expected.foreign_units),
-        "orca repos": _orca_repo_diff(expected, actual),
     }
-
-
-def _orca_repo_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
-    """Compare registered repos, admitting the dispatcher's lazy repository by path.
-
-    The dispatcher creates its observer root only when an observer is first needed, so absence is
-    healthy. Once it exists, its configured path proves that this installation owns it; another repo
-    merely reusing the display name remains unmanaged.
-    """
-    matched = expected.orca_repos & actual.orca_repos
-    for name, path in expected.lazy_orca_repos.items():
-        if name not in actual.orca_repos:
-            continue
-        actual_path = actual.orca_repo_paths.get(name)
-        # Fixtures provide names only. Live inventory supplies the path and is
-        # required to prove a same-name registration belongs to this instance.
-        if actual_path is None or actual_path == path:
-            matched.add(name)
-    return KindDiff(
-        matched=sorted(matched),
-        missing_on_host=sorted(expected.orca_repos - actual.orca_repos),
-        unmanaged_on_host=sorted(actual.orca_repos - matched),
-    )
 
 
 class HostSource(ABC):
@@ -719,7 +655,6 @@ class FixtureHostSource(HostSource):
 
             projects/<name>/     one directory per project repo on the fixture host
             units.txt            one systemd unit name per line
-            orca-repos.txt       one Orca repo name per line
 
     Reads only. A missing root is an inspection failure, so every kind is marked unavailable; within
     an existing root a missing per-kind file means an empty set.
@@ -775,19 +710,15 @@ class FixtureHostSource(HostSource):
         units, unit_error = self._lines("units.txt")
         states, state_error = self._unit_states()
         triggers, trigger_error = self._timer_triggers()
-        repos, repo_error = self._lines("orca-repos.txt")
         errors = {
             kind: reason
             for kind, reason in (
                 ("projects", project_error),
                 ("units", unit_error or state_error or trigger_error),
-                ("orca repos", repo_error),
             )
             if reason
         }
-        return CollectResult(
-            HostInventory(projects, units, repos, states, timer_triggers=triggers), errors
-        )
+        return CollectResult(HostInventory(projects, units, states, timer_triggers=triggers), errors)
 
     def _timer_triggers(self) -> tuple[dict[str, str], str]:
         """Optional fixture last triggers: ``timer LastTriggerUSec`` per line (the value has spaces)."""
@@ -847,17 +778,14 @@ class _CmdResult:
 
 
 class LiveHostSource(HostSource):
-    """The real host: the projects directory, systemd and Orca, all read-only.
+    """The real host: the projects directory and systemd, both read-only.
 
     A failure to inspect a kind is recorded per kind in the CollectResult rather than silently
     turning into an empty set, so doctor can say "could not inspect" instead of a false "nothing".
     """
 
-    # Cap each host probe so a hung systemctl or orca cannot wedge doctor.
+    # Cap each host probe so a hung systemctl cannot wedge doctor.
     timeout_seconds = 10
-
-    def __init__(self, orca_user: str | None = None):
-        self.orca_user = orca_user
 
     def collect(self, expected: Expectations) -> CollectResult:
         inventory = HostInventory()
@@ -867,39 +795,13 @@ class LiveHostSource(HostSource):
         if reason:
             errors["projects"] = reason
         else:
-            inventory = HostInventory(
-                projects,
-                inventory.units,
-                inventory.orca_repos,
-                inventory.unit_states,
-                inventory.orca_repo_paths,
-            )
+            inventory = HostInventory(projects, inventory.units, inventory.unit_states)
 
         units, unit_states, triggers, reason = self._units(expected)
         if reason:
             errors["units"] = reason
         else:
-            inventory = HostInventory(
-                inventory.projects,
-                units,
-                inventory.orca_repos,
-                unit_states,
-                inventory.orca_repo_paths,
-                timer_triggers=triggers,
-            )
-
-        repos, repo_paths, reason = self._orca_repos()
-        if reason:
-            errors["orca repos"] = reason
-        else:
-            inventory = HostInventory(
-                inventory.projects,
-                inventory.units,
-                repos,
-                inventory.unit_states,
-                repo_paths,
-                timer_triggers=inventory.timer_triggers,
-            )
+            inventory = HostInventory(inventory.projects, units, unit_states, timer_triggers=triggers)
 
         return CollectResult(inventory=inventory, errors=errors)
 
@@ -983,67 +885,6 @@ class LiveHostSource(HostSource):
         if result.returncode != 0 and result.stderr.strip():
             return f"systemctl exited {result.returncode}"
         return ""
-
-    def _orca_repos(self) -> tuple[set[str], dict[str, str], str]:
-        result = self._run(self._orca_command(["orca", "repo", "list"]))
-        if not result.ran:
-            return set(), {}, result.reason
-        if result.returncode != 0:
-            # orca reports an empty registry as exit 0, so non-zero is a failure.
-            return set(), {}, f"orca exited {result.returncode}"
-        names: set[str] = set()
-        paths: dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            # Format: <uuid> <name> <path>. The name is the second column.
-            if len(parts) >= 2:
-                name = parts[1]
-                names.add(name)
-                if len(parts) < 3:
-                    continue
-                try:
-                    paths[name] = str(Path(parts[2]).expanduser().resolve(strict=False))
-                except (OSError, RuntimeError):
-                    return set(), {}, "orca repo path could not be normalized"
-        return names, paths, ""
-
-    def orca_repo_paths(self) -> tuple[dict[str, str], str]:
-        """Return Orca registration name -> normalized repo path."""
-        result = self._run(self._orca_command(["orca", "repo", "list", "--json"]))
-        if not result.ran:
-            return {}, result.reason
-        if result.returncode != 0:
-            return {}, f"orca exited {result.returncode}"
-        try:
-            payload = json.loads(result.stdout)
-        except ValueError:
-            return {}, "orca returned invalid JSON"
-        repos = payload.get("result", {}).get("repos") if isinstance(payload, dict) else None
-        if not isinstance(repos, list):
-            return {}, "orca JSON has no repo inventory"
-        paths: dict[str, str] = {}
-        for repo in repos:
-            if not isinstance(repo, dict):
-                continue
-            name, path = repo.get("displayName"), repo.get("path")
-            if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
-                continue
-            candidate = Path(path).expanduser()
-            if not candidate.is_absolute():
-                return {}, "orca returned a non-absolute repo path"
-            try:
-                normalized = str(candidate.resolve(strict=False))
-            except (OSError, RuntimeError):
-                return {}, "orca repo path could not be normalized"
-            if name in paths and paths[name] != normalized:
-                return {}, "orca returned duplicate registration names"
-            paths[name] = normalized
-        return paths, ""
-
-    def _orca_command(self, command: list[str]) -> list[str]:
-        if os.geteuid() == 0 and self.orca_user:
-            return ["runuser", "--user", self.orca_user, "--", *command]
-        return command
 
     def _run(self, cmd: list[str]) -> _CmdResult:
         tool = cmd[0]
