@@ -8,41 +8,7 @@ from pathlib import Path
 
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.runtime import codex_preflight
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, spawn
-from secretary.runtime.pane_host import Pane
-
-
-class _Host:
-    def __init__(self) -> None:
-        self.opened = 0
-
-    def open_pane(self, workspace: str, title: str, command: str) -> Pane:
-        self.opened += 1
-        return Pane(handle="pane", leaf="leaf")
-
-    def split_pane(self, handle: str, command: str) -> Pane:  # pragma: no cover - protocol shape
-        raise AssertionError("not used")
-
-    def rename_pane(self, handle: str, title: str) -> None:  # pragma: no cover - protocol shape
-        raise AssertionError("not used")
-
-    def close_pane(self, handle: str) -> None:  # pragma: no cover - protocol shape
-        raise AssertionError("not used")
-
-    def panes(self, workspace: str) -> list[Pane]:  # pragma: no cover - protocol shape
-        return []
-
-    def stop_workspace(self, workspace: str) -> None:  # pragma: no cover - protocol shape
-        raise AssertionError("not used")
-
-    def send(self, handle: str, text: str, *, enter: bool):  # pragma: no cover - protocol shape
-        raise AssertionError("not used")
-
-    def read(self, handle: str, *, limit: int | None = None):  # pragma: no cover - protocol shape
-        return {}
-
-    def wait_idle(self, handle: str, *, timeout_ms: int):  # pragma: no cover - protocol shape
-        return {"satisfied": True}
+from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 class CodexFanoutPolicyTests(unittest.TestCase):
@@ -291,31 +257,6 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertFalse(missing.fanout_clean)
         self.assertEqual(missing.fanout_policy_state, "unknown")
         self.assertEqual(missing.fanout_policy["provider_source"], {})
-
-    def test_worker_reviewer_and_observer_preflight_allow_without_schema(self) -> None:
-        for role in ("worker", "reviewer", "observer"):
-            with self.subTest(role=role):
-                host = _Host()
-                run = self._run(role)
-                launched = spawn(
-                    run.spec,
-                    run.workspace,
-                    run.task_ref,
-                    host=host,
-                    command="codex",
-                    title=f"{role} head",
-                    run=run,
-                    role=role,
-                    preflight=lambda candidate, role=role: codex_preflight.preflight_codex_launch(
-                        {},
-                        candidate.workspace,
-                        candidate,
-                        binary_path=str(self.binary),
-                        config=self.root / f"{role}.toml",
-                    ),
-                )
-                self.assertEqual(host.opened, 1)
-                self.assertEqual(launched.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
 
     def test_dispatcher_worker_reviewer_and_observer_allow_without_schema(self) -> None:
         class Catalog:

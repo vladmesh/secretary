@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import inspect
 import re
+import shlex
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
@@ -95,17 +97,65 @@ def _imports_automations(relative: str, source: str) -> list[str]:
     return sorted(offenders)
 
 
-# The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
-# must not come back, and nothing may import it under its old name.
-# The background agents hold their heads under this product's own supervisor and nothing else
-# (secretary-1720, A20 step 4): no module under `secretary.automations` may reach Orca again —
-# not through the pane host, not through an Orca RPC client of its own, and not by running the
-# `orca` / `orca-cli` binary. `pane_host` and `orca_legacy_head` elsewhere in `secretary` are later
-# steps of A20 and are not held here.
-AUTOMATIONS_SOURCE = "src/secretary/automations/"
-PANE_HOST_MODULE = "secretary.runtime.pane_host"
-ORCA_RPC_NAME = "orca_rpc"
-ORCA_BINARIES = frozenset({"orca", "orca-cli"})
+# Orca is gone from the product's own code (A20, secretary-1725): no module under `src/secretary`
+# imports the pane host, the Orca head backend or an Orca RPC client, and no string constant in it
+# names the `orca` / `orca-cli` program. The rule scans the program name itself, wherever the string
+# sits, rather than resolving call shapes: an alias, a wrapper or a shell cannot hide a name that is
+# looked for in every constant. What is still there is on `ORCA_ALLOWLIST`, one line each, with the
+# checklist step (`docs/HEAD_RUNTIME.md`) that removes it.
+SOURCE_ROOT = ROOT / "src" / "secretary"
+BANNED_ORCA_MODULES = ("secretary.runtime.pane_host", "secretary.runtime.orca_legacy_head")
+BANNED_ORCA_LAST_COMPONENTS = frozenset({"pane_host", "orca_legacy_head", "orca_rpc"})
+ORCA_PROGRAMS = frozenset({"orca", "orca-cli"})
+_DOTTED_NAME = re.compile(r"\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+@dataclass(frozen=True)
+class OrcaAllowance:
+    """One source line still allowed to name Orca: its file, a substring of it, and why."""
+
+    path: str
+    line: str
+    reason: str
+
+
+ORCA_ALLOWLIST = (
+    OrcaAllowance(
+        "src/secretary/installation.py",
+        'shutil.which("orca")',
+        "step 9: install inspection still looks the Orca CLI up",
+    ),
+    OrcaAllowance(
+        "src/secretary/installation.py",
+        '"orca", "--version"',
+        "step 9: install inspection still runs `orca --version`",
+    ),
+    OrcaAllowance(
+        "src/secretary/host_apply.py",
+        'Path("/usr/local/bin/orca")',
+        "step 9: host apply still probes the Orca executable candidates",
+    ),
+    OrcaAllowance(
+        "src/secretary/host.py",
+        'Path("/usr/local/bin/orca")',
+        "step 9: the default Orca executable host apply inspects",
+    ),
+    OrcaAllowance(
+        "src/secretary/bootstrap.py",
+        'Path("/usr/local/bin/orca")',
+        "step 9: bootstrap still installs the Orca AppImage wrapper",
+    ),
+    OrcaAllowance(
+        "src/secretary/host.py",
+        '{"unit", "orca"}',
+        "step 8: the legacy `orca` record kind in host-managed.json stays loadable; a kind, not a program",
+    ),
+    OrcaAllowance(
+        "src/secretary/upgrade.py",
+        'workspace_root.parent.name == "orca"',
+        "step 11: the role worktree root `~/orca/workspaces`, compared by name; a path, not a program",
+    ),
+)
 
 
 def _module_of(relative: str) -> str:
@@ -136,177 +186,179 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
     return found
 
 
-#: The modules whose calls start a process, and the calls of theirs that do (`os.exec*` and
-#: `os.spawn*` by prefix). A string argument of one of these is a command, whatever else it is.
-PROCESS_MODULES = frozenset({"subprocess", "os", "shutil", "asyncio"})
-PROCESS_CALLS = frozenset(
-    {
-        "run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
-        "system", "popen", "which", "create_subprocess_exec", "create_subprocess_shell",
-    }
-)
+def _first_shell_word(text: str) -> str:
+    """The first word of `text` as a shell would split it; later unbalanced quotes do not matter."""
+    lexer = shlex.shlex(text, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return lexer.get_token() or ""
+    except ValueError:
+        words = text.split()
+        return words[0] if words else ""
 
 
-def _is_orca_command(text: str) -> bool:
-    """A command string that is `orca` / `orca-cli`, or whose first word is (a path to) either."""
-    words = text.split()
-    return bool(words) and Path(words[0]).name in ORCA_BINARIES
+def _shell_words(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
 
 
-def _runs_orca(node: ast.AST) -> bool:
-    """An argument vector or command string whose program is the `orca` / `orca-cli` binary."""
-    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
-        first = node.elts[0]
-        return isinstance(first, ast.Constant) and isinstance(first.value, str) and _is_orca_command(first.value)
-    return isinstance(node, ast.Constant) and isinstance(node.value, str) and _is_orca_command(node.value)
+def _is_orca_program(word: str) -> bool:
+    return word in ORCA_PROGRAMS or word.endswith(tuple(f"/{name}" for name in ORCA_PROGRAMS))
 
 
-def _starts_a_process(call: ast.Call) -> bool:
-    """Whether a call is one of the process-starting calls, by name and, when dotted, by module."""
-    func = call.func
-    if isinstance(func, ast.Attribute):
-        name = func.attr
-        if not (isinstance(func.value, ast.Name) and func.value.id in PROCESS_MODULES):
-            return False
-    elif isinstance(func, ast.Name):
-        name = func.id
-    else:
+def _is_path_operand(node: ast.Constant, parent: ast.AST | None) -> bool:
+    """The one structural exception: a bare `"orca"` used as a path component.
+
+    An operand of `/`, or an argument of `Path(...)`, `os.path.join(...)` or `joinpath(...)`.
+    """
+    if node.value != "orca" or parent is None:
         return False
-    return name in PROCESS_CALLS or name.startswith(("exec", "spawn"))
+    if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div):
+        return True
+    if not isinstance(parent, ast.Call) or node not in parent.args:
+        return False
+    func = parent.func
+    if isinstance(func, ast.Name):
+        return func.id == "Path"
+    if isinstance(func, ast.Attribute):
+        if func.attr in {"Path", "joinpath"}:
+            return True
+        return func.attr == "join" and isinstance(func.value, ast.Attribute) and func.value.attr == "path"
+    return False
 
 
-def _automations_orca_routes(relative: str, source: str) -> list[str]:
-    """Every route from a module under `secretary.automations` to Orca, as offender lines."""
-    if not relative.startswith(AUTOMATIONS_SOURCE):
-        return []
-    offenders: set[str] = set()
+def _names_banned_module(module: str) -> bool:
+    return any(_names(module, banned) for banned in BANNED_ORCA_MODULES) or (
+        module.rsplit(".", 1)[-1] == "orca_rpc"
+    )
+
+
+def _orca_references(relative: str, source: str) -> list[tuple[int, str]]:
+    """Every Orca import and every string constant naming the Orca program, as (line, what)."""
+    tree = ast.parse(source, filename=relative)
+    found: set[tuple[int, str]] = set()
     for lineno, module in _imported_modules(relative, source):
-        if _names(module, PANE_HOST_MODULE):
-            offenders.add(f"{relative}:{lineno}: imports {PANE_HOST_MODULE}")
-        if ORCA_RPC_NAME in module.split("."):
-            offenders.add(f"{relative}:{lineno}: imports {ORCA_RPC_NAME}")
-    for node in ast.walk(ast.parse(source, filename=relative)):
+        if _names_banned_module(module):
+            found.add((lineno, f"imports {module}"))
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if _names(node.value, PANE_HOST_MODULE) or node.value.endswith("." + ORCA_RPC_NAME):
-                offenders.add(f"{relative}:{node.lineno}: names {node.value}")
-        if isinstance(node, ast.Call) and _starts_a_process(node):
-            called = [*node.args, *(keyword.value for keyword in node.keywords)]
-            if any(_runs_orca(argument) for argument in called):
-                offenders.add(f"{relative}:{node.lineno}: runs the orca binary")
-        if isinstance(node, (ast.List, ast.Tuple)) and _runs_orca(node):
-            offenders.add(f"{relative}:{node.lineno}: builds an orca argument vector")
-    return sorted(offenders)
+            text = node.value
+            # `importlib.import_module("…")` and friends name a module by string.
+            if _DOTTED_NAME.fullmatch(text) and text.rsplit(".", 1)[-1] in BANNED_ORCA_LAST_COMPONENTS:
+                found.add((node.lineno, f"names module {text}"))
+            if _is_orca_program(_first_shell_word(text)) and not _is_path_operand(
+                node, parents.get(id(node))
+            ):
+                found.add((node.lineno, f"names the orca program: {text[:60]!r}"))
+        if isinstance(node, (ast.List, ast.Tuple)):
+            words = [
+                element.value
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                else None
+                for element in node.elts
+            ]
+            if "-c" in words:
+                for word in words[words.index("-c") + 1 :]:
+                    if word and any(_is_orca_program(part) for part in _shell_words(word)):
+                        found.add((node.lineno, f"runs the orca program through -c: {word[:60]!r}"))
+    return sorted(found)
 
 
-class AutomationsReachNoOrcaTests(unittest.TestCase):
-    """secretary-1720: the background agents' runtime has one backend, and it is not Orca."""
+def _allowance_for(relative: str, line: str) -> OrcaAllowance | None:
+    for allowance in ORCA_ALLOWLIST:
+        if allowance.path == relative and allowance.line in line:
+            return allowance
+    return None
 
-    def test_no_automations_module_reaches_orca(self) -> None:
-        package = ROOT / "src" / "secretary" / "automations"
+
+def _orca_offenders(relative: str, source: str) -> list[str]:
+    """`_orca_references` minus the allowlisted lines, as offender lines."""
+    lines = source.splitlines()
+    return [
+        f"{relative}:{lineno}: {what}"
+        for lineno, what in _orca_references(relative, source)
+        if _allowance_for(relative, lines[lineno - 1] if lineno <= len(lines) else "") is None
+    ]
+
+
+class NoOrcaInSourceTests(unittest.TestCase):
+    """The one Orca rule: over every module under `src/secretary`, with one explicit allowlist."""
+
+    def _sources(self):
+        for path in sorted(SOURCE_ROOT.rglob("*.py")):
+            yield path.relative_to(ROOT).as_posix(), path.read_text(encoding="utf-8")
+
+    def test_no_module_imports_or_names_orca(self) -> None:
         offenders: list[str] = []
-        for path in sorted(package.rglob("*.py")):
-            relative = path.relative_to(ROOT).as_posix()
-            offenders.extend(_automations_orca_routes(relative, path.read_text(encoding="utf-8")))
+        for relative, source in self._sources():
+            offenders.extend(_orca_offenders(relative, source))
         self.assertEqual(offenders, [])
-        self.assertFalse((package / "runtime" / "orca_rpc.py").exists())
-        self.assertFalse((package / "runtime" / "finalizer.py").exists())
+        for retired in (
+            "runtime/pane_host.py",
+            "runtime/orca_legacy_head.py",
+            "automations/runtime/orca_rpc.py",
+            "automations/runtime/finalizer.py",
+        ):
+            self.assertFalse((SOURCE_ROOT / retired).exists(), retired)
 
-    def test_each_route_to_orca_is_caught(self) -> None:
-        planted = "src/secretary/automations/runtime/planted.py"
+    def test_each_allowlist_entry_still_excuses_a_real_line(self) -> None:
+        """An entry cannot outlive its code: it must match a line that the rule would flag."""
+        excused: set[OrcaAllowance] = set()
+        for relative, source in self._sources():
+            lines = source.splitlines()
+            for lineno, _what in _orca_references(relative, source):
+                allowance = _allowance_for(relative, lines[lineno - 1])
+                if allowance is not None:
+                    excused.add(allowance)
+        for allowance in ORCA_ALLOWLIST:
+            with self.subTest(path=allowance.path, line=allowance.line):
+                self.assertTrue(allowance.reason)
+                self.assertIn(allowance, excused, "no flagged line matches this entry any more")
+
+    def test_each_planted_route_to_orca_fails_the_rule(self) -> None:
+        planted = "src/secretary/runtime/planted.py"
         for source in (
-            "from secretary.runtime.pane_host import session_host\n",
-            "import secretary.runtime.pane_host\n",
-            "from secretary.runtime import pane_host\n",
-            "from ...runtime import pane_host\n",
-            "def f():\n    from secretary.runtime.pane_host import Pane\n",
+            "import subprocess\nsubprocess.run('orca')\n",
+            "import subprocess as sp\nsp.run(['orca', 'x'])\n",
+            "from subprocess import run as launch\nlaunch('orca-cli')\n",
+            "import subprocess\nsubprocess.run(['/bin/sh', '-c', 'orca terminal list'])\n",
+            "import os\nos.system('orca')\n",
+            "from importlib import import_module\nimport_module('secretary.runtime.pane_host')\n",
+            # Beyond the card's six: a later word under `-c`, a path, the imports in each form.
+            "import subprocess\nsubprocess.run(['sh', '-c', 'cd /tmp && orca terminal list'])\n",
+            "BIN = '/usr/local/bin/orca-cli status'\n",
+            "from secretary.runtime.pane_host import Pane\n",
+            "from ..runtime import pane_host\n",
+            "def f():\n    import secretary.runtime.orca_legacy_head\n",
             "from . import orca_rpc\n",
             "from .orca_rpc import call\n",
-            "import secretary.automations.runtime.orca_rpc as rpc\n",
-            "import importlib\nimportlib.import_module('secretary.runtime.pane_host')\n",
-            "import subprocess\nsubprocess.run('orca')\n",
-            "import subprocess\nsubprocess.run(['orca'])\n",
-            "import subprocess\nsubprocess.run('orca-cli')\n",
-            "import os\nos.system('orca')\n",
-            "import os\nos.execvp('orca', ['orca'])\n",
-            "import os\nos.spawnlp(os.P_WAIT, 'orca-cli', 'orca-cli')\n",
-            "from subprocess import check_output\ncheck_output(args='orca terminal list', shell=True)\n",
-            "import subprocess\nsubprocess.run(['orca', 'terminal', 'list', '--json'])\n",
-            "import subprocess\nsubprocess.run(('/usr/local/bin/orca-cli', 'status'))\n",
-            "import os\nos.system('orca terminal stop --worktree x')\n",
-            "ORCA = ['orca-cli', 'terminal', 'list']\n",
-            "import shutil\nshutil.which('orca')\n",
+            "__import__('secretary.automations.runtime.orca_rpc')\n",
         ):
             with self.subTest(source=source):
-                self.assertTrue(_automations_orca_routes(planted, source), source)
+                self.assertTrue(_orca_offenders(planted, source), source)
 
-    def test_what_is_not_a_route_to_orca_is_left_alone(self) -> None:
-        planted = "src/secretary/automations/agents/curator/planted.py"
+    def test_a_path_component_or_a_longer_word_passes_the_rule(self) -> None:
+        planted = "src/secretary/runtime/planted.py"
         for source in (
-            # A path component named after the old workspace root is not the binary.
             "from pathlib import Path\nROOT = Path.home() / 'orca' / 'workspaces'\n",
-            "from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME\n",
-            "import subprocess\nsubprocess.run(['git', 'status'])\n",
-            # A string "orca" handed to a call that starts no process is not a command.
-            "import os\nROOT = os.path.join(os.path.expanduser('~'), 'orca', 'workspaces')\n",
-            "import subprocess\nsubprocess.run(['ls', 'orca'])\n",
+            "import os\nROOT = os.path.join(home, 'orca')\n",
+            "KEY = 'orca_binding'\n",
         ):
             with self.subTest(source=source):
-                self.assertEqual(_automations_orca_routes(planted, source), [])
-        # Outside the package the rule does not apply yet (A20 checklist step 6).
-        self.assertEqual(
-            _automations_orca_routes("src/secretary/dispatch/host.py", "from secretary.runtime import pane_host\n"),
-            [],
-        )
+                self.assertEqual(_orca_offenders(planted, source), [])
+
+    def test_an_allowlisted_line_is_excused_only_in_its_own_file(self) -> None:
+        line = 'if shutil.which("orca") is None:\n    pass\n'
+        self.assertEqual(_orca_offenders("src/secretary/installation.py", line), [])
+        self.assertTrue(_orca_offenders("src/secretary/runtime/planted.py", line))
 
 
-# The dispatcher reads no pane (secretary-1723, A20 steps 5 and 6 for `dispatch/`): head-status,
-# vitality and the review liveness read the local-pty supervisor and the pid heartbeat alone, so no
-# module under `secretary.dispatch` imports the pane host. The rest of the tree is the next step.
-DISPATCH_SOURCE = "src/secretary/dispatch/"
-
-
-def _dispatch_pane_host_imports(relative: str, source: str) -> list[str]:
-    """Every import of, or dotted name for, the pane host in one module under `secretary.dispatch`."""
-    if not relative.startswith(DISPATCH_SOURCE):
-        return []
-    offenders = {
-        f"{relative}:{lineno}: imports {PANE_HOST_MODULE}"
-        for lineno, module in _imported_modules(relative, source)
-        if _names(module, PANE_HOST_MODULE)
-    }
-    offenders.update(
-        f"{relative}:{node.lineno}: names {node.value}"
-        for node in ast.walk(ast.parse(source, filename=relative))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and _names(node.value, PANE_HOST_MODULE)
-    )
-    return sorted(offenders)
-
-
-class DispatchReadsNoPaneTests(unittest.TestCase):
-    """secretary-1723: nothing under `secretary.dispatch` imports `secretary.runtime.pane_host`."""
-
-    def test_no_dispatch_module_imports_the_pane_host(self) -> None:
-        package = ROOT / "src" / "secretary" / "dispatch"
-        offenders: list[str] = []
-        for path in sorted(package.rglob("*.py")):
-            relative = path.relative_to(ROOT).as_posix()
-            offenders.extend(_dispatch_pane_host_imports(relative, path.read_text(encoding="utf-8")))
-        self.assertEqual(offenders, [])
-
-    def test_each_import_of_the_pane_host_is_caught(self) -> None:
-        planted = "src/secretary/dispatch/planted.py"
-        for source in (
-            "from secretary.runtime.pane_host import PaneHost\n",
-            "import secretary.runtime.pane_host\n",
-            "from secretary.runtime import pane_host\n",
-            "from ..runtime import pane_host\n",
-            "def f():\n    from secretary.runtime.pane_host import WorkspaceInventory\n",
-            "import importlib\nimportlib.import_module('secretary.runtime.pane_host')\n",
-        ):
-            with self.subTest(source=source):
-                self.assertTrue(_dispatch_pane_host_imports(planted, source), source)
-
-
+# The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
+# must not come back, and nothing may import it under its old name.
 RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
 
 

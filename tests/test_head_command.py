@@ -403,14 +403,15 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 
 
 def _module_paths() -> list[Path]:
-    """Every product module, the background agents' included, minus the files the seam lives in."""
-    allowed = {
-        REPO_ROOT / "src" / "secretary" / "runtime" / "pane_host.py",
-    }
+    """Every product module, the background agents' included, minus the head package.
+
+    The Orca pane host that used to be excused here as the seam was deleted in secretary-1725, so
+    no module outside the head package is excused from any check below.
+    """
     head_package = REPO_ROOT / "src" / "secretary" / "runtime" / "head"
     paths = []
     for path in sorted((REPO_ROOT / "src" / "secretary").rglob("*.py")):
-        if path in allowed or head_package in path.parents:
+        if head_package in path.parents:
             continue
         paths.append(path)
     return paths
@@ -464,7 +465,7 @@ def _pane_screen_reads(tree: ast.AST) -> list[int]:
 
     A rule of its own rather than a consequence of the one above: a module can read a screen
     through a vector built some other way, and the scheduler's own screen read was the live proof
-    that assuming `terminal read` is spelled only inside `pane_host` was wrong. So the words are
+    that assuming `terminal read` is spelled only inside the pane host was wrong. So the words are
     looked for both as a vector and as a non-docstring string constant.
     """
     prose = _docstring_nodes(tree)
@@ -483,7 +484,7 @@ def _docstring_nodes(tree: ast.AST) -> set[int]:
     """The string constants that are documentation rather than data.
 
     A grep invariant that fails on prose is a grep invariant that gets its modules stripped of the
-    explanations they need: `pane_host` has to say which CLI it spells, and `heads` has to say what
+    explanations they need: a module has to be able to name the CLI it stopped calling, and `heads` has to say what
     it stopped doing. So docstrings are collected here and skipped below, and comments never enter
     an AST at all — what is left is the literals a call is actually built out of.
     """
@@ -533,7 +534,7 @@ class SeamGrepTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for lineno, sub in _terminal_vectors(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} (terminal {sub})")
-        self.assertEqual(offenders, [], f"orca terminal argument vectors outside pane_host: {offenders}")
+        self.assertEqual(offenders, [], f"orca terminal argument vectors in src/secretary: {offenders}")
 
     def test_the_check_sees_a_vector_whose_binary_came_from_a_variable(self) -> None:
         """The check is not vacuous, in both of the forms a live call is written in.
@@ -564,7 +565,7 @@ class SeamGrepTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for lineno in _pane_screen_reads(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
-        self.assertEqual(offenders, [], f"pane screen reads outside pane_host: {offenders}")
+        self.assertEqual(offenders, [], f"pane screen reads in src/secretary: {offenders}")
 
     def test_the_pane_read_rule_catches_a_read_however_the_vector_was_built(self) -> None:
         """Named, so a screen read is caught even when the vector around it is assembled
@@ -609,46 +610,6 @@ class SeamGrepTests(unittest.TestCase):
                     if literal in node.value:
                         offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} ({literal})")
         self.assertEqual(offenders, [], f"head command assembly outside the head package: {offenders}")
-
-    def test_the_prompt_redaction_predicate_moved_with_the_argument_vectors(self) -> None:
-        """The one `["orca", "terminal", ...]` literal that is a predicate rather than a call.
-
-        It reads a vector to decide which of its words holds a prompt, so it belongs to the module
-        that spells those vectors — and there it needs no exception from the check above, because
-        that module is the seam. A copy of it left in the dispatcher would have needed one, and an
-        invariant with a silent exception in it is not an invariant.
-        """
-        from secretary.runtime import pane_host
-
-        self.assertEqual(
-            pane_host.safe_command_label(
-                ["orca", "terminal", "send", "--terminal", "t1", "--text", "secret body"]
-            ),
-            "orca terminal send --terminal t1 --text <prompt-redacted>",
-        )
-        self.assertEqual(
-            pane_host.safe_command_label(["orca", "terminal", "close", "--terminal", "t1"]),
-            "orca terminal close --terminal t1",
-        )
-
-    def test_a_workspace_stop_is_a_session_host_verb(self) -> None:
-        """Criterion 3: a by-worktree stop, where one is made, goes through the host like every
-        other pane command. It stays a stop of the whole worktree — a caller that can no longer
-        name a head — and is deliberately not `head_ops.stop`, which ends one named head.
-
-        The legacy backend still makes it through the `SessionHost` verb. The dispatcher no longer
-        makes it at all (secretary-1722): every head it holds is supervised and is stopped by its
-        own run, and a record whose head was an Orca pane is refused rather than torn down.
-        """
-        from secretary.runtime import orca_legacy_head
-        from secretary.runtime.pane_host import SessionHost
-
-        self.assertIn("stop_workspace", dir(SessionHost))
-        source = (REPO_ROOT / "src" / "secretary" / "dispatch" / "host.py").read_text(encoding="utf-8")
-        self.assertNotIn(".stop_workspace(workspace)", source)
-        self.assertNotIn("head_ops.stop(", source)
-        runtime_source = Path(orca_legacy_head.__file__).read_text(encoding="utf-8")
-        self.assertIn("self.host.stop_workspace(workspace)", runtime_source)
 
 
 if __name__ == "__main__":

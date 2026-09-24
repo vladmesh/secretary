@@ -1527,17 +1527,13 @@ Returning the same card again gets a fresh answer. While unresolved, `secretary 
   before Blocked, default 5.
 - `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,
   default 5.
-- `SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S` — time a pane in a dialog gets to leave it within one delivery,
-  default 45.
-- `SECRETARY_TUI_MODAL_ANSWER_ATTEMPTS` — answers to the known update modal before refusal, default 2.
 
 The stall settings are read at check time; garbage or zero falls back to the default.
 
 A bring-up whose pane is working, held in a dialog or still starting is deferred, not failed:
 `worker-launch-deferred` / `review-launch-deferred` with the pane state and attempt, retried next tick.
 When the attempts run out the card is Blocked naming the pane state, with the infrastructure class
-([An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome)). A probe Orca does not answer
-takes the failure path immediately.
+([An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome)).
 
 ### Reports and verdicts
 

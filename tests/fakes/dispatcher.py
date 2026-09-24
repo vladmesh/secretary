@@ -1076,7 +1076,7 @@ class FakeHost:
         that moved since the caller looked — so a test can make a rotation lose the race without
         needing a second thread. `observer_not_quiescent` stands for the first of those whatever
         this head's process is doing: which of the runtime's reasons produced it is settled against
-        the real runtime in `tests/test_head_runtime.py`, and what this layer owes is that a refusal
+        the real runtime in `tests/test_local_pty_head_runtime.py`, and what this layer owes is that a refusal
         parks the relaunch. The liveness fact the caller is now required to hand down is recorded so
         that a test can check it travelled and was read where the judgement was made.
         """

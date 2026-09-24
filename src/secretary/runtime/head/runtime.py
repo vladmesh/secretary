@@ -1,11 +1,11 @@
 """`HeadRuntime`: the one typed boundary a head's life is lived through.
 
-`operations` holds three free functions and every caller supplies its own `SessionHost`, its own
-transport and its own error handling around them. That worked while there was one backend. It stops
-working the moment there are two, because "which backend is this head on" would then have to be
-decided again at every call site — and because half of what a second backend can do (observe a
-head, ask it to wind down, attach to it) has no home among three functions that open, write into and
-close a pane.
+`operations` once held three free functions, and every caller supplied its own session host, its
+own transport and its own error handling around them. That stopped working once there were two
+backends, because "which backend is this head on" had to be decided again at every call site — and
+because half of what a head backend can do (observe a head, ask it to wind down, attach to it) had
+no home among three functions that open, write into and close a pane. The Orca backend those
+functions served was removed in secretary-1725; `local_pty_head` is the implementation.
 
 So the six verbs live on one object:
 
@@ -441,8 +441,7 @@ class HeadRuntime(Protocol):
     """One head backend, as everything above it is allowed to see one.
 
     Six verbs, each answering with its own receipt. An implementation may take backend-specific
-    keyword options — `orca-legacy` takes the transport and the commit hooks the operations have
-    always taken — but nothing above this boundary may reach past it to a pane, a session manager or
+    keyword options, but nothing above this boundary may reach past it to a pane, a session manager or
     a pty to perform any part of a head's lifecycle.
     """
 

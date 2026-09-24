@@ -1909,9 +1909,10 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
 
     * **no Orca import** on any module of the layer -- neither the pane host, nor the legacy
       backend, nor the control plane's Orca-facing terminal readers;
-    * **no Orca call** on the start path or the result-reading path: with every verb of
-      `pane_host`'s session host, and `secretary.dispatch.head_status` replaced by
-      detonators, `run_start`, `run_state` and `run_review` all complete;
+    * **no Orca call** on the start path or the result-reading path: with
+      `secretary.dispatch.head_status` replaced by a detonator, `run_start`, `run_state` and
+      `run_review` all complete. The pane host whose verbs were detonated here too is deleted
+      (secretary-1725), and `test_architecture` forbids importing it anywhere;
     * **no `orca` process**: every child process the two paths spawn is captured, and none of them
       is an `orca` executable;
     * **no session manager**: the backend is built by name through the product's one
@@ -1950,11 +1951,6 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
         self.assertEqual(offenders, [])
 
     def test_the_start_and_result_paths_call_no_orca(self) -> None:
-        from secretary.runtime import pane_host
-
-        def detonate(*_args, **_kwargs):
-            raise AssertionError("the product runtime reached Orca")
-
         spawned: list[list[str]] = []
         real_run = subprocess.run
 
@@ -1963,9 +1959,6 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
             return real_run(argv, *args, **kwargs)
 
         with (
-            mock.patch.object(pane_host, "session_host", detonate),
-            mock.patch.object(pane_host.SessionHost, "open_pane", detonate, create=True),
-            mock.patch.object(pane_host.SessionHost, "list_panes", detonate, create=True),
             mock.patch("subprocess.run", watched_run),
             mock.patch.dict("sys.modules", {"secretary.dispatch.head_status": None}),
         ):

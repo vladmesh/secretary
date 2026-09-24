@@ -64,7 +64,6 @@ unit tests/test_head_command.py
 unit tests/test_legacy_head_records.py
 unit tests/test_head_health.py
 unit tests/test_head_operations.py
-runtime-component tests/test_head_runtime.py
 unit tests/test_head_spec.py
 unit tests/test_head_status_command.py
 unit tests/test_head_vitality.py

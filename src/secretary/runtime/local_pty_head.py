@@ -203,9 +203,9 @@ from secretary.runtime.head.runtime import (
 )
 from secretary.runtime.head.spec import HeadSpec
 from secretary.runtime.head.task_ref import TaskRef
+from secretary.runtime.prompt_document import NUDGE_FILE_MODE
 from secretary.runtime.tui_delivery import (
     DELIVERY_CONFIRMED,
-    NUDGE_FILE_MODE,
     READINESS_BUSY,
     READINESS_READY,
     STAGE_ENTER_ACCEPTED,

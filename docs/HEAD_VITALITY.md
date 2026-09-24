@@ -20,9 +20,7 @@ and any action. Agreeing channels reduce noise but never close the window.
 > atomically owns delivery decides whether an intervention is safe.
 
 Local-pty performs the final admission/lease/epoch check inside its own lock against durable supervisor
-evidence. Orca readiness, terminal output and filesystem fingerprints never grant a kill capability by
-themselves; `OrcaLegacyHeadRuntime.stop_if_quiescent` is a best-effort fence around the external
-observation window.
+evidence. Terminal output and filesystem fingerprints never grant a kill capability by themselves.
 
 ## Three independent axes
 

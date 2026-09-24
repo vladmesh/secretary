@@ -7,8 +7,8 @@ one scheme — the classification of such a record into "this launch is running"
 "this pid is somebody else's now".
 
 It lives here rather than in the control plane that grew it because both of the things that need
-it live under this package: `local_pty_head.LocalPtyHeadRuntime` and `orca_legacy_head` are handed
-this reader by whoever builds them, and the mechanical-role driver in `runtime/dispatch.py` builds
+it live under this package: `local_pty_head.LocalPtyHeadRuntime` is handed this reader by whoever
+builds it, and the mechanical-role driver in `runtime/dispatch.py` builds
 one too. `secretary.dispatch.watchdog` re-exports every name below, so the control plane keeps
 the spelling it has always used and there is still exactly one implementation.
 
