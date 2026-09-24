@@ -79,10 +79,7 @@ def cursor_settlement_transaction(*, nonblocking: bool = False):
 
 def _write_pending(record: dict) -> None:
     """Atomically publish the fact-bearing batch that a later advance consumes."""
-    STATE.ensure_dir()
-    tmp = STATE.pending_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(STATE.pending_file)
+    harvest.write_pending(STATE, record)
 
 
 def _baseline_audit_file() -> Path:
