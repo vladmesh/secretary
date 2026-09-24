@@ -22,7 +22,7 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 107,
+    "tests.test_sprints": 109,
     "tests.test_sprint_executors": 21,
     "tests.test_sprint_restore": 22,
     "tests.test_sprint_listing_budget": 4,
@@ -50,7 +50,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprints.SprintTests": 21,
     "tests.test_sprints.SprintStatusHeadlessCommandTests": 3,
     "tests.test_sprints.SprintAuditTraversalTests": 7,
-    "tests.test_sprints.SprintSingleWriterGuardTests": 11,
+    "tests.test_sprints.SprintSingleWriterGuardTests": 13,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
     "tests.test_sprints.SprintCloseDecisionTests": 10,
     "tests.test_sprints.CloseDecisionFileTests": 3,
@@ -215,11 +215,13 @@ class SprintFixtureGuards(unittest.TestCase):
         secretary-1670 removed the 33 remaining cases that only the retired Sprint implementation
         had, with it, moved three SQL-only cases in from tests/test_sprints_sql_backend.py, and
         rewrote the four listing-budget cases in store statements: 180 - 33 + 3 + 4 = 154.
+
+        secretary-1712 added two single-writer guard cases for the steward's own report card: 156.
         """
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 154)
+        self.assertEqual(len(methods), 156)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]

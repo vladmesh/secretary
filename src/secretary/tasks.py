@@ -1159,6 +1159,7 @@ class TaskWriter:
             sprint_override_reason=sprint_override_reason,
             request_id=request_id,
             reference=reference,
+            steward_report=steward_report,
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
         # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
@@ -2282,6 +2283,7 @@ class TaskWriter:
             sprint_override_reason=sprint_override_reason.strip(),
             request_id=request_id,
             reference=reference,
+            steward_report=_is_steward_report_card(task),
         )
         source = task["state"]
         _check_execution_record(task)
@@ -2356,6 +2358,7 @@ class TaskWriter:
             sprint_override_reason=sprint_override_reason.strip(),
             request_id=request_id,
             reference=reference,
+            steward_report=_is_steward_report_card(task),
         )
         return self._write(
             "moved",
@@ -2831,6 +2834,7 @@ class TaskWriter:
         sprint_override_reason: str,
         request_id: str,
         reference: str,
+        steward_report: bool = False,
     ) -> dict[str, str]:
         """Authorize one create/move/edit against the caller and the open-sprint reservation index.
 
@@ -2838,7 +2842,9 @@ class TaskWriter:
         was launched for, and a write about any other sprint's card is refused as the identity failure
         it is. Then what is being written: which open sprint reserves the card's project. A PO write
         of a card linked to no sprint is not the holding sprint's and passes once the index is
-        verified; the dispatcher's admission decides whether such a card runs.
+        verified; the dispatcher's admission decides whether such a card runs. So does a steward
+        write of its own report card (`steward_report`, the caller's reading of the create or of
+        the card's recorded marker), which is the steward's accounting, never a sprint's work.
 
         The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
         the observer of, and an unprovable caller is refused rather than admitted.
@@ -2901,6 +2907,11 @@ class TaskWriter:
         # asked before the claim), not this guard. A card linked to a sprint, and a create that
         # links one, keep the override rule above.
         if role == "po" and not card_sprint and linked_sprint is None:
+            return {}
+        # The steward's own report card is its tick's accounting, created In progress as research
+        # and linked to no sprint; the dispatcher never claims it. Its proposals and every other
+        # card it touches stay the holding sprint's to refuse.
+        if role == "steward" and steward_report and not card_sprint and linked_sprint is None:
             return {}
         # The caller was already proven to be this card's sprint's observer above; what is left is
         # that the sprint holding the project is the one the card is linked to.
@@ -4149,6 +4160,11 @@ def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:
 
 def _is_steward_report(task: dict[str, Any]) -> bool:
     return task.get("extensions", {}).get(EXTENSION_BAG, {}).get("steward_report") == "1"
+
+
+def _is_steward_report_card(task: dict[str, Any]) -> bool:
+    """A card the report create wrote: its marker, research, and no sprint, all as recorded."""
+    return _is_steward_report(task) and task.get("type") == "research" and not task.get("sprint")
 
 
 def _matches_optional(expected: Any, actual: Any) -> bool:
