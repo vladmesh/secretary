@@ -167,7 +167,8 @@ Inspect without exposing credentials:
 secretary upgrade --dry-run --no-pull --instance INSTANCE
 rg -n 'po_memory|secretary-memory-po-bridge' \
   ~/.claude.json ~/.codex/config.toml \
-  ~/.config/orca/codex-runtime-home/home/config.toml
+  ~/.config/orca/codex-runtime-home/home/config.toml \
+  DATA_DIR/codex-home/config.toml
 ```
 
 ### Codex home (`CODEX_HOME`)
@@ -190,6 +191,16 @@ Rung 4 keeps live Codex heads logged in until the PO logs in to the new home. It
 `DATA_DIR/codex-home` if they are missing. Install keeps doing the same for the legacy home,
 including the managed Memory entry, while it is still the active one. Upgrade leaves the legacy home
 alone, as it always has. Neither copies or writes `auth.json`.
+
+Every managed home must hold the full `[mcp_servers.po_memory]` bridge entry (`command`, `args`,
+`env`). Each head is launched with `-c mcp_servers.po_memory.enabled=false`, and on a home without
+the entry that override creates a table with no `command` or `url`: Codex then refuses every command
+with `invalid transport in mcp_servers.po_memory`. The packaged `config.toml` therefore carries no
+such table. Seeding writes the entry into each `config.toml` it creates, in the same step. The
+upgrade's `memory-clients` step reconciles it in the legacy home and in `DATA_DIR/codex-home`
+whenever that directory exists, since a login alone is enough for heads to select it: a file the
+home lacks is seeded first through the same copy-once path, so the packaged defaults are never
+skipped, whichever of the `memory-clients` and `codex-home` steps reaches the home first.
 
 Migration runbook, run once as the installation user after an upgrade that includes the `codex-home`
 step:
@@ -2123,7 +2134,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
 | `board-store` | connect as owner and apply Alembic to the shipped head |
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
-| `memory-clients` | reconcile the `po_memory` MCP entries without touching provider login state |
+| `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
 | `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
 | `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `secretary-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |

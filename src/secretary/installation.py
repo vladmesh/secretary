@@ -55,6 +55,12 @@ from secretary.infra.github_credential import (
     bootstrap_file_owner_is_allowed,
     validate_checkpoint_credential,
 )
+from secretary.memory.client_config import (
+    ClientConfigError,
+    bridge_executable,
+    packaged_codex_home,
+    seed_codex_home,
+)
 from secretary.projects.availability import ProjectAvailability
 from secretary.restore import (
     RestoreError,
@@ -64,7 +70,8 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from secretary.runtime.codex_preflight import CODEX_HOME_DATA_DIRNAME, codex_home_logged_in
+from secretary.runtime.codex_home import managed_codex_homes
+from secretary.runtime.codex_preflight import codex_home_logged_in
 from secretary.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from secretary.runtime.shared_state import resolve_pipeline_state_dir
 from secretary.runtime_env import (
@@ -1415,10 +1422,6 @@ def _write_recovery_progress(path: Path, identity: str, **changes: object) -> No
         raise InstallError(f"could not record recovery progress: {exc}") from None
 
 
-# What an install seeds into a CODEX_HOME. Never `auth.json`: the login is the PO's.
-CODEX_HOME_SEEDED_FILES = ("AGENTS.md", "config.toml")
-
-
 def provision_codex_home(
     product_root: Path,
     installation_user: str | None,
@@ -1435,44 +1438,43 @@ def provision_codex_home(
     PO's own step, `CODEX_HOME=<data_dir>/codex-home codex login`. `runtime_home` is the account's
     home as the caller already resolved it; unnamed, it is read from the password database.
     `legacy=False` leaves the legacy home alone, which is what upgrade has always done with it.
+
+    A `config.toml` seeded here gets the full PO-bridge entry in the same step
+    (`memory.client_config.seed_codex_home`, which `reconcile_clients` seeds through too), so the home
+    parses under the `-c mcp_servers.po_memory.enabled=false` every pipeline head is launched with.
+    That needs the data dir the bridge reads; without one the seed is the packaged file alone. An
+    existing config is the upgrade's `memory-clients` step to reconcile.
     """
     if not installation_user:
         return 0
     home = runtime_home if runtime_home is not None else Path(pwd.getpwnam(installation_user).pw_dir)
-    legacy_home = home / ".config" / "orca" / "codex-runtime-home" / "home"
-    targets: list[Path] = []
-    if data_dir is not None:
-        data_home = Path(data_dir) / CODEX_HOME_DATA_DIRNAME
-        targets.append(data_home)
-        if legacy and not codex_home_logged_in(data_home):
-            targets.append(legacy_home)
-    elif legacy:
+    legacy_home, *data_homes = managed_codex_homes(home, None if data_dir is None else Path(data_dir))
+    targets: list[Path] = list(data_homes)
+    if legacy and not any(codex_home_logged_in(data_home) for data_home in data_homes):
         targets.append(legacy_home)
-    source = product_root / "packaging" / "codex-home"
+    source = packaged_codex_home(product_root)
+    bridge = (bridge_executable(product_root), Path(data_dir)) if data_dir is not None else None
     changed = 0
     for target in targets:
-        changed += _seed_codex_home(target, source)
+        changed += _seed_codex_home(target, source, bridge=bridge)
         _set_installation_owner(target, installation_user)
     return changed
 
 
-def _seed_codex_home(target: Path, source: Path) -> int:
-    """Copy-once `AGENTS.md` and `config.toml` into one CODEX_HOME, reconciling the memory entry."""
+def _seed_codex_home(target: Path, source: Path, *, bridge: tuple[Path, Path] | None = None) -> int:
+    """Copy-once `AGENTS.md` and `config.toml` into one CODEX_HOME, reconciling the memory entry.
+
+    `bridge` is the PO-bridge executable and data dir a freshly seeded `config.toml` is reconciled
+    with (`memory.client_config.seed_codex_home`); the file still counts once.
+    """
     changed = 0
-    for name in CODEX_HOME_SEEDED_FILES:
-        destination = target / name
-        if destination.exists():
-            if name == "config.toml" and _reconcile_managed_memory_mcp(destination, source / name):
-                changed += 1
-            continue
-        try:
-            contents = (source / name).read_text(encoding="utf-8")
-            # The home will hold a login once the PO runs `codex login` into it.
-            target.mkdir(mode=0o700, parents=True, exist_ok=True)
-            write_text_atomic(destination, contents)
-        except (OSError, RuntimeError) as exc:
-            raise InstallError(f"could not provision managed CODEX_HOME: {exc}") from None
+    config = target / "config.toml"
+    if config.exists() and _reconcile_managed_memory_mcp(config, source / "config.toml"):
         changed += 1
+    try:
+        changed += len(seed_codex_home(target, source, bridge))
+    except ClientConfigError as exc:
+        raise InstallError(f"could not provision managed CODEX_HOME: {exc}") from None
     return changed
 
 

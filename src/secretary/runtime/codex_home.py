@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.runtime.codex_preflight import (
+    CODEX_HOME_LEGACY_RELATIVE,
     CodexHome,
     data_dir_codex_home,
     legacy_codex_home,
@@ -49,6 +50,20 @@ def selected_data_dir() -> Path | None:
 def installation_codex_home(profile: Mapping[str, Any] | None = None) -> CodexHome:
     """The CODEX_HOME this process's installation launches Codex heads with."""
     return resolve_codex_home(profile or {}, data_dir=selected_data_dir())
+
+
+def managed_codex_homes(runtime_home: Path, data_dir: Path | None) -> tuple[Path, ...]:
+    """Every CODEX_HOME an installation manages, whether or not it exists yet or holds a login.
+
+    The legacy Orca home of the account whose home is `runtime_home`, then `<data_dir>/codex-home`
+    when a data dir is named. Seeding and the Memory-client reconcile take their homes from here,
+    so neither can leave one of them out.
+    """
+    legacy = runtime_home / CODEX_HOME_LEGACY_RELATIVE
+    # Only a named data dir: `data_dir_codex_home(None)` would fall back to this process's own
+    # `SECRETARY_DATA_DIR`, which is not necessarily the installation being provisioned.
+    data_home = data_dir_codex_home(data_dir) if data_dir is not None else None
+    return (legacy,) if data_home is None else (legacy, data_home)
 
 
 def session_roots() -> list[Path]:

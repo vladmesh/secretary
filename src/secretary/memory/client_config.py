@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import write_text_atomic
+from secretary.runtime.codex_home import managed_codex_homes
 
 MEMORY_URL = "http://127.0.0.1:8077/mcp"
 LEGACY_SERVER = "memory"
@@ -33,10 +34,11 @@ class ClientConfigResult:
     codex_managed: bool = False
     codex_user: bool = False
     claude_user: bool = False
+    codex_data_dir: bool = False
 
     @property
     def changed(self) -> int:
-        return sum((self.codex_managed, self.codex_user, self.claude_user))
+        return sum((self.codex_managed, self.codex_user, self.claude_user, self.codex_data_dir))
 
 
 def bridge_executable(product_root: Path) -> Path:
@@ -165,17 +167,83 @@ def reconcile_claude(path: Path, command: Path, data_dir: Path, *, dry_run: bool
     return True
 
 
+# What seeding writes into a managed CODEX_HOME, copy-once. Never `auth.json`: the login is the PO's.
+CODEX_HOME_SEEDED_FILES = ("AGENTS.md", "config.toml")
+
+
+def packaged_codex_home(product_root: Path) -> Path:
+    return product_root / "packaging" / "codex-home"
+
+
+def seed_codex_home(
+    home: Path, source: Path, bridge: tuple[Path, Path] | None, *, dry_run: bool = False
+) -> tuple[str, ...]:
+    """Copy-once the packaged files `home` lacks; a `config.toml` seeded here gets the bridge entry.
+
+    The one way a managed CODEX_HOME gets its files, whichever of install, the upgrade's `codex-home`
+    step or `reconcile_clients` reaches it first: the packaged defaults are never skipped, and with
+    `bridge` (the PO-bridge executable and data dir) a seeded config is never left without the
+    `po_memory` entry the head's `-c mcp_servers.po_memory.enabled=false` needs. An existing file
+    is left as it is. Returns the names written, or that would be under `dry_run`.
+    """
+    seeded: list[str] = []
+    for name in CODEX_HOME_SEEDED_FILES:
+        destination = home / name
+        if destination.exists():
+            continue
+        seeded.append(name)
+        if dry_run:
+            continue
+        try:
+            contents = (source / name).read_text(encoding="utf-8")
+            # The home will hold a login once the PO runs `codex login` into it.
+            home.mkdir(mode=0o700, parents=True, exist_ok=True)
+            write_text_atomic(destination, contents)
+        except (OSError, RuntimeError) as exc:
+            raise ClientConfigError(f"cannot seed managed CODEX_HOME {home}: {exc}") from None
+        if name == "config.toml" and bridge is not None:
+            reconcile_codex(destination, *bridge)
+    return tuple(seeded)
+
+
+def reconciled_codex_homes(runtime_home: Path, data_dir: Path) -> tuple[Path, ...]:
+    """The managed CODEX_HOMEs `reconcile_clients` writes the bridge entry into: every one the
+    resolver (`codex_preflight.resolve_codex_home`) can select.
+
+    The legacy home always, as it always was. `<data_dir>/codex-home` whenever it exists, whatever
+    it holds: a login alone is enough for the resolver to pick it. One that does not exist yet can
+    not be selected, and seeding creates it with the entry already in place.
+    """
+    legacy, *others = managed_codex_homes(runtime_home, data_dir)
+    return (legacy, *(home for home in others if home.exists()))
+
+
 def reconcile_clients(
     product_root: Path, runtime_home: Path, data_dir: Path, *, dry_run: bool = False
 ) -> ClientConfigResult:
     command = bridge_executable(product_root)
     if not dry_run and not command.is_file():
         raise ClientConfigError(f"PO bridge executable is missing: {command}")
-    managed = runtime_home / ".config" / "orca" / "codex-runtime-home" / "home" / "config.toml"
+    legacy, *data_homes = reconciled_codex_homes(runtime_home, data_dir)
     user_codex = runtime_home / ".codex" / "config.toml"
     claude = runtime_home / ".claude.json"
     return ClientConfigResult(
-        codex_managed=reconcile_codex(managed, command, data_dir, dry_run=dry_run),
+        codex_managed=reconcile_codex(legacy / "config.toml", command, data_dir, dry_run=dry_run),
         codex_user=reconcile_codex(user_codex, command, data_dir, dry_run=dry_run),
         claude_user=reconcile_claude(claude, command, data_dir, dry_run=dry_run),
+        codex_data_dir=any(
+            [
+                _reconcile_codex_home(home, product_root, command, data_dir, dry_run=dry_run)
+                for home in data_homes
+            ]
+        ),
     )
+
+
+def _reconcile_codex_home(
+    home: Path, product_root: Path, command: Path, data_dir: Path, *, dry_run: bool
+) -> bool:
+    """Seed what the home lacks, then bring its `po_memory` entry current."""
+    seeded = seed_codex_home(home, packaged_codex_home(product_root), (command, data_dir), dry_run=dry_run)
+    reconciled = reconcile_codex(home / "config.toml", command, data_dir, dry_run=dry_run)
+    return bool(seeded) or reconciled
