@@ -60,11 +60,11 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 - raw board dumps;
 - the vector index and derived memory exports;
 - transcripts, artifacts, backups;
-- terminals, worktrees and generated host state (systemd units from `packaging/systemd/`,
-  session-manager automations of background roles). The product is canonical for these: units are
-  compiled from packaging templates and automation schedules come from each role's `automation.toml`.
-  `secretary reconcile apply` and `secretary upgrade` re-materialise them idempotently, matching
-  automations by name and editing in place so ids and unit names stay stable.
+- terminals, worktrees and generated host state (systemd units from `packaging/systemd/`). The
+  product is canonical for these: units are compiled from packaging templates, and those timers are
+  the background roles' only schedule. `secretary reconcile apply` and `secretary upgrade`
+  re-materialise them idempotently, so unit names stay stable. Orca automations are not recovered:
+  Secretary no longer manages them.
 
 ## Layout
 
@@ -419,7 +419,7 @@ refused. A clean tree alone never proves product ownership.
    degraded result that does not stop later safe steps; ordinary `secretary upgrade` stops at it.
 8. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
-9. Applies host units and session-manager automations, performs any required memory recovery and
+9. Applies host units, performs any required memory recovery and
    verifies restore status. Orca repo registrations are not part of this step; they stay Orca's own
    state. Dispatch refuses an unavailable binding before starting
    its worker, reviewer or project worktree. Observers use the dedicated observer repository and are

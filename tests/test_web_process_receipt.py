@@ -47,7 +47,6 @@ class WebProcessReceiptTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=self.units,
-            automations=None,
             pull=False,
             report=self.report,
         )

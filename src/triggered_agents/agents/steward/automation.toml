@@ -1,14 +1,11 @@
-# Portable automation spec for the steward triggered-agent.
+# Portable spec for the steward triggered-agent.
 #
-# Canon for HOW the steward is scheduled and dispatched. Host bindings Orca generates (workspace
-# path, repo/automation UUIDs) are NOT here — `secretary upgrade` resolves them on the host and
-# applies this spec idempotently (match Orca automation by `name`, compare its whole context and edit
-# in place so the automation id stays stable).
+# The canon for HOW the steward is dispatched. Its schedule is the packaged systemd timers
+# (secretary-steward.timer and the deep sweep's), the only schedule owner; Secretary manages no
+# Orca automation.
 
-name = "steward"          # Orca automation name; the match key across re-provisions
-skill = "/steward"        # automation prompt = skill invocation (skill lives in .claude/skills/steward)
-provider = "claude"
-reuse_session = true
+name = "steward"
+skill = "/steward"        # prompt = skill invocation (skill lives in .claude/skills/steward)
 # Last resort only. The steward launches on `role_defaults.steward` in the selected head
 # registry — the same table the dispatcher routes worker, reviewer and observer through — and
 # runtime/dispatch.py resolves it through secretary.head_health/heads the same way a worker head is
@@ -18,20 +15,12 @@ head = "codex-sol-high"
 # Skip the run unless the deterministic scan finds a real anomaly signal (new Blocked card,
 # warn/error/head-health-flip line in the pipeline's own runs.jsonl, a card stuck past the
 # staleness threshold, a resource health flip, a worker/reviewer workspace on disk with no
-# in-flight card). Gated in the systemd unit, not Orca's field (manual `automations run` ignores
-# --precheck). The steward's whole reason to exist is post-merge self-
+# in-flight card). Gated in the systemd unit. The steward's whole reason to exist is post-merge self-
 # modification safety-netting, not a frequent LLM-cost sweep — a quiet tick costs nothing.
 precheck = "python3 -P -m triggered_agents steward precheck"
 
-[trigger]
-# systemd is the sole schedule owner. Keep the equivalent cron recorded for GUI/manual context,
-# but disable Orca's native trigger so a desktop/local scheduler cannot run a second steward in
-# parallel with secretary-steward.timer. Manual `orca automations run` remains available.
-orca = "0 */3 * * *"
-enabled = false
-
 [systemd]
-# The actual scheduler on this headless box; the unit itself is packaged as
+# The only scheduler; the unit itself is packaged as
 # packaging/systemd/secretary-<name>.timer and installed by `secretary reconcile apply`.
 calendar = "00/3:00:00"
 randomized_delay_sec = 150   # jitter so the three-hour sweep never races curator/board at :00-:03
@@ -42,7 +31,7 @@ randomized_delay_sec = 150   # jitter so the three-hour sweep never races curato
 # precheck gate at all, regardless of whether signals.py found anything — the five signal
 # detectors themselves can be blind (253: a wrong path made the pipeline log look permanently
 # quiet), and a signal-gated wake-up can never catch that. the product ships a SECOND systemd unit (secretary-<name>-deep-sweep) alongside the three-hour one above —
-# same worktree/workspace/head, no separate Orca automation. `skill` carries an argument
+# same worktree/workspace/head. `skill` carries an argument
 # ("deep-sweep") the same way a slash command would if typed by hand, so the one SKILL.md file
 # can branch to its own section instead of the five-signal one; cli.py's deep-sweep-since/
 # deep-sweep-advance keep this mode's watermark (last unconditional sweep) entirely separate

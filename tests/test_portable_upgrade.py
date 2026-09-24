@@ -150,20 +150,6 @@ class RecordingUnits(FakeUnitInstaller):
         self._publish()
 
 
-class FakeAutomations:
-    """The Orca automation client, with nothing registered and nothing reachable."""
-
-    def __init__(self, user: str | None = None) -> None:
-        self.user = user
-        self.calls: list[str] = []
-
-    def list(self) -> list[dict[str, object]]:
-        return []
-
-    def run(self, argv: list[str], label: str) -> None:
-        self.calls.append(label)
-
-
 class PortableFixture(unittest.TestCase):
     """A clean installation materialized entirely from a checkout this test wrote."""
 
@@ -324,7 +310,6 @@ class PortableFixture(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=self.units,
-            automations=FakeAutomations(),
             host_fixture=self.host_fixture,
             pull=False,
             report=report,
@@ -359,7 +344,6 @@ class PortableFixture(unittest.TestCase):
             setattr(args, key, value)
         with (
             mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units),
-            mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations),
             mock.patch.object(upgrade, "probe_memory"),
         ):
             return upgrade.run_upgrade(args)
@@ -500,6 +484,36 @@ class PortableInstallationTests(PortableFixture):
         self.assertIn(f"ExecStart={self.home}/.local/bin".encode(), rendered)
         self.assertIn("User=operator", rendered.decode())
         self.assert_hermetic(rendered.decode())
+
+    def test_a_dry_run_upgrade_never_asks_orca_about_automations(self) -> None:
+        """secretary-1706: systemd units are the only schedule owner of the background roles.
+
+        The product ships a background agent's spec, which is exactly what the retired automations
+        step turned into `orca automations` calls; the upgrade must now issue none of them.
+        """
+        agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
+        agent.mkdir(parents=True, exist_ok=True)
+        (agent / "automation.toml").write_text('name = "curator"\nskill = "/curate"\n', encoding="utf-8")
+        (self.product / "pyproject.toml").write_text(
+            '[tool.secretary]\nagent-specs = "src/triggered_agents/agents"\n', encoding="utf-8"
+        )
+        argvs: list[list[str]] = []
+        real_popen_init = subprocess.Popen.__init__
+
+        def recording_init(popen, args, *rest, **kwargs):
+            argvs.append([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [str(args)])
+            return real_popen_init(popen, args, *rest, **kwargs)
+
+        with (
+            mock.patch.object(subprocess.Popen, "__init__", recording_init),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            code = self.run_upgrade_command(dry_run=True)
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertTrue(argvs, "the recorder saw no subprocess at all")
+        self.assertFalse([argv for argv in argvs if "automations" in argv], argvs)
+        self.assertNotIn("automations", output.getvalue())
 
     def test_a_second_run_against_the_installation_it_just_wrote_changes_nothing(self) -> None:
         first = self.run_upgrade()
@@ -676,8 +690,8 @@ class InstallationOwnerTests(PortableFixture):
         )
         self.assert_invoker_home_untouched()
 
-    def test_role_worktrees_and_automation_workspaces_belong_to_the_owner(self) -> None:
-        """Neither is written here; both are decided from a home, and it must be the owner's."""
+    def test_role_worktrees_belong_to_the_owner(self) -> None:
+        """Not written here; decided from a home, and it must be the owner's."""
         agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
@@ -686,13 +700,8 @@ class InstallationOwnerTests(PortableFixture):
         )
 
         worktrees = upgrade.desired_role_worktrees(self.product, self.home)
-        specs = upgrade.load_specs(self.product, home=self.home)
 
         self.assertEqual(worktrees, [self.home / "orca" / "workspaces" / "secretary" / "curator"])
-        self.assertEqual(
-            [spec.workspace for spec in specs],
-            [str(self.home / "orca" / "workspaces" / "secretary" / "curator")],
-        )
 
     def test_a_configured_workspaces_root_still_wins_over_the_owners_home(self) -> None:
         elsewhere = self.root / "elsewhere"

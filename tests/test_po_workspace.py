@@ -53,7 +53,6 @@ class PoWorkspaceStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            automations=None,
             report=SimpleNamespace(data_dir=self.data),
         )
         return upgrade.step_po_workspace(context)
@@ -84,7 +83,6 @@ class PoWorkspaceStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=None,
-            automations=None,
             report=SimpleNamespace(data_dir=self.data),
             runtime_user="po-runtime",
         )
@@ -136,7 +134,6 @@ class PoWorkspaceStepTests(unittest.TestCase):
                 base_branch="main",
                 dry_run=False,
                 units=None,
-                automations=None,
                 report=SimpleNamespace(data_dir=self.data),
             )
         )
@@ -146,7 +143,6 @@ class PoWorkspaceStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=None,
-            automations=None,
             report=SimpleNamespace(data_dir=self.data),
             runtime_user="po-runtime",
         )

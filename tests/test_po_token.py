@@ -29,7 +29,6 @@ class PoTokenStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=dry_run,
             units=None,
-            automations=None,
             report=SimpleNamespace(data_dir=self.data),
             runtime_user=runtime_user,
         )

@@ -2079,12 +2079,16 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
 | `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
-| `automations` | create or repoint session-manager automations from `automation.toml` |
 | `memory` | restart the memory service if its code, dependencies, unit or pack changed, then a bounded `memory_list` read |
 | `web` | for an active transport, verify its process receipt or restart, probe loopback, write the receipt after 200 |
 | `verify` | repeat dry run; the second rollout must be a no-op |
 
 Flags: `--no-pull`, `--base-branch`, `--product-root`, `--runtime-user`, `--json`.
+
+The packaged systemd timers are the only schedule owner of the background roles (curator, retro,
+steward). Upgrade no longer manages Orca automations: it neither creates, repoints nor deletes them,
+and `doctor` no longer reports them. Automations an older upgrade left on a live host stay as Orca's
+own state and go away with Orca itself (A20).
 
 When `pull` advances the checkout, the process re-executes `python -P -m secretary` from the pulled checkout
 with the same arguments and changed paths, so steps new in that revision run in the same upgrade.
@@ -2096,7 +2100,7 @@ If `host` reports `unowned names in our namespace`, resolve it as in
 ### Upgrading from another checkout
 
 `--product-root` names the checkout to install; every step reads only it (skill manifest and roles,
-`packaging/systemd`, automation specs, role worktrees, and its head canon when the installation owns none).
+`packaging/systemd`, agent specs, role worktrees, and its head canon when the installation owns none).
 `secretary role-skills audit|sync --product-root <checkout>` delivers skills alone.
 
 Without `--product-root`, install and upgrade materialize the configured checkout (`TA_SECRETARY_REPO`, else
@@ -2121,7 +2125,7 @@ No absolute product path is shipped. First hit wins:
 | the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
 | a skill's command link | `SECRETARY_BIN_DIR`, else `<owner home>/bin` |
-| a role worktree and an automation workspace | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
+| a role worktree | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
 | the role runtime env file | `SECRETARY_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
 | the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
 

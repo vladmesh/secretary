@@ -1,32 +1,21 @@
-"""Tests for the upgrade materializer: packaged units, reconcile apply, automations."""
+"""Tests for the upgrade materializer: packaged units, reconcile apply, role worktrees."""
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import io
 import json
 import os
 import stat
 import subprocess
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
 from secretary import state_repo, status, upgrade
-from secretary.automations import (
-    AutomationError,
-    AutomationSpec,
-    create_argv,
-    drifted_fields,
-    load_specs,
-    plan_automations,
-    repoint_argv,
-)
 from secretary.config import DataDirError
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
@@ -465,94 +454,8 @@ class ApplyHostTests(unittest.TestCase):
         self.assertIn(legacy, strict_manifest(self.manifest)[0])
 
 
-class AutomationSpecTests(unittest.TestCase):
-    def spec(self, **overrides) -> AutomationSpec:
-        base = AutomationSpec(
-            name="steward",
-            prompt="/steward",
-            provider="claude",
-            precheck="python3 -m triggered_agents steward precheck",
-            reuse_session=True,
-            trigger="0 */3 * * *",
-            enabled=False,
-            workspace="/home/dev/orca/workspaces/secretary/steward",
-            repo="/home/dev/secretary",
-        )
-        return replace(base, **overrides)
-
-    def live(self, **overrides) -> dict:
-        record = {
-            "id": "auto-1",
-            "name": "steward",
-            "prompt": "/steward",
-            "agentId": "claude",
-            "precheck": {"command": "python3 -m triggered_agents steward precheck"},
-            "reuseSession": True,
-            "enabled": False,
-            "workspaceMode": "existing",
-            "workspaceId": "repo-1::/home/dev/orca/workspaces/secretary/steward",
-            "runContext": {"path": "/home/dev/secretary"},
-            "rrule": "0 */3 * * *",
-        }
-        record.update(overrides)
-        return record
-
-    def test_a_matching_automation_has_no_drift(self):
-        self.assertEqual(drifted_fields(self.spec(), self.live()), ())
-
-    def test_a_stale_workspace_is_drift_even_when_prompt_and_precheck_match(self):
-        stale = self.live(
-            workspaceId="repo-2::/home/dev/orca/workspaces/triggered-agents/steward",
-            runContext={"path": "/home/dev/triggered-agents"},
-        )
-        self.assertEqual(drifted_fields(self.spec(), stale), ("repo", "workspace"))
-
-    def test_a_stale_workspace_becomes_a_repoint_at_the_desired_path(self):
-        stale = self.live(workspaceId="repo-2::/home/dev/orca/workspaces/triggered-agents/steward")
-        change = plan_automations([self.spec()], [stale])[0]
-
-        self.assertEqual((change.action, change.drifted), ("repoint", ("workspace",)))
-        argv = repoint_argv(self.spec(), change.automation_id)
-        self.assertIn("--id", argv)
-        self.assertIn("path:/home/dev/orca/workspaces/secretary/steward", argv)
-        self.assertNotIn("--repo", argv)
-        self.assertIn("--disabled", argv)
-        self.assertIn("--reuse-session", argv)
-
-    def test_orca_trigger_state_is_owned_by_the_spec(self):
-        self.assertEqual(drifted_fields(self.spec(), self.live(enabled=True)), ("enabled",))
-
-    def test_an_explicit_cron_is_compared_but_a_preset_expansion_is_not(self):
-        self.assertEqual(drifted_fields(self.spec(), self.live(rrule="0 */6 * * *")), ("trigger",))
-        preset = self.spec(trigger="daily")
-        self.assertEqual(drifted_fields(preset, self.live(rrule="FREQ=DAILY;BYHOUR=9")), ())
-
-    def test_a_missing_automation_is_a_create(self):
-        change = plan_automations([self.spec()], [])[0]
-        self.assertEqual((change.action, change.automation_id), ("create", ""))
-
-    def test_new_per_run_uses_repo_instead_of_workspace_selector(self):
-        argv = create_argv(self.spec(workspace_mode="new-per-run"))
-        self.assertIn("--repo", argv)
-        self.assertIn("path:/home/dev/secretary", argv)
-        self.assertNotIn("--workspace", argv)
-
-    def test_shipped_specs_skip_the_deterministic_dispatcher(self):
-        specs = {spec.name: spec for spec in load_specs(upgrade.running_product_root())}
-        self.assertNotIn("pipeline", specs)
-        self.assertEqual(specs["steward"].prompt, "/steward")
-        self.assertTrue(specs["steward"].workspace.endswith("/secretary/steward"))
-
-    def test_every_background_role_disables_its_orca_trigger(self):
-        # The systemd timer is the sole schedule owner on the headless box; the Orca automation
-        # itself stays --disabled so a non-headless orca (or a GUI re-enable) cannot double-fire a
-        # role alongside its timer. retro used to ship without this and would be created --enabled.
-        specs = {spec.name: spec for spec in load_specs(upgrade.running_product_root())}
-        for role in ("curator", "retro", "steward"):
-            self.assertFalse(specs[role].enabled, f"{role} Orca automation must be disabled")
-            self.assertIn("--disabled", create_argv(specs[role]))
-
-    def test_the_product_manifest_locates_the_shipped_specs_unchanged(self):
+class AgentSpecsTests(unittest.TestCase):
+    def test_the_product_manifest_locates_the_shipped_role_worktrees_unchanged(self):
         # secretary-1689: the specs are found through `[tool.secretary] agent-specs` instead of a
         # package name written into `secretary`. What they materialize must not move by a byte.
         product = upgrade.running_product_root()
@@ -560,19 +463,7 @@ class AutomationSpecTests(unittest.TestCase):
         workspaces = home / "orca" / "workspaces" / "secretary"
         with mock.patch.dict(os.environ):
             os.environ.pop("TA_WORKSPACES_ROOT", None)
-            specs = load_specs(product, repo="/repo", home=home)
             worktrees = upgrade.desired_role_worktrees(product, home)
-        self.assertEqual(
-            [(spec.name, spec.prompt, spec.precheck, spec.trigger, spec.workspace) for spec in specs],
-            [
-                ("curator", "/curate", "python3 -P -m triggered_agents curator precheck", "hourly",
-                 str(workspaces / "curator")),
-                ("retro", "/retro", "python3 -P -m triggered_agents retro precheck", "daily",
-                 str(workspaces / "retro")),
-                ("steward", "/steward", "python3 -P -m triggered_agents steward precheck", "0 */3 * * *",
-                 str(workspaces / "steward")),
-            ],
-        )
         self.assertEqual(worktrees, [workspaces / name for name in ("curator", "pipeline", "retro", "steward")])
 
     def test_the_product_manifest_decides_whether_any_specs_ship(self):
@@ -582,14 +473,14 @@ class AutomationSpecTests(unittest.TestCase):
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
             # No manifest, or a manifest that declares none: the product ships no agents.
-            self.assertEqual(load_specs(product), [])
+            self.assertIsNone(upgrade.agents_root(product))
             self.assertEqual(upgrade.desired_role_worktrees(product), [])
             manifest = product / "pyproject.toml"
             manifest.write_text("[project]\nname = 'x'\n", encoding="utf-8")
-            self.assertEqual(load_specs(product), [])
+            self.assertIsNone(upgrade.agents_root(product))
 
             manifest.write_text('[tool.secretary]\nagent-specs = "agents"\n', encoding="utf-8")
-            self.assertEqual([spec.name for spec in load_specs(product)], ["curator"])
+            self.assertEqual(upgrade.agents_root(product), product / "agents")
 
             for broken in (
                 "[tool.secretary\n",
@@ -599,10 +490,17 @@ class AutomationSpecTests(unittest.TestCase):
             ):
                 with self.subTest(broken=broken):
                     manifest.write_text(broken, encoding="utf-8")
-                    with self.assertRaises(AutomationError):
-                        load_specs(product)
+                    with self.assertRaises(upgrade.AgentSpecsError):
+                        upgrade.agents_root(product)
                     context = SimpleNamespace(product_root=product, runtime_home=None)
                     self.assertEqual(upgrade.step_worktrees(context).status, "failed")
+
+    def test_the_upgrade_has_no_orca_automations_step(self):
+        # secretary-1706: systemd units are the only schedule owner; upgrade neither creates nor
+        # repoints nor deletes Orca automations.
+        names = [step.__name__ for step in upgrade.STEPS]
+        self.assertFalse([name for name in names if "automation" in name], names)
+        self.assertNotIn("automations", {f.name for f in fields(upgrade.UpgradeContext)})
 
 
 class UpgradeStepTests(unittest.TestCase):
@@ -619,7 +517,6 @@ class UpgradeStepTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=units,
-            automations=None,
             report=_Report(),
         )
         return replace(base, **overrides)
@@ -1489,7 +1386,6 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            automations=None,
             report=_Report(),
         )
 
@@ -1852,60 +1748,6 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertIn("role skills:", output)
 
 
-class RunUpgradeClientOwnerTests(unittest.TestCase):
-    """`run_upgrade` builds the Orca clients for the account that owns the installation."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.instance = self.root / "instance"
-        self.instance.mkdir()
-
-    def build_context(self, *, euid: int):
-        report = SimpleNamespace(ok=True, errors=[], instance_path=self.instance / "instance.yaml")
-        args = SimpleNamespace(
-            instance=str(self.instance),
-            product_root=str(self.root / "product"),
-            base_branch="main",
-            dry_run=True,
-            host_fixture=None,
-            no_pull=True,
-            json=False,
-            runtime_user="operator",
-        )
-        captured = {}
-
-        def remember(name):
-            def build(user=None):
-                captured[name] = user
-                return mock.Mock()
-
-            return build
-
-        with (
-            mock.patch.object(upgrade, "validate_instance", return_value=report),
-            mock.patch.object(
-                upgrade, "resolve_runtime_owner", return_value=("operator", Path("/home/operator"))
-            ),
-            mock.patch.object(upgrade.os, "geteuid", return_value=euid),
-            mock.patch.object(upgrade, "OrcaAutomationClient", remember("automations")),
-            mock.patch.object(upgrade, "SystemdUnitInstaller", mock.Mock()),
-            mock.patch.object(upgrade, "run_steps", return_value=upgrade.UpgradeResult()),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            upgrade.run_upgrade(args)
-        return captured
-
-    def test_root_run_reaches_orca_through_the_runtime_user(self):
-        """Root has no Orca runtime of its own; the automations step must not call the CLI as root."""
-        self.assertEqual(self.build_context(euid=0), {"automations": "operator"})
-
-    def test_unprivileged_run_calls_orca_directly(self):
-        """`runuser` is root's tool: an owner running the upgrade is already the right account."""
-        self.assertEqual(self.build_context(euid=1000), {"automations": None})
-
-
 class HealthUnitNameTests(unittest.TestCase):
     def test_agents_map_to_the_packaged_units_not_the_retired_ta_names(self):
         from triggered_agents.runtime import health
@@ -2125,7 +1967,6 @@ class InstanceHeadCanonTests(unittest.TestCase):
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            automations=None,
             report=_Report(),
         )
 

@@ -119,7 +119,6 @@ def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
         base_branch="main",
         dry_run=False,
         units=units,
-        automations=None,
         report=report,
     )
     return replace(base, **overrides)

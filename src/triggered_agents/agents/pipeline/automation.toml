@@ -1,11 +1,11 @@
-# Portable automation spec for the pipeline board CLI.
+# Portable spec for the pipeline board CLI.
 #
 # `pipeline` is not a scheduled agent: it has no LLM head and no tick of its own. The spec exists
 # so the role gets its own worktree and shows up in the agent inventory alongside the heads. Task
 # dispatch is secretary/dispatch/production.py, on secretary-dispatcher-production.timer.
 
 name = "pipeline"
-dispatcher = true          # no skill, no head: `secretary upgrade` provisions no Orca automation
+dispatcher = true          # no skill, no head: nothing for a triggered-agent timer to launch
 
 [health]
 # Freshness budget for health.py's runs.jsonl check. Board writes come from whoever drives the
