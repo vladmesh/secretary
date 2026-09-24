@@ -60,13 +60,14 @@ class HermeticCodexHomeTests(unittest.TestCase):
         installation_home = Path(codex_preflight.CODEX_HOME_DEFAULT)
         self.assertNotEqual(suite_home, installation_home)
         self.assertFalse(suite_home.is_relative_to(installation_home))
-        # Every reader resolves the seam at the call, so all of them agree on the suite's home.
+        # Every reader resolves the seam at the call, so all of them put the suite's home first.
+        # (Readers also scan the installation homes that exist, read-only, for live heads.)
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
         with mock.patch.dict(os.environ):
             os.environ.pop("TA_CODEX_SESSIONS", None)
             os.environ.pop("SECRETARY_CODEX_SESSIONS", None)
-            self.assertEqual(dispatcher_tui._sessions_root(), suite_home / "sessions")
-            self.assertEqual(pipeline_codex_sessions.sessions_root(), suite_home / "sessions")
+            self.assertEqual(dispatcher_tui._sessions_roots()[0], suite_home / "sessions")
+            self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], suite_home / "sessions")
 
     def test_a_worker_and_a_reviewer_bring_up_write_only_where_the_run_owns(self) -> None:
         """The regression proper: the two roles whose launch tests wrote into the live config.

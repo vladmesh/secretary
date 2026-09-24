@@ -12,14 +12,19 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from secretary.automations.agents.curator import discover
 from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
+from secretary.automations.runtime import dispatch as automations_dispatch
 from secretary.dispatch import commands as dispatch_commands
+from secretary.dispatch import tui as dispatcher_tui
 from secretary.runtime import codex_home as codex_home_module
 from secretary.runtime import codex_preflight, heads
 from secretary.runtime.codex_preflight import (
@@ -169,11 +174,131 @@ class ResolverOrderTests(unittest.TestCase):
         trusted = (self.data_home / codex_preflight.CODEX_CONFIG_FILE).read_text(encoding="utf-8")
         self.assertIn(str(workspace.resolve()), trusted)
 
-    def test_the_session_reader_follows_the_login(self) -> None:
+    def test_the_session_readers_put_the_current_home_first(self) -> None:
         os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
-        self.assertEqual(pipeline_codex_sessions.sessions_root(), Path(CODEX_HOME_DEFAULT) / "sessions")
+        self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], Path(CODEX_HOME_DEFAULT) / "sessions")
         self.log_in()
-        self.assertEqual(pipeline_codex_sessions.sessions_root(), self.data_home / "sessions")
+        self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
+
+
+class LiveSessionCutoverTests(unittest.TestCase):
+    """Session readers never depend on which home is current (secretary-1710, round 3).
+
+    A head keeps the CODEX_HOME it was launched with. One that came up on the legacy home keeps
+    writing its rollout there after the PO logs in to the data-dir home, and the delivery
+    confirmation, the activity signal and the recovery proof must all still find its turns.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.home = self.root / "home"
+        self.legacy = self.home / ".config" / "orca" / "codex-runtime-home" / "home"
+        self.data_dir = self.root / "data"
+        self.data_home = self.data_dir / "codex-home"
+        self.workspace = self.root / "workspace"
+        for path in (self.legacy, self.data_home, self.workspace):
+            path.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ,
+            {
+                **_without(
+                    "TA_CODEX_HOME",
+                    "SECRETARY_INSTANCE",
+                    "TA_CODEX_SESSIONS",
+                    "SECRETARY_CODEX_SESSIONS",
+                    "TA_CODEX_SESSIONS_DIR",
+                ),
+                "HOME": str(self.home),
+                "SECRETARY_DATA_DIR": str(self.data_dir),
+            },
+            clear=True,
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        # The curator reads its override once at import; unset, it scans every home.
+        curator = mock.patch.object(discover, "CODEX_SESSIONS", None)
+        curator.start()
+        self.addCleanup(curator.stop)
+        self.assertEqual(codex_home_module.legacy_codex_home(), str(self.legacy))
+
+    def log_in(self) -> None:
+        (self.data_home / "auth.json").write_text('{"tokens": "fixture"}\n', encoding="utf-8")
+
+    def rollout(self, home: Path, name: str, *, turn_at: datetime) -> Path:
+        """One rollout for this workspace, dated today, holding one interactive user turn."""
+        day = home / "sessions" / f"{turn_at:%Y}" / f"{turn_at:%m}" / f"{turn_at:%d}"
+        day.mkdir(parents=True, exist_ok=True)
+        path = day / f"rollout-{name}.jsonl"
+        meta = {"type": "session_meta", "payload": {"id": name, "cwd": str(self.workspace)}}
+        turn = {
+            "timestamp": turn_at.isoformat().replace("+00:00", "Z"),
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": []},
+        }
+        path.write_text(json.dumps(meta) + "\n" + json.dumps(turn) + "\n", encoding="utf-8")
+        return path
+
+    def assert_every_reader_finds_the_turn(self, sent_at: float) -> None:
+        workspace = str(self.workspace)
+        self.assertTrue(automations_dispatch._codex_turn_after(workspace, sent_at))
+        latest = pipeline_codex_sessions.latest_activity_for(workspace)
+        self.assertIsNotNone(latest)
+        self.assertTrue(dispatcher_tui.provider_turn_started(workspace, sent_at, adapter="codex"))
+        self.assertIsNotNone(dispatcher_tui.latest_user_turn_for(workspace, sent_at))
+        self.assertTrue(
+            dispatcher_tui.terminal_turn_started("pane", workspace=workspace, since=sent_at, adapter="codex")
+        )
+        self.assertEqual([entry["cwd"] for entry in discover.codex_sessions()], [workspace])
+
+    def test_a_head_on_the_legacy_home_is_still_found_after_the_login(self) -> None:
+        now = datetime.now(UTC)
+        sent_at = (now - timedelta(seconds=30)).timestamp()
+        # Launched before the login: the launch resolves the legacy home and the head writes there.
+        self.assertEqual(codex_home({}), str(self.legacy))
+        self.rollout(self.legacy, "legacy-head", turn_at=now - timedelta(seconds=60))
+
+        self.log_in()
+        self.assertEqual(codex_home({}), str(self.data_home))
+        # Its later turn lands in the legacy rollout it has been writing all along.
+        later = self.rollout(self.legacy, "legacy-head", turn_at=now)
+        os.utime(later, (now.timestamp(), now.timestamp()))
+
+        self.assert_every_reader_finds_the_turn(sent_at)
+
+    def test_a_head_on_the_data_dir_home_is_found(self) -> None:
+        self.log_in()
+        now = datetime.now(UTC)
+        self.rollout(self.data_home, "data-head", turn_at=now)
+        self.assert_every_reader_finds_the_turn((now - timedelta(seconds=30)).timestamp())
+
+    def test_with_both_homes_present_a_session_is_counted_once(self) -> None:
+        self.log_in()
+        now = datetime.now(UTC)
+        self.rollout(self.data_home, "data-head", turn_at=now)
+        # The data-dir home is both the current home and a candidate of its own, and a legacy
+        # `sessions/` that is a link to it names the same files again.
+        (self.legacy / "sessions").symlink_to(self.data_home / "sessions", target_is_directory=True)
+
+        self.assertEqual(len(codex_home_module.session_roots()), 1)
+        self.assertEqual(len(list(pipeline_codex_sessions._session_paths_for(str(self.workspace)))), 1)
+        self.assertEqual(len(list(dispatcher_tui._session_paths_for(str(self.workspace)))), 1)
+        self.assertEqual(len(discover.codex_sessions()), 1)
+
+    def test_a_sessions_override_is_the_only_root(self) -> None:
+        self.log_in()
+        override = self.root / "override"
+        override.mkdir()
+        os.environ["TA_CODEX_SESSIONS"] = str(override)
+        self.assertEqual(pipeline_codex_sessions.sessions_roots(), [override])
+        self.assertEqual(dispatcher_tui._sessions_roots(), [override])
+        os.environ.pop("TA_CODEX_SESSIONS")
+        os.environ["SECRETARY_CODEX_SESSIONS"] = str(override)
+        self.assertEqual(dispatcher_tui._sessions_roots(), [override])
+        with mock.patch.object(discover, "CODEX_SESSIONS", override):
+            self.rollout(self.data_home, "data-head", turn_at=datetime.now(UTC))
+            self.assertEqual(discover.codex_sessions(), [])
 
 
 class NoImportTimeHomeTests(unittest.TestCase):

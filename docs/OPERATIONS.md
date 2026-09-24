@@ -206,9 +206,13 @@ secretary doctor --offline --instance INSTANCE | grep 'codex home'
 `doctor --json` returns the same answer in `codex_home` (`path`, `kind`, `data_dir_home`,
 `migration_pending`). A pending migration is only a warning and does not change doctor's exit status.
 Nothing else needs to change. Heads launched after the login use the new home, and heads already
-running keep the home they started with. Session readers (the watchdog's activity signal and the
-curator) switch to the new home's `sessions/` from the same moment. The legacy home is not moved or
-deleted, and nothing is copied out of it.
+running keep the home they started with. Every session reader scans the `sessions/` of the current home,
+of the legacy home and of the data-dir home, whichever of them exist. So a head that started on the
+legacy home is still found after the login. This covers the watchdog's activity signal, the delivery
+confirmation for service heads, the dispatcher's continuation recovery proof and the curator. Each
+reader counts a session only once. An explicit sessions override (`TA_CODEX_SESSIONS`,
+`SECRETARY_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root while it is set. The
+legacy home is not moved or deleted, and nothing is copied out of it.
 
 ### The PO workspace
 

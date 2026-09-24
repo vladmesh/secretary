@@ -23,16 +23,14 @@ import json
 import os
 from pathlib import Path
 
-from secretary.runtime.codex_home import installation_codex_home
+from secretary.runtime.codex_home import session_roots
 
 
-def sessions_root() -> Path:
-    """Where Codex heads write their rollouts: `TA_CODEX_SESSIONS`, else the active CODEX_HOME's.
-
-    Resolved per call, so the switch to the data-dir home is seen the tick after the login.
-    """
+def sessions_roots() -> list[Path]:
+    """Where Codex heads write their rollouts: `TA_CODEX_SESSIONS` alone when set, else every home
+    a live head may be writing into (`codex_home.session_roots`), not only the current one."""
     configured = os.environ.get("TA_CODEX_SESSIONS")
-    return Path(configured) if configured else Path(installation_codex_home().path) / "sessions"
+    return [Path(configured)] if configured else session_roots()
 
 
 # A TUI head alive right now wrote its rollout today, or yesterday across midnight.
@@ -96,19 +94,22 @@ def _recent_day_dirs(root: Path, limit: int = SCAN_DAY_DIRS) -> list[Path]:
 
 
 def _session_paths_for(workspace: str):
-    root = sessions_root()
-    if not root.is_dir():
-        return
     want = str(Path(workspace).resolve(strict=False))
-    for day_dir in _recent_day_dirs(root):
-        try:
-            files = list(day_dir.glob("*.jsonl"))
-        except OSError:
+    seen: set[Path] = set()
+    for root in sessions_roots():
+        if not root.is_dir():
             continue
-        for path in files:
-            if session_cwd(path) != want:
+        for day_dir in _recent_day_dirs(root):
+            try:
+                files = list(day_dir.glob("*.jsonl"))
+            except OSError:
                 continue
-            yield path
+            for path in files:
+                key = path.resolve(strict=False)
+                if key in seen or session_cwd(path) != want:
+                    continue
+                seen.add(key)
+                yield path
 
 
 def latest_activity_for(workspace: str) -> float | None:

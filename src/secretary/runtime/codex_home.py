@@ -15,7 +15,12 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from secretary.runtime.codex_preflight import CodexHome, resolve_codex_home
+from secretary.runtime.codex_preflight import (
+    CodexHome,
+    data_dir_codex_home,
+    legacy_codex_home,
+    resolve_codex_home,
+)
 
 DATA_DIR_ENV = "SECRETARY_DATA_DIR"
 INSTANCE_ENV = "SECRETARY_INSTANCE"
@@ -44,6 +49,32 @@ def selected_data_dir() -> Path | None:
 def installation_codex_home(profile: Mapping[str, Any] | None = None) -> CodexHome:
     """The CODEX_HOME this process's installation launches Codex heads with."""
     return resolve_codex_home(profile or {}, data_dir=selected_data_dir())
+
+
+def session_roots() -> list[Path]:
+    """Every `sessions/` a live Codex head of this installation may be writing its rollout into.
+
+    The home a launch would resolve to now comes first, then the legacy home and the data-dir home
+    whenever their `sessions/` exists, each directory once (symlinks resolved). A head keeps the
+    CODEX_HOME it was launched with, so a head that came up on the legacy home keeps writing
+    there after the PO logs in to the data-dir home: a reader that followed only the current
+    home would lose it. Session readers therefore never depend on which home is current.
+    """
+    candidates = [Path(installation_codex_home().path) / "sessions", Path(legacy_codex_home()) / "sessions"]
+    data_home = data_dir_codex_home(selected_data_dir())
+    if data_home is not None:
+        candidates.append(data_home / "sessions")
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for index, root in enumerate(candidates):
+        if index and not root.is_dir():
+            continue
+        key = root.resolve(strict=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return roots
 
 
 @contextlib.contextmanager
