@@ -485,8 +485,9 @@ secrets ([Protocols](PROTOCOLS.md#knowledge)).
   managed manifest or a product-written marker. Its kinds are project checkouts and systemd units;
   Orca repo registrations are Orca's own state, which reconcile and `doctor` neither create, check
   nor remove (an `orca` record an older reconcile left in the managed manifest is kept, untouched).
-  A binding's `orca_binding` is optional legacy, read only by orca-legacy heads; new projects have
-  none and run on local-pty heads in git workspaces. The observer root's session-manager
+  A binding's `orca_binding` is optional legacy, read by orca-legacy heads and by curator routing of
+  historical sessions ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none
+  and run on local-pty heads in git workspaces. The observer root's session-manager
   registration is created lazily by the dispatcher.
 - Store-registered secrets reach instance Git only as encrypted envelopes. The raw installation key,
   the recovery phrase and `runtime.env` stay out of Git. Facts, exports and diagnostics carry no
