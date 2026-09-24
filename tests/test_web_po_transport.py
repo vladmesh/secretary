@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 
 from secretary.config import validate
 from secretary.po import token as po_token
-from secretary.po.models import DEFAULT_MODELS, models_from_instance
+from secretary.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
 from secretary.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
 from secretary.web.server import build_server
 from secretary.webproto.errors import InstallationUnavailable, RuntimeUnavailable
@@ -346,6 +346,24 @@ class PoModelListTests(unittest.TestCase):
             {"models": {"claude": [""]}},
             {"models": {"claude": "opus"}},
             {"other": True},
+        ):
+            with self.subTest(bad=bad):
+                self.assertTrue(validate({**self.INSTANCE, "po": bad}, "instance", "instance.yaml"))
+
+    def test_efforts_default_per_cli_and_a_configured_list_replaces_one_cli(self) -> None:
+        self.assertEqual(efforts_from_instance(self.INSTANCE), DEFAULT_EFFORTS)
+        self.assertEqual(DEFAULT_EFFORTS["claude"], ("default", "low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(DEFAULT_EFFORTS["codex"], ("default", "low", "medium", "high", "xhigh"))
+        efforts = efforts_from_instance(
+            {**self.INSTANCE, "po": {"efforts": {"claude": ["high"], "codex": []}}}
+        )
+        self.assertEqual(efforts, {"claude": ("high",), "codex": ()})
+        good = {**self.INSTANCE, "po": {"efforts": {"claude": ["default", "max"], "codex": ["xhigh"]}}}
+        self.assertEqual(validate(good, "instance", "instance.yaml"), [])
+        for bad in (
+            {"efforts": {"claude": ["turbo"]}},
+            {"efforts": {"codex": ["max"]}},
+            {"efforts": {"gemini": []}},
         ):
             with self.subTest(bad=bad):
                 self.assertTrue(validate({**self.INSTANCE, "po": bad}, "instance", "instance.yaml"))

@@ -5,7 +5,7 @@ and kept: its waiter threads own the turns it started, and a second runner in th
 not know about them. Every rule about turns — one running per session, how a stop settles, what
 reaches the feed — and about request ids stays in `secretary.po.runner` and `secretary.po.store`
 (`po_requests`, decided in the transaction that creates the session or the turn); this layer checks the
-model list and translates the store's vocabulary into this package's typed codes.
+model and effort lists and translates the store's vocabulary into this package's typed codes.
 """
 
 from __future__ import annotations
@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
-from secretary.po.models import models_from_instance
+from secretary.po.models import DEFAULT_EFFORTS, efforts_from_instance, models_from_instance
 from secretary.po.runner import PoRunner, RunnerError
 from secretary.po.store import (
+    DEFAULT_EFFORT,
     OWNER,
     RUNNING,
     SESSION_CLOSED,
@@ -46,7 +47,11 @@ from secretary.webproto.po_recovery import recover_po_turns
 
 
 class PoLayer(ProtocolBoundary):
-    """One installation's PO sessions. Construction does no I/O; `runner` and `models` are test seams."""
+    """One installation's PO sessions. Construction does no I/O; `runner`, `models` and `efforts` are test seams.
+
+    A layer given `models` and no `efforts` offers the product's default efforts rather than reading
+    `instance.yaml` for them.
+    """
 
     def __init__(
         self,
@@ -56,6 +61,7 @@ class PoLayer(ProtocolBoundary):
         runner: PoRunner | None = None,
         runner_factory: Callable[[Path], PoRunner] | None = None,
         models: Mapping[str, tuple[str, ...]] | None = None,
+        efforts: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
@@ -64,6 +70,7 @@ class PoLayer(ProtocolBoundary):
             lambda data_dir: PoRunner.for_instance(self.instance, data_dir)
         )
         self._models = dict(models) if models is not None else None
+        self._efforts = dict(efforts) if efforts is not None else None
         self._lock = threading.Lock()
 
     # --- service start ----------------------------------------------------------------------
@@ -87,6 +94,7 @@ class PoLayer(ProtocolBoundary):
         return {
             "kind": "po_models",
             "models": {cli: list(values) for cli, values in self._model_list().items()},
+            "efforts": {cli: list(values) for cli, values in self._effort_list().items()},
         }
 
     def po_running_count(self) -> dict[str, Any]:
@@ -114,7 +122,7 @@ class PoLayer(ProtocolBoundary):
             "closed_count": closed_count,
             "sessions": items,
             "running": len(running),
-            "models": self.po_models()["models"],
+            **{key: value for key, value in self.po_models().items() if key != "kind"},
         }
 
     def po_session(self, session_id: str) -> dict[str, Any]:
@@ -135,8 +143,14 @@ class PoLayer(ProtocolBoundary):
 
     # --- writes -----------------------------------------------------------------------------
 
-    def po_create_session(self, *, request_id: str, cli: str, model: str) -> dict[str, Any]:
-        """One session per request id (`PoStore.claim_session`); a repeat answers the same session."""
+    def po_create_session(
+        self, *, request_id: str, cli: str, model: str, effort: str = DEFAULT_EFFORT
+    ) -> dict[str, Any]:
+        """One session per request id (`PoStore.claim_session`); a repeat answers the same session.
+
+        `effort` is one the installation offers for `cli`, or `default` (no effort flag), which is
+        always accepted; it is bound to the request id with the CLI and the model.
+        """
         request_id = _required(request_id, "request_id")
         models = self._model_list()
         if cli not in models or not models[cli]:
@@ -146,12 +160,21 @@ class PoLayer(ProtocolBoundary):
             raise ValidationRefused(
                 f"{model!r} is not a model this installation offers for {cli}: {', '.join(models[cli])}"
             )
+        effort = str(effort or "").strip() or DEFAULT_EFFORT
+        if effort != DEFAULT_EFFORT:
+            efforts = self._effort_list().get(cli, ())
+            if effort not in efforts:
+                offered = ", ".join(dict.fromkeys((DEFAULT_EFFORT, *efforts)))
+                raise ValidationRefused(
+                    f"{effort!r} is not an effort this installation offers for {cli}: {offered}"
+                )
         runner = self._runner_or_refuse()
-        session, created = self._store(lambda: runner.create_session_request(cli, model, request_id))
+        session, created = self._store(lambda: runner.create_session_request(cli, model, request_id, effort))
         return {
             "kind": "po_session_created",
             "request_id": request_id,
             "session_id": session.session_id,
+            "effort": session.effort,
             "repeated": not created,
         }
 
@@ -223,9 +246,20 @@ class PoLayer(ProtocolBoundary):
     def _model_list(self) -> dict[str, tuple[str, ...]]:
         if self._models is not None:
             return self._models
+        return models_from_instance(self._instance_config())
+
+    def _effort_list(self) -> dict[str, tuple[str, ...]]:
+        if self._efforts is not None:
+            return self._efforts
+        if self._models is not None:
+            # A layer whose model list is injected reads no config for its efforts either.
+            return dict(DEFAULT_EFFORTS)
+        return efforts_from_instance(self._instance_config())
+
+    def _instance_config(self) -> Any:
         path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
         try:
-            return models_from_instance(load_config(path))
+            return load_config(path)
         except ConfigError as exc:
             raise InstallationUnavailable(str(exc)) from None
 
@@ -263,6 +297,9 @@ def _session(session: Session, *, running: bool) -> dict[str, Any]:
         "session_id": session.session_id,
         "cli": session.cli,
         "model": session.model,
+        "effort": session.effort,
+        # What the latest turn that reported one ran; null before any did (`Turn.resolved_model`).
+        "resolved_model": session.resolved_model,
         "created_at": _time(session.created_at),
         "state": session.state,
         "closed_at": _time(session.closed_at),
@@ -278,6 +315,7 @@ def _turn(turn: Turn) -> dict[str, Any]:
         "started_at": _time(turn.started_at),
         "finished_at": _time(turn.finished_at),
         "reason": turn.reason,
+        "resolved_model": turn.resolved_model,
     }
 
 

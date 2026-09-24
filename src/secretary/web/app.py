@@ -142,7 +142,7 @@ PO_PREFIX = PO_COOKIE_PATH
 #: The only /po routes answered without a valid cookie.
 PO_OPEN_ROUTES = frozenset({("POST", "/po/login")})
 PO_LOGIN_FIELDS = frozenset({"token"})
-PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model"})
+PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model", "effort"})
 PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
 PO_CLOSE_FIELDS: frozenset[str] = frozenset()
@@ -786,8 +786,12 @@ class WebApp:
     def _po_create(self, _params, _query, body) -> Response:
         _fields(body, PO_CREATE_FIELDS, "PO session create")
         cli, model = _first(body, "cli"), _first(body, "model")
+        # A form from before efforts were offered carries none; that is the CLI's own default.
+        effort = _first(body, "effort") or "default"
         try:
-            created = self.po.po_create_session(request_id=_first(body, "request_id"), cli=cli, model=model)
+            created = self.po.po_create_session(
+                request_id=_first(body, "request_id"), cli=cli, model=model, effort=effort
+            )
         except ReadError as exc:
             return _html(
                 status_for(exc.code),
@@ -795,7 +799,7 @@ class WebApp:
                     self.po.po_overview(),
                     request_id=_po_request_id(),
                     refusal=exc.to_json(),
-                    submitted={"cli": cli, "model": model},
+                    submitted={"cli": cli, "model": model, "effort": effort},
                 ),
             )
         return _redirect(f"/po/sessions/{quote(str(created['session_id']))}", what="the session is open")

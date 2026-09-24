@@ -82,6 +82,15 @@
             "claude": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
             "codex": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
           }
+        },
+        "efforts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Reasoning efforts a PO session may be opened with, per CLI (Claude --effort, Codex -c model_reasoning_effort=). A CLI not named keeps the product default (claude: default, low, medium, high, xhigh, max; codex: default, low, medium, high, xhigh); `default` passes no flag and is always accepted.",
+          "properties": {
+            "claude": {"type": "array", "uniqueItems": true, "items": {"enum": ["default", "low", "medium", "high", "xhigh", "max"]}},
+            "codex": {"type": "array", "uniqueItems": true, "items": {"enum": ["default", "minimal", "low", "medium", "high", "xhigh"]}}
+          }
         }
       }
     },

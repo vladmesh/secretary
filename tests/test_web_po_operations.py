@@ -25,7 +25,7 @@ from secretary.po.models import DEFAULT_MODELS
 from secretary.po.runner import PoRunner
 from secretary.po.store import PoStore
 from secretary.web.app import WebApp
-from secretary.webproto.errors import ValidationRefused
+from secretary.webproto.errors import PoRequestConflict, ValidationRefused
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually
@@ -66,9 +66,9 @@ class PoWebOperationTests(unittest.TestCase):
         config = BOARD.fresh_database()
         self.addCleanup(BOARD.drop_database, config.dbname)
         self.store = PoStore(config.for_role("app"))
-        self.runner = PoRunner(
-            self.store, self.data, executables=executables, env={**os.environ, "FAKE_LOG": str(self.log)}
-        )
+        # The Codex home is the test's own, so no turn reads a rollout of this host's.
+        env = {**os.environ, "FAKE_LOG": str(self.log), "CODEX_HOME": str(self.root / "codex-home")}
+        self.runner = PoRunner(self.store, self.data, executables=executables, env=env)
         self.addCleanup(self.stop_everything)
         self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=MODELS)
         po_token.ensure_token(self.data)
@@ -169,7 +169,12 @@ class PoWebOperationTests(unittest.TestCase):
         )
         form = self.get("/po").body.decode()
         self.assertIn('<option value="fable" data-cli="claude" selected>', form)
-        self.assertEqual(form.count(" selected>"), 2, "only the CLI and its first model are preselected")
+        self.assertIn('<option value="default" data-cli="claude" selected>CLI default</option>', form)
+        self.assertEqual(
+            form.count(" selected>"),
+            3,
+            "only the CLI, its first model and the CLI's default effort are preselected",
+        )
 
         created = []
         for cli, model in (("claude", "fable"), ("codex", "gpt-6-astra")):
@@ -185,6 +190,45 @@ class PoWebOperationTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status, 400)
         self.assertEqual(sorted(item.session_id for item in self.store.sessions()), sorted(created))
+
+    def test_a_session_opens_with_an_offered_effort_and_one_outside_the_list_is_refused(self) -> None:
+        self.layer = PoLayer(
+            self.root,
+            data_dir=self.data,
+            runner=self.runner,
+            models=MODELS,
+            efforts={"claude": ("high", "max"), "codex": ()},
+        )
+        self.assertEqual(self.layer.po_models()["efforts"], {"claude": ["high", "max"], "codex": []})
+
+        created = self.layer.po_create_session(
+            request_id="effort-1", cli="claude", model="opus", effort="max"
+        )
+        self.assertEqual(created["effort"], "max")
+        self.assertEqual(self.store.session(created["session_id"]).effort, "max")
+        # `default` passes no flag and is always accepted, listed or not.
+        plain = self.layer.po_create_session(request_id="effort-2", cli="codex", model="gpt-5.6-sol")
+        self.assertEqual(self.store.session(plain["session_id"]).effort, po_store.DEFAULT_EFFORT)
+
+        for cli, model, effort in (("claude", "opus", "low"), ("codex", "gpt-5.6-sol", "high")):
+            with self.subTest(cli=cli, effort=effort), self.assertRaises(ValidationRefused):
+                self.layer.po_create_session(request_id=f"bad-{effort}", cli=cli, model=model, effort=effort)
+        # The effort is one of the inputs its request id is bound to.
+        with self.assertRaises(PoRequestConflict):
+            self.layer.po_create_session(request_id="effort-1", cli="claude", model="opus", effort="high")
+        self.assertEqual(len(self.store.sessions()), 2)
+
+    def test_the_session_documents_carry_the_effort_and_the_model_each_turn_resolved_to(self) -> None:
+        session_id = self.create("claude", "sonnet")
+        self.assertEqual(self.send(session_id, "hello", "send-1").status, 303)
+        self.settle(session_id)
+
+        document = self.document(session_id)
+        self.assertEqual(document["session"]["effort"], po_store.DEFAULT_EFFORT)
+        self.assertEqual(document["session"]["resolved_model"], "claude-sonnet-5")
+        self.assertEqual(document["turns"][0]["resolved_model"], "claude-sonnet-5")
+        (listed,) = self.layer.po_overview()["sessions"]
+        self.assertEqual((listed["effort"], listed["resolved_model"]), ("default", "claude-sonnet-5"))
 
     def test_the_new_session_form_preselects_the_first_model_of_the_chosen_cli(self) -> None:
         from secretary.web.pages import _PO_FORM_SCRIPT, _po_new_session_form
@@ -202,7 +246,9 @@ class PoWebOperationTests(unittest.TestCase):
                 cli, model = expected
                 self.assertIn(f'<option value="{cli}" selected>', form)
                 self.assertIn(f'<option value="{model}" data-cli="{cli}" selected>', form)
-                self.assertEqual(form.count(" selected>"), 2)
+                # The effort starts at the CLI's own default: no flag is passed until one is chosen.
+                self.assertIn(f'<option value="default" data-cli="{cli}" selected>CLI default</option>', form)
+                self.assertEqual(form.count(" selected>"), 3)
         # Changing the CLI in the browser selects that CLI's first listed model.
         self.assertIn("if (owned && first === null) first = option;", _PO_FORM_SCRIPT)
         self.assertIn("if ((!current || current.disabled) && first) first.selected = true;", _PO_FORM_SCRIPT)
@@ -554,6 +600,8 @@ class PoWebOperationTests(unittest.TestCase):
                 "state",
                 "closed_at",
                 "closed_by",
+                "effort",
+                "resolved_model",
                 "running",
                 "first_message",
                 "last_activity_at",
@@ -764,7 +812,9 @@ class PoWebOperationTests(unittest.TestCase):
 
     def new_session_form(self, page: str) -> list[tuple[str, str]]:
         """The fields the `new session` form on a session page would post, in the order it lists them."""
-        form = page[page.index('<form class="po-new"') : page.index("</form>", page.index('<form class="po-new"'))]
+        form = page[
+            page.index('<form class="po-new"') : page.index("</form>", page.index('<form class="po-new"'))
+        ]
         self.assertIn('action="/po/sessions"', form)
         return re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', form)
 
@@ -811,7 +861,33 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertLess(page.index("</form>"), page.index('<div class="po-controls">'))
         self.assertIn('<button type="submit" form="po-send">send</button>', page)
         # The script still finds the button to disable it, now by that association.
-        self.assertIn("const button = document.querySelector('button[form=\"po-send\"]');", _PO_SESSION_SCRIPT)
+        self.assertIn(
+            "const button = document.querySelector('button[form=\"po-send\"]');", _PO_SESSION_SCRIPT
+        )
+
+    def test_the_form_opens_a_session_with_the_chosen_effort_and_every_page_names_it(self) -> None:
+        response = self.post(
+            "/po/sessions",
+            [("request_id", "create-high"), ("cli", "claude"), ("model", "opus"), ("effort", "high")],
+        )
+        self.assertEqual(response.status, 303, response.body.decode())
+        session_id = response.headers["Location"].rsplit("/", 1)[1]
+        self.assertEqual(self.document(session_id)["session"]["effort"], "high")
+
+        listing = self.get("/po").body.decode()
+        self.assertIn('<label for="po-effort">reasoning effort</label>', listing)
+        self.assertIn("<span>high</span>", listing)
+        page = self.page(session_id)
+        self.assertIn('<span class="head-chip"', page)
+        self.assertEqual(dict(self.new_session_form(page))["effort"], "high")
+
+    def test_an_effort_the_installation_does_not_offer_is_refused_on_the_form(self) -> None:
+        response = self.post(
+            "/po/sessions",
+            [("request_id", "create-odd"), ("cli", "claude"), ("model", "opus"), ("effort", "turbo")],
+        )
+        self.assertEqual(response.status, 400)
+        self.assertIn("turbo", response.body.decode())
 
     def test_a_new_session_from_a_session_page_reuses_its_cli_and_model_and_leaves_it_open(self) -> None:
         """`new session` posts the `/po` form's own route; the session being read is not touched."""
@@ -819,7 +895,8 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual(self.send(session_id, "hello", "message-1").status, 303)
         self.settle(session_id)
         fields = self.new_session_form(self.page(session_id))
-        self.assertEqual([name for name, _ in fields], ["request_id", "cli", "model"])
+        self.assertEqual([name for name, _ in fields], ["request_id", "cli", "model", "effort"])
+        self.assertEqual(dict(fields)["effort"], "default")
         self.assertEqual(dict(fields)["cli"], "codex")
         self.assertEqual(dict(fields)["model"], "gpt-5.6-sol")
 

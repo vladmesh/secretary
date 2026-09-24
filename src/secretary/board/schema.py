@@ -802,6 +802,8 @@ class PoSession(Base):
     # The owner's close (0010): both set exactly when the session is closed, never cleared.
     closed_at = sa.Column(TIMESTAMPTZ)
     closed_by = sa.Column(sa.Text)
+    # The reasoning effort chosen at creation (0015); `default` passes the CLI no effort flag.
+    effort = sa.Column(sa.Text, nullable=False, server_default=sa.text("'default'"))
 
     __table_args__ = (
         sa.CheckConstraint("cli IN ('claude','codex')", name="po_session_cli_in_vocabulary"),
@@ -828,6 +830,8 @@ class PoTurn(Base):
     # Boot id and kernel start time of `pid`: recovery kills only the process it started.
     process_identity = sa.Column(sa.Text)
     reason = sa.Column(sa.Text)
+    # The model the CLI reported it ran for this turn (0015), null when it reported none.
+    resolved_model = sa.Column(sa.Text)
 
     __table_args__ = (
         sa.CheckConstraint(

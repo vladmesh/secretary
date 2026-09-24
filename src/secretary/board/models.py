@@ -567,6 +567,25 @@ def _validate_control_marker_event(
         raise ValueError("Card decision event has duplicate protocol prerequisites")
 
 
+def check_attempt_usage_resolved(model: Any, models: Any, effort: Any) -> None:
+    """The resolved-model fields of an ``attempt.usage`` occurrence, one rule for both boundaries."""
+    shaped = (
+        isinstance(model, str)
+        and isinstance(effort, str)
+        and isinstance(models, (list, tuple))
+        and all(isinstance(item, str) and item.strip() for item in models)
+    )
+    if not shaped:
+        raise ValueError(
+            "attempt usage resolved_model and resolved_effort are strings and resolved_models "
+            "a list of non-empty model ids"
+        )
+    if len(set(models)) != len(models):
+        raise ValueError("attempt usage resolved_models names each model once")
+    if model != (models[-1] if models else ""):
+        raise ValueError("attempt usage resolved_model is the last of resolved_models")
+
+
 def _validate_attempt_usage_event(
     kind: EventKind,
     entity_kind: EntityKind,
@@ -602,6 +621,11 @@ def _validate_attempt_usage_event(
     # under a source that says so, which is exactly the routing journal's own rule.
     if not isinstance(model, str) or not isinstance(model_source, str) or not model_source:
         raise ValueError("attempt usage events carry a model string and where it was resolved")
+    # Added after release: an occurrence written before them carries none of the three.
+    if any(name in data for name in ("resolved_model", "resolved_models", "resolved_effort")):
+        check_attempt_usage_resolved(
+            data.get("resolved_model"), data.get("resolved_models"), data.get("resolved_effort")
+        )
     session_id = data.get("session_id")
     if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
         raise ValueError("attempt usage session id must be a non-empty string or null")
