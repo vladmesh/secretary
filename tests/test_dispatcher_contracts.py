@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import json
 import os
 import pwd
 import re
@@ -83,6 +84,7 @@ from secretary.runtime.head_runtimes import (
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
+    RECORD_RUNTIME_WHEN_ABSENT,
 )
 from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
 from secretary.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
@@ -1336,11 +1338,12 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
     # -- criterion 1: the key, and what its absence means --------------------------------------
 
-    def test_a_profile_may_name_either_runtime_and_naming_none_is_the_legacy_one(self) -> None:
+    def test_a_profile_may_name_either_runtime_and_naming_none_is_the_supervised_one(self) -> None:
+        """secretary-1718: a profile's absent key is `local-pty`; an explicit `orca-legacy` stays."""
         for named, expected in (
             (LOCAL_PTY_RUNTIME, LOCAL_PTY_RUNTIME),
             (ORCA_LEGACY_RUNTIME, ORCA_LEGACY_RUNTIME),
-            (None, DEFAULT_HEAD_RUNTIME),
+            (None, LOCAL_PTY_RUNTIME),
         ):
             with self.subTest(runtime=named):
                 profile = {"adapter": "claude"}
@@ -1352,7 +1355,25 @@ class PerProfileRuntimeTests(unittest.TestCase):
                 spec = HeadSpec.from_profile("head", profiles["head"])
 
                 self.assertEqual(spec.runtime, expected)
-        self.assertEqual(DEFAULT_HEAD_RUNTIME, ORCA_LEGACY_RUNTIME, "absence must not change hands")
+        self.assertEqual(DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME)
+        self.assertEqual(
+            RECORD_RUNTIME_WHEN_ABSENT, ORCA_LEGACY_RUNTIME, "a record's absence must not change hands"
+        )
+
+    def test_the_shipped_registry_names_a_runtime_on_every_profile(self) -> None:
+        """A fresh install keeps every shipped tier on Orca until A20, by saying so."""
+        shipped = heads.load_registry(heads.HEADS_TOML)
+
+        self.assertTrue(shipped.profiles)
+        for profile_id, profile in shipped.profiles.items():
+            with self.subTest(profile=profile_id):
+                self.assertIn("runtime", profile, "a keyless shipped profile would become local-pty")
+                self.assertEqual(profile["runtime"], ORCA_LEGACY_RUNTIME)
+                self.assertEqual(HeadSpec.from_profile(profile_id, profile).runtime, ORCA_LEGACY_RUNTIME)
+
+    def test_a_spec_built_by_hand_is_read_by_the_record_rule(self) -> None:
+        """Every hand-built spec is a head rebuilt from a record that never named a backend."""
+        self.assertEqual(HeadSpec(profile_id="head", adapter="unknown").runtime, ORCA_LEGACY_RUNTIME)
 
     # -- criterion 2: one refusal, at both readers of a registry -------------------------------
 
@@ -1640,6 +1661,30 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
 
         self.host.stop_workspace(record)
 
+        self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
+        self.assertEqual(self.supervised.calls, [])
+
+    def test_a_record_whose_runs_predate_the_runtime_key_is_torn_down_through_orca(self) -> None:
+        """secretary-1718: the profile default moved to `local-pty`, and a durable record did not.
+
+        Today's record shape, with the `head_runtime` its runs carry stripped out — which is what
+        every record written before the key existed looks like — reads back as Orca heads and is
+        torn down exactly as it always was.
+        """
+        current = self._record(
+            worker_head_run=self._run("worker", ORCA_LEGACY_RUNTIME, "run-w"),
+            review_head_run=self._run("reviewer", ORCA_LEGACY_RUNTIME, "run-r"),
+        ).to_json()
+        for role in ("worker_head_run", "review_head_run"):
+            self.assertIn("head_runtime", current[role], "the fixture is not today's record shape")
+            del current[role]["head_runtime"]
+
+        record = DispatcherRecord.from_json(json.loads(json.dumps(current)))
+
+        for persisted in (record.worker_head_run, record.review_head_run):
+            self.assertIsNotNone(persisted.run)
+            self.assertEqual(persisted.run.spec.runtime, ORCA_LEGACY_RUNTIME)
+        self.host.stop_workspace(record)
         self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
         self.assertEqual(self.supervised.calls, [])
 

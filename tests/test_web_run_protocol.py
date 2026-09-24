@@ -96,6 +96,7 @@ PROFILES = {
         "resource": "claude-sub",
         "adapter": "claude",
         "model": "opus",
+        "runtime": "orca-legacy",
         "fallback": [],
     },
 }

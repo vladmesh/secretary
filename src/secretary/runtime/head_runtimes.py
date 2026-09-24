@@ -26,6 +26,12 @@ ORCA_LEGACY_RUNTIME = "orca-legacy"
 LOCAL_PTY_RUNTIME = "local-pty"
 HEAD_RUNTIMES = (ORCA_LEGACY_RUNTIME, LOCAL_PTY_RUNTIME)
 
-#: What an absent `runtime` means. Every registry written before this key existed is a registry of
-#: Orca-legacy heads, so absence has to keep meaning exactly what those registries already did.
-DEFAULT_HEAD_RUNTIME = ORCA_LEGACY_RUNTIME
+#: What an absent `runtime` key means in a head *profile*. Every profile that stays on Orca until
+#: A20 says `orca-legacy` explicitly — the shipped `heads.toml` and the installed registry alike —
+#: so flipping this changed no profile that exists, only what a new keyless one gets.
+DEFAULT_HEAD_RUNTIME = LOCAL_PTY_RUNTIME
+#: What an absent `runtime` means in a *durable record*: a `HeadRun` written before heads had a
+#: choice of backend, or a spec rebuilt from a record that never named one. Every such head was an
+#: Orca pane, so a record keeps meaning exactly what it meant when it was written, whatever the
+#: profile default is today.
+RECORD_RUNTIME_WHEN_ABSENT = ORCA_LEGACY_RUNTIME

@@ -1132,6 +1132,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "adapter": "claude",
             "model": "opus",
             "resource": "claude-sub",
+            "runtime": "orca-legacy",
         }
         self.catalog.role_defaults["observer"] = "claude-observer"
         self.open_sprint()
@@ -5464,6 +5465,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
                 "adapter": "claude",
                 "model": "opus",
                 "resource": "claude-sub",
+                "runtime": "orca-legacy",
             }
             host = CommandHostRuntime(catalog, root / "data", mode="noop")
             workspace = host.observer_workspace("sprint:1")

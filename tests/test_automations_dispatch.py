@@ -21,6 +21,7 @@ from secretary.runtime.agent_prompt_transport import (
 )
 from secretary.runtime.claude_sessions import claude_project_dir_name
 from secretary.runtime.head import HeadSpec
+from secretary.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 from secretary.runtime.pane_host import Pane, PaneHostError
 from tests.fakes.triggered_dispatch import FakeSessionHost
 
@@ -639,6 +640,8 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             "model": "gpt-5.6-terra",
             "codex_home": str(self.codex_home),
             "fallback": [],
+            # These tests are about the pane a service tick creates; a keyless profile is supervised.
+            "runtime": ORCA_LEGACY_RUNTIME,
         }
         self.command = dispatch.DispatchCommand(
             "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile

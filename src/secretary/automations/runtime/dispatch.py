@@ -154,7 +154,7 @@ from secretary.runtime.head import (
 )
 from secretary.runtime.head.identity import head_process_status
 from secretary.runtime.head_runtime_backends import build_head_runtime, head_runtime_name
-from secretary.runtime.head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from secretary.runtime.pane_host import Pane, SessionHost, safe_command_label, session_host
 from secretary.runtime.state import AgentState
 from secretary.runtime.tui_delivery import (
@@ -489,6 +489,16 @@ def _reuse_head_is_red(agent: str, state: AgentState, snapshot: RegistrySnapshot
         return False
 
 
+#: The backend of a standing launch this driver holds without a usable profile: the bare
+#: default-model `claude` invocation, and a tick that took no resolution because nothing it could
+#: resolve names a supervisor. Not the profile default (`DEFAULT_HEAD_RUNTIME`, which `HeadSpec`
+#: applies to a profile that names no runtime): a supervisor raises a head from its profile's spec,
+#: and a launch with no usable profile has no spec to raise it from, so a pane is the one backend
+#: that can hold it — and the one every such tick was already on, so no role is handed over by it.
+#: It goes with the pane backend in A20.
+PANE_FALLBACK_RUNTIME = ORCA_LEGACY_RUNTIME
+
+
 @dataclass(frozen=True)
 class LaunchResolution:
     """Which head this agent gets this tick, and which backend holds it.
@@ -531,14 +541,14 @@ def _resolve_launch(
     head = _preferred_head(agent, spec, snapshot)
     registry = snapshot.registry
     if not head or registry is None:
-        return LaunchResolution(skill, None, None, DEFAULT_HEAD_RUNTIME)
+        return LaunchResolution(skill, None, None, PANE_FALLBACK_RUNTIME)
     try:
         health = _head_health(registry)
         choice = resolve_head_chain(head, health.check, lambda pid: _head_fallback(registry, pid))
         resolved = choice.head or head
         profile = registry.profile(resolved)
     except Exception:
-        return LaunchResolution(skill, None, None, DEFAULT_HEAD_RUNTIME)
+        return LaunchResolution(skill, None, None, PANE_FALLBACK_RUNTIME)
     return LaunchResolution(skill, resolved, profile, _profile_runtime(resolved, profile))
 
 
@@ -561,7 +571,7 @@ def _render_launch(
     drift from a pipeline head's by being assembled somewhere else.
     """
     skill = f"{resolution.skill} --card {card_ref}" if card_ref else resolution.skill
-    bare = LaunchResolution(resolution.skill, None, None, DEFAULT_HEAD_RUNTIME)
+    bare = LaunchResolution(resolution.skill, None, None, PANE_FALLBACK_RUNTIME)
     bare_claude = render_head_command(
         {"adapter": "claude"},
         prompt=skill,
@@ -1467,16 +1477,17 @@ def _profile_runtime(profile_id: str | None, profile: dict | None) -> str:
     Through `HeadSpec.from_profile`, which is where a `runtime` value is validated against the
     closed vocabulary, and then through the shared name reader the dispatcher's own lifecycle
     sites go through — so there is no second reading of the key here and no second list of names.
+    A profile that names no runtime gets the profile default there, like any other reader's.
     A profile that will not make a spec, and the bare fallback invocation that has no profile at
-    all, are heads this driver holds the way it has always held one: absence has meant
-    `orca-legacy` since before the key existed, and an unusable profile is not a promotion.
+    all, are `PANE_FALLBACK_RUNTIME`: a supervisor raises a head from a spec, and neither has one,
+    so an unusable profile is not a promotion.
     """
     if not profile:
-        return DEFAULT_HEAD_RUNTIME
+        return PANE_FALLBACK_RUNTIME
     try:
         return head_runtime_name(HeadSpec.from_profile(str(profile_id or "head"), dict(profile)))
     except Exception:
-        return DEFAULT_HEAD_RUNTIME
+        return PANE_FALLBACK_RUNTIME
 
 
 def _may_be_supervised(agent: str, snapshot: RegistrySnapshot | None = None) -> bool:
@@ -1992,7 +2003,7 @@ def _tick(
             return 0
         resolution = _resolve_launch(agent, variant, registry)
     # A resolution nobody took is the pane backend, which is the one this driver has always used.
-    backend = resolution.runtime if resolution is not None else DEFAULT_HEAD_RUNTIME
+    backend = resolution.runtime if resolution is not None else PANE_FALLBACK_RUNTIME
     # One owner of this role's head at a time. A tick whose backend is not the one this driver
     # wrote the owner down under is the handover, and it ends here having dispatched nothing —
     # no skill, and no report card, because none has been built yet.

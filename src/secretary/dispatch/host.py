@@ -3630,13 +3630,14 @@ class CommandHostRuntime:
 
     @property
     def head_runtime(self) -> Any:
-        """The product's default backend, for a caller that has no head to name.
+        """The backend a head with no runtime of its own is read on, for a caller with none to name.
 
         Every operation of this dispatcher that acts on a head — including the workspace-scoped
         cleanups, which choose from the durable run the record names — goes through
         `head_runtime_for` instead. What is left on this property is the reading a caller outside
         the lifecycle does when it wants the default backend as an object and has nothing to
-        resolve it from.
+        resolve it from. That is the record rule (`RECORD_RUNTIME_WHEN_ABSENT`), not the profile
+        default: nothing here reads a profile.
         """
         return self.head_runtime_for(None)
 
@@ -3646,7 +3647,7 @@ class CommandHostRuntime:
         One resolver rather than a branch at each caller: every lifecycle site hands over the head
         it is acting on (a `HeadRun`, a `HeadSpec`, or the name itself) and is handed back the
         backend that head's profile named, so no caller has to know that there is more than one.
-        `None` is the operation that names no head at all and gets the product default.
+        `None` is the operation that names no head at all and gets the record rule.
 
         The value is read off the head rather than re-resolved from the registry, because the
         registry can be repointed while a head is running: a head raised on one backend has to go

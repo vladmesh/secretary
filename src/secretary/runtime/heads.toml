@@ -48,6 +48,10 @@ probe = "python3 -P -m secretary.runtime.resource_probe --resource openai-sub"
 # then sends the prompt into. It is stated on each profile rather than left to the default so the
 # generated installation snapshot says it too; the one-shot `codex exec` head is gone from the
 # product (secretary-1173), and a profile naming it is refused when the registry is validated.
+#
+# Every tier says `runtime = "orca-legacy"` explicitly: a profile that names no runtime is held by
+# this product's own supervisor (DEFAULT_HEAD_RUNTIME in runtime/head_runtimes.py), and these stay
+# Orca panes until A20 (docs/HEAD_RUNTIME.md), so a fresh install runs exactly as it did before.
 
 [profiles.codex-terra-high]
 resource = "openai-sub"
@@ -56,6 +60,7 @@ model = "gpt-5.6-terra"
 effort = "high"
 codex_mode = "tui"
 fallback = ["claude-opus-high"]
+runtime = "orca-legacy"
 
 [profiles.codex-sol-medium]
 resource = "openai-sub"
@@ -64,6 +69,7 @@ model = "gpt-6-sol"
 effort = "medium"
 codex_mode = "tui"
 fallback = ["claude-opus-medium"]
+runtime = "orca-legacy"
 
 [profiles.codex-sol-high]
 resource = "openai-sub"
@@ -72,6 +78,7 @@ model = "gpt-6-sol"
 effort = "high"
 codex_mode = "tui"
 fallback = ["claude-opus-high"]
+runtime = "orca-legacy"
 
 [profiles.claude-opus-medium]
 resource = "claude-sub"
@@ -79,6 +86,7 @@ adapter = "claude"
 model = "opus"
 effort = "medium"
 fallback = ["codex-sol-medium"]
+runtime = "orca-legacy"
 
 [profiles.claude-opus-high]
 resource = "claude-sub"
@@ -86,6 +94,7 @@ adapter = "claude"
 model = "opus"
 effort = "high"
 fallback = ["codex-terra-high"]
+runtime = "orca-legacy"
 
 [role_defaults]
 # Which head each role runs on. The reviewer is of the other family from new_card, so a card is

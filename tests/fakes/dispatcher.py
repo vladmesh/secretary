@@ -380,6 +380,10 @@ class FakeCatalog:
             "resource": "openai-sub",
             "codex_mode": "tui",
         }
+        # Like the installed registry, every profile names its runtime: a keyless one is `local-pty`
+        # (secretary-1718), and these stand in for the Orca heads this fake host models.
+        for profile in self.profiles.values():
+            profile["runtime"] = "orca-legacy"
         # Mutable, like the role_defaults block of heads.yaml: an operator can re-point a role
         # while cards are in flight.
         self.role_defaults = {

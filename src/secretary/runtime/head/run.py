@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
-from ..head_runtimes import DEFAULT_HEAD_RUNTIME
+from ..head_runtimes import RECORD_RUNTIME_WHEN_ABSENT
 from .spec import DEFAULT_EFFORT, HeadSpec
 from .task_ref import TaskRef
 
@@ -274,8 +274,9 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
     `runtime` arrives separately because it is written beside the spec block rather than inside it;
     see `to_json`. An absent one is a record written before heads had a choice of backend, and
     every such head was an Orca-legacy one. Unlike the adapter it is not repaired by guessing —
-    absence *is* the answer, and it is the same answer the registry gives a profile that names
-    none.
+    absence *is* the answer. It is `RECORD_RUNTIME_WHEN_ABSENT` and not the profile default: a
+    record keeps what it meant when it was written, and a profile that names no runtime today is
+    a `local-pty` head that no record written before the key existed could describe.
     """
     if not isinstance(payload, dict):
         raise HeadRunError("a head run carries the spec it was launched from")
@@ -293,7 +294,7 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
         resource=str(payload.get("resource") or "") or None,
         codex_mode=str(payload.get("codex_mode") or "") or None,
         fallback=tuple(str(entry) for entry in fallback) if isinstance(fallback, list) else (),
-        runtime=runtime or DEFAULT_HEAD_RUNTIME,
+        runtime=runtime or RECORD_RUNTIME_WHEN_ABSENT,
     )
 
 
