@@ -63,8 +63,8 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 - terminals, worktrees and generated host state (systemd units from `packaging/systemd/`). The
   product is canonical for these: units are compiled from packaging templates, and those timers are
   the background roles' only schedule. `secretary reconcile apply` and `secretary upgrade`
-  re-materialise them idempotently, so unit names stay stable. Orca automations are not recovered:
-  Secretary no longer manages them.
+  re-materialise them idempotently, so unit names stay stable. The Orca automations the background
+  roles ran as before sprint:1459 are not recovered.
 
 ## Layout
 
@@ -348,7 +348,7 @@ database untouched; repair or recreate only the target before retrying.
 Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs Docker
 and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
 store, with no recovery phrase or manual board credentials. It installs no session manager: heads run
-on local-pty, and nothing the product ships needs Orca (A20 step 9). `secretary install` installs no
+on local-pty. Before A20 step 9 it also installed Orca and its X server. `secretary install` installs no
 runtime and checks that the board store is reachable before changing live state.
 
 ```bash
@@ -421,8 +421,7 @@ refused. A clean tree alone never proves product ownership.
 8. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
 9. Applies host units, performs any required memory recovery and
-   verifies restore status. Orca repo registrations are not part of this step; they stay Orca's own
-   state. Dispatch refuses an unavailable binding before starting
+   verifies restore status. Dispatch refuses an unavailable binding before starting
    its worker, reviewer or project worktree. Observers use the dedicated observer repository and are
    unaffected by unavailable reserved projects. Heads are connected afterwards as a separate step.
 10. Re-enters the ownership barrier on every partial or successful exit, handing root-created instance

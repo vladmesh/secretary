@@ -95,6 +95,6 @@ The project is developed as open source, with measurable results and without a h
 
 ## Not now
 
-No team platform, multi-tenant SaaS, in-house Orca replacement, public plugin ecosystem or automatic
+No team platform, multi-tenant SaaS, general-purpose terminal session manager, public plugin ecosystem or automatic
 storage of every provider credential. Telegram, voice input and moving configuration into a database
 wait until the main install and recovery path is automated.

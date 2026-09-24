@@ -27,9 +27,8 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   specs through the product manifest (`[tool.secretary] agent-specs` in `pyproject.toml`), not by the
   package name. `tests/test_architecture.py` holds the one direction and keeps the retired top-level
   `triggered_agents` package (historical name, removed in sprint:1459) from coming back.
-- The packaged systemd timers are the only schedule owner of the background agents. Secretary
-  manages no Orca automations: `upgrade` neither creates nor deletes them, and ones left on a live
-  host by older upgrades stay Orca's state until Orca itself is removed (A20).
+- The packaged systemd timers are the only schedule owner of the background agents. Before
+  sprint:1459 they ran as Orca automations; `upgrade` no longer creates, repoints or deletes any.
 - Resource health has one writer and one vocabulary: `secretary.head_health` runs each registry
   resource's `probe` command, classifies it (`ready`, `unknown`, `probe_broken`, `unauthenticated`,
   `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
@@ -193,7 +192,7 @@ There is no pane path (see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
 
 `HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
-infer success from a pane, a socket write or process existence. There is one head runtime,
+infer success from a socket write or process existence. There is one head runtime,
 `local-pty`, and `secretary.runtime.head_runtime_backends` is the only place a name becomes a
 backend. A durable record written while heads were Orca panes (`orca-legacy`, or no runtime) still
 loads and is shown as a legacy record, but no backend is built for it, so it is never launched or
@@ -210,7 +209,7 @@ checklist are in [Head runtime](HEAD_RUNTIME.md).
   permanent lease. A prompt the dispatcher hands over with its transport is an agent's prompt: the
   runtime waits for the head to settle, types the line, sends Enter as a separate delivery and
   reports `ok` only once the head's output shows a turn started. The dispatcher addresses a
-  supervised observer by its run, never through Orca's pane inventory.
+  supervised observer by its run.
 
 Mechanical scheduler units are `Type=oneshot` ticks with `KillMode=process`, so a supervised head
 outlives the tick. The next tick controls it through the runtime's identity-fenced drain/stop. The
@@ -282,8 +281,7 @@ Protocol, schema, states and cursors: [Protocols](PROTOCOLS.md#reading-the-pipel
 The other half of `secretary.webproto` raises a real worker head for a card and a reviewer head from
 its result, and owns their workspace, process, pid, logs and outcome.
 
-It does not use Orca. The start and result-reading paths use no Orca CLI, RPC, terminal or repository
-inventory, and a test enforces this. It reuses existing parts: `LocalPtyHeadRuntime` through
+It reuses existing parts: `LocalPtyHeadRuntime` through
 `head_runtime_backends.build_head_runtime`, the watchdog's launch-identity heartbeat for liveness,
 the supervisor journal for exit status, the head registry and `head.command.render_head_command` for
 the command, `codex_preflight` and `claude_env` for first-run preparation, and the board's audit
@@ -484,9 +482,8 @@ secrets ([Protocols](PROTOCOLS.md#knowledge)).
 - `doctor` reads config, data and host inventory and never changes the host. `status` and `doctor`
   share one recovery projection; it does not decrypt values, update the probe cache or launch heads.
 - `reconcile plan` computes desired state. A matching name or prefix confers no ownership without a
-  managed manifest or a product-written marker. Its kinds are project checkouts and systemd units;
-  Orca repo registrations are Orca's own state, which reconcile and `doctor` neither create, check
-  nor remove (an `orca` record an older reconcile left in the managed manifest is kept, untouched).
+  managed manifest or a product-written marker. Its kinds are project checkouts and systemd units.
+  An `orca` record an older reconcile left in the managed manifest is kept, untouched (A20 step 8).
   A binding's `orca_binding` is optional legacy, read only by curator routing
   ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none. Card placement
   never reads it.

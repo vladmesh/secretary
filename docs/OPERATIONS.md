@@ -268,7 +268,7 @@ secretary role-skills audit --instance INSTANCE
 
 ### PO head sessions and turns
 
-`secretary.po.runner` runs the PO head headless, without Orca or local-pty. A **session** is one
+`secretary.po.runner` runs the PO head headless, without a head runtime. A **session** is one
 conversation with one CLI (`claude` or `codex`), one model and one reasoning effort, with `DATA_DIR/po` as cwd. A **turn**
 is one CLI process with full permissions (`--dangerously-skip-permissions`,
 `--dangerously-bypass-approvals-and-sandbox`), its own process group, and the owner's message on stdin:
@@ -588,9 +588,9 @@ task and the gate result; the provision result carries only `id` and `adapter`, 
 rejects a mismatch as foreign. `plane`, `policy.code_concurrency` and the other mutable fields carry
 over on a repeat `project add`, so refreshing a draft does not reset routing.
 
-`project add` writes no `orca_binding`, and `reconcile apply` makes no Orca call: a new project runs
-on local-pty heads in git workspaces. `orca_binding` is optional legacy. An existing one is kept;
-only curator routing reads it, and card placement never does (secretary-1722).
+`project add` writes no `orca_binding`: a new project runs on local-pty heads in git workspaces.
+`orca_binding` is optional legacy (A20 step 8). An existing one is kept; only curator routing reads
+it, and card placement never does (secretary-1722).
 
 ### Stale input or an invalid schema
 
@@ -1027,8 +1027,8 @@ metadata target, then repair from the registered production checkout only:
 Substitute the exact registered root for both occurrences. Do not restart or kill heads, rewrite task
 metadata or delete the retained checkout as part of this repair.
 
-`workspace_targeted_editable` covers both workspaces roots: the Orca root
-(`SECRETARY_DISPATCHER_WORKSPACES_ROOT`, default `~/orca/workspaces`) and `DATA_DIR/workspaces`,
+`workspace_targeted_editable` covers both workspaces roots: the Orca workspaces root of A20 steps 8
+and 11 (`SECRETARY_DISPATCHER_WORKSPACES_ROOT`, default `~/orca/workspaces`) and `DATA_DIR/workspaces`,
 where git-managed card and observer worktrees live. A workspace's owner is read from its path, so the
 real dispatcher refuses to start (`workspace_roots_overlap`, naming both paths) when the two roots
 are equal or one is inside the other. Point `SECRETARY_DISPATCHER_WORKSPACES_ROOT` or the instance
@@ -1172,7 +1172,7 @@ The launch intent is written to production state before the host call:
 
 Card heads use the same intent on every launch path (claim, rework, watchdog respawn, relaunch on
 resume). Delivery contracts are in
-[Protocols](PROTOCOLS.md#a-pane-that-is-ready-is-not-a-pane-that-is-sendable) and
+[Protocols](PROTOCOLS.md#a-settled-head-is-not-a-delivered-prompt) and
 [Protocols](PROTOCOLS.md#a-live-head-is-not-a-delivered-pointer).
 
 - Launch-intent-unwritable (degraded) — no head was launched; fix disk or permissions.
@@ -1188,16 +1188,14 @@ resume). Delivery contracts are in
   (`*-launch-undeliverable`). A stop the host will not confirm reports `*-stop-unconfirmed` and keeps the
   intent; nothing is opened beside an unstopped head. A report of `pre-delivery-starting` after bytes were
   written is the normal path for a head still starting.
-- Codex update prompt: preflight sets `dismissed_version` in the runtime `CODEX_HOME` `version.json`. If
-  the modal still appears on the live screen, delivery answers "Skip until next version" a bounded number
-  of times; a modal seen only in history refuses with `modal-not-on-screen`. No delivery ever upgrades
-  Codex; an unrecognized dialog gets no keystrokes.
+- Codex update prompt: preflight sets `dismissed_version` in the runtime `CODEX_HOME` `version.json`,
+  best effort, before the head starts. No delivery ever upgrades Codex.
 - The reviewer starts as a second supervised process in the worker's git worktree; there is no pane
   to split.
 - A record written while heads were Orca panes (its workspace an Orca worktree, or a head run on
   `orca-legacy`) is refused by every launch, delivery, stop and teardown with a
-  `legacy dispatcher record` reason, and the card goes Blocked naming the record. Nothing is torn down
-  through Orca; clear that checkout by hand once its heads are confirmed gone.
+  `legacy dispatcher record` reason, and the card goes Blocked naming the record. Nothing is torn down;
+  clear that checkout by hand once its heads are confirmed gone.
 - A stop the host did not confirm is not a stop: no replacement, no Blocked move, no freeze listing until
   confirmed. Check the session manager: the stop is refused or the process ignores the signal.
 
@@ -2195,9 +2193,8 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 Flags: `--no-pull`, `--base-branch`, `--product-root`, `--runtime-user`, `--json`.
 
 The packaged systemd timers are the only schedule owner of the background roles (curator, retro,
-steward). Upgrade no longer manages Orca automations: it neither creates, repoints nor deletes them,
-and `doctor` no longer reports them. Automations an older upgrade left on a live host stay as Orca's
-own state and go away with Orca itself (A20).
+steward). Before sprint:1459 they ran as Orca automations; upgrade no longer creates, repoints or
+deletes any, and `doctor` does not report them.
 
 When `pull` advances the checkout, the process re-executes `python -P -m secretary` from the pulled checkout
 with the same arguments and changed paths, so steps new in that revision run in the same upgrade.
@@ -2289,15 +2286,14 @@ curator = "codex-terra-high"
 ```
 
 `secretary-curator.timer` is the sole scheduler owner when the curator component is enabled. The Orca curator
-automation must remain disabled, and this installation's curator component must remain disabled for this deferred
-route change. Verify the latter read-only against the selected installation:
+automation must remain disabled: it is a leftover of the schedule before sprint:1459, and removing it is a PO action
+(A20 step 10). This installation's curator component must remain disabled for this deferred route change. Verify the latter read-only against the selected installation:
 
 ```bash
 SECRETARY_INSTANCE=INSTANCE python3 -P -m secretary automations health
 ```
 
-The output must retain the `DISABLED curator` line. Do not change `host.components.curator`, enable the Orca
-automation, run `systemctl`, start or stop a service or timer, invoke the curator, run a production
+The output must retain the `DISABLED curator` line. Do not change `host.components.curator`, run `systemctl`, start or stop a service or timer, invoke the curator, run a production
 baseline/backfill, write or delete a fact, reindex, or run a canary. Routing a role authorizes none of those actions.
 
 After a separately approved instance-canon edit, materialize it manually with the normal instance rollout, for
@@ -2338,8 +2334,8 @@ Resolve it:
 - the name belongs to something else: list it in `host.foreign_units` in `instance.yaml`.
 
 A differing unit is not adopted: remove it and let `apply` install the canonical one, or find out why the
-host diverged. Orca repo registrations are outside reconcile: `plan`, `apply` and `doctor` neither
-create, check nor remove them, and an existing one is left to Orca.
+host diverged. An `orca` record an older reconcile left in the managed manifest is kept, untouched
+(A20 step 8).
 
 Switch off a component in config, not by removing its unit:
 
@@ -2482,14 +2478,14 @@ and `heartbeat` from its launch identity (state, pid), `supervisor` from the sup
 torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
 `unavailable_sources`, never read as a gone head. A legacy record (a run on `orca-legacy`, or a head
 identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through its
-pid heartbeat alone; no pane inventory is read for any row, and Orca is never called (secretary-1723).
+pid heartbeat alone; no pane inventory is read for any row (secretary-1723).
 
-Pane readings are advisory. No visible, disconnected, unnamed or unreadable pane is evidence that a head is
+Readings are advisory. No disconnected or unreadable source is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:
 no lifecycle call, no rebinding, no harder probing.
 
 The web card page lists the card's heads under **Heads** (role, run id, state); each local-pty one links to
 `/tasks/<ref>/heads/<run_id>` (JSON: `/api/tasks/...`), a read-only view with no input or control: the terminal
 tail as redacted plain text (live from the supervisor while its lock is held, else `output.tail`) and the journal
-tail. Orca is not used. A supervisor letting go of a run writes `<data_dir>/heads/<run_id>/output.tail` (last 64 KiB,
+tail. A supervisor letting go of a run writes `<data_dir>/heads/<run_id>/output.tail` (last 64 KiB,
 owner-only, atomic; a same-id bring-up removes it). Without one: "no transcript was kept for this run".

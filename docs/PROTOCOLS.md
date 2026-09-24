@@ -463,47 +463,32 @@ delivery, recovery does not freeze or signal the worker, write reviewer routing 
 attribution, clear the intent, or replace the pane. Confirmation crosses the ordinary launch adoption
 boundary once; `unavailable`, malformed and stale-handle evidence keep their own conservative paths.
 
-### A pane that is ready is not a pane that is sendable
+### A settled head is not a delivered prompt
 
-Orca answers `tui-idle` from the pane's agent status or a quiescence window. A TUI holding an update
-dialog or still starting MCP servers is quiescent: `tui-idle` is satisfied, `terminal send` answers
-`accepted`, and nothing reaches the provider. The delivery boundary therefore classifies the screen
-into a typed **pre-delivery state**, distinct from `busy` and `blocked`.
+The `local-pty` supervisor waits for the head to settle, types the line, waits for the turn over that
+line to close, then sends Enter alone and watches the head answer. Only output that shows a turn
+started sets `turn_confirmed`; a line typed and not taken is `payload_left_in_composer`, never `ok`.
+Codex's `Update available!` modal is prevented before the head starts, best effort: preflight sets
+`dismissed_version` in the runtime `CODEX_HOME`'s `version.json` to the version found, the same thing
+"Skip until next version" writes. No delivery ever upgrades.
 
-Nothing the backend offers before a write asserts a live idle composer. The pre-write step checks for
-dialogs only; otherwise it records `sendability=unestablished`, which is not a proof of readiness.
-The guarantee rests on the delivery receipt.
-
-Classification reads the **live screen**, never the whole `terminal read` output. Orca retains raw
-output and a TUI redraws in place, so old frames (e.g. `Starting MCP servers`, a settled modal) stay
-in the tail. The live screen is what follows the last prompt marker the TUI paints, or the bounded end
-of the tail when no composer is painted (a dialog owning the terminal).
-
-- `update-modal` — Codex's `Update available! … 1. Update now 2. Skip 3. Skip until next version`.
-  Preflight prevents it: before the pane exists, the runtime `CODEX_HOME`'s `version.json` gets
-  `dismissed_version` set to the version found, the same thing "Skip until next version" writes. If
-  one appears anyway it is answered on screen with that choice, a bounded number of times, and
-  readiness is proved again before the pointer is written. No delivery ever upgrades. The keystroke
-  requires both that the screen is the known modal and that the modal is the frame painted now; a
-  modal recognised only in history is a refusal with nothing typed.
-- `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
-  queue message`). A post-write observation, recorded in `pre_delivery_after`; not a pre-write gate.
-- `unknown-dialog` — anything else dialog-shaped: an Orca `blockedReason`, or Codex's `Press enter to
-  continue` footer under an unmatched screen. Fails closed: no keystroke, a typed refusal, a bounded
-  caller retry, and an operator-visible infrastructure outcome at the ceiling. Never a second head.
+The pre-delivery states (`update-modal`, `starting`, `unknown-dialog`) and `sendability`
+(`unestablished`, `dialog-refused`) are delivery-record vocabulary from before A20, when heads ran as
+Orca panes: a pane's readiness answer held for a TUI quiescent in a dialog, so that delivery
+classified the live screen before writing. Records written then carry those fields and read back
+unchanged (`runtime/tui_delivery.py`).
 
 The evidence keeps apart **modal resolution** (`modal_resolution`, `modal_answers`,
-`pre_delivery_*`), **delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and
-`turn_confirmed`) and **provider binding** (`provider_bound`, the caller's criterion), with
-`sendability` beside them. A head a dialog will not release inside the bounded window is a typed
-refusal.
+`pre_delivery_*`, empty on a `local-pty` delivery), **delivery receipt** (`delivery_receipt`, from
+`payload_left_in_composer` and `turn_confirmed`) and **provider binding** (`provider_bound`, the
+caller's criterion), with `sendability` beside them.
 
 ### A live head is not a delivered pointer
 
 `delivery_receipt` is the one predicate launch, recovery and adoption all ask. It reads only the
-delivery boundary's evidence; a live pid, a writable pane and Orca's `accepted`/`bytesWritten` are
-never consulted. Positive `payload_left_in_composer` evidence is a determinate `refused` and outranks
-a provider turn.
+delivery boundary's evidence; a live pid and a transport's write acceptance (`send_accepted` /
+`bytes_written`, which pane-era records carry as Orca's answer) are never consulted. Positive
+`payload_left_in_composer` evidence is a determinate `refused` and outranks a provider turn.
 
 A bring-up that aborted with its pane open carries that receipt onto its launch intent. Adoption
 refuses an undelivered launch: no claim, no routing event, no `review_starting`, no `reviewing`, no
@@ -605,8 +590,8 @@ One production-runtime provenance probe fences workspace prepare, worker/reviewe
 of a gate query, both sides of release, and worktree removal. It runs the fixed production
 interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`
 and `workspace_targeted_editable` (plain editable paths, executable editable finder modules named by
-`.pth`, and `direct_url.json`, including vanished paths under either workspaces root: the Orca root
-and `<data_dir>/workspaces`). Any
+`.pth`, and `direct_url.json`, including vanished paths under either workspaces root: the Orca
+workspaces root of A20 steps 8 and 11, `~/orca/workspaces`, and `<data_dir>/workspaces`). Any
 refusal becomes durable blocked evidence and keeps the checkout; installation metadata is never
 repaired implicitly.
 
@@ -2378,7 +2363,7 @@ Every document validates against the packaged `web-run` schema and carries `sche
 of `product_run` or `product_review`, and `observed_at`. A run id is `pr-` prefixed.
 
 `--profile` is required, with no default. The profile comes from the head registry and must declare the
-`local-pty` runtime; a profile on Orca's backend is refused. `--heads-registry` (or
+`local-pty` runtime; a profile naming any other runtime is refused. `--heads-registry` (or
 `TA_HEADS_REGISTRY`) points one run at another registry.
 
 **`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points it at

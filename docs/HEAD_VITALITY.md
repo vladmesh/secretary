@@ -8,8 +8,8 @@ with hysteresis, then turned into a recovery intent. Modules:
 - `src/secretary/dispatch/head_vitality_guard.py`: the destructive-step guard;
 - `src/secretary/dispatch/head_vitality_policy.py`: the recovery policy.
 
-`HeadRuntime` owns the lifecycle boundary. The local-pty backend owns delivery, turn lease, drain and
-stop atomically. The Orca legacy backend has a weaker conditional stop.
+`HeadRuntime` owns the lifecycle boundary. The local-pty backend, the one head runtime, owns
+delivery, turn lease, drain and stop atomically.
 
 ## Central invariant
 
@@ -173,9 +173,8 @@ cleared after the bring-up, so no rework, review or restart renders a stale one.
 
 A witnessed progress source is dark when it answers unavailable **or** produces no snapshot on a tick
 (`basis` says `absent@<source>`). The wait tick's status can carry a live `pid_status` with no provider
-channel, for example `reason: "pid"` (exact live heartbeat of an Orca head whose pane the worktree
-inventory no longer lists) or `reason: "disconnected"`. A source that never answered is not treated as
-dark; that is the pid-only case above.
+channel, for example `reason: "pid"` (an exact live heartbeat) or `reason: "disconnected"`. A source
+that never answered is not treated as dark; that is the pid-only case above.
 
 A `local-pty` head has no pane, so `reason: "pid"` is its normal shape, and that shape carries its
 provider cursor (`provider_progress_for_run` reads the run's own transcript, not a pane). Before
@@ -365,9 +364,9 @@ snapshot (a dark source's reason is carried onto the episode). Timing, availabil
 refusals do not qualify: counting them would let one dark channel fast-track a live head to
 escalation. A tick with no deterministic reason resets the count.
 
-Reviewer bring-up handles `terminal_split_source_not_found` before the policy sees it: the token can
-occur before or after Orca attempts a child. It opens one standalone pane in the same worktree only when
-before/after worktree inventories show no pane appeared; otherwise it fails closed.
+The `terminal_split_*` tokens come from pane launches before A20, when heads ran as Orca panes and a
+reviewer was split from the worker's pane. A `local-pty` reviewer is a second supervised process in the
+worker's worktree, so its bring-up splits nothing and never produces them.
 
 Tests: rungs and idempotency in `tests/test_head_vitality_policy.py`; real-process SIGCONT and
 foreign-identity refusal in `tests/test_head_vitality_policy_execution.py`; wait-tick and gate-phase
