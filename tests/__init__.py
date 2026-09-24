@@ -91,9 +91,9 @@ _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 # and the run fails naming it. A test that writes to `/tmp` by absolute path bypasses TMPDIR and
 # this guard alike, so such a test owns its own cleanup. `tests/test_suite_tmp_guard.py` proves the rest.
 _LEAK_PREFIXES = ("secretary-", "orca-")
-# Production state that is persistent by design and that tests reach through production code: the
-# per-terminal prompt lock directory (`agent_prompt_transport.terminal_prompt_lock`). A lock file
-# has to outlive its holder, so nothing removes it; here it lives in the suite root and goes with it.
+# Production state that is persistent by design: the per-terminal prompt lock directory the Orca
+# prompt send kept. Nothing creates it since that send went (secretary-1725); the exemption is
+# pinned by `test_suite_tmp_guard` and goes with it.
 _PERSISTENT_BY_DESIGN = frozenset({"secretary-agent-prompt-locks"})
 # Short on purpose: it lengthens every temporary path in the run, and real-head tests put a Unix
 # socket (100-byte address limit) about 70 bytes deep under the temporary directory.

@@ -1,36 +1,21 @@
-"""Serialized terminal input for one interactive agent prompt.
+"""The validation policy and wire form of one interactive agent prompt.
 
-``orca terminal send`` is the public ingress available to Secretary.  Its generic
-``--text ... --enter`` form is not safe for a large Codex paste: Codex can retain the
-paste in its composer while consuming Enter.  This module owns the replacement protocol
-so callers cannot assemble escape sequences, body writes and submissions differently.
+Every prompt is checked here before it goes near a terminal, and given the one body form its
+adapter receives: Codex takes a bracketed paste, Claude a plain body. The terminal write itself
+belongs to the head backend. The Orca pane send that used to live here was removed with the pane
+host (secretary-1725); `AGENT_PROMPT_TRANSPORT_VERSION` and `TRANSPORT_POLICY` stay because
+`DeliveryEvidence` records them.
 """
 
 from __future__ import annotations
 
-import fcntl
-import hashlib
-import os
-import tempfile
-import threading
-import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from .pane_host import PaneHost
-from .pane_host import pane_host as resolve_pane_host
-from .tui_delivery_types import RunJson
-
 AGENT_PROMPT_TRANSPORT_VERSION = "agent-prompt-v2"
-# ``orca terminal send --text`` receives the body as one argv element.  Linux restricts one
-# argument to 128 KiB even where ``ARG_MAX`` is larger, and other supported POSIX hosts have
-# comparable limits.  Keep a substantial margin below that hard boundary rather than advertise a
-# size the public ingress cannot actually execute.  The framing bytes count against this limit.
+# One prompt is bounded with a substantial margin below the 128 KiB Linux limit on one argv
+# element, so the same body can travel as a single argument. The framing bytes count against it.
 AGENT_PROMPT_MAX_BYTES = 64 * 1024
-AGENT_PROMPT_SUBMIT_DELAY_S = float(os.environ.get("SECRETARY_AGENT_PROMPT_SUBMIT_DELAY_S", "0.5"))
 BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
 _ALLOWED_C0 = frozenset({"\t", "\n"})
@@ -87,10 +72,6 @@ class AgentPromptTransportError(RuntimeError):
         self.receipt = receipt
 
 
-_thread_locks_guard = threading.Lock()
-_thread_locks: dict[str, threading.RLock] = {}
-
-
 def prepare_agent_prompt(text: str, *, adapter: str) -> PreparedAgentPrompt:
     """Validate prompt data before any terminal interaction and choose its wire form.
 
@@ -124,81 +105,3 @@ def prepare_agent_prompt(text: str, *, adapter: str) -> PreparedAgentPrompt:
     if len(body.encode("utf-8", "strict")) > AGENT_PROMPT_MAX_BYTES:
         raise AgentPromptTransportError("prompt-body-too-large", receipt)
     return PreparedAgentPrompt(text=text, adapter=normalized_adapter, body=body, framing=framing)
-
-
-def send_agent_prompt(
-    handle: str,
-    prompt: PreparedAgentPrompt,
-    *,
-    run_json: RunJson | None = None,
-    host: PaneHost | None = None,
-    submit_only: bool = False,
-) -> PromptTransportReceipt:
-    """Write one body and one separate submission while owning this terminal's ingress.
-
-    A process-wide lock plus a per-process advisory file lock covers both the body and Enter.  The
-    session manager is asked for two writes and never one: no caller gets to combine them and no
-    other Secretary delivery can put bytes between them.
-    """
-    pane = resolve_pane_host(run_json, host=host)
-    receipt = PromptTransportReceipt(adapter=prompt.adapter, framing=prompt.framing)
-    with terminal_prompt_lock(handle):
-        if not submit_only:
-            receipt.body_write_count = 1
-            try:
-                answer = pane.send(handle, prompt.body, enter=False)
-            except Exception as exc:
-                raise AgentPromptTransportError("transport-refused-body-write", receipt) from exc
-            _record_write(receipt, "body", answer)
-            if not receipt.body_write_accepted:
-                raise AgentPromptTransportError("body-write-refused", receipt)
-            # This is the same body/submit settling interval Orca's private agent-prompt helper
-            # uses.  Retain it when adapting Claude's raw body too: generic `--text --enter`
-            # already provided it server-side.
-            time.sleep(max(AGENT_PROMPT_SUBMIT_DELAY_S, 0.0))
-        receipt.submit_count = 1
-        try:
-            answer = pane.send(handle, "", enter=True)
-        except Exception as exc:
-            raise AgentPromptTransportError("transport-refused-submit-write", receipt) from exc
-        _record_write(receipt, "submit", answer)
-        if not receipt.submit_write_accepted:
-            raise AgentPromptTransportError("submit-write-refused", receipt)
-    return receipt
-
-
-def _record_write(receipt: PromptTransportReceipt, kind: str, answer: Any) -> None:
-    body = answer.get("send") if isinstance(answer, dict) and isinstance(answer.get("send"), dict) else answer
-    accepted = True
-    bytes_written = 0
-    if isinstance(body, dict):
-        if body.get("accepted") is not None:
-            accepted = bool(body.get("accepted"))
-        try:
-            bytes_written = max(0, int(body.get("bytesWritten") or 0))
-        except (TypeError, ValueError):
-            pass
-    if kind == "body":
-        receipt.body_write_accepted = accepted
-        receipt.body_bytes_written += bytes_written
-    else:
-        receipt.submit_write_accepted = accepted
-        receipt.submit_bytes_written += bytes_written
-
-
-@contextmanager
-def terminal_prompt_lock(handle: str) -> Iterator[None]:
-    """Serialise one terminal's prompt pairs across threads and local processes."""
-    key = hashlib.sha256(str(handle).encode("utf-8", "replace")).hexdigest()
-    with _thread_locks_guard:
-        lock = _thread_locks.setdefault(key, threading.RLock())
-    with lock:
-        directory = Path(tempfile.gettempdir()) / "secretary-agent-prompt-locks"
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(directory / f"{key}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)

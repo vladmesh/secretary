@@ -101,38 +101,41 @@ before it. Steps 2 and 3 turned out to need each other (the host's Orca branches
    `orca-legacy` runtime. It is dropped from `HEAD_RUNTIMES` and from `head_runtime_backends`, and
    the explicit `runtime = "orca-legacy"` profiles from the shipped `heads.toml`. Why: after step 1
    nothing selects it, and the default no longer does. Old records stay readable as legacy records
-   (see [The runtime default](#the-runtime-default)); `runtime/orca_legacy_head.py` is unreferenced
-   by the backend builder until step 6 deletes it.
+   (see [The runtime default](#the-runtime-default)). The Orca backend module itself went in step 6.
 3. **Done (secretary-1722, with step 2; the merge commit is filled in by a later docs card).** Orca
    branches in `dispatch/host.py`: the Orca worktree create, show and rm, `_orca_repo`,
    `_orca_binding_name`, `_runs_in_orca_pane`, `_split_anchor` / `_worktree_terminals`, the
    observer's Orca worktree, `_observer_workspace_registered` and `_register_observer_repo`. Every
    card is placed by `GitWorkspaceManager` and every observer in its detached git worktree, whatever
-   the profiles; the host runs no `orca` argv and imports neither `pane_host` nor
-   `orca_legacy_head`. A legacy dispatcher record is refused (see
+   the profiles; the host runs no `orca` argv and imports neither the pane host nor the Orca
+   backend. A legacy dispatcher record is refused (see
    [The runtime default](#the-runtime-default)). The host still reads the Orca workspaces root, only
    to recognise such a record. The observer root repo needs no Orca registration.
 4. **Done (secretary-1720; the merge commit is filled in by a later docs card).** Orca branches in
    `automations/runtime/dispatch.py` and `automations/runtime/orca_rpc.py`. A standing agent's
    tick without a `local-pty` head fails closed instead of falling back to a pane. So the pane
    lifecycle (`PANE_FALLBACK_RUNTIME`, warm reuse, ghost reap, watchdog restart, finalizer
-   trailer) and `orca_rpc.py` are deleted. `tests/test_architecture.py` keeps every module under
-   `secretary.automations` free of `pane_host`, `orca_rpc` and the `orca` / `orca-cli` binary.
+   trailer) and `orca_rpc.py` are deleted. Step 6 extended the architecture rule to the whole tree.
 5. **Done (secretary-1723).** The pane inventory in `dispatch/head_status.py`. Every supervised row
    reads the supervisor as before; a legacy record is shown as legacy (`is_legacy_record`) through its
    pid heartbeat, with no pane inventory. The `pane_channel`, `runtime_pane_channel`, `runtime_pane`
    and `pane` fields are gone.
-6. **`runtime/orca_legacy_head.py`, then `runtime/pane_host.py`.** Why: only the `orca-legacy`
-   backend constructs them. Remove the pane-host importers first (`runtime/tui_delivery.py`,
-   `runtime/agent_prompt_transport.py`, `runtime/head/operations.py`, `dispatch/tui.py`,
-   `dispatch/review.py`): each keeps a pane path only for Orca. `automations/runtime/finalizer.py`
-   is already deleted, with its `--spawn-finalizer` / `--finalize` flags (done: secretary-1720).
-   **The `dispatch/` half is done (secretary-1723):** `command_terminal_status` reads the pid
-   heartbeat and the exact-run provider cursor and no pane, the `workspace_panes` seam is gone, and
-   `dispatch/tui.py` keeps the delivery vocabulary and the provider-journal readers but no pane or
-   screen path. No module under `secretary.dispatch` imports `pane_host`
-   (`tests/test_architecture.py`, `DispatchReadsNoPaneTests`). The runtime half and the deletions
-   remain.
+6. **Done (secretary-1723 for `dispatch/`, secretary-1725 for `runtime/`).** The Orca head backend
+   and the pane host are deleted, and so are the pane halves of their importers:
+   - `dispatch/`: `command_terminal_status` reads the pid heartbeat and the exact-run provider
+     cursor, the `workspace_panes` seam is gone, and `dispatch/tui.py` keeps the delivery vocabulary
+     and the provider-journal readers (secretary-1723);
+   - `runtime/`: `tui_delivery.py` keeps the delivery vocabulary (`DeliveryEvidence`,
+     `DeliveryOutcome`, `TuiDeliveryError`, the stage, readiness and receipt names) and no pane read,
+     send or screen probe; `agent_prompt_transport.py` keeps the prompt validation policy and no
+     terminal send; `head/operations.py` keeps the typed refusals, `NudgePointer` and
+     `post_delivery_run`, and no pane `spawn` / `nudge` / `stop` (secretary-1725).
+   `automations/runtime/finalizer.py` went with its `--spawn-finalizer` / `--finalize` flags
+   (secretary-1720). One rule in `tests/test_architecture.py` (`NoOrcaInSourceTests`) holds it over
+   every module under `src/secretary`: no import of the pane host, the Orca backend or an `orca_rpc`
+   module, and no string constant whose program is `orca` or `orca-cli`. The literals step 9 still
+   has to remove are on its allowlist, marked `step 9`, with two path and record literals of steps
+   8 and 11.
 7. **Done (secretary-1723).** The legacy `CODEX_HOME` rung (`~/.config/orca/.../home`) in
    `codex_preflight.resolve_codex_home`, and its readers in `upgrade.py` and `installation.py`
    (secretary-1710). With no profile `codex_home`, no `TA_CODEX_HOME` and no data-dir login the
@@ -161,7 +164,9 @@ before it. Steps 2 and 3 turned out to need each other (the host's Orca branches
    PO edit).
 9. **Host coupling.** The units' `After=orca-server.service` (`packaging/systemd/*.service`),
    doctor's `orca-server.service` expectation (`host.py`), bootstrap's Orca AppImage and `xvfb`
-   install (`bootstrap.py`), and the Orca state dirs in `backup.py`. Why: after steps 2–7 no tick,
+   install (`bootstrap.py`), the Orca inspection in `installation.py` and `host_apply.py`, and the
+   Orca state dirs in `backup.py`. The step-9 entries of the `NoOrcaInSourceTests` allowlist go with
+   this step. Why: after steps 2–7 no tick,
    head or command calls Orca, so ordering after it, requiring it or backing it up protects nothing.
    `orca-server` itself is a host-owned unit; stopping it and uninstalling Orca are PO actions after
    this step.

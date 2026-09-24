@@ -4,7 +4,8 @@ secretary-1461 pinned the boundary against the only backend there was, and secre
 the order of its critical section the same way. With a second backend those expectations stop
 being a suite about `OrcaLegacyHeadRuntime` and become the definition of the boundary: a mixin a
 backend's own suite inherits, so that a new backend cannot be accepted with weaker behaviour than
-the one that is already in production.
+the one that is already in production. The Orca backend it was first run against was deleted in
+secretary-1725; `test_local_pty_head_runtime` is the suite that inherits it now.
 
 The mixin knows nothing about panes, sockets, ptys or session managers. Everything a backend has
 of its own arrives through the hooks below, and each of them is a thing every backend can do:

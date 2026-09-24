@@ -171,8 +171,8 @@ the task and agent lifecycle.
 ### Open questions
 
 - Keep the current session manager, move to an existing alternative, maintain a fork, or build a
-  minimal in-house session backend. Decide by running the same pipeline on a second `PaneHost`
-  implementation and attributing bug classes by measurement.
+  minimal in-house session backend. Decide by running the same pipeline on a second session
+  backend and attributing bug classes by measurement.
 - Whether there is a real need for a public extension API.
 
 ## Milestone 6. First supported release
