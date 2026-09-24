@@ -411,10 +411,12 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
                     with self.subTest(role=role, target=target), self.assertRaises(TaskError) as raised:
                         writer.move(role=role, actor=role, reference=issue["ref"], target=target, reason="")
                     self.assertEqual(raised.exception.code, "transition_forbidden")
+        # A role outside the proposal roles cannot create in Issues. The steward was that role
+        # here until secretary-1709 made it a proposal role; the PO takes its place.
         with self.assertRaises(TaskError) as raised:
             writer.create(
-                role="steward",
-                actor="steward",
+                role="po",
+                actor="po",
                 project="secretary",
                 task_type="research",
                 title="Wrong column",

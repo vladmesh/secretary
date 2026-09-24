@@ -1838,11 +1838,12 @@ class SprintTests(SprintFixture):
 
         # An unlinked card in a project the sprint reserves is answered by the reservation
         # guard, not by the admission rule; the admission rule is what a project outside every
-        # reservation still meets. Both are asked of the steward: since secretary-1641 the PO may
-        # cut a card outside every sprint, and whether it runs is the dispatcher's admission.
+        # reservation still meets. Both are asked of the sprint's observer: since secretary-1641
+        # the PO may cut a card outside every sprint, and whether it runs is the dispatcher's
+        # admission; since secretary-1709 the steward creates in Ready no more.
         for kwargs, code in (
-            ({"project": "other", "role": "steward", "actor": "steward"}, "validation"),
-            ({"role": "steward", "actor": "steward"}, "sprint_write_forbidden"),
+            ({"project": "other", "role": "observer", "actor": "observer"}, "validation"),
+            ({"role": "observer", "actor": "observer"}, "sprint_write_forbidden"),
             ({"sprint": ref, "project": "other"}, "sprint_project_unreserved"),
             ({"sprint": ref, "priority": "P1"}, "validation"),
         ):
@@ -1859,7 +1860,7 @@ class SprintTests(SprintFixture):
                 "target": "ready",
                 **kwargs,
             }
-            with self.assertRaises(TaskError) as raised:
+            with as_observer(ref), self.assertRaises(TaskError) as raised:
                 writer.create(**arguments)
             self.assertEqual(raised.exception.code, code)
             self.assertEqual(
@@ -2793,17 +2794,20 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(event["payload"]["sprint_override_reason"], "production incident")
 
     def test_linked_task_still_obeys_the_held_project_guard(self) -> None:
-        for role, actor, request_id in (
-            ("po", "operator", "linked-po-denied"),
-            ("steward", "steward", "linked-steward-denied"),
+        # Since secretary-1709 the steward, like retro, creates only proposals in Issues (besides
+        # its report); a proposal linked to the holding sprint meets the same guard as a PO card.
+        for role, actor, target, request_id in (
+            ("po", "operator", "ready", "linked-po-denied"),
+            ("steward", "steward", "issues", "linked-steward-denied"),
         ):
-            with self.assertRaises(TaskError) as raised:
+            with self.subTest(role=role), self.assertRaises(TaskError) as raised:
                 self.tasks.create(
                     role=role,
                     actor=actor,
                     project="secretary",
                     task_type="code",
                     title="guarded",
+                    target=target,
                     sprint=self.ref,
                     request_id=request_id,
                 )
@@ -3050,7 +3054,12 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
         (Path(self.tmp.name) / "sprints" / "active-repositories.json").unlink()
         with self.assertRaisesRegex(TaskError, self.ref) as denied:
             self.tasks.create(
-                role="steward", actor="steward", project="secretary", task_type="code", title="blocked"
+                role="steward",
+                actor="steward",
+                project="secretary",
+                task_type="code",
+                title="blocked",
+                target="issues",
             )
         self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
@@ -3204,26 +3213,6 @@ class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
             event for event in SqlTaskAudit(self.client).events() if event["kind"] == "sprint_guard_denied"
         ]
         self.assertEqual([event["payload"]["sprint"] for event in events], [self.ref])
-
-    def test_a_steward_proposal_with_a_sprint_is_refused_as_a_retro_one_is(self) -> None:
-        """secretary-1709: a proposal carries no sprint, whichever proposal role files it."""
-        for role in ("retro", "steward"):
-            for sprint in (self.ref, ""):
-                with (
-                    self.subTest(role=role, sprint=sprint),
-                    self.assertRaisesRegex(TaskError, self.ref) as denied,
-                ):
-                    self.tasks.create(
-                        role=role,
-                        actor=role,
-                        project="secretary",
-                        task_type="code",
-                        title="finding",
-                        target="issues",
-                        sprint=sprint,
-                        request_id=f"{role}-proposal-{sprint or 'unlinked'}",
-                    )
-                self.assertEqual(denied.exception.code, "sprint_write_forbidden")
 
     def test_a_project_no_sprint_reserves_is_unaffected(self) -> None:
         created = self.tasks.create(
