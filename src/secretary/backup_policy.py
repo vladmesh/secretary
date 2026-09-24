@@ -16,6 +16,11 @@ MEMORY_MODEL_CACHE = ("memory", "fastembed-cache")
 # A process-bound applied-state receipt is recreated by ``secretary upgrade`` after a live probe;
 # restoring it would let a historical process identity masquerade as the current generation.
 WEB_PROCESS_RECEIPT = ("web", "process-receipt.json")
+# Optional debug material a full archive carried before A20 step 9 (secretary-1726): an inventory of
+# the host's Orca state. No backup writes it now and no policy requires it. An older full archive
+# that has it still verifies, since its checksum covers it, and restore never extracts it (only
+# `secretary-data/` is restored). A core archive never carried it and still may not.
+LEGACY_DEBUG_ORCA_INVENTORY = "debug/orca-state/inventory.json"
 
 
 @dataclass(frozen=True)
@@ -88,7 +93,7 @@ CORE_POLICY = BackupPolicy(
         f"{ARCHIVE_ROOT}/secretary-data/runs/runs.ndjson",
         f"{ARCHIVE_ROOT}/secretary-data/transcripts/inventory.json",
         f"{ARCHIVE_ROOT}/secretary-data/artifacts/inventory.json",
-        f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json",
+        f"{ARCHIVE_ROOT}/{LEGACY_DEBUG_ORCA_INVENTORY}",
     ),
     retention_seconds=None,
     restore_capability="normalized-core",
@@ -104,11 +109,6 @@ FULL_POLICY = BackupPolicy(
         ComponentPolicy("runs", "runs/runs.ndjson", source_export="runs"),
         ComponentPolicy("transcripts", "transcripts/inventory.json", source_export="transcripts"),
         ComponentPolicy("artifacts", "artifacts/inventory.json", source_export="artifacts"),
-        ComponentPolicy(
-            "debug_orca_state",
-            "debug/orca-state/inventory.json",
-            restore_action="exclude",
-        ),
         BOARD_HISTORY,
     ),
     forbidden_entries=(),
@@ -182,8 +182,6 @@ def build_components_manifest(
                 "claims": "runs/claims.json",
                 "source": exports["runs"].source,
             }
-        elif component.name == "debug_orca_state":
-            components[component.name] = {"path": component.path}
         elif component.source_export is not None:
             components[component.name] = _component_manifest(
                 data_dir,

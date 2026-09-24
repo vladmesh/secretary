@@ -9,8 +9,8 @@ does not exist yet: it is what the store writes once the recovery phrase rebuild
 installation key. Without the phrase the recovery still brings back everything that needs no
 credentials and reports which secrets stayed locked or went missing.
 
-It deliberately does not install the board store or Orca (`bootstrap` does): their supported versions
-are product decision gates, so a missing runtime is reported before any live state is written.
+It deliberately does not install the board store (`bootstrap` does): its supported version is a
+product decision gate, so a missing store is reported before any live state is written.
 """
 
 from __future__ import annotations
@@ -833,21 +833,7 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def check_prerequisites(
-    instance_dir: Path,
-    installation_user: str | None = None,
-) -> None:
-    if shutil.which("orca") is None:
-        raise InstallError(
-            "Orca is not installed; install a supported Orca runtime before secretary recovery"
-        )
-    # The pinned Electron AppImage deliberately refuses to start as root.  The
-    # installation command is allowed to run as root, but its CLI probe must
-    # have the same uid as the service it is checking.
-    if os.geteuid() == 0 and installation_user:
-        _run(["runuser", "--user", installation_user, "--", "orca", "--version"], label="inspect Orca")
-    else:
-        _run(["orca", "--version"], label="inspect Orca")
+def check_prerequisites(instance_dir: Path) -> None:
     # The prerequisite is the board this installation serves cards from: the PostgreSQL store.
     try:
         TaskReader(board_client(instance_dir, serves=(CARD,))).list()
@@ -872,9 +858,9 @@ def materialize_checkpoint(
     """Validate the checkpoint and optionally publish it into the local layout."""
     bootstrap_evidence = False
     if data_dir.exists() and any(data_dir.iterdir()):
-        # Bootstrap records the Orca unit before checkpoint materialization so
-        # the first full reconcile can prove ownership.  That one evidence file
-        # is compatible with an otherwise empty data root.
+        # An older bootstrap recorded its host unit in `host-managed.json` before checkpoint
+        # materialization so the first full reconcile could prove ownership. That one evidence
+        # file is compatible with an otherwise empty data root.
         entries = {entry.name for entry in data_dir.iterdir()}
         bootstrap_evidence = entries == {"host-managed.json"}
         if not bootstrap_evidence and not _valid_existing_layout(data_dir):
@@ -1759,8 +1745,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             else "not required by this installation",
         )
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
-            check_prerequisites(target, args.installation_user)
-            result.add("prerequisites", "unchanged", "PostgreSQL and Orca are reachable")
+            check_prerequisites(target)
+            result.add("prerequisites", "unchanged", "PostgreSQL is reachable")
             report = _validated_instance(target)
             assert report.data_dir is not None
             data_dir = report.data_dir

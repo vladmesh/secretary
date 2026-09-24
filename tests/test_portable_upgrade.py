@@ -190,8 +190,6 @@ class PortableFixture(unittest.TestCase):
         for target, kwargs in (
             ("secretary.host_apply.pwd.getpwnam", {"return_value": account}),
             ("secretary.host_apply.pwd.getpwuid", {"return_value": account}),
-            ("secretary.host_apply.find_orca_executable", {"return_value": Path("/usr/local/bin/orca")}),
-            ("secretary.host_apply._is_executable", {"return_value": True}),
         ):
             patch = mock.patch(target, **kwargs)
             patch.start()

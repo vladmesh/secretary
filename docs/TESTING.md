@@ -76,7 +76,7 @@ succeeds. Its summary lists each suite as `success`, `product_failure`, `infrast
     python3 scripts/ci_test_shards.py --fast
 
 The one fast profile for worker feedback. It validates a fixed module list (`FAST_MODULES`) and runs
-only hermetic board, Orca-discovery and pipeline-state proofs. It is not a CI suite and does not
+only hermetic board and pipeline-state proofs. It is not a CI suite and does not
 read `tests/ci-shards.txt` or use discovery.
 
 The child process group has a 120-second ceiling; on timeout the runner reports failure, terminates the

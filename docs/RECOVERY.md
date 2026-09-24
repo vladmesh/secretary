@@ -345,10 +345,11 @@ database untouched; repair or recreate only the target before retrying.
 
 ## Fresh install and recovery
 
-Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs the pinned
-Docker and session-manager runtimes and provisions, migrates and role-verifies the PostgreSQL board
-store, with no recovery phrase or manual board credentials. `secretary install` installs neither
-runtime and checks both before changing live state.
+Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs Docker
+and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
+store, with no recovery phrase or manual board credentials. It installs no session manager: heads run
+on local-pty, and nothing the product ships needs Orca (A20 step 9). `secretary install` installs no
+runtime and checks that the board store is reachable before changing live state.
 
 ```bash
 python3 -m pip install '.[memory]'
@@ -404,8 +405,8 @@ refused. A clean tree alone never proves product ownership.
 2. Crosses the recovery ownership barrier: the instance checkout, secrets, locks and declared data root
    are handed to `--installation-user` before that user's Git or remote child can consume a restored
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
-3. Checks the remote and checkout, materialised credentials, board reachability and the installed
-   session manager.
+3. Checks the remote and checkout, materialised credentials and board reachability. No session
+   manager is required.
 4. Materialises `state/board` and `state/runs` into a new local data plane, builds derived JSON from
    the NDJSON and verifies counters before any live write.
 5. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`

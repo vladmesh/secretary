@@ -38,7 +38,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from tests.orca_fixtures import legacy_orca_runtime
+from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.restore_fixtures import (
     _producer_exports,
     _restore_card,
@@ -74,17 +74,8 @@ def _empty_board(case: unittest.TestCase, instance: Path) -> SqlCardClient:
     return client
 
 
-def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
-    """Run the CLI, relying on the suite-wide hermetic Orca default.
-
-    Pass ``orca_executable`` only to model a deliberately alternate or
-    unavailable executable; the default leaves the suite's fixture patch
-    (tests/__init__.py) in place instead of shadowing it with the same value.
-    """
-    if orca_executable is _UNSET:
-        return cli_main(argv)
-    with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
-        return cli_main(argv)
+def main(argv: list[str]) -> int:
+    return cli_main(argv)
 
 
 REINDEX_SCRIPT = """
@@ -241,16 +232,13 @@ def _reindex_script(root: Path) -> Path:
 
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
-    with legacy_orca_runtime(root) as legacy_orca:
+    with fixture_runtime_account(root):
         report = restore_commands.validate_instance(instance)
-        with mock.patch("secretary.host_apply.find_orca_executable", return_value=None) as find_executable:
-            packaged = resolve_packaged(
-                report.instance,
-                instance_path=report.instance_path.parent,
-                data_dir=report.data_dir,
-                orca_executable=legacy_orca,
-            )
-        find_executable.assert_not_called()
+        packaged = resolve_packaged(
+            report.instance,
+            instance_path=report.instance_path.parent,
+            data_dir=report.data_dir,
+        )
         desired = build_plan(report.instance, report.bindings, packaged=packaged)
         (data_dir / "host-managed.json").write_text(
             json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
@@ -261,16 +249,13 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
         (host_fixture / "units.txt").write_text(
             "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
         )
-        if main(
-            ["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)],
-            orca_executable=legacy_orca,
-        ):
+        if main(["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(host_fixture)]):
             raise AssertionError("reconcile plan rejected the restored desired state")
         inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
         live = mock.Mock()
         live.collect.return_value = CollectResult(inventory=inventory)
         with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
-            return main(["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca)
+            return main(["restore-reconcile", "--instance", str(instance)])
 
 
 class RestoreEndToEndTests(unittest.TestCase):
@@ -310,13 +295,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(_apply_reconcile(instance, data_dir, root), 0)
 
             self.assertEqual(restore_findings(data_dir), [])
-            self.assertEqual(
-                main(
-                    ["doctor", "--offline", "--instance", str(instance)],
-                    orca_executable=root / "operator" / ".local" / "bin" / "orca",
-                ),
-                0,
-            )
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
             state = restore_state(data_dir)
             self.assertEqual(state["board_count"], fixture.manifest["components"]["board"]["count"])
             self.assertEqual(state["memory_index_count"], fixture.facts)
@@ -535,7 +514,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             plan = restore_backup(archive, instance, _allow_postgres_engine=True)
 
             actions = {component["name"]: component["action"] for component in plan.components}
-            self.assertEqual(actions["debug_orca_state"], "exclude")
+            self.assertNotIn("debug_orca_state", actions)
             self.assertEqual(actions["memory_index"], "rebuild")
             for derived in ("debug", "worktrees", "generated"):
                 self.assertFalse((data_dir / derived).exists(), derived)
@@ -547,15 +526,8 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertFalse([name for name in names if "index.sqlite" in name])
             self.assertFalse([name for name in names if "/worktrees/" in name])
             self.assertFalse([name for name in names if "/generated/" in name])
-            # The Orca snapshot travels as debug only, never as restorable data.
-            self.assertIn(f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json", names)
-            self.assertFalse(
-                [
-                    name
-                    for name in names
-                    if "orca-state" in name and name.startswith(f"{ARCHIVE_ROOT}/secretary-data/")
-                ]
-            )
+            # No Orca snapshot travels at all since A20 step 9 (secretary-1726), not even as debug.
+            self.assertFalse([name for name in names if "orca-state" in name or "/debug/" in name])
 
 
 def _repacked_archive(root: Path, manifest_changes: dict[str, object], *, kind: str = "core") -> Path:

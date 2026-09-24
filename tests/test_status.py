@@ -211,7 +211,8 @@ class StatusCliTests(unittest.TestCase):
         # written): a pre-deployment host must read as "unknown", not borrow the pre-existing
         # "last_tick_finished_at" as if it were reconciliation evidence.
         self.assertIsNone(payload["dispatcher"]["reconciliation"]["last_reconciled_at"])
-        self.assertIn("external_runtime", payload["host"])
+        # A20 step 9 (secretary-1726): status no longer reports a host-owned Orca runtime.
+        self.assertNotIn("external_runtime", payload["host"])
         # What the last tick cost, beside the facts already recorded for it (secretary-1649): the
         # dispatcher has always written this entry and status carried nothing from it.
         last_tick = payload["dispatcher"]["last_tick"]
@@ -528,10 +529,11 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(code, 1, payload)
         self.assertTrue(any(finding["code"] == "unit_runtime" for finding in payload["findings"]))
 
-    def test_status_json_reports_oneshot_and_external_runtime_state(self):
-        # secretary-755: a completed one-shot dispatcher unit and the host-owned Orca server
-        # must both carry real, non-null evidence — not the "unprobed" (None, None) an operator
-        # cannot distinguish from "we never looked".
+    def test_status_json_reports_oneshot_state_and_no_orca_runtime(self):
+        # secretary-755: a completed one-shot dispatcher unit must carry real, non-null evidence —
+        # not the "unprobed" (None, None) an operator cannot distinguish from "we never looked".
+        # A20 step 9 (secretary-1726): Orca's server and its X display, stopped and disabled on
+        # this host, are neither expected nor reported.
         root = Path(__file__).resolve().parents[1]
         # The example installation runs this checkout: status compares a host against the units of
         # the product the installation is configured with, not the module's own directory.
@@ -563,7 +565,8 @@ class StatusCliTests(unittest.TestCase):
                     [
                         *(f"{name} enabled active" for name in sorted(expected.units) if name != oneshot),
                         f"{oneshot} static inactive",
-                        "orca-server.service enabled active",
+                        "orca-server.service disabled inactive",
+                        "xvfb.service disabled inactive",
                     ]
                 ),
                 encoding="utf-8",
@@ -585,16 +588,14 @@ class StatusCliTests(unittest.TestCase):
         oneshot_row = next(row for row in payload["host"]["units"] if row["name"] == oneshot)
         self.assertEqual(oneshot_row["active"], "inactive")
         self.assertEqual(oneshot_row["enabled"], "static")
-        self.assertEqual(payload["host"]["external_runtime"]["name"], "orca-server.service")
-        self.assertEqual(payload["host"]["external_runtime"]["enabled"], "enabled")
-        self.assertEqual(payload["host"]["external_runtime"]["active"], "active")
+        self.assertNotIn("external_runtime", payload["host"])
+        self.assertNotIn("orca-server", output.getvalue())
+        self.assertNotIn("xvfb", output.getvalue())
 
-    def test_status_and_doctor_report_absent_external_runtime(self):
-        # secretary-756: a real systemd reports a never-installed unit as
-        # `is-enabled`/`is-active` "not-found"/"inactive" on stdout, not as a missing
-        # inventory entry (verified against systemd 255). status must surface that
-        # value as-is, and doctor's human report must read it as "absent", not print
-        # the raw systemctl token.
+    def test_status_and_doctor_ignore_stopped_and_absent_orca_units(self):
+        # A20 step 9 (secretary-1726): neither status nor doctor expects or prints Orca's server
+        # or its X display. Stopped and disabled, or never installed ("not-found", as systemd 255
+        # reports it), the unit section and its runtime findings stay green.
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp)
@@ -613,7 +614,8 @@ class StatusCliTests(unittest.TestCase):
                 "\n".join(
                     [
                         *(f"{name} enabled active" for name in sorted(expected.units)),
-                        "orca-server.service not-found inactive",
+                        "orca-server.service disabled inactive",
+                        "xvfb.service not-found inactive",
                     ]
                 ),
                 encoding="utf-8",
@@ -643,13 +645,22 @@ class StatusCliTests(unittest.TestCase):
                 )
         payload = json.loads(json_output.getvalue())
         self.assertEqual(json_code, 0, payload)
-        self.assertEqual(payload["host"]["external_runtime"]["name"], "orca-server.service")
-        self.assertEqual(payload["host"]["external_runtime"]["enabled"], "not-found")
-        self.assertEqual(payload["host"]["external_runtime"]["active"], "inactive")
-        # examples/instance's fixture host is otherwise incomplete (missing project checkout,
-        # unit drift), same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor;
-        # this scenario only asserts the external-runtime line, not the overall exit code.
-        self.assertIn("Orca runtime: absent (external, not managed by Secretary)", text_output.getvalue())
+        self.assertNotIn("external_runtime", payload["host"])
+        self.assertFalse([row for row in payload["host"]["units"] if row.get("active") != "active"])
+        # examples/instance's fixture host is otherwise incomplete (missing project checkout),
+        # same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor; the unit
+        # section is what this scenario pins: matched, no drift, no runtime findings.
+        text = text_output.getvalue()
+        for foreign in ("orca-server", "xvfb", "Orca runtime"):
+            self.assertNotIn(foreign, json_output.getvalue())
+            self.assertNotIn(foreign, text)
+        self.assertNotIn("unit runtime findings", text)
+        units_section = text.split("\nunits:\n", 1)[1].splitlines()[:3]
+        self.assertEqual(
+            [line.strip() for line in units_section[1:]],
+            ["missing-on-host: (none)", "unmanaged-on-host: (none)"],
+            text,
+        )
 
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
         root = Path(__file__).resolve().parents[1]

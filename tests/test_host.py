@@ -37,7 +37,7 @@ from secretary.host import (
     _CmdResult as CmdResult,
 )
 from secretary.host_apply import resolve_packaged, resolve_systemd_layout
-from tests.orca_fixtures import legacy_orca_runtime
+from tests.runtime_account_fixtures import fixture_runtime_account
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The units this checkout ships. A plan or a doctor run reads the checkout its host is configured
@@ -47,23 +47,9 @@ EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
 
 
-_UNSET = object()
-
-
-def run_cli(argv: list[str], *, orca_executable: Path | object = _UNSET) -> tuple[int, str]:
-    """Run the CLI, relying on the suite-wide hermetic Orca default.
-
-    Pass ``orca_executable`` only to model a deliberately alternate or
-    unavailable executable; the default leaves the suite's fixture patch
-    (tests/__init__.py) in place instead of shadowing it with the same value.
-    """
+def run_cli(argv: list[str]) -> tuple[int, str]:
     output = io.StringIO()
-    with contextlib.ExitStack() as stack:
-        stack.enter_context(contextlib.redirect_stdout(output))
-        if orca_executable is not _UNSET:
-            stack.enter_context(
-                unittest.mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable)
-            )
+    with contextlib.redirect_stdout(output):
         code = main(argv)
     return code, output.getvalue()
 
@@ -275,24 +261,21 @@ class ManagedManifestReadTests(unittest.TestCase):
 
 class ReconcilePlanTests(unittest.TestCase):
     def test_resolve_packaged_never_yields_an_orca_component(self):
-        """Orca runs external to Secretary (secretary-739/755): the product ships no
-        ``secretary-orca.*`` unit, so ``resolve_packaged`` cannot depend on an Orca
-        executable being installed and must not raise over one being unavailable.
-        """
+        """The product ships no Orca unit and resolves no Orca executable (A20 step 9)."""
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = root / "instance"
             instance.mkdir()
-            with unittest.mock.patch("secretary.host_apply.find_orca_executable", return_value=None):
-                packaged = resolve_packaged(
-                    {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
-                    instance_path=instance,
-                    data_dir=root / "data",
-                )
+            packaged = resolve_packaged(
+                {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
+                instance_path=instance,
+                data_dir=root / "data",
+            )
 
         self.assertNotIn("orca", {unit.component for unit in packaged})
+        self.assertFalse(hasattr(SystemdLayout, "orca_executable"))
 
     def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
         import tempfile
@@ -319,10 +302,6 @@ class ReconcilePlanTests(unittest.TestCase):
             account = SimpleNamespace(pw_dir="/srv/operator")
             with (
                 unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-                unittest.mock.patch(
-                    "secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")
-                ),
-                unittest.mock.patch("secretary.host_apply._is_executable", return_value=True),
             ):
                 directory_report = validate_instance(Path("instance"))
                 relative_report = validate_instance(Path("instance/instance.yaml"))
@@ -400,10 +379,6 @@ class ReconcilePlanTests(unittest.TestCase):
             with (
                 unittest.mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
                 unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-                unittest.mock.patch(
-                    "secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")
-                ),
-                unittest.mock.patch("secretary.host_apply._is_executable", return_value=True),
             ):
                 packaged = resolve_packaged(
                     report_instance,
@@ -721,7 +696,7 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn("SECRETARY_INSTANCE", service["env"])
         self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
 
-    def test_production_dispatcher_unit_sets_path_for_orca_lookup(self):
+    def test_production_dispatcher_unit_sets_path_for_head_cli_lookup(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",
             "secretary-",
@@ -802,7 +777,9 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn(b"Environment=MEMORY_DIM=4", unit)
         self.assertIn(b"Environment=MEMORY_THREADS=2", unit)
 
-    def test_scheduler_units_order_after_the_external_orca_runtime_without_starting_it(self):
+    def test_no_shipped_unit_orders_after_or_requires_an_orca_unit(self):
+        """A20 step 9 (secretary-1726): the ticks neither order after nor require Orca's server or
+        its X display, so a host that stops and disables both runs every scheduler unit as before."""
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",
             "secretary-",
@@ -821,11 +798,15 @@ class ReconcilePlanTests(unittest.TestCase):
         rendered = {unit.name: unit.content for unit in units}
         self.assertTrue(scheduler_services <= rendered.keys())
         for name in scheduler_services:
-            content = rendered[name]
-            self.assertIn(b"After=", content)
-            self.assertIn(b"orca-server.service", content)
-            self.assertNotIn(b"Wants=orca-server.service", content)
-            self.assertNotIn(b"secretary-orca.service", content)
+            self.assertIn(b"After=network-online.target\n", rendered[name], name)
+        for name, content in rendered.items():
+            for foreign in (b"orca-server", b"xvfb", b"secretary-orca.service"):
+                self.assertNotIn(foreign, content, name)
+        for template in (REPO_ROOT / "packaging" / "systemd").iterdir():
+            text = template.read_bytes()
+            self.assertNotIn(b"orca-server", text, template.name)
+            self.assertNotIn(b"xvfb", text, template.name)
+            self.assertNotIn(b"SECRETARY_ORCA_EXECUTABLE", text, template.name)
 
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
@@ -1194,6 +1175,58 @@ def _cmd(ran=True, returncode=0, stdout="", stderr="", reason=""):
     return CmdResult(ran, returncode, stdout, stderr, reason)
 
 
+class NoOrcaUnitInDoctorTests(unittest.TestCase):
+    """A20 step 9 (secretary-1726): doctor neither expects nor probes Orca's units.
+
+    The fake systemd below is a host where `orca-server.service` and `xvfb.service` are both
+    stopped and disabled, and every Secretary unit is in the state its runtime expectation wants.
+    """
+
+    FOREIGN = ("orca-server.service", "xvfb.service")
+
+    def _expected(self):
+        report = validate_instance(EXAMPLE_INSTANCE)
+        return build_doctor_expectations(report.instance, report.bindings, packaged=SHIPPED_UNITS)
+
+    def test_expectations_name_no_orca_unit(self):
+        expected = self._expected()
+        self.assertTrue(expected.units)
+        for name in self.FOREIGN:
+            self.assertNotIn(name, expected.units)
+            self.assertNotIn(name, expected.unit_runtime)
+        self.assertFalse(hasattr(expected, "external_runtime"))
+
+    def test_live_inventory_with_orca_units_stopped_and_disabled_is_green(self):
+        expected = self._expected()
+        calls: list[list[str]] = []
+
+        class FakeSystemd(LiveHostSource):
+            def _run(self, cmd):
+                calls.append(cmd)
+                verb, name = cmd[1], cmd[-1]
+                if verb == "list-unit-files":
+                    return _cmd(stdout="".join(f"{unit} enabled enabled\n" for unit in sorted(expected.units)))
+                if name in NoOrcaUnitInDoctorTests.FOREIGN:
+                    stopped = {"is-enabled": ("disabled\n", 1), "is-active": ("inactive\n", 3)}
+                    stdout, code = stopped.get(verb, ("", 0))
+                    return _cmd(returncode=code, stdout=stdout)
+                need_enabled, need_active = expected.unit_runtime.get(name, (True, True))
+                if verb == "is-enabled":
+                    return _cmd(stdout="enabled\n" if need_enabled else "static\n")
+                if verb == "is-active":
+                    return _cmd(stdout="active\n" if need_active else "inactive\n")
+                return _cmd(stdout="")
+
+        result = FakeSystemd().collect(expected)
+
+        self.assertNotIn("units", result.errors)
+        self.assertFalse([cmd for cmd in calls if set(cmd) & set(self.FOREIGN)], calls)
+        self.assertEqual(cli._unit_runtime_findings(expected, result), [])
+        diff = inventory(expected, result.inventory)
+        self.assertEqual(diff["units"].missing_on_host, [])
+        self.assertEqual(diff["units"].unmanaged_on_host, [])
+
+
 class LiveSourceErrorTests(unittest.TestCase):
     """A host we cannot inspect must be reported as unavailable, never as empty."""
 
@@ -1491,17 +1524,12 @@ class DoctorHostCliTests(unittest.TestCase):
             )
             report = validate_instance(instance)
             self.assertTrue(report.ok, report.errors)
-            with legacy_orca_runtime(root) as legacy_orca:
-                with unittest.mock.patch(
-                    "secretary.host_apply.find_orca_executable", return_value=None
-                ) as find_executable:
-                    packaged = resolve_packaged(
-                        report.instance,
-                        instance_path=report.instance_path.parent,
-                        data_dir=report.data_dir,
-                        orca_executable=legacy_orca,
-                    )
-                find_executable.assert_not_called()
+            with fixture_runtime_account(root):
+                packaged = resolve_packaged(
+                    report.instance,
+                    instance_path=report.instance_path.parent,
+                    data_dir=report.data_dir,
+                )
             desired = [
                 resource
                 for resource in build_plan(report.instance, report.bindings, packaged=packaged)
@@ -1546,7 +1574,6 @@ class DoctorHostCliTests(unittest.TestCase):
                         "--host-fixture",
                         str(fixture),
                     ],
-                    orca_executable=legacy_orca,
                 )
 
         self.assertEqual(code, 0, output)

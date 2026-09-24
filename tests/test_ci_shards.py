@@ -221,7 +221,6 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             FAST_MODULES,
             (
                 "tests.test_hermetic_board",
-                "tests.test_hermetic_orca",
                 "tests.test_hermetic_pipeline_state",
             ),
         )

@@ -1161,10 +1161,6 @@ class UpgradeStepTests(unittest.TestCase):
             with (
                 mock.patch.object(upgrade, "run_steps", side_effect=capture),
                 mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-                mock.patch(
-                    "secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")
-                ),
-                mock.patch("secretary.host_apply._is_executable", return_value=True),
             ):
                 for value in (instance, config):
                     code = upgrade.run_upgrade(

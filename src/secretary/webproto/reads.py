@@ -758,7 +758,6 @@ PROBLEM_SEVERITY: dict[str, str] = {
     # Yellow: the installation is running, but a person should look.
     "pipeline.paused": "yellow",
     "dispatcher.divergences_open": "yellow",
-    "external_runtime.inactive": "yellow",
     "host.inventory_unreadable": "yellow",
     "memory.index_missing": "yellow",
 }
@@ -829,12 +828,6 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
             found("unit.missing", f"{name} is not installed on this host")
         elif _text(unit.get("active")) == "failed":
             found("unit.failed", f"{name} is failed")
-    external = _object(host.get("external_runtime"))
-    if _text(external.get("name")) and external.get("active") not in (None, "active"):
-        found(
-            "external_runtime.inactive",
-            f"{_text(external.get('name'))} is {_text(external.get('active'))}",
-        )
     for name, error in sorted(_object(host.get("inventory_errors")).items()):
         found("host.inventory_unreadable", f"the host inventory could not read {name}: {error}")
     if pause.get("paused"):
@@ -881,10 +874,6 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
             "last_tick_finished_at": _text(_object(dispatcher.get("reconciliation")).get("last_tick_finished_at")) or None,
         },
         "units": units,
-        "external_runtime": {
-            "name": _text(external.get("name")) or None,
-            "active": external.get("active"),
-        },
         "checkpoint": {
             "status": _text(checkpoint.get("checkpoint_status")) or None,
             "lag_minutes": checkpoint.get("lag_minutes"),

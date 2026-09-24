@@ -39,7 +39,7 @@ from secretary.restore import (
 )
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.fakes.tasks import empty_seed
-from tests.orca_fixtures import legacy_orca_runtime
+from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.restore_fixtures import (
     _restore_card,
     _seed_instance_facts,
@@ -50,17 +50,8 @@ from tests.sql_backend_fixtures import card_store
 _UNSET = object()
 
 
-def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
-    """Run the CLI, relying on the suite-wide hermetic Orca default.
-
-    Pass ``orca_executable`` only to model a deliberately alternate or
-    unavailable executable; the default leaves the suite's fixture patch
-    (tests/__init__.py) in place instead of shadowing it with the same value.
-    """
-    if orca_executable is _UNSET:
-        return cli_main(argv)
-    with mock.patch("secretary.host_apply.find_orca_executable", return_value=orca_executable):
-        return cli_main(argv)
+def main(argv: list[str]) -> int:
+    return cli_main(argv)
 
 
 def _seed_legacy_facts(data_dir: Path) -> Path:
@@ -818,18 +809,13 @@ class RestoreTests(unittest.TestCase):
                 1,
             )
 
-            with legacy_orca_runtime(root) as legacy_orca:
+            with fixture_runtime_account(root):
                 report = restore_commands.validate_instance(instance)
-                with unittest.mock.patch(
-                    "secretary.host_apply.find_orca_executable", return_value=None
-                ) as find_executable:
-                    packaged = resolve_packaged(
-                        report.instance,
-                        instance_path=report.instance_path.parent,
-                        data_dir=report.data_dir,
-                        orca_executable=legacy_orca,
-                    )
-                find_executable.assert_not_called()
+                packaged = resolve_packaged(
+                    report.instance,
+                    instance_path=report.instance_path.parent,
+                    data_dir=report.data_dir,
+                )
                 desired = build_plan(report.instance, report.bindings, packaged=packaged)
                 (data_dir / "host-managed.json").write_text(
                     json.dumps({"version": 1, "resources": [resource.__dict__ for resource in desired]}),
@@ -850,7 +836,6 @@ class RestoreTests(unittest.TestCase):
                             "--host-fixture",
                             str(fixture),
                         ],
-                        orca_executable=legacy_orca,
                     ),
                     0,
                 )
@@ -860,11 +845,11 @@ class RestoreTests(unittest.TestCase):
                 source.collect.return_value = CollectResult(inventory=inventory)
                 with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
                     self.assertEqual(
-                        main(["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca),
+                        main(["restore-reconcile", "--instance", str(instance)]),
                         0,
                     )
             self.assertEqual(
-                main(["doctor", "--offline", "--instance", str(instance)], orca_executable=legacy_orca), 0
+                main(["doctor", "--offline", "--instance", str(instance)]), 0
             )
             self.assertEqual(restore_findings(data_dir), [])
 

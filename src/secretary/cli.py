@@ -543,7 +543,6 @@ def run_doctor(args: argparse.Namespace) -> int:
         print_host_inventory(
             report, args, expected=inspection.expected, collected=inspection.collected, diffs=inspection.diffs
         )
-        _print_external_orca_runtime(inspection.expected, inspection.collected)
 
     print_dispatcher_status(
         report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
@@ -1887,27 +1886,6 @@ def _unit_runtime_findings(expected, collected: CollectResult) -> list[str]:
         if need_active and active != "active":
             findings.append(f"{name}: expected active, got {active}")
     return findings
-
-
-def _print_external_orca_runtime(expected, collected: CollectResult) -> None:
-    """Show the host-owned runtime separately from Secretary's unit parity.
-
-    A real systemd never leaves this lookup unset: `systemctl is-enabled`/`is-active` on a unit
-    that does not exist still exit non-zero with ``not-found``/``inactive`` on stdout, not an
-    exception or stderr (verified against systemd 255). So ``state is None`` cannot happen through
-    `LiveHostSource`; the reachable "absent" signal is `enabled == "not-found"`. The `state is
-    None` case is kept only as a defensive fallback for a `HostSource` that omits the entry
-    entirely (e.g. a hand-authored fixture).
-    """
-    name = expected.external_runtime
-    if not name or "units" in collected.errors:
-        return
-    state = collected.inventory.unit_states.get(name)
-    if state is None or state[0] == "not-found":
-        print("Orca runtime: absent (external, not managed by Secretary)")
-        return
-    enabled, active = state
-    print(f"Orca runtime: external {name}, enabled={enabled}, active={active}")
 
 
 def _join(names: list[str]) -> str:

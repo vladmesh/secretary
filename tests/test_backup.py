@@ -96,7 +96,9 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
             self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
             self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
-            self.assertIn("secretary-backup/debug/orca-state/inventory.json", names)
+            # A20 step 9 (secretary-1726): a new backup carries no Orca state, debug or otherwise.
+            self.assertFalse([name for name in names if "orca" in name or "/debug" in name], names)
+            self.assertNotIn("debug_orca_state", verified.manifest["components"])
             self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
             self.assertNotIn("secretary-backup/secretary-data/backups/old.tar", names)
             self.assertNotIn("secretary-backup/instance/runtime.env", names)

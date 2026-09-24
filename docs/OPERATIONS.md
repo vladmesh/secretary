@@ -491,9 +491,9 @@ With the production dispatcher enabled, the observer-root repository under the d
 to the installation. It is created on the first observer launch, so its absence on a fresh
 installation is no finding. `reconcile` neither creates nor deletes it.
 
-`host.external_runtime` reports the host session-manager service Secretary depends on but does not
-own. Timer-started oneshot units are neither required enabled nor active; their state is still
-reported.
+Timer-started oneshot units are neither required enabled nor active; their state is still
+reported. No unit outside the installation's own is expected or probed: Secretary depends on no
+host-owned session manager (A20 step 9, [Head runtime](HEAD_RUNTIME.md)).
 
 ## How long things take
 
@@ -1730,7 +1730,7 @@ fourth, and each one is decided by a rule rather than by a reading of the senten
   `secret_store.key_unusable`, or
   `health.unreadable`.
 - **yellow** — it runs, but somebody should look. Any of `pipeline.paused`,
-  `dispatcher.divergences_open`, `external_runtime.inactive`, `host.inventory_unreadable`,
+  `dispatcher.divergences_open`, `host.inventory_unreadable`,
   `memory.index_missing`. A problem whose code nobody has classified is yellow too — never green.
 - **green** — health was read, and it reports no problem at all.
 

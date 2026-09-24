@@ -106,7 +106,6 @@ def collect_status(
             "schedules": _schedules(expected, collected, offline=offline),
             "inventory_errors": collected.errors,
             "resources": _host_resources(data_dir),
-            "external_runtime": _external_runtime(expected, collected, offline=offline),
         },
         "dispatcher": {
             "phase": _text(production.get("phase")) or "new",
@@ -231,19 +230,6 @@ def _schedules(expected, collected: CollectResult, *, offline: bool) -> list[dic
         for row in _units(expected, collected, offline=offline)
         if row["kind"] == "timer"
     ]
-
-
-def _external_runtime(expected, collected: CollectResult, *, offline: bool) -> dict[str, Any]:
-    """The host-owned Orca server: outside Secretary's unit ownership parity (`host.units`),
-
-    but the local scheduler depends on it, so status/doctor need its own non-null evidence
-    instead of a silent absence from that list.
-    """
-    name = str(getattr(expected, "external_runtime", "") or "")
-    enabled, active = (None, None)
-    if not offline and "units" not in collected.errors:
-        enabled, active = collected.inventory.unit_states.get(name, (None, None))
-    return {"name": name or None, "enabled": enabled, "active": active}
 
 
 def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[str, Any]]:
