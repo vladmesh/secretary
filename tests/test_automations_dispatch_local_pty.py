@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -37,8 +38,9 @@ from secretary.automations.runtime import dispatch
 from secretary.dispatch.watchdog import head_process_status
 from secretary.head_health import HeadChoice, HeadReadiness
 from secretary.runtime import heads as pipeline_heads
+from secretary.runtime import role_env
 from secretary.runtime import state as runtime_state
-from secretary.runtime.head import HeadCommand
+from secretary.runtime.head import HeadCommand, render_head_command
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty.client import SupervisorClient
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
@@ -586,6 +588,56 @@ class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
         self.assertEqual(len(released), 1, "the diverted launch's report card was left open")
         self.assertEqual(self.actions(), ["active-report-skip"])
         self.assertEqual(self.run_dirs(), [], "a skipped tick raised a supervised head")
+
+
+class ManagedInterpreterLaunchTests(MechanicalRoleBackendTestCase):
+    """secretary-1708: whichever backend holds the head, its command puts the product's venv first.
+
+    The command a tick renders is recorded from the real renderer, and the head each backend then
+    raises is still this module's fixture: a provider CLI is not something these tests start. The
+    helper is answered with a sentinel so the rendered command can only carry it through that helper.
+    """
+
+    SENTINEL = Path("/sentinel/product/.venv/bin")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.rendered: list[str] = []
+
+    def _rendered(
+        self, profile, *, prompt=None, workspace="", role="", identity=None, binding=""
+    ) -> HeadCommand:
+        real = render_head_command(
+            profile, prompt=prompt, workspace=workspace, role=role, identity=identity, binding=binding
+        )
+        self.rendered.append(real.command)
+        return super()._rendered(
+            profile, prompt=prompt, workspace=workspace, role=role, identity=identity, binding=binding
+        )
+
+    def assert_rendered_under_the_helper(self) -> None:
+        prefix = f"PATH={self.SENTINEL}${{PATH:+:$PATH}}; export PATH; "
+        self.assertTrue(self.rendered, "the tick rendered no command")
+        for command in self.rendered:
+            self.assertIn(f" -- /bin/sh -lc {shlex.quote(prefix)[:-1]}", command)
+
+    def test_a_pane_head_is_launched_under_the_product_venv(self) -> None:
+        host = RecordingSessionHost()
+        with (
+            mock.patch.object(role_env, "managed_venv_bin", return_value=self.SENTINEL),
+            mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
+        ):
+            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
+
+        self.assertEqual(len(host.opened), 1)
+        self.assert_rendered_under_the_helper()
+
+    def test_a_supervised_head_is_launched_under_the_product_venv(self) -> None:
+        with mock.patch.object(role_env, "managed_venv_bin", return_value=self.SENTINEL):
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(len(self.run_dirs()), 1)
+        self.assert_rendered_under_the_helper()
 
 
 class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):

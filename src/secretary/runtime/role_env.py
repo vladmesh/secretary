@@ -50,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_PYTHONPATH_ENV = "TA_RUNTIME_PYTHONPATH"
 
 
-def runtime_pythonpath() -> str:
+def runtime_product_root() -> Path:
     """The checkout a launched role imports the product from, resolved per call.
 
     The launcher's explicit ``TA_RUNTIME_PYTHONPATH`` first, then the product checkout this
@@ -64,8 +64,47 @@ def runtime_pythonpath() -> str:
     should not be sent to a path that may not exist.
     """
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
-    root = Path(configured).expanduser() if configured else REPO_ROOT
-    return str(root / "src")
+    return Path(configured).expanduser() if configured else REPO_ROOT
+
+
+def runtime_pythonpath() -> str:
+    """The source tree of `runtime_product_root()`."""
+    return str(runtime_product_root() / "src")
+
+
+# The product's own interpreter, provisioned by `secretary upgrade` and verified by
+# `scripts/secretary-agent-gate.sh` before it starts a role: `<product root>/.venv/bin/python3`.
+MANAGED_VENV_DIR = ".venv"
+
+
+def managed_venv_bin(product_root: Path | str | None = None) -> Path:
+    """`<product root>/.venv/bin`, the one place a role's product interpreter is resolved.
+
+    The product root defaults to `runtime_product_root()`, the checkout the role imports the product
+    from, so the interpreter and the source tree come from one checkout. Resolving is pure, like the
+    rest of a rendered command; `require_managed_interpreter` is what refuses a missing one.
+    """
+    root = Path(product_root).expanduser() if product_root is not None else runtime_product_root()
+    return root / MANAGED_VENV_DIR / "bin"
+
+
+def require_managed_interpreter(product_root: Path | str | None = None) -> Path:
+    """`managed_venv_bin()`, refused when its `python3` is missing or not executable.
+
+    A head started without it would find the system `python3`, which lacks the product's
+    dependencies, and every role skill's `python3 -P -m secretary ...` would fail inside a head that
+    looked healthy. The message is the one `scripts/secretary-agent-gate.sh` gives for the same fault.
+    """
+    root = Path(product_root).expanduser() if product_root is not None else runtime_product_root()
+    venv_bin = managed_venv_bin(root)
+    python = venv_bin / "python3"
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise RoleEnvError(
+            f"selected product checkout {str(root)!r} has no executable managed interpreter at "
+            f"{str(python)!r}; repair it through the supported install/upgrade path: "
+            f"secretary upgrade --no-pull --product-root {shlex.quote(str(root))}"
+        )
+    return venv_bin
 
 
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
@@ -106,6 +145,9 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 RUFF_ROLES = frozenset(("worker", "reviewer"))
+# Roles whose heads run the product's own CLI rather than a candidate's: their `python3` is the
+# product's managed venv. `pipeline` launches no head and keeps whatever interpreter it was given.
+PRODUCT_VENV_ROLES = frozenset(("observer", "steward", "retro", "curator"))
 # Reserved to the dispatcher. A project's conventional ``.venv`` remains adapter-owned, so uv,
 # make and setup commands never share an environment with the head-launch boundary.
 WORKSPACE_ENV_DIR = ".secretary-task-env/venv"
@@ -238,6 +280,10 @@ def runtime_env(
         # trusted command boundary, not ambient authority for every command the head subsequently
         # runs. Candidate imports come from its environment or the broad-check bootstrap.
         env.pop("PYTHONPATH", None)
+    elif role in PRODUCT_VENV_ROLES:
+        venv_bin = managed_venv_bin()
+        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = str(venv_bin.parent)
 
     if role in BOARD_ROLES:
         env["BOARD_ROLE"] = role
@@ -257,13 +303,15 @@ def role_shell_command(
 
     The role wrapper starts ``/bin/sh -lc`` so a head gets its normal login environment. Some
     shell profiles replace ``PATH`` there, after ``runtime_env()`` has already supplied it. Keep
-    the workspace venv prefix in the command itself for worker and reviewer tooling.
+    the venv prefix in the command itself: the workspace venv for worker and reviewer tooling, the
+    product's managed venv for the roles that run the product's own CLI.
     """
-    if role not in RUFF_ROLES:
+    if role in PRODUCT_VENV_ROLES:
+        venv_bin = managed_venv_bin()
+    elif role in RUFF_ROLES and workspace is not None:
+        venv_bin = Path(workspace).expanduser() / WORKSPACE_ENV_DIR / "bin"
+    else:
         return command
-    if workspace is None:
-        return command
-    venv_bin = Path(workspace).expanduser() / WORKSPACE_ENV_DIR / "bin"
     return f"PATH={shlex.quote(str(venv_bin))}${{PATH:+:$PATH}}; export PATH; {command}"
 
 
@@ -345,6 +393,8 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     try:
         if ns.role in RUFF_ROLES and not ns.workspace:
             raise RoleEnvError(f"role {ns.role!r} requires a workspace-owned Python environment")
+        if ns.role in PRODUCT_VENV_ROLES:
+            require_managed_interpreter()
         env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
     except RoleEnvError as e:
         print(f"role-env: {e}", file=sys.stderr)

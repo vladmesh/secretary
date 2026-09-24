@@ -91,6 +91,7 @@ from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.retired_board import legacy_runtime_lines
+from tests.support.managed_venv import managed_product_root
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -936,7 +937,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         self.decoy_runtime_env()
         identity = observer_binding("sprint:1126", "abc123def456")
         bound = self.unit_env("secretary-dispatcher-production.service")
-        bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
+        # An observer head starts only under the product's managed venv.
+        product = managed_product_root(self.root)
+        bound["TA_SECRETARY_REPO"] = str(product)
         with mock.patch.dict(os.environ, bound, clear=True):
             command = wrap_role_command(
                 "observer",
@@ -953,7 +956,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root),
-                "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+                "TA_SECRETARY_REPO": str(product),
             },
         )
 
