@@ -196,7 +196,7 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
     def test_an_observer_raised_on_local_pty_runs_its_head_and_reads_as_a_live_match(self) -> None:
         workspace = self.root / "workspaces" / "observer"
         workspace.mkdir(parents=True)
-        with mock.patch.object(CommandHostRuntime, "_create_observer_workspace", return_value=workspace):
+        with mock.patch.object(CommandHostRuntime, "_create_git_observer_workspace", return_value=workspace):
             launched = self.host.prepare_observer({"ref": "sprint:1459"}, PROFILE, prompt="# Sprint\n")
 
         run = HeadRun.from_json(launched["head_run"])
@@ -404,7 +404,7 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
     def _launch(self) -> tuple[dict[str, Any], ObserverRecord]:
         workspace = self.root / "workspaces" / "observer"
         workspace.mkdir(parents=True)
-        with mock.patch.object(CommandHostRuntime, "_create_observer_workspace", return_value=workspace):
+        with mock.patch.object(CommandHostRuntime, "_create_git_observer_workspace", return_value=workspace):
             launched = self.host.prepare_observer({"ref": "sprint:1459"}, PROFILE, prompt="# Sprint\n")
         record = ObserverRecord(
             sprint="sprint:1459",
