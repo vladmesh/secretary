@@ -32,6 +32,10 @@ class PendingError(ValueError):
     pass
 
 
+class LegacyPendingError(PendingError):
+    """The pending file is not a versioned record at all (a pre-version-3 or foreign format)."""
+
+
 def selector(project: str | None) -> str:
     """Normalize the explicit all-backlog selector used in signed pending records."""
     return project or "all"
@@ -362,6 +366,29 @@ def pending_record(batch, identity, base, project=None):
     }
 
 
+def write_pending(st, record) -> None:
+    """Atomically publish the fact-bearing record that a later `advance` consumes."""
+    st.ensure_dir()
+    tmp = st.pending_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(st.pending_file)
+
+
+def _well_formed_batch(batch) -> bool:
+    """The whole batch shape every pending consumer reads, so a replayed record is never half-trusted."""
+    if not isinstance(batch, dict):
+        return False
+    sessions, memory, pending = batch.get("sessions"), batch.get("memory"), batch.get("pending")
+    if not isinstance(sessions, list) or not isinstance(memory, list) or not isinstance(pending, dict):
+        return False
+    return all(
+        isinstance(session, dict)
+        and isinstance(session.get("turns"), list)
+        and all(isinstance(turn, dict) for turn in session["turns"])
+        for session in sessions
+    )
+
+
 def read_pending(st, identity=None, project=None):
     identity = identity or current_identity()
     try:
@@ -369,11 +396,11 @@ def read_pending(st, identity=None, project=None):
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PendingError("curator pending record is unreadable") from exc
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
-        raise PendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
+        raise LegacyPendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
     if record.get("identity") != identity:
         raise PendingError("curator pending record belongs to a different run identity")
     batch, base = record.get("batch"), record.get("base")
-    if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
+    if not _well_formed_batch(batch) or not isinstance(base, dict):
         raise PendingError("curator pending record has an invalid batch")
     if record.get("selector") != selector(project):
         raise PendingError("curator pending record belongs to a different project selector")
