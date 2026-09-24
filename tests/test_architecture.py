@@ -101,8 +101,8 @@ def _imports_automations(relative: str, source: str) -> list[str]:
 # imports the pane host, the Orca head backend or an Orca RPC client, and no string constant in it
 # names the `orca` / `orca-cli` program. The rule scans the program name itself, wherever the string
 # sits, rather than resolving call shapes: an alias, a wrapper or a shell cannot hide a name that is
-# looked for in every constant. What is still there is on `ORCA_ALLOWLIST`, one line each, with the
-# checklist step (`docs/HEAD_RUNTIME.md`) that removes it.
+# looked for in every constant. What is still there is on `ORCA_ALLOWLIST`, one finding each, with
+# the owner decision that keeps it. Step 9 (secretary-1726) left only two: neither runs a program.
 SOURCE_ROOT = ROOT / "src" / "secretary"
 BANNED_ORCA_MODULES = ("secretary.runtime.pane_host", "secretary.runtime.orca_legacy_head")
 BANNED_ORCA_LAST_COMPONENTS = frozenset({"pane_host", "orca_legacy_head", "orca_rpc"})
@@ -112,48 +112,40 @@ _DOTTED_NAME = re.compile(r"\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 
 @dataclass(frozen=True)
 class OrcaAllowance:
-    """One source line still allowed to name Orca: its file, a substring of it, and why."""
+    """One finding still allowed: its file, a substring of its line, the flagged value, and why.
+
+    It excuses exactly one finding: the first on a matching line whose flagged value (the string
+    constant, or the imported module) is `value`. Every other finding on that line is reported.
+    """
 
     path: str
     line: str
+    value: str
     reason: str
+
+
+@dataclass(frozen=True)
+class OrcaFinding:
+    lineno: int
+    col: int
+    what: str
+    value: str
 
 
 ORCA_ALLOWLIST = (
     OrcaAllowance(
-        "src/secretary/installation.py",
-        'shutil.which("orca")',
-        "step 9: install inspection still looks the Orca CLI up",
-    ),
-    OrcaAllowance(
-        "src/secretary/installation.py",
-        '"orca", "--version"',
-        "step 9: install inspection still runs `orca --version`",
-    ),
-    OrcaAllowance(
-        "src/secretary/host_apply.py",
-        'Path("/usr/local/bin/orca")',
-        "step 9: host apply still probes the Orca executable candidates",
-    ),
-    OrcaAllowance(
-        "src/secretary/host.py",
-        'Path("/usr/local/bin/orca")',
-        "step 9: the default Orca executable host apply inspects",
-    ),
-    OrcaAllowance(
-        "src/secretary/bootstrap.py",
-        'Path("/usr/local/bin/orca")',
-        "step 9: bootstrap still installs the Orca AppImage wrapper",
-    ),
-    OrcaAllowance(
         "src/secretary/host.py",
         '{"unit", "orca"}',
-        "step 8: the legacy `orca` record kind in host-managed.json stays loadable; a kind, not a program",
+        "orca",
+        "owner decision, step 8: the legacy `orca` record kind in host-managed.json stays loadable; "
+        "a kind, not a program",
     ),
     OrcaAllowance(
         "src/secretary/upgrade.py",
         'workspace_root.parent.name == "orca"',
-        "step 11: the role worktree root `~/orca/workspaces`, compared by name; a path, not a program",
+        "orca",
+        "owner decision, step 11: the role worktree root `~/orca/workspaces`, compared by name; "
+        "a path, not a program",
     ),
 )
 
@@ -236,24 +228,26 @@ def _names_banned_module(module: str) -> bool:
     )
 
 
-def _orca_references(relative: str, source: str) -> list[tuple[int, str]]:
-    """Every Orca import and every string constant naming the Orca program, as (line, what)."""
+def _orca_references(relative: str, source: str) -> list[OrcaFinding]:
+    """Every Orca import and every string constant naming the Orca program, one finding per node."""
     tree = ast.parse(source, filename=relative)
-    found: set[tuple[int, str]] = set()
+    found: set[OrcaFinding] = set()
     for lineno, module in _imported_modules(relative, source):
         if _names_banned_module(module):
-            found.add((lineno, f"imports {module}"))
+            found.add(OrcaFinding(lineno, -1, f"imports {module}", module))
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value
             # `importlib.import_module("…")` and friends name a module by string.
             if _DOTTED_NAME.fullmatch(text) and text.rsplit(".", 1)[-1] in BANNED_ORCA_LAST_COMPONENTS:
-                found.add((node.lineno, f"names module {text}"))
+                found.add(OrcaFinding(node.lineno, node.col_offset, f"names module {text}", text))
             if _is_orca_program(_first_shell_word(text)) and not _is_path_operand(
                 node, parents.get(id(node))
             ):
-                found.add((node.lineno, f"names the orca program: {text[:60]!r}"))
+                found.add(
+                    OrcaFinding(node.lineno, node.col_offset, f"names the orca program: {text[:60]!r}", text)
+                )
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [
                 element.value
@@ -262,27 +256,50 @@ def _orca_references(relative: str, source: str) -> list[tuple[int, str]]:
                 for element in node.elts
             ]
             if "-c" in words:
-                for word in words[words.index("-c") + 1 :]:
+                start = words.index("-c") + 1
+                for element, word in zip(node.elts[start:], words[start:], strict=True):
                     if word and any(_is_orca_program(part) for part in _shell_words(word)):
-                        found.add((node.lineno, f"runs the orca program through -c: {word[:60]!r}"))
-    return sorted(found)
+                        found.add(
+                            OrcaFinding(
+                                element.lineno,
+                                element.col_offset,
+                                f"runs the orca program through -c: {word[:60]!r}",
+                                word,
+                            )
+                        )
+    return sorted(found, key=lambda finding: (finding.lineno, finding.col, finding.what))
 
 
-def _allowance_for(relative: str, line: str) -> OrcaAllowance | None:
-    for allowance in ORCA_ALLOWLIST:
-        if allowance.path == relative and allowance.line in line:
-            return allowance
-    return None
+def _apply_allowlist(relative: str, source: str) -> tuple[list[str], list[OrcaAllowance]]:
+    """The findings no allowance excuses, as offender lines, and the allowances that excused one.
+
+    Each allowance is spent on the first finding it matches, so a second finding with the same value
+    on the same line is still an offender.
+    """
+    lines = source.splitlines()
+    unspent = [allowance for allowance in ORCA_ALLOWLIST if allowance.path == relative]
+    spent: list[OrcaAllowance] = []
+    offenders: list[str] = []
+    for finding in _orca_references(relative, source):
+        line = lines[finding.lineno - 1] if finding.lineno <= len(lines) else ""
+        allowance = next(
+            (
+                candidate
+                for candidate in unspent
+                if candidate.line in line and candidate.value == finding.value
+            ),
+            None,
+        )
+        if allowance is None:
+            offenders.append(f"{relative}:{finding.lineno}: {finding.what}")
+            continue
+        unspent.remove(allowance)
+        spent.append(allowance)
+    return offenders, spent
 
 
 def _orca_offenders(relative: str, source: str) -> list[str]:
-    """`_orca_references` minus the allowlisted lines, as offender lines."""
-    lines = source.splitlines()
-    return [
-        f"{relative}:{lineno}: {what}"
-        for lineno, what in _orca_references(relative, source)
-        if _allowance_for(relative, lines[lineno - 1] if lineno <= len(lines) else "") is None
-    ]
+    return _apply_allowlist(relative, source)[0]
 
 
 class NoOrcaInSourceTests(unittest.TestCase):
@@ -307,13 +324,10 @@ class NoOrcaInSourceTests(unittest.TestCase):
 
     def test_each_allowlist_entry_still_excuses_a_real_line(self) -> None:
         """An entry cannot outlive its code: it must match a line that the rule would flag."""
-        excused: set[OrcaAllowance] = set()
+        excused: list[OrcaAllowance] = []
         for relative, source in self._sources():
-            lines = source.splitlines()
-            for lineno, _what in _orca_references(relative, source):
-                allowance = _allowance_for(relative, lines[lineno - 1])
-                if allowance is not None:
-                    excused.add(allowance)
+            excused.extend(_apply_allowlist(relative, source)[1])
+        self.assertEqual(len(excused), len(set(excused)))
         for allowance in ORCA_ALLOWLIST:
             with self.subTest(path=allowance.path, line=allowance.line):
                 self.assertTrue(allowance.reason)
@@ -352,9 +366,54 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 self.assertEqual(_orca_offenders(planted, source), [])
 
     def test_an_allowlisted_line_is_excused_only_in_its_own_file(self) -> None:
-        line = 'if shutil.which("orca") is None:\n    pass\n'
-        self.assertEqual(_orca_offenders("src/secretary/installation.py", line), [])
+        line = 'if resource.kind not in {"unit", "orca"}:\n    pass\n'
+        self.assertEqual(_orca_offenders("src/secretary/host.py", line), [])
         self.assertTrue(_orca_offenders("src/secretary/runtime/planted.py", line))
+
+    def test_the_allowlist_keeps_only_the_two_owner_decisions(self) -> None:
+        """A20 step 9 (secretary-1726) emptied the step-9 class: no entry excuses a program."""
+        self.assertEqual(
+            {(allowance.path, allowance.line, allowance.value) for allowance in ORCA_ALLOWLIST},
+            {
+                ("src/secretary/host.py", '{"unit", "orca"}', "orca"),
+                ("src/secretary/upgrade.py", 'workspace_root.parent.name == "orca"', "orca"),
+            },
+        )
+        for allowance in ORCA_ALLOWLIST:
+            with self.subTest(path=allowance.path):
+                self.assertTrue(allowance.reason.startswith("owner decision, step "), allowance.reason)
+                self.assertNotIn("step 9", allowance.reason)
+
+    def test_an_allowance_excuses_exactly_one_finding_on_its_line(self) -> None:
+        """The allowed constant is excused once; everything else the line carries is reported."""
+        for path, source, expected in (
+            (
+                "src/secretary/host.py",
+                'if x in {"unit", "orca"}: import secretary.runtime.pane_host\n',
+                ["imports secretary.runtime.pane_host"],
+            ),
+            (
+                "src/secretary/upgrade.py",
+                'workspace_root.parent.name == "orca"; os.system("orca-cli")\n',
+                ["names the orca program: 'orca-cli'"],
+            ),
+            (
+                "src/secretary/upgrade.py",
+                'workspace_root.parent.name == "orca"; os.system("orca")\n',
+                ["names the orca program: 'orca'"],
+            ),
+            (
+                "src/secretary/host.py",
+                'if x in {"unit", "orca"}: subprocess.run(["sh", "-c", "orca terminal list"])\n',
+                [
+                    "names the orca program: 'orca terminal list'",
+                    "runs the orca program through -c: 'orca terminal list'",
+                ],
+            ),
+        ):
+            with self.subTest(source=source):
+                offenders = _orca_offenders(path, source)
+                self.assertEqual([offender.split(": ", 1)[1] for offender in offenders], expected)
 
 
 # The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module

@@ -304,7 +304,6 @@ def resolve_packaged(
     instance_path: Path,
     data_dir: Path | None = None,
     runtime_user: str | None = None,
-    orca_executable: Path | None = None,
 ) -> list[PackagedUnit]:
     """Compile shipped templates for this installation's user and filesystem layout."""
     layout = resolve_systemd_layout(
@@ -314,7 +313,6 @@ def resolve_packaged(
         instance_path=instance_path,
         data_dir=data_dir,
         runtime_user=runtime_user,
-        orca_executable=orca_executable,
     )
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
@@ -344,32 +342,6 @@ def resolve_installed_packaged(
         instance_path=instance_path,
         data_dir=data_dir,
     )
-
-
-def find_orca_executable(runtime_user: str, runtime_home: Path | None = None) -> Path | None:
-    """Find the pinned runtime or the legacy CLI owned by the runtime user."""
-    if runtime_home is None:
-        try:
-            runtime_home = Path(pwd.getpwnam(runtime_user).pw_dir).expanduser().resolve(strict=False)
-        except KeyError:
-            return None
-    for candidate in (Path("/usr/local/bin/orca"), runtime_home / ".local" / "bin" / "orca"):
-        if _is_executable(candidate):
-            return candidate
-    return None
-
-
-def pinned_orca_executable() -> Path | None:
-    """Return the runtime installed by Secretary, never a user's legacy CLI."""
-    candidate = Path("/usr/local/bin/orca")
-    return candidate if _is_executable(candidate) else None
-
-
-def _is_executable(path: Path) -> bool:
-    try:
-        return path.is_file() and path.stat().st_mode & 0o111 != 0
-    except OSError:
-        return False
 
 
 def resolve_runtime_owner(instance_path: Path, runtime_user: str | None = None) -> tuple[str, Path]:
@@ -403,7 +375,6 @@ def resolve_systemd_layout(
     instance_path: Path,
     data_dir: Path | None = None,
     runtime_user: str | None = None,
-    orca_executable: Path | None = None,
 ) -> SystemdLayout:
     """Resolve the one systemd layout used for an installation command."""
     root = (packaging_root or default_packaging_root()).resolve(strict=False)
@@ -412,7 +383,6 @@ def resolve_systemd_layout(
     # change the service's interpretation of its own layout.
     target = instance_path.expanduser().resolve(strict=False)
     user, home = resolve_runtime_owner(target, runtime_user)
-    executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
     host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
     configured_data_dir = data_dir if data_dir is not None else instance_data_dir(target)
     return SystemdLayout(
@@ -421,7 +391,6 @@ def resolve_systemd_layout(
         data_dir=configured_data_dir.expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
-        orca_executable=executable,
         memory_model=host.get("memory_model", "intfloat/multilingual-e5-large"),
         memory_dim=host.get("memory_dim", 1024),
         memory_threads=host.get("memory_threads", 1),
@@ -626,7 +595,6 @@ __all__ = [
     "UnitInstaller",
     "UnitProcessIdentity",
     "apply_host",
-    "pinned_orca_executable",
     "resolve_packaged",
     "resolve_systemd_layout",
 ]

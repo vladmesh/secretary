@@ -166,13 +166,12 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         self.assertFalse((target / "runtime.env").exists())
         self.assertFalse((target / STALE_FILE).exists())
 
-        orca_version = mock.Mock(return_value="orca v1")
         real_run = installation._run
 
         def run(argv: list[str], **kwargs: object) -> object:
-            # The host's Orca is not the subject; every other command runs for real.
-            if argv[:1] == ["orca"]:
-                return orca_version(argv)
+            # Recovery needs no Orca (A20 step 9); every command runs for real.
+            if "orca" in argv[:1] or argv[:5] == ["runuser", "--user", getpass.getuser(), "--", "orca"]:
+                raise AssertionError(f"recovery ran Orca: {argv}")
             return real_run(argv, **kwargs)
 
         args = SimpleNamespace(
@@ -194,7 +193,6 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
             for patch in (
                 mock.patch("secretary.installation._ensure_installation_user"),
                 mock.patch("secretary.installation._set_installation_owner"),
-                mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
                 mock.patch("secretary.installation._run", side_effect=run),
                 # Project checkouts and CODEX_HOME are host provisioning, not the board.
                 mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
@@ -213,7 +211,7 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", result.steps)
         self.assertFalse([name for name in steps if "transport" in name], steps)
-        self.assertEqual(steps["prerequisites"], ("unchanged", "PostgreSQL and Orca are reachable"))
+        self.assertEqual(steps["prerequisites"], ("unchanged", "PostgreSQL is reachable"))
         self.assertEqual(steps["board"], ("changed", "1 card(s) at parity"))
         self.assertFalse((target / STALE_FILE).exists())
         self.assertFalse((target / "runtime.env").exists())

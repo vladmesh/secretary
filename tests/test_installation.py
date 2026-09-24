@@ -805,8 +805,6 @@ class InstallationTests(unittest.TestCase):
     def test_prerequisite_probe_reads_the_installation_s_board_store(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
-            mock.patch("secretary.installation._run"),
             mock.patch("secretary.installation.board_client") as selected,
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
@@ -1736,20 +1734,19 @@ class InstallationTests(unittest.TestCase):
             self.assertFalse((legacy / "AGENTS.md").exists())
             self.assertEqual((data_home / "auth.json").read_text(encoding="utf-8"), login)
 
-    def test_root_checks_orca_as_installation_user(self):
+    def test_prerequisites_need_no_orca_binary(self):
+        """A20 step 9 (secretary-1726): recovery probes the board store and runs no `orca`."""
         with (
             mock.patch("secretary.installation.os.geteuid", return_value=0),
-            mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
+            mock.patch("secretary.installation.shutil.which", return_value=None) as which,
             mock.patch("secretary.installation._run") as run,
             mock.patch("secretary.installation.board_client"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
-            check_prerequisites(Path("/tmp/instance"), "dev")
+            check_prerequisites(Path("/tmp/instance"))
 
-        self.assertIn(
-            ["runuser", "--user", "dev", "--", "orca", "--version"],
-            [call.args[0] for call in run.call_args_list],
-        )
+        which.assert_not_called()
+        run.assert_not_called()
         reader.return_value.list.assert_called_once()
 
     def test_prerequisite_probe_requires_the_instance(self):
@@ -2334,7 +2331,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         self.assertEqual(
             steps.mock_calls,
             [
-                mock.call.check_prerequisites(self.target, getpass.getuser()),
+                mock.call.check_prerequisites(self.target),
                 mock.call.import_normalized_board(self.data, instance=self.target),
             ],
         )

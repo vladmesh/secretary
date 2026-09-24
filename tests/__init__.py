@@ -1,12 +1,11 @@
-"""Hermetic defaults for the unit-test run: Orca discovery never leaves the
+"""Hermetic defaults for the unit-test run: nothing the suite reads or writes leaves the
 repo/process.
 
 ``python -m unittest`` imports this package before it imports any ``test_*``
-module, so the patches below are live before a single test can reach
-``resolve_systemd_layout``/``resolve_packaged`` and discover a real host
-executable. Without this, the same checkout is green on a developer box with
-Orca installed and red on a bare CI runner (or vice versa) purely from
-process discovery order (secretary-705, secretary-738, secretary-748).
+module, so the defaults below are live before a single test can reach a
+host-facing path. Without them, the same checkout is green on one box and red on
+another purely from what that host happens to have (secretary-705, secretary-738,
+secretary-748).
 
 Board reads need no patch here. A client is built only by
 ``secretary.board.backend.board_client(<instance dir>)``, from that
@@ -52,20 +51,8 @@ one throwaway state dir of its own for the whole run, before any test module
 is imported (secretary-1403). ``tests/test_hermetic_pipeline_state.py``
 proves it.
 
-A test that needs real host resolution or a real sprint board opts in
-locally, the same way the rest of the suite already overrides other
-host-facing seams: wrap the call in its own
-``mock.patch("secretary.host_apply.find_orca_executable", ...)`` (or
-``...pinned_orca_executable``), or pass an explicit board through
-``collect_status(..., sprint_client=sprint_store(test))``. A local patch simply
-shadows the process-wide default for the duration of the ``with`` block;
-nothing needs to be undone.
-
-If a test fails with "Orca executable for <user> is unavailable", it means
-production code reached real host discovery without going through either
-this default or a local opt-in patch: look for a code path that calls
-``find_orca_executable``/``pinned_orca_executable`` directly instead of
-through ``resolve_systemd_layout``/``resolve_packaged``.
+A test that needs a real sprint board opts in locally: it passes an explicit
+board through ``collect_status(..., sprint_client=sprint_store(test))``.
 """
 
 from __future__ import annotations
@@ -76,9 +63,6 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from unittest import mock
-
-_FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 
 # The suite's own temporary directory, and the guard that keeps it from leaking (secretary-1663).
 # Every `tempfile` call in this process and every child that inherits TMPDIR lands under one root
@@ -152,16 +136,6 @@ atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
 _SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeline-state."))
 os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
-
-_find_orca_patcher = mock.patch("secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA)
-_find_orca_patcher.start()
-
-# pinned_orca_executable() reads /usr/local/bin/orca straight off the host,
-# outside the find_orca_executable seam above. Default it to "no pinned
-# runtime" so secretary.bootstrap's install-vs-skip branch is deterministic
-# regardless of whether this machine happens to have Orca installed there.
-_pinned_orca_patcher = mock.patch("secretary.host_apply.pinned_orca_executable", return_value=None)
-_pinned_orca_patcher.start()
 
 # `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,
 # so a repository a test built in a temporary directory can still be written to

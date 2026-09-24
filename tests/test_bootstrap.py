@@ -26,53 +26,41 @@ class BootstrapTests(unittest.TestCase):
     # bootstrap never installs, starts, or owns a `secretary-orca.service` unit, so none of
     # these scenarios has a current-contract equivalent. Deleted rather than rewritten.
 
-    def test_platform_uses_distribution_compose_and_ubuntu_fuse_packages(self) -> None:
+    def test_platform_installs_docker_and_distribution_compose_and_nothing_of_orca(self) -> None:
         with (
             mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
             mock.patch("secretary.bootstrap.shutil.which", side_effect=lambda name: None),
             mock.patch("secretary.bootstrap._docker_compose_available", return_value=False),
             mock.patch("secretary.bootstrap._compose_package", return_value="docker-compose-v2"),
             mock.patch("secretary.bootstrap._ensure_docker_ready"),
-            mock.patch("secretary.bootstrap._install_orca") as install_orca,
             mock.patch("secretary.bootstrap._run") as run,
-            mock.patch("secretary.bootstrap.write_text_atomic"),
-            mock.patch("secretary.bootstrap.Path.mkdir"),
-            mock.patch("secretary.bootstrap.Path.chmod"),
         ):
             _install_platform(dry_run=False)
 
-        self.assertIn(
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(
+            commands,
             [
-                "apt-get",
-                "install",
-                "--yes",
-                "curl",
-                "fuse",
-                "libnss3",
-                "libgtk-3-0t64",
-                "libgbm1",
-                "libasound2t64",
-                "xvfb",
-                "docker.io",
-                "docker-compose-v2",
+                ["apt-get", "update"],
+                ["apt-get", "install", "--yes", "docker.io", "docker-compose-v2"],
             ],
-            [call.args[0] for call in run.call_args_list],
         )
-        install_orca.assert_called_once_with()
+        # A20 step 9 (secretary-1726): no Orca AppImage, no xvfb, no Electron runtime packages.
+        self.assertFalse(hasattr(bootstrap_module, "_install_orca"))
+        self.assertFalse(hasattr(bootstrap_module, "ORCA_APPIMAGE_URL"))
 
-    def test_clean_bootstrap_installs_pinned_runtime_despite_legacy_user_cli(self) -> None:
+    def test_platform_with_docker_present_installs_nothing(self) -> None:
         with (
             mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
             mock.patch("secretary.bootstrap.shutil.which", return_value="/usr/bin/docker"),
             mock.patch("secretary.bootstrap._docker_compose_available", return_value=True),
-            mock.patch("secretary.bootstrap.pinned_orca_executable", return_value=None),
-            mock.patch("secretary.bootstrap._ensure_docker_ready"),
-            mock.patch("secretary.bootstrap._install_orca") as install_orca,
-            mock.patch("secretary.bootstrap._run"),
+            mock.patch("secretary.bootstrap._ensure_docker_ready") as ready,
+            mock.patch("secretary.bootstrap._run") as run,
         ):
             _install_platform(dry_run=False, runtime_user="existing-dedicated-user")
 
-        install_orca.assert_called_once_with()
+        run.assert_not_called()
+        ready.assert_called_once_with()
 
     def test_host_contract_accepts_only_ubuntu_2404(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

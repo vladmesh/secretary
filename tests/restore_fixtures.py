@@ -249,7 +249,9 @@ def _core_archive(root: Path, name: str) -> Path:
     return archive
 
 
-def _full_archive(root: Path, name: str) -> Path:
+def _full_archive(root: Path, name: str, *, legacy_orca_debug: bool = False) -> Path:
+    """A full archive; `legacy_orca_debug` writes it as one from before A20 step 9 (secretary-1726),
+    carrying the optional `debug_orca_state` component a full backup no longer writes."""
     _core_archive(root, name)
     payload = root / ARCHIVE_ROOT
     engine = payload / "engine"
@@ -261,9 +263,10 @@ def _full_archive(root: Path, name: str) -> Path:
         directory = payload / "secretary-data" / component
         directory.mkdir()
         (directory / "inventory.json").write_text("{}", encoding="utf-8")
-    debug = payload / "debug" / "orca-state"
-    debug.mkdir(parents=True)
-    (debug / "inventory.json").write_text("{}", encoding="utf-8")
+    if legacy_orca_debug:
+        debug = payload / "debug" / "orca-state"
+        debug.mkdir(parents=True)
+        (debug / "inventory.json").write_text('{"version": 1, "files": []}\n', encoding="utf-8")
     manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
     manifest["backup_kind"] = "full"
     manifest["components"] = {
@@ -278,7 +281,11 @@ def _full_archive(root: Path, name: str) -> Path:
         "runs": {"path": "runs/runs.ndjson"},
         "transcripts": {"path": "transcripts/inventory.json"},
         "artifacts": {"path": "artifacts/inventory.json"},
-        "debug_orca_state": {"path": "debug/orca-state/inventory.json"},
+        **(
+            {"debug_orca_state": {"path": "debug/orca-state/inventory.json"}}
+            if legacy_orca_debug
+            else {}
+        ),
         "board_history": {"path": "board/audit.json", "count": 0},
     }
     _write_checksums(payload, manifest)

@@ -45,7 +45,6 @@ EVERY_PROBLEM: dict[str, Any] = {
             {"name": "a.service", "kind": "service", "present": True, "active": "failed"},
             {"name": "b.service", "kind": "service", "present": False, "active": None},
         ],
-        "external_runtime": {"name": "orca-server.service", "active": "inactive"},
         "inventory_errors": {"units": "systemctl timed out"},
     },
     "dispatcher": {"pause": {"paused": True, "mode": "drain"}, "divergences": {"open_count": 2}},
@@ -114,7 +113,6 @@ class TheColourRuleTests(unittest.TestCase):
             [
                 "unit.failed",
                 "unit.missing",
-                "external_runtime.inactive",
                 "host.inventory_unreadable",
                 "pipeline.paused",
                 "dispatcher.divergences_open",
@@ -143,7 +141,6 @@ class TheColourRuleTests(unittest.TestCase):
         yellow = {
             "pipeline.paused",
             "dispatcher.divergences_open",
-            "external_runtime.inactive",
             "host.inventory_unreadable",
             "memory.index_missing",
         }

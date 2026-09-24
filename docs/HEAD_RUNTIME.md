@@ -133,9 +133,9 @@ before it. Steps 2 and 3 turned out to need each other (the host's Orca branches
    `automations/runtime/finalizer.py` went with its `--spawn-finalizer` / `--finalize` flags
    (secretary-1720). One rule in `tests/test_architecture.py` (`NoOrcaInSourceTests`) holds it over
    every module under `src/secretary`: no import of the pane host, the Orca backend or an `orca_rpc`
-   module, and no string constant whose program is `orca` or `orca-cli`. The literals step 9 still
-   has to remove are on its allowlist, marked `step 9`, with two path and record literals of steps
-   8 and 11.
+   module, and no string constant whose program is `orca` or `orca-cli`. Since step 9 its allowlist
+   holds only the two owner decisions of steps 8 and 11 (a record kind and a path, neither a
+   program), and each entry excuses exactly one finding on its line.
 7. **Done (secretary-1723).** The legacy `CODEX_HOME` rung (`~/.config/orca/.../home`) in
    `codex_preflight.resolve_codex_home`, and its readers in `upgrade.py` and `installation.py`
    (secretary-1710). With no profile `codex_home`, no `TA_CODEX_HOME` and no data-dir login the
@@ -162,14 +162,19 @@ before it. Steps 2 and 3 turned out to need each other (the host's Orca branches
    Reconcile and doctor already ignore the leftover `orca` records. Durable formats stay loadable:
    the loader keeps accepting and ignoring the key and the record until the instance drops them (a
    PO edit).
-9. **Host coupling.** The units' `After=orca-server.service` (`packaging/systemd/*.service`),
-   doctor's `orca-server.service` expectation (`host.py`), bootstrap's Orca AppImage and `xvfb`
-   install (`bootstrap.py`), the Orca inspection in `installation.py` and `host_apply.py`, and the
-   Orca state dirs in `backup.py`. The step-9 entries of the `NoOrcaInSourceTests` allowlist go with
-   this step. Why: after steps 2–7 no tick,
-   head or command calls Orca, so ordering after it, requiring it or backing it up protects nothing.
-   `orca-server` itself is a host-owned unit; stopping it and uninstalling Orca are PO actions after
-   this step.
+9. **Done (secretary-1726).** Host coupling. No packaged unit orders after or requires
+   `orca-server.service` or `xvfb.service`; doctor and status neither expect nor report either
+   (`status --json` has no `host.external_runtime`, the doctor lamp no `external_runtime.inactive`);
+   bootstrap installs Docker and Compose only, with no Orca AppImage, `xvfb` or Electron runtime
+   packages; recovery's prerequisites are the PostgreSQL store alone, with no `orca` binary;
+   `SystemdLayout` has no `orca_executable` and templates no `{{SECRETARY_ORCA_EXECUTABLE}}`; a new
+   full backup writes no Orca state. An older full archive that carries the optional
+   `debug/orca-state/inventory.json` (`debug_orca_state`) still verifies and restores: the entry is
+   checksummed like any other, required by no policy, and never restored as data. The step-9 entries
+   of the `NoOrcaInSourceTests` allowlist went with it. Why: after steps 2–7 no tick, head or command
+   calls Orca, so ordering after it, requiring it or backing it up protected nothing.
+   `orca-server.service` and `xvfb.service` are host-owned units Secretary never wrote; stopping and
+   disabling them, and uninstalling Orca, are PO actions after the merge and upgrade.
 10. **Leftover Orca automations on the host** (Orca's own state). Why: sprint:1459 moved the
     background agents to the product's units (secretary-1706); the Orca copies no longer run anything.
     A PO action, since the product never writes Orca state.

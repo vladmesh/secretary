@@ -743,7 +743,6 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             instance_path=self.instance,
             data_dir=self.root / "data",
             runtime_user=self.RUNTIME_USER,
-            orca_executable=Path("/usr/local/bin/orca"),
         )
         compiled = {unit.name: unit.content for unit in packaged}
 

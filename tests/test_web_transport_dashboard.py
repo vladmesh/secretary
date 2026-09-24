@@ -894,6 +894,8 @@ class HealthSummaryTests(unittest.TestCase):
             {
                 "host": {
                     "units": [{"name": "x.service", "kind": "service", "present": False, "active": None}],
+                    # A status document from before A20 step 9 (secretary-1726) still names the
+                    # host-owned Orca server; the summary no longer reports it as a problem.
                     "external_runtime": {"name": "orca-server.service", "active": "inactive"},
                     "inventory_errors": {"units": "systemctl timed out"},
                 },
@@ -912,7 +914,6 @@ class HealthSummaryTests(unittest.TestCase):
             summary["problems"],
             [
                 "x.service is not installed on this host",
-                "orca-server.service is inactive",
                 "the host inventory could not read units: systemctl timed out",
                 "the pipeline is paused (drain)",
                 "2 dispatcher divergence(s) are open",

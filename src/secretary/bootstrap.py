@@ -1,7 +1,7 @@
-"""Bootstrap the host-owned PostgreSQL board store and Orca prerequisites.
+"""Bootstrap the host-owned PostgreSQL board store and its Docker prerequisites.
 
 The checkpoint deliberately does not carry these services or their credentials. They are
-reproducible host state: this module installs the pinned Docker and Orca runtimes, provisions the
+reproducible host state: this module installs Docker and Compose, provisions the
 PostgreSQL board store (`board/provision.py`), migrates it to this build's schema
 (`board/migrate.py`) and verifies its role contract. That empty, migrated store is the whole board a fresh installation starts from:
 cards come later from `task create` or from install recovery restoring a checkpoint into it.
@@ -13,7 +13,6 @@ import argparse
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -22,7 +21,6 @@ from secretary._fsutil import write_text_atomic
 from secretary.board.migrate import migrate_instance
 from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
-from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -31,8 +29,6 @@ from secretary.installation import (
     _set_installation_owner,
 )
 
-ORCA_VERSION = "v1.4.152"
-ORCA_APPIMAGE_URL = f"https://github.com/stablyai/orca/releases/download/{ORCA_VERSION}/orca-linux.AppImage"
 BOOTSTRAP_STAMP = ".secretary-bootstrap"
 
 
@@ -56,74 +52,20 @@ def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None
         return
     needs_docker = shutil.which("docker") is None
     needs_compose = not _docker_compose_available()
-    # Bootstrap owns a pinned runtime.  A legacy per-user CLI is suitable for
-    # upgrading an existing installation, but it must not turn a new bootstrap
-    # into an installation with an unpinned runtime.
-    needs_orca = pinned_orca_executable() is None
-    if needs_docker or needs_compose or needs_orca:
+    if needs_docker or needs_compose:
         if os.geteuid() != 0:
             raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
         _run(["apt-get", "update"], label="refresh apt")
-        # Orca is an Electron AppImage.  These are its explicit runtime
-        # dependencies on the one supported host release, not merely FUSE.
-        packages = [
-            "curl",
-            "fuse",
-            "libnss3",
-            "libgtk-3-0t64",
-            "libgbm1",
-            "libasound2t64",
-            "xvfb",
-        ]
+        packages: list[str] = []
         if needs_docker:
             packages.append("docker.io")
         if needs_compose:
             packages.append(_compose_package())
         _run(
             ["apt-get", "install", "--yes", *packages],
-            label="install Docker and Orca prerequisites",
+            label="install Docker prerequisites",
         )
     _ensure_docker_ready()
-    if needs_orca:
-        if os.geteuid() != 0:
-            raise BootstrapError("Orca is absent; rerun bootstrap as root")
-        _install_orca()
-
-
-def _install_orca() -> None:
-    """Extract the AppImage and expose its Node-mode CLI launcher."""
-    parent = Path("/opt/secretary")
-    image = parent / f"orca-{ORCA_VERSION}.AppImage"
-    install_root = parent / "orca"
-    parent.mkdir(parents=True, exist_ok=True)
-    if install_root.exists():
-        raise BootstrapError(f"incomplete Orca installation exists at {install_root}")
-    _run(
-        ["curl", "--fail", "--location", "--output", str(image), ORCA_APPIMAGE_URL],
-        label="download pinned Orca",
-        timeout=300,
-    )
-    image.chmod(0o755)
-    with tempfile.TemporaryDirectory(prefix=".orca-extract-", dir=parent) as staging_raw:
-        staging = Path(staging_raw)
-        _run(
-            [str(image), "--appimage-extract"],
-            label="extract pinned Orca",
-            timeout=300,
-            cwd=staging,
-        )
-        extracted = staging / "squashfs-root"
-        cli = extracted / "resources" / "bin" / "orca-ide"
-        sandbox = extracted / "chrome-sandbox"
-        if not cli.is_file() or not sandbox.is_file():
-            raise BootstrapError("pinned Orca AppImage has an unsupported layout")
-        _run(["chmod", "-R", "a+rX", str(extracted)], label="set Orca runtime permissions")
-        os.chown(sandbox, 0, 0)
-        sandbox.chmod(0o4755)
-        os.replace(extracted, install_root)
-    wrapper = Path("/usr/local/bin/orca")
-    wrapper.unlink(missing_ok=True)
-    wrapper.symlink_to(install_root / "resources" / "bin" / "orca-ide")
 
 
 def _compose_package() -> str:

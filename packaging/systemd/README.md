@@ -17,9 +17,8 @@ an unreadable manifest is reported as a host-state error, not treated as an empt
 
 Every unit name here must fall under the instance's `host.unit_prefix`, and its component name (the
 file name minus that prefix and the suffix) is what `host.components` opts out of. Paths in
-committed templates contain placeholders for that layout. Orca itself is a host-owned runtime:
-Secretary orders its ticks after `orca-server.service` but never starts, owns or replaces that
-unit. Run `systemd-analyze verify` on anything you change.
+committed templates contain placeholders for that layout. Run `systemd-analyze verify` on anything
+you change.
 A unit already on the host is never overwritten until it is adopted; apply refuses to write over a
 name it cannot prove it owns.
 
@@ -45,5 +44,5 @@ so the pair starts, stops and restarts together, and its configuration is not a 
 carries a bcrypt hash and is rendered from the secret store by `secretary web-front render` into
 `<data-dir>/webfront/Caddyfile` with mode 0600. The distribution's own `caddy.service` is masked on
 this installation so that installing the package can never start an unconfigured public listener;
-see [Operations](../../docs/OPERATIONS.md#the-published-web-front). Scheduler-backed roles must have exactly one owner; do not enable both systemd and
-Orca Automations for the same role.
+see [Operations](../../docs/OPERATIONS.md#the-published-web-front). Scheduler-backed roles must have exactly one owner: the
+systemd timer here.

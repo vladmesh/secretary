@@ -7,16 +7,13 @@ from unittest import mock
 
 
 @contextlib.contextmanager
-def legacy_orca_runtime(root: Path):
-    """Provide a legacy Orca executable for a fixture-owned runtime account."""
+def fixture_runtime_account(root: Path):
+    """Resolve the installation's runtime account to a fixture-owned `operator` under `root`."""
     home = root / "operator"
-    executable = home / ".local" / "bin" / "orca"
-    executable.parent.mkdir(parents=True)
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
+    home.mkdir(parents=True, exist_ok=True)
     account = SimpleNamespace(pw_name="operator", pw_dir=str(home))
     with (
         mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
         mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
     ):
-        yield executable
+        yield home

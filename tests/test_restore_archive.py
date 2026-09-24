@@ -223,7 +223,7 @@ class RestoreArchiveTests(unittest.TestCase):
             any("checksum manifest does not match archive" in finding for finding in result.findings)
         )
 
-    def test_full_restore_marks_debug_excluded_and_restores_data_components(self):
+    def test_full_restore_restores_data_components_and_plans_no_orca_component(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = _write_instance(root, "test")
@@ -234,11 +234,35 @@ class RestoreArchiveTests(unittest.TestCase):
 
             actions = {component["name"]: component["action"] for component in plan.components}
             data_dir = root / "secretary-data"
-            self.assertEqual(actions["debug_orca_state"], "exclude")
+            self.assertNotIn("debug_orca_state", actions)
             self.assertEqual(actions["memory_index"], "rebuild")
             self.assertTrue((data_dir / "transcripts" / "inventory.json").is_file())
             self.assertTrue((data_dir / "artifacts" / "inventory.json").is_file())
             self.assertFalse((data_dir / "debug").exists())
+
+    def test_a_full_archive_from_before_a20_step_9_still_verifies_and_restores(self):
+        """An archive carrying `debug/orca-state/inventory.json` and its `debug_orca_state` manifest
+        component (secretary-1726): optional debug material, read if present, never required and
+        never restored as data."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = _write_instance(root, "test")
+            archive = _full_archive(root, "test", legacy_orca_debug=True)
+            with tarfile.open(archive) as bundle:
+                self.assertIn(f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json", bundle.getnames())
+
+            verified = verify_backup(archive)
+            self.assertEqual((verified.code, verified.findings), (0, []))
+            self.assertIn("debug_orca_state", verified.manifest["components"])
+
+            plan = restore_backup(archive, instance, _allow_postgres_engine=True)
+
+            actions = {component["name"]: component["action"] for component in plan.components}
+            data_dir = root / "secretary-data"
+            self.assertEqual(actions["memory_index"], "rebuild")
+            self.assertTrue((data_dir / "transcripts" / "inventory.json").is_file())
+            self.assertFalse((data_dir / "debug").exists())
+            self.assertFalse(list(data_dir.rglob("*orca*")))
 
     def test_plain_restore_refuses_a_full_archive_it_cannot_restore_the_engine_of(self):
         with tempfile.TemporaryDirectory() as tmpdir:

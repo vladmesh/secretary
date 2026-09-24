@@ -1,6 +1,6 @@
 """Regression coverage for secretary-748: the documented health-suite command
-must import ``tests`` (and therefore the hermetic Orca default it installs)
-before any test module can reach production Orca discovery.
+must import ``tests`` (and therefore the hermetic defaults it installs)
+before any test module can reach a host-facing path.
 
 Prior incident: docs/OPERATIONS.md and the steward skill documented
 ``python3 -m unittest discover -s tests``. That invocation's top-level
@@ -8,7 +8,7 @@ directory defaults to the start directory itself, so unittest's discovery
 does not treat ``tests`` as a dotted package rooted one level up; whether the
 hermetic default in ``tests/__init__.py`` ends up applied at all then depends
 on some *other* test module happening to import ``tests`` explicitly (as
-``tests/test_hermetic_orca.py`` does) before any test runs, purely by
+the since-retired ``tests/test_hermetic_orca.py`` did) before any test runs, purely by
 incidental module ordering, not by design. The fix was to document
 ``python3 -m unittest`` instead, whose default discovery (``discover('.')``)
 imports ``tests`` as a package on its own, unconditionally.
@@ -39,15 +39,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: process: that the ``tests`` package was imported, that its hermetic default is live, and that
 #: no test module had to be imported first for either to be true.
 _PROBE = """
+import os
 import sys
-from unittest import mock
+from pathlib import Path
 
 import tests.broad
 
-import secretary.host_apply as host_apply
-
 print("tests-imported=%s" % ("tests" in sys.modules))
-print("patched=%s" % isinstance(host_apply.find_orca_executable, mock.Mock))
+print("patched=%s" % Path(os.environ.get("TA_PIPELINE_STATE_DIR", "")).name.startswith(
+    "secretary-tests-pipeline-state."
+))
 print("no-test-module-imported=%s" % (not any(
     name == "tests.test" or name.startswith("tests.test_") for name in sys.modules
 )))
@@ -114,7 +115,7 @@ class DocumentedHealthSuiteCommandTests(unittest.TestCase):
         # `-s tests` without `-t` sets top_level_dir to the start dir itself,
         # so `tests/__init__.py` is not guaranteed to run before test
         # collection: today it happens to run anyway only because
-        # `tests/test_hermetic_orca.py` imports the `tests` package as a
+        # some test module imports the `tests` package as a
         # side effect at module scope, and unittest's discovery eagerly
         # imports every test module before running any of them. That is an
         # accident of which test modules currently exist, not a property of

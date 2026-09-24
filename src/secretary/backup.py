@@ -44,7 +44,6 @@ from secretary.data import (
     init_layout,
 )
 
-ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 PIPELINE_PAUSE_REASON = "secretary backup create"
 PIPELINE_PAUSE_ACTOR = "secretary-backup"
 PRODUCT_REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -162,8 +161,6 @@ def create_backups(
                 if kind == "core":
                     core_board_count = _filter_core_board_export(payload / "secretary-data" / "board")
                     manifest["components"]["board"]["count"] = core_board_count
-                if kind == "full":
-                    _write_orca_debug_snapshot(payload / "debug" / "orca-state")
                 manifest["checksums"] = _payload_checksums(payload)
                 _write_json(payload / "versions.json", manifest)
 
@@ -455,31 +452,6 @@ def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path
         elif path.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target, follow_symlinks=False)
-
-
-def _write_orca_debug_snapshot(destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    _write_json(destination / "inventory.json", _orca_debug_inventory())
-
-
-def _orca_debug_inventory() -> dict[str, Any]:
-    entries: list[dict[str, Any]] = []
-    for root in ORCA_STATE_DIRS:
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*")):
-            if path.is_symlink() or not path.is_file():
-                continue
-            stat = path.stat()
-            entries.append(
-                {
-                    "root": str(root),
-                    "relative_path": path.relative_to(root).as_posix(),
-                    "bytes": stat.st_size,
-                    "mtime": int(stat.st_mtime),
-                }
-            )
-    return {"version": 1, "files": entries}
 
 
 def _json_text(payload: Any) -> str:
