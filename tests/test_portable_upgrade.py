@@ -257,6 +257,26 @@ class PortableFixture(unittest.TestCase):
         codex_home.mkdir(parents=True)
         (codex_home / "AGENTS.md").write_text("# portable\n", encoding="utf-8")
         (codex_home / "config.toml").write_text("[portable]\n", encoding="utf-8")
+        # An installed product is a Git checkout: `dependencies` and `memory` bind their receipts to
+        # its revision and tracked inputs, so a fixture that is not one could never be current.
+        for command in (
+            ["git", "-C", str(self.product), "init", "--quiet", "--initial-branch", "main"],
+            ["git", "-C", str(self.product), "add", "-A"],
+            [
+                "git",
+                "-C",
+                str(self.product),
+                "-c",
+                "user.name=portable operator",
+                "-c",
+                "user.email=portable@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "product",
+            ],
+        ):
+            subprocess.run(command, check=True, capture_output=True)
 
     def write_instance(self) -> None:
         (self.instance / "instance.yaml").write_text(

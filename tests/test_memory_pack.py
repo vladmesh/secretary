@@ -244,6 +244,10 @@ class ProductMemoryPackTests(unittest.TestCase):
         fact.symlink_to(outside)
 
     def test_no_pull_memory_pack_step_detects_ledger_drift_and_requests_restart(self):
+        # `memory` binds its receipt to the product checkout's revision, so the product is a Git one.
+        git(self.product, "init", "--initial-branch=main", "--quiet")
+        git(self.product, "add", "-A")
+        git(self.product, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "p")
         report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "secretary-"})
         context = upgrade.UpgradeContext(
             instance_path=self.instance,

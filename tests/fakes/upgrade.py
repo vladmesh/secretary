@@ -48,8 +48,10 @@ class FakeUnitInstaller:
         self.identities.pop(name, None)
 
     def restart(self, name: str) -> None:
+        # `systemctl restart` starts a stopped unit too, with a new main process.
         self.calls.append(("restart", name))
-        if name in self.active:
+        self.active.add(name)
+        if name.endswith(".service"):
             self.identities[name] = self._new_identity()
 
     def is_active(self, name: str) -> bool:

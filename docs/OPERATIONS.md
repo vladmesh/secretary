@@ -1967,7 +1967,9 @@ mismatched receipt is stale, never `unchanged`; do not copy or edit it.
 `--dry-run` compares `HEAD` with `origin/<branch>`, names the actions the target revision would cause
 (`would restart secretary-web.service and probe ...`), and writes nothing.
 
-`upgrade` restarts onto whatever dependency set it installed; it does not correct a wrong set.
+`upgrade` restarts onto the dependency set `dependencies` left. That step reinstalls when the venv does
+not match the checkout by its receipt ([Upgrade](#upgrade)); it does not inspect a venv edited by hand
+behind a matching receipt.
 
 #### When the restart or the probe fails
 
@@ -1989,16 +1991,19 @@ sudo journalctl -u secretary-web.service -n 50 --no-pager     # the reference, t
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system
 ```
 
-**Rollback** is the checkout plus a restart (`upgrade` is `--ff-only`):
+**Rollback** is the checkout plus `upgrade --no-pull` (`upgrade` is `--ff-only`):
 
 ```bash
 git -C ~/secretary log --oneline -3                  # the revision to go back to
 git -C ~/secretary switch --detach <previous-sha>
-sudo systemctl restart secretary-web.service         # the front is PartOf= and comes with it
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
-`git switch` alone leaves the head-registry pin, units and dependencies as the upgrade put them; rerun
-`secretary upgrade --no-pull` to realign them.
+`git switch` alone leaves the head-registry pin, units, dependencies and the memory and web processes as
+the upgrade put them. `upgrade --no-pull` realigns them against the moved checkout: the venv and the memory
+service through their receipts, the web transport through its own (the front is `PartOf=` and comes with
+it). See [Taking the slice down, and rolling the application back a
+revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
 
 When an upgrade did not finish, or a service was restarted by hand, check whether the process is newer than
 the checkout:
@@ -2023,31 +2028,28 @@ A request in flight during the restart fails; a reload a moment later reaches th
 **Taking the slice down** is `sudo systemctl stop secretary-web-front.service`; the transport and pipeline
 keep running ([Rolling back to before this front existed](#rolling-back-to-before-this-front-existed)).
 
-**Rolling the application back a revision** while staying published: move the tree, then restart (the
-restart last):
+**Rolling the application back a revision** while staying published: move the tree, then run
+`upgrade --no-pull` against it (the upgrade last):
 
 ```bash
 git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
 git -C ~/secretary switch --detach <revision>
-sudo systemctl restart secretary-web.service
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
-- `upgrade --no-pull` does not reinstall dependencies for a hand-moved checkout (no pull, so no recorded
-  dependency change). If requirements differ, reinstall deliberately:
-
-  ```bash
-  ~/secretary/.venv/bin/python -m pip install -e "$HOME/secretary[dev]"
-  sudo systemctl restart secretary-web.service
-  ```
-
+- `upgrade --no-pull` compares the venv and the memory service with the moved checkout through the
+  dependency and memory process receipts ([Upgrade](#upgrade)), and reconciles both: it reinstalls the
+  product with every extra the installation uses when the dependency manifests differ, and restarts the
+  memory service when its revision, code, dependencies, model or pack differ. The `web` step restarts the
+  transport through its own receipt. Do not install `[dev]` or restart units by hand.
 - An `upgrade` that ends `status: failed` did only the steps printed before the failure; it rolls nothing
   back.
 
-A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly:
+A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly, the same way:
 
 ```bash
 git -C ~/secretary switch main
-sudo systemctl restart secretary-web.service
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
 ### A snapshot of the whole thing, in one go
@@ -2177,7 +2179,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `pull` | `git fetch` plus `merge --ff-only`; a dirty checkout is refused |
 | `registries` | read the skill manifest, instance overlay, head canon and memory pack; an unreadable or undeliverable registry stops the run before any write |
 | `memory-pack` | materialize the shipped memory pack into the memory canon |
-| `dependencies` | reinstall into the virtualenv if the dependency manifest moved |
+| `dependencies` | compare the venv with the checkout through the dependency receipt (tracked-manifest digest, extras, venv path); on a mismatch, a snapshot install or a wrong Ruff pin, `pip install -e <root>[dev,…]` with every extra this installation uses, then write the receipt |
 | `dependency-provenance` | import `secretary`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
 | `board-store` | connect as owner and apply Alembic to the shipped head |
@@ -2190,11 +2192,25 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
 | `host` | `reconcile apply`: units from `packaging/systemd` |
-| `memory` | restart the memory service if its code, dependencies, unit or pack changed, then a bounded `memory_list` read |
+| `memory` | start a stopped memory service; restart an active one whose process receipt is missing, belongs to another process or binds another revision, source, dependency digest, `MEMORY_MODEL` or pack digest (or whose code, unit or pack this run changed); then a bounded `memory_list` read and a new receipt |
 | `web` | for an active transport, verify its process receipt or restart, probe loopback, write the receipt after 200 |
 | `verify` | repeat dry run; the second rollout must be a no-op |
 
 Flags: `--no-pull`, `--base-branch`, `--product-root`, `--runtime-user`, `--json`.
+
+`dependencies` and `memory` decide by installed state, not by what this run's `pull` moved, so a checkout
+moved outside `upgrade` (a manual reset or pull, `--no-pull`, a recreated checkout) is caught by the next
+run. Each line names what it compared, for example `unchanged dependencies: venv matches checkout (deps
+sha256 1a2b3c4d5e6f, extras dev,memory)` or `changed dependencies: …: deps sha256 1a2b3c4d5e6f ->
+4d5e6f7a8b9c`. The required extras are `dev`, plus `memory` when the memory unit is installed or active,
+plus any declared extra whose distributions the venv already carries. The receipts are
+`DATA_DIR/upgrade/dependency-receipt.json` and `DATA_DIR/upgrade/memory-process-receipt.json` (mode 0600,
+excluded from backups). A missing, unreadable or malformed receipt means the work is done, never
+`unchanged`; do not copy or edit them.
+
+**First run after this change.** An installation has no receipts yet, so its first upgrade (the final
+upgrade included) reinstalls the product into the venv once and restarts the memory service once, then
+writes both receipts. The next run reports both steps `unchanged`.
 
 The packaged systemd timers are the only schedule owner of the background roles (curator, retro,
 steward). Before sprint:1459 they ran as Orca automations; upgrade no longer creates, repoints or

@@ -197,5 +197,6 @@ unit tests/test_provider_usage.py
 unit tests/test_web_process_coherence.py
 unit tests/test_suite_tmp_guard.py
 unit tests/test_web_process_receipt.py
+unit tests/test_upgrade_state_receipts.py
 integration-board tests/test_retired_identity.py
 unit tests/test_resource_probe.py

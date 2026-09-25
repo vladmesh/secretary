@@ -25,6 +25,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
+from secretary.memory import DEFAULT_MODEL
 from secretary.memory import access as memory_access
 
 DEFAULT_MEMORY_DIR = Path.home() / "secretary-data" / "memory"
@@ -35,7 +36,7 @@ DEFAULT_CANON = Path.home() / "secretary-instance" / "state" / "memory" / "facts
 CANON = Path(os.environ.get("MEMORY_CANON_ROOT", DEFAULT_CANON))
 
 DB_PATH = os.environ.get("MEMORY_DB", str(DEFAULT_MEMORY_DIR / "index.sqlite"))
-MODEL = os.environ.get("MEMORY_MODEL", "intfloat/multilingual-e5-large")
+MODEL = os.environ.get("MEMORY_MODEL", DEFAULT_MODEL)
 PORT = int(os.environ.get("MEMORY_PORT", "8077"))
 DIM = int(os.environ.get("MEMORY_DIM", "1024"))
 MODEL_CACHE_DIR = Path(os.environ.get("MEMORY_CACHE_DIR", str(DEFAULT_MEMORY_DIR / "fastembed-cache")))
