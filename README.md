@@ -54,7 +54,7 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
-Bootstrap pins the Docker and session-manager runtimes and provisions the loopback-only `postgres:16`
+Bootstrap installs Docker and Compose from the distribution and provisions the loopback-only `postgres:16`
 board-store container and persistent volume, with its local mode-0600 ignored `board-store.env`,
 through the current Alembic head; see [Board store](docs/BOARD_STORE.md).
 

@@ -34,30 +34,30 @@ to reach, and the A20 exit checklist that removed Orca from the product, step by
   before any child runs or any backend is asked. Its bring-up cause is the card's own contract, so
   the card goes Blocked with a reason naming the record; it is never torn down through Orca and never
   re-placed. `head-status` shows such a record as legacy (`runtime: orca-legacy`,
-  `legacy_record: true`) through its pid heartbeat alone; it reads no pane inventory (step 5).
+  `legacy_record: true`) through its pid heartbeat alone (step 5 removed the pane inventory).
 - **Memory access grants.** A grant whose `head_run` is a legacy record loads, so it is never
-  `runtime_identity_malformed` for its runtime alone. It is decided by liveness like any grant: an
-  Orca pane is never alive, so it is denied `runtime_identity_unbound` (no pid file) or
+  `runtime_identity_malformed` for its runtime alone. It is decided by liveness like any grant: the
+  Orca pane its head ran in is gone, so it is denied `runtime_identity_unbound` (no pid file) or
   `runtime_identity_stale`. The PO memory bridge and the memory health probe build their spec by
   hand and now name `local-pty`; grants they wrote before that say `orca-legacy` and keep working
   while their process is alive.
 
-A standing agent's tick with no usable `local-pty` profile fails closed (secretary-1720): it starts
-no head and never falls back to a pane. The causes are: the registry would not load, no profile is
-routed to the role, the profile will not make a `HeadSpec`, its command will not render, or it names
-a runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The tick changes
-nothing else: it creates no steward report card, stops no head, leaves `head_run.json` and
-`active_report.json` as they are and closes no report, and exits 1. A head an earlier tick raised
-finishes its turn under its own supervisor; the next tick with a usable profile finds it through
-`head_run.json` (busy-skip, or a bring-up over a head that has ended).
-To see the reason, read the last entry of `automation-state/<agent>/runs.jsonl` (under
-`TA_STATE`, by default `~/secretary-data/automation-state`): `action="no-supervised-head"`,
-`result="error"`, the cause in `error`. The unit's journal (`journalctl -u secretary-<agent>.service`)
-has the same reason on stderr. A `terminal_handle.json` left in the agent's state by the pane
-backend is refused the same way (`action="supervised-owner-conflict"`, exit 1) whenever the file
-exists, even empty, unreadable or without a `handle`: the tick never deletes it and never raises a
-head beside it. Remove it once that pane is confirmed gone. Pinned by
-`tests/test_automations_dispatch_local_pty.py` (`FailClosedTests`).
+A standing agent's tick with no usable `local-pty` profile fails closed (secretary-1720): it starts no
+head; the pane fallback went in A20 step 4. The causes are: the registry would not load, no profile is
+routed to the role, the profile will not make a `HeadSpec`, its command will not render, or it names a
+runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The tick changes nothing
+else: it creates no steward report card, stops no head, leaves `head_run.json` and `active_report.json`
+as they are and closes no report, and exits 1. A head an earlier tick raised finishes its turn under its
+own supervisor; the next tick with a usable profile finds it through `head_run.json` (busy-skip, or a
+bring-up over a head that has ended). To see the reason, read the last entry of
+`automation-state/<agent>/runs.jsonl` (under `TA_STATE`, by default
+`~/secretary-data/automation-state`): `action="no-supervised-head"`, `result="error"`, the cause in
+`error`. The unit's journal (`journalctl -u secretary-<agent>.service`) has the same reason on stderr. A
+`terminal_handle.json` left in the agent's state by the pane backend before A20 step 4 is refused the
+same way (`action="supervised-owner-conflict"`, exit 1) whenever the file exists, even empty, unreadable
+or without a `handle`: the tick never deletes it and never raises a head beside it. Remove it once the
+pane-era head it names is confirmed gone. Pinned by `tests/test_automations_dispatch_local_pty.py`
+(`FailClosedTests`).
 
 ## `local-pty` parity criteria
 

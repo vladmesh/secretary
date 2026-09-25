@@ -77,8 +77,8 @@ How this works today is in [Protocols](PROTOCOLS.md#sprints).
   backend holds live state.
 - Product intent and execution are different planes: issues are durable and prioritised, tasks are cut
   just in time inside a sprint.
-- The session manager provides managed PTY sessions, streamed output, input, state, process-tree
-  termination and recovery. A pretty live UI is a frontend capability.
+- The head runtime (`local-pty`) provides managed PTY sessions, streamed output, input, state,
+  process-tree termination and recovery. A pretty live UI is a frontend capability.
 - LLMs do and review the work. Routing, lifecycle, recovery and ownership are ordinary checkable
   protocols.
 - The owner keeps product authority. The secretary is the interactive PO interface; an observer is an
@@ -87,7 +87,7 @@ How this works today is in [Protocols](PROTOCOLS.md#sprints).
 
 ## Delivery and direction
 
-The appliance ships its board and session manager out of the box. Their internals must not leak across
+The appliance ships its board and head runtime out of the box. Their internals must not leak across
 the product, so replacing either stays a decision that can be taken later. Heads remain the owner's
 choice and are connected independently.
 
@@ -95,6 +95,6 @@ The project is developed as open source, with measurable results and without a h
 
 ## Not now
 
-No team platform, multi-tenant SaaS, general-purpose terminal session manager, public plugin ecosystem or automatic
-storage of every provider credential. Telegram, voice input and moving configuration into a database
-wait until the main install and recovery path is automated.
+No team platform, multi-tenant SaaS, general-purpose terminal multiplexer, public plugin ecosystem or
+automatic storage of every provider credential. Telegram, voice input and moving configuration into a
+database wait until the main install and recovery path is automated.

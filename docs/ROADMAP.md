@@ -41,7 +41,7 @@ deviations, an in-house CI runner for private repositories, and cleanup by owner
 ### Goal
 
 A short bootstrap and install flow creates the appliance on a clean Ubuntu 24.04 VPS: the dedicated
-OS user, the private instance repository, the local data plane, and the board, session manager,
+OS user, the private instance repository, the local data plane, and the board, head runtime,
 memory service, dispatcher, background roles and schedules. Agent heads and provider logins remain a
 separate operator choice.
 
@@ -58,10 +58,10 @@ install secretary
 ### Done when
 
 - A clean-host end-to-end run passes on an Ubuntu 24.04 host with no pre-prepared home directory for
-  the installation user, no checkouts, no board and no session-manager state.
+  the installation user, no checkouts, no board and no head-runtime state.
 - Every host path and resource name is derived from the instance and the discovered host context.
-- The installer installs and configures the bundled board and session manager without a pre-prepared
-  runtime.
+- The installer installs and configures the bundled board without a pre-prepared runtime; the head
+  runtime, `local-pty`, ships with the product.
 - Memory, dispatcher, curator, steward, retro and the schedules come up through the materialiser with
   no hand-copied units and no editing of generated files.
 - A repeat apply is idempotent, and an existing installation user triggers an explicit adopt/recover
@@ -154,7 +154,7 @@ add project
 
 ### Goal
 
-Dependencies on the board backend, the session manager and specific CLIs sit behind checkable
+Dependencies on the board backend, the head runtime and specific CLIs sit behind checkable
 contracts. This is not a public plugin API; it is the ability to replace a backend without rewriting
 the task and agent lifecycle.
 
@@ -170,9 +170,8 @@ the task and agent lifecycle.
 
 ### Open questions
 
-- Keep the current session manager, move to an existing alternative, maintain a fork, or build a
-  minimal in-house session backend. Decide by running the same pipeline on a second session
-  backend and attributing bug classes by measurement.
+- Settled in A20 (sprint:1459 and sprint:1461): the minimal in-house backend, `local-pty`, replaced
+  the session manager heads ran in before (Orca); see [Head runtime](HEAD_RUNTIME.md).
 - Whether there is a real need for a public extension API.
 
 ## Milestone 6. First supported release

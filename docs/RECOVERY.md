@@ -347,8 +347,9 @@ database untouched; repair or recreate only the target before retrying.
 
 Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs Docker
 and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
-store, with no recovery phrase or manual board credentials. It installs no session manager: heads run
-on local-pty. Before A20 step 9 it also installed Orca and its X server. `secretary install` installs no
+store, with no recovery phrase or manual board credentials. Heads run on local-pty, which ships
+with the product; before A20 step 9 bootstrap also installed Orca, the session manager heads then ran
+in, and its X server. `secretary install` installs no
 runtime and checks that the board store is reachable before changing live state.
 
 ```bash

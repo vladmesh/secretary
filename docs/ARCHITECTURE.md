@@ -185,8 +185,8 @@ metadata; its freshness is computed against card audit.
 Standing agents: curator, steward and retro all enter `python3 -P -m secretary automations`. Its
 composition root supplies task-backed ports for steward signals and reports and for retro Done
 retention; curator needs none. The generic triggered-agent runtime owns only the port interfaces.
-Each tick raises the role's head on `local-pty` or fails closed with a recorded reason and exit 1.
-There is no pane path (see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
+Each tick raises the role's head on `local-pty` or fails closed with a recorded reason and exit 1
+(see [Head runtime](HEAD_RUNTIME.md#the-runtime-default)).
 
 ### Head runtime ownership
 
@@ -272,7 +272,7 @@ Constraints, enforced by tests:
 
 - nothing under `webproto` imports HTTP, sockets, a framework or a template engine;
 - read operations never write the board, dispatcher state, audit or installation, and take no actor;
-- liveness is process state, never pane, terminal or window state.
+- liveness is process state, never terminal or window state.
 
 Protocol, schema, states and cursors: [Protocols](PROTOCOLS.md#reading-the-pipeline).
 

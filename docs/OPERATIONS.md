@@ -22,10 +22,10 @@ python3 -m pip install '.[dev]'
 python3 -m tests.broad
 ```
 
-The first form installs the CLI, the second adds the memory runtime, the third the pinned linter.
-`ruff` is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed
-Python paths with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports
-Ubuntu 24.04, installs the pinned Docker and session-manager runtimes and provisions the board store; `secretary install` or
+The first form installs the CLI, the second adds the memory runtime, the third the pinned linter. `ruff`
+is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed Python paths
+with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports Ubuntu 24.04,
+installs Docker and Compose from the distribution and provisions the board store; `secretary install` or
 `secretary recover` then applies the instance ([Recovery](RECOVERY.md)).
 
 `secretary status --instance <dir>` summarizes an installation; `--json` is a structured snapshot and
@@ -117,9 +117,8 @@ The model cache is `DATA_DIR/memory/fastembed-cache`, never `/tmp`. `host.memory
 ONNX Runtime inference limit (default `1`). `secretary doctor` prints the cache path and warns when
 `data_dir` puts it under a temporary directory.
 
-The session-manager runtime belongs to the host. Secretary ships no unit for it; scheduler units order
-themselves after it without a dependency that could restart it. `doctor` reports it as external and
-distinguishes absent from inactive.
+Heads run on `local-pty`, which ships with the product: no host-owned head runtime is installed,
+ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)).
 
 ## Data plane
 
@@ -460,9 +459,10 @@ observation.
 
 `secretary status --json --instance INSTANCE` is the read-only operational snapshot and safe to poll.
 It reports managed services and timers, projects and heads, active dispatcher attempts (workspace,
-watchdog pane, progress, respawn state), sprint observers, pause state, checkpoint freshness, memory
-index state, and host disk, memory and load. A live run uses the dispatcher's pane probe for watchdog
-liveness; `--offline` reports it as unprobed.
+watchdog liveness, progress, respawn state), sprint observers, pause state, checkpoint freshness,
+memory index state, and host disk, memory and load. A live run reads each head's liveness the way the
+dispatcher's watchdog does (`command_terminal_status`: the pid heartbeat and the exact-run provider
+cursor) into the watchdog's `panel` field; `--offline` reports it as `not-probed`.
 
 `secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and exits
 non-zero for a broken or unavailable host. Use `status` for what is running and `doctor` for what
@@ -492,8 +492,8 @@ to the installation. It is created on the first observer launch, so its absence 
 installation is no finding. `reconcile` neither creates nor deletes it.
 
 Timer-started oneshot units are neither required enabled nor active; their state is still
-reported. No unit outside the installation's own is expected or probed: Secretary depends on no
-host-owned session manager (A20 step 9, [Head runtime](HEAD_RUNTIME.md)).
+reported. No unit outside the installation's own is expected or probed; before A20 step 9 the
+host-owned Orca unit was ([Head runtime](HEAD_RUNTIME.md)).
 
 ## How long things take
 
@@ -1076,13 +1076,13 @@ Each sprint's decision appears under the `observer-reconcile` step:
 - `observer-idle` — ready for input, nothing owed;
 - `observer-nudged` — a committed linked-card event woke an idle observer;
 - `observer-wake-pending` — a sent batch awaits acknowledgement;
-- `observer-wake-waiting` — an event arrived while working; the next tick with a ready pane nudges
+- `observer-wake-waiting` — an event arrived while working; the next tick with a ready observer nudges
   unless exact provider progress shows the run advancing. `admission` says what the provider source
   answered; an unadmitted source is held to the unproven turn ceiling;
 - `observer-wake-progressing` — the admitted provider cursor advanced; nothing is sent or stopped;
 - `observer-wake-no-progress` — the admitted cursor is unchanged while busy; the three-observation
   ladder advances, no raw input is sent;
-- `observer-redelivered` — a batch was sent again (pane ready without acknowledgement, or the
+- `observer-redelivered` — a batch was sent again (observer ready without acknowledgement, or the
   acknowledgement deadline ran out); the original batch is kept;
 - `observer-wake-deferred` — the wake failed; after `SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS` (3) failures
   the head is replaced (`observer-relaunched`);
@@ -1110,7 +1110,8 @@ Timers:
 - A head with an admitted cursor has no ceiling; its no-progress ladder decides. An unbound Codex source
   is retried for binding on every poll under the launch-time rules.
 
-A pane is idle only when the session manager reports it ready and its last-output time is readable. A
+An observer is ready only when its supervisor reports no turn open and no delivery in flight, and idle
+only when it is ready and its last-output time (the supervisor journal's last event) is readable. A
 delivery left in `delivery-intent` by a dispatcher that died mid-send waits for the deadline rather than
 being sent twice. A card in Ready, In progress or Validate is never by itself an idle observer. Never
 clear a composer with Ctrl-C, Escape, a key chord or raw terminal input.
@@ -1190,14 +1191,14 @@ resume). Delivery contracts are in
   written is the normal path for a head still starting.
 - Codex update prompt: preflight sets `dismissed_version` in the runtime `CODEX_HOME` `version.json`,
   best effort, before the head starts. No delivery ever upgrades Codex.
-- The reviewer starts as a second supervised process in the worker's git worktree; there is no pane
-  to split.
+- The reviewer starts as a second supervised process in the worker's git worktree.
 - A record written while heads were Orca panes (its workspace an Orca worktree, or a head run on
   `orca-legacy`) is refused by every launch, delivery, stop and teardown with a
   `legacy dispatcher record` reason, and the card goes Blocked naming the record. Nothing is torn down;
   clear that checkout by hand once its heads are confirmed gone.
 - A stop the host did not confirm is not a stop: no replacement, no Blocked move, no freeze listing until
-  confirmed. Check the session manager: the stop is refused or the process ignores the signal.
+  confirmed. Check the head with [head-status](#head-status-in-a-live-workspace): the stop is refused
+  or the process ignores the signal.
 
 State without reading a transcript:
 
@@ -1230,7 +1231,7 @@ A card blocked because a head never came up says so. Vocabulary:
 `cause=base_branch_contract` means an integration base the project cannot integrate into or a seed the
 remote lacks. Neither is fixed by relaunching.
 
-Repair what the cause names (pane, resource, adapter, checkout), then move the card out of Blocked with a
+Repair what the cause names (head, resource, adapter, checkout), then move the card out of Blocked with a
 reason. The dispatcher schedules no retry; the observer decides, and a returned card is claimed under a
 fresh attempt id. Before concluding a head is missing, ask [head-status](#head-status-in-a-live-workspace).
 
@@ -1468,29 +1469,31 @@ The dispatcher waits for a worker report (In progress) and a review verdict (Val
 observation and the recovery ladder are in [Head vitality](HEAD_VITALITY.md); the headless-card contract
 is in [Protocols](PROTOCOLS.md#a-card-in-an-active-state-with-no-worker).
 
-Each waiting tick compares the stored pane id with the session manager's inventory. A missing or
-disconnected pane takes the stall path: one respawn in the same workspace, then Blocked. A runtime that
-answers unavailable is not a dead head; the waiting ceiling still runs as a fallback.
+Each waiting tick reads the head as `head-status` does (`command_terminal_status`): its launch-identity
+pid heartbeat, the exact-run provider cursor and its child processes, reduced to one vitality verdict
+([Head vitality](HEAD_VITALITY.md#decision-path)). A heartbeat naming a gone process takes the stall
+path: one respawn in the same workspace, then Blocked. A runtime that answers unavailable is not a dead
+head; the waiting ceiling still runs as a fallback.
 
-A present pane must also show output moving for the stored pane before the ceiling. The launch-identity
-heartbeat, written by the launcher before `exec`, lives under `SECRETARY_DISPATCHER_BODY_DIR` (default
-`/tmp`) with its pane-leaf handoff; respawn deletes both first. A matching live heartbeat is positive
-liveness; a dead one takes the missing-pane path; missing or unreadable keeps the output fallback; a live
-mismatch is degraded and never authorizes a close, stop, signal, adoption or replacement. The raw command
-override has no heartbeat and stays on output checks.
+The launch-identity heartbeat, written by the launcher before `exec`, lives under
+`SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`) with its leaf handoff; respawn deletes both first. A
+matching live heartbeat is positive liveness; a dead one takes the stall path; missing or unreadable
+keeps the output fallback; a live mismatch is degraded and never authorizes a close, stop, signal,
+adoption or replacement. The raw command override has no heartbeat and stays on output checks.
 
 Every fresh progress signal restarts the waiting window, so a ceiling measures silence, not task age. A
 head that printed nothing since launch gets the short first-output window; TUI heads on an alternate
 screen also count the session rollout file's modification time. First breach: one respawn; second:
 Blocked.
 
-A pid-confirmed head whose pane stays ready for input for the idle window, with nothing landed for the
-round, is stalled too (a pane held in a dialog counts the same). Before replacing a worker that is still a
-live conversation, the dispatcher types one reminder per report round into its pane to run the report
-command from its `TASK.md` (`worker-report-prompted`, degraded). A second idle episode in the round, a head
-nothing can be typed into, or an unconfirmed send takes respawn then Blocked. A head whose pane identity
-was never persisted or whose binding was lost falls back to the long ceiling. The respawned worker gets the
-same `TASK.md`, commands and generation.
+A worker whose episode suspects or confirms a stall, with nothing landed for the round, first gets one
+reminder per report round, delivered through its supervisor, to run the report command from its
+`TASK.md` (`worker-report-prompted`, degraded). A suspicion never destroys: once the reminder is spent
+the tick reports `worker-stall-suspected` (degraded) and waits. Under a confirmed stall, a spent
+reminder, a head that cannot take one (exited, suspended or not addressable) or an unconfirmed send
+takes respawn then Blocked. A head nobody could observe is never replaced on the clock: past the long
+ceiling the tick escalates to the operator. The respawned worker gets the same `TASK.md`, commands and
+generation.
 
 This idle bounce is a degraded tick and turns `secretary automations health` red until a healthy tick follows.
 The Blocked move after it is not degraded; the steward reports it as `new_blocked`. Every respawn writes a
@@ -1521,17 +1524,19 @@ Returning the same card again gets a fresh answer. While unresolved, `secretary 
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — report ceiling after first output, default 21600.
 - `SECRETARY_HEAD_IDLE_STALL_SECONDS` — no production effect since the wait tick moved onto the vitality
   verdict; the vitality thresholds do not read it (see `docs/HEAD_VITALITY.md`, Thresholds).
-- `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — bring-ups deferred over a pane not ready for its launch prompt
-  before Blocked, default 5.
+- `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — pane-era: before A20, bring-ups deferred over a pane not ready
+  for its launch prompt before Blocked, default 5. Only the removed Orca spawn raised that deferral, so
+  no `local-pty` bring-up reads it.
 - `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,
   default 5.
 
 The stall settings are read at check time; garbage or zero falls back to the default.
 
-A bring-up whose pane is working, held in a dialog or still starting is deferred, not failed:
-`worker-launch-deferred` / `review-launch-deferred` with the pane state and attempt, retried next tick.
-When the attempts run out the card is Blocked naming the pane state, with the infrastructure class
-([An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome)).
+Before A20 a bring-up whose pane was working, held in a dialog or still starting was deferred, not
+failed: `worker-launch-deferred` / `review-launch-deferred` with the pane state and attempt, and at the
+limit Blocked with the infrastructure class
+([An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome)). A `local-pty` bring-up has
+no such deferral: a head that does not come up is an ordinary bring-up failure.
 
 ### Reports and verdicts
 
@@ -2185,7 +2190,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
-| `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
+| `host` | `reconcile apply`: units from `packaging/systemd` |
 | `memory` | restart the memory service if its code, dependencies, unit or pack changed, then a bounded `memory_list` read |
 | `web` | for an active transport, verify its process receipt or restart, probe loopback, write the receipt after 200 |
 | `verify` | repeat dry run; the second rollout must be a no-op |
@@ -2470,15 +2475,15 @@ for an answer, 3 for degraded (no workspace path, or a host in `noop` mode). No 
   `missing_progress_sources`, `last_progress`, and `next_recovery_deadline` (or `null` with
   `deadline_note`). Ladder semantics: [Head vitality](HEAD_VITALITY.md).
 
-A head on the `local-pty` runtime (worker, reviewer or sprint observer; `kind` names which) owns no pane and
-is read from its own supervisor instead (`runtime: local-pty`, the backend its recorded run names): `process`
-and `heartbeat` from its launch identity (state, pid), `supervisor` from the supervisor's `status` (`alive`,
+A head on the `local-pty` runtime (worker, reviewer or sprint observer; `kind` names which) is read from
+its own supervisor (`runtime: local-pty`, the backend its recorded run names): `process` and `heartbeat`
+from its launch identity (state, pid), `supervisor` from the supervisor's `status` (`alive`,
 `turn_open`, `turn`, `draining`, `stopping`), `lease` from the kernel's lock table (`held` with
 `holder_pid`, or `free`), and `journal.tail`, the last eight journal records; a journal with skipped,
 torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
 `unavailable_sources`, never read as a gone head. A legacy record (a run on `orca-legacy`, or a head
-identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through its
-pid heartbeat alone; no pane inventory is read for any row (secretary-1723).
+identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through
+its pid heartbeat alone (secretary-1723 removed the pane inventory, A20 step 5).
 
 Readings are advisory. No disconnected or unreadable source is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:
