@@ -35,7 +35,7 @@ A missing required dependency is an infrastructure failure, never a green skip:
   loopback ports.
 
 Fixtures use only temporary state. No test contacts a live board or reads or writes the live
-installation, its Compose project or volume. Real host, systemd, Orca, credential, live GitHub
+installation, its Compose project or volume. Real host, systemd, credential, live GitHub
 authentication and recovery-drill contours are outside PR CI and are operator checks.
 
 ## CI evidence

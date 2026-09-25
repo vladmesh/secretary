@@ -8,8 +8,8 @@ with hysteresis, then turned into a recovery intent. Modules:
 - `src/secretary/dispatch/head_vitality_guard.py`: the destructive-step guard;
 - `src/secretary/dispatch/head_vitality_policy.py`: the recovery policy.
 
-`HeadRuntime` owns the lifecycle boundary. The local-pty backend owns delivery, turn lease, drain and
-stop atomically. The Orca legacy backend has a weaker conditional stop.
+`HeadRuntime` owns the lifecycle boundary. The local-pty backend, the one head runtime, owns
+delivery, turn lease, drain and stop atomically.
 
 ## Central invariant
 
@@ -30,7 +30,8 @@ Turn     = Active  | Idle    | Unknown               is a turn in flight?
 Progress = Advancing| Quiet  | Stagnant | Unknown    is the work moving?
 ```
 
-A pid heartbeat answers only Process, a provider cursor only Progress, a pane only Turn. An axis a
+A pid heartbeat answers only Process, a provider cursor only Progress. Turn was answered only by
+pane readings before A20; no `local-pty` status carries one, so Turn stays `Unknown`. An axis a
 snapshot cannot answer stays `Unknown`, and that survives serialisation: `Process=Running` with
 `Turn=Unknown` is a valid state.
 
@@ -44,17 +45,18 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant.
 - **Identity-bound.** Every snapshot carries the `HeadRun.run_id` it was proven against. A source whose
   attestation names another run degrades to `Unknown`/unavailable, never `Dead`. A snapshot never
   combines a new run's pid with an old run's cursor.
-- **Unavailable is not no progress.** A missing pid file, refused pane probe or unreadable journal
+- **Unavailable is not no progress.** A missing pid file, unreadable supervisor status or journal
   yields `Unknown` axes, `availability=unavailable` and a bounded reason. A broken channel freezes
   knowledge; it never counts as stall evidence.
-- **Pane readings are advisory.** They fill only `Turn` and are stamped `source=pane_advisory`.
-  Readiness says whether a pane accepts input, not whether the head may be stopped.
+- **Pane readings were advisory (pane-era).** Before A20 they filled only `Turn`, stamped
+  `source=pane_advisory`; readiness said whether a pane accepted input, never whether the head could
+  be stopped. The source name stays so older episodes load.
 
 | Source | Producer wrapped | Axes answered |
 |---|---|---|
 | `pid_heartbeat` | `dispatcher_watchdog.head_process_status` | Process |
 | `provider_cursor` | `dispatcher_tui.provider_progress_for_run` | Progress |
-| `pane_advisory` | pane readiness (`{"idle": bool}`); no dispatcher status carries it since secretary-1723 removed the pane path | Turn |
+| `pane_advisory` | pane-era: pane readiness (`{"idle": bool}`) before A20; no dispatcher status carries it since secretary-1723 | Turn |
 | `execution_child` | `runtime.head.children.read_head_children` (the head's `/proc` descendants) | Progress |
 
 Mappings:
@@ -65,7 +67,7 @@ Mappings:
 - cursor moved since this run's previous snapshot → `Advancing`; unchanged → `Quiet`; unadmitted,
   foreign or unreadable → `Unknown` + unavailable; the first observation of a source records its cursor
   without a progress opinion;
-- pane ready → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`;
+- pane-era pane readiness, before A20: ready → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`;
 - child processes (see [Child processes](#child-processes)): summed CPU or IO movement of the head's
   descendants since the previous reading past the noise floor → `Advancing`; less, or no descendant →
   `Quiet`; first reading → no opinion; `/proc` unreadable → the source is left out of the status.
@@ -107,7 +109,8 @@ Reducer rules (pinned in `tests/test_head_vitality_episode.py`):
 - A caller-declared rejected report the head has not answered (`answer_owed_since`), followed by an
   advisory turn seen to end, raises `HealthyQuiet` to `SuspectedStall` at once. Without an owed answer
   advisory readings carry no weight.
-- Advisory pane readings only corroborate in `basis`; they never drive a stall verdict.
+- Advisory Turn readings, a pane-era source, only corroborate in `basis` and never drive a stall
+  verdict.
 - Quiet is measured from `max(last_progress_at, quiet_since, child_progress_at)`, or `started_at` if
   none is set, not from the observing tick. The ladder climbs `HealthyQuiet` → `SuspectedStall` → `ConfirmedStall` as
   that age crosses `suspect_after` and then `suspect_after + confirm_after`.
@@ -115,7 +118,7 @@ Reducer rules (pinned in `tests/test_head_vitality_episode.py`):
 
 ### Child processes
 
-A head running one long foreground command is silent in its pane and provider journal until the
+A head running one long foreground command is silent in its terminal and provider journal until the
 command returns (secretary-1665: two integration shards, respawned at 968 s of strong quiet with the
 test child alive and on CPU). `command_terminal_status` therefore reads the descendants of the pid the
 heartbeat proved (`live-match` only) through `host.head_children` → `read_head_children`: one scan of
@@ -173,12 +176,11 @@ cleared after the bring-up, so no rework, review or restart renders a stale one.
 
 A witnessed progress source is dark when it answers unavailable **or** produces no snapshot on a tick
 (`basis` says `absent@<source>`). The wait tick's status can carry a live `pid_status` with no provider
-channel, for example `reason: "pid"` (exact live heartbeat of an Orca head whose pane the worktree
-inventory no longer lists) or `reason: "disconnected"`. A source that never answered is not treated as
-dark; that is the pid-only case above.
+channel, for example `reason: "pid"` (an exact live heartbeat) or `reason: "disconnected"`. A source
+that never answered is not treated as dark; that is the pid-only case above.
 
-A `local-pty` head has no pane, so `reason: "pid"` is its normal shape, and that shape carries its
-provider cursor (`provider_progress_for_run` reads the run's own transcript, not a pane). Before
+`reason: "pid"` is a `local-pty` head's normal shape, and that shape carries its provider cursor
+(`provider_progress_for_run` reads the run's own transcript). Before
 secretary-1719 it did not. The episode then aged on the pid alone, and only child processes held it
 healthy, within their ceiling: secretary-1703's working worker read `suspected_stall`, then
 `confirmed_stall`.
@@ -223,9 +225,9 @@ active retention follows the `Suspended` ladder.
 | worker report outer ceiling | `WORKER_REPORT_STALL_DEFAULT` (6 h) |
 | gate pending outer ceiling | `GATE_PENDING_STALL_SECONDS` (6 h) |
 
-`dark_ceiling` must outlast a provider startup window, during which pane readiness and output cursor
-cannot tell a starting head from a settled one, and stay far below the six-hour ceilings. A dark and
-quiet head is nudged at `max(dark_ceiling, suspect_after)`.
+`dark_ceiling` must outlast a provider startup window, during which the output cursor cannot tell a
+starting head from a settled one, and stay far below the six-hour ceilings. A dark and quiet head is
+nudged at `max(dark_ceiling, suspect_after)`.
 
 `child_activity_ceiling` must outlast the longest command a worker legitimately runs in the
 foreground (two `timeout 580` integration shards, or one broad suite: about 20 minutes, plus slack for
@@ -257,8 +259,8 @@ them. Snapshots gained optional `child_key`, `command` and `output_path` on the 
 ## Decision path
 
 The wait tick decides from the persisted episode's verdict. The reduction runs on every wait tick,
-including not-live shapes: a heartbeat naming a gone process reduces to `Dead`; a vanished pane over a
-live process is an observation failure that waits.
+including not-live shapes: a heartbeat naming a gone process reduces to `Dead`; an unreadable status over
+a live process is an observation failure that waits.
 
 | Verdict | Wait-tick action |
 |---|---|
@@ -365,9 +367,9 @@ snapshot (a dark source's reason is carried onto the episode). Timing, availabil
 refusals do not qualify: counting them would let one dark channel fast-track a live head to
 escalation. A tick with no deterministic reason resets the count.
 
-Reviewer bring-up handles `terminal_split_source_not_found` before the policy sees it: the token can
-occur before or after Orca attempts a child. It opens one standalone pane in the same worktree only when
-before/after worktree inventories show no pane appeared; otherwise it fails closed.
+The `terminal_split_*` tokens come from pane launches before A20, when heads ran as Orca panes and a
+reviewer was split from the worker's pane. A `local-pty` reviewer is a second supervised process in the
+worker's worktree, so its bring-up splits nothing and never produces them.
 
 Tests: rungs and idempotency in `tests/test_head_vitality_policy.py`; real-process SIGCONT and
 foreign-identity refusal in `tests/test_head_vitality_policy_execution.py`; wait-tick and gate-phase
@@ -376,15 +378,15 @@ decisions in `tests/test_head_vitality_wait_decisions.py` and `tests/test_head_v
 ## Regression invariants
 
 Each invariant is replayed tick by tick through the snapshot builders, fed the producer payload shapes
-(`head_process_status`, `provider_progress_for_run`, pane readiness) and folded by the reducer under
-`DEFAULT_VITALITY_THRESHOLDS`. A false "working" costs idle time; a false kill loses a live round, so a
-verdict that can stop a head needs strong admitted evidence.
+(`head_process_status`, `provider_progress_for_run`, and the pane-era pane readiness) and folded by the
+reducer under `DEFAULT_VITALITY_THRESHOLDS`. A false "working" costs idle time; a false kill loses a
+live round, so a verdict that can stop a head needs strong admitted evidence.
 
 | Invariant | Tests |
 |---|---|
-| Provider `Advancing` ⇒ `HealthyActive`; advisory pane-idle alone never leaves `Unverifiable`; no destructive verdict while the transcript moves; such a head is never prompted or respawned. | `IssueB5195041CodexTranscriptBlindnessTests`, `IssueB5195041LegacyIdlePathTests` |
-| Busy pane + `Running` + `Advancing` ⇒ `HealthyActive`; readiness unavailable is Turn-only and never stall evidence; unknown provider ⇒ `HealthyQuiet`, never `Dead`/`ConfirmedStall`. | `Issue3e7abdf9BusyReadAsUnavailableTests`, `Issue3e7abdf9LegacyBusyReadinessTests` |
-| `Running` + admitted `Quiet` ⇒ `SuspectedStall` at +300 s and `ConfirmedStall` at +900 s from last progress; a busy pane only corroborates. | `Issue8f86ed63BusyMasksStallTests` |
+| Provider `Advancing` ⇒ `HealthyActive`; advisory pane-idle (pane-era) alone never leaves `Unverifiable`; no destructive verdict while the transcript moves; such a head is never prompted or respawned. | `IssueB5195041CodexTranscriptBlindnessTests`, `IssueB5195041LegacyIdlePathTests` |
+| Busy pane (pane-era advisory) + `Running` + `Advancing` ⇒ `HealthyActive`; readiness unavailable is Turn-only and never stall evidence; unknown provider ⇒ `HealthyQuiet`, never `Dead`/`ConfirmedStall`. | `Issue3e7abdf9BusyReadAsUnavailableTests`, `Issue3e7abdf9LegacyBusyReadinessTests` |
+| `Running` + admitted `Quiet` ⇒ `SuspectedStall` at +300 s and `ConfirmedStall` at +900 s from last progress; a busy pane (pane-era advisory) only corroborates. | `Issue8f86ed63BusyMasksStallTests` |
 | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen; never `ConfirmedStall` or `Dead`; the gate-pending tick SIGCONTs a non-retained suspended worker within one tick. | `IssueFe04011bStoppedWorkerSixHourCeilingTests`, `IssueFe04011bLegacyGatePendingTests` |
 | A repeated deterministic reason with a live terminal keeps `Unverifiable` and escalates after 3 identical sightings; a repeated heuristic reason earns only observation. | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` |
 | A confirmed retention ⇒ `Retained`: no SIGCONT or other rung, so a red gate reuses the suspended session; `Dead` still outranks it. | `Issue02fe04d7RetainedWorkerTests` |

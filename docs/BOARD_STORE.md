@@ -634,7 +634,7 @@ close decisions are relational.
 
 Agent runtime and head processes; the head registry (`heads/heads.yaml`, `heads/source.yaml`);
 memory facts and the vector index; personas, adapters, policies; secrets; provider sessions,
-quotas and credentials; Orca bindings and automations; run journals (`state/runs/**`); transcripts
+quotas and credentials; run journals (`state/runs/**`); transcripts
 and artifacts; knowledge documents.
 
 ### 3.12 Closed vocabularies

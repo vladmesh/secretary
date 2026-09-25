@@ -14,7 +14,7 @@ and derived runtime state lives in a local data directory. Install and recovery 
 - [Vision](docs/VISION.md) — what the appliance is for and who it is for
 - [Roadmap](docs/ROADMAP.md) — product states, milestones and open questions
 - [Architecture](docs/ARCHITECTURE.md) — storage boundary, runtime flow, security model
-- [Head runtime](docs/HEAD_RUNTIME.md) — `local-pty` parity with Orca and the A20 exit checklist
+- [Head runtime](docs/HEAD_RUNTIME.md) — the one head runtime, `local-pty`, and the A20 record of how it replaced Orca
 - [Head vitality](docs/HEAD_VITALITY.md) — observation axes, snapshots and their invariants
 - [Outcome lineage](docs/OUTCOME_LINEAGE.md) — durable round handoffs between worker and reviewer launches
 - [Board store](docs/BOARD_STORE.md) — board read/write inventory and the PostgreSQL schema
@@ -54,7 +54,7 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
-Bootstrap pins the Docker and session-manager runtimes and provisions the loopback-only `postgres:16`
+Bootstrap installs Docker and Compose from the distribution and provisions the loopback-only `postgres:16`
 board-store container and persistent volume, with its local mode-0600 ignored `board-store.env`,
 through the current Alembic head; see [Board store](docs/BOARD_STORE.md).
 

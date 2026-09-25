@@ -20,8 +20,8 @@ invalid input or unreachable inventory. Without `--strict`, warnings alone stay 
 Live parity uses the same desired state as `reconcile`: each project checkout is checked against the
 normalised absolute path from its binding, including a path outside the projects root; the projects
 root is only used to find unmanaged checkouts. An unreachable or unnormalisable expected checkout
-makes project inventory unavailable (exit `2`), not a missing-on-host finding. Unit files,
-session-manager registrations and the enabled/active state of long-running services and timers are
+makes project inventory unavailable (exit `2`), not a missing-on-host finding. Unit files and the
+enabled/active state of long-running services and timers are
 checked; a missing resource or unhealthy required state is a finding (exit `1`); a oneshot service
 may be inactive. Units in `foreign_units` are excluded from managed parity.
 
@@ -34,10 +34,10 @@ python3 -P -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--y
 `--offline` is rejected. Exit `0`: no conflicts; `1`: conflicts; `2`: invalid input or unreachable
 inventory.
 
-`reconcile adopt` touches one existing desired session-manager registration. It checks the name and
-normalised repository path, shows a fingerprint, and is a preview without `--yes`. A confirmed run
-atomically adds a managed record without changing the session manager, systemd or worktrees. Unit
-resources are not adopted this way.
+`reconcile adopt` touches one existing desired systemd unit. It adopts it only when the installed file
+matches the shipped file's digest byte for byte, shows a fingerprint, and is a preview without `--yes`.
+A confirmed run atomically adds a managed record without changing systemd or worktrees; any other
+resource kind has no verifiable adoption identity and is refused.
 
 ## Tasks
 
@@ -212,9 +212,9 @@ an explicit instruction to do its turn in the current head without spawning or d
 children. A rare provider-internal child is acceptable. The launch policy is practical suppression,
 not capability isolation.
 
-`secretary.runtime.codex_preflight` is the one pre-pane preparation boundary. Its v1 record
+`secretary.runtime.codex_preflight` is the one pre-launch preparation boundary. Its v1 record
 keeps `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as diagnostics; none of
-these fan-out states permits or refuses a pane. Workspace trust is the hard pre-pane requirement.
+these fan-out states permits or refuses a launch. Workspace trust is the hard pre-launch requirement.
 Launches proceed with `schema_absent`, an unbound structured journal source where available, and the
 low-fan-out launch configuration.
 
@@ -227,10 +227,10 @@ These states are telemetry only: they never stop or replace the HeadRun, block a
 refuse prompt delivery, or affect continuation liveness. Telemetry loss is non-fatal. An observed
 edge is recorded and the run continues.
 
-The Codex source is its structured session-event JSONL, not a pane read and not the workspace-level
-session liveness lookup. The pre-pane attestation stores the v1 source root and the set of journal
-paths that existed before the pane. The collector reads the journal's `session_meta` and `event_msg`
-envelopes, never pane text. The TUI collaboration shape is
+The Codex source is its structured session-event JSONL, not a terminal read and not the workspace-level
+session liveness lookup. The pre-launch attestation stores the v1 source root and the set of journal
+paths that existed before the head started. The collector reads the journal's `session_meta` and
+`event_msg` envelopes, never terminal text. The TUI collaboration shape is
 `event_msg.payload.item.type = CollabAgentToolCall`, with `tool`, `sender_thread_id` and
 `receiver_thread_ids`; the `collab_tool_call` shape is also normalized. An unfamiliar
 collaboration-shaped item is `unknown`, never ordinary output.
@@ -249,14 +249,14 @@ later line. Missing, unreadable, changed or ambiguous source evidence is non-fat
 
 ### Post-delivery HeadRun handoff
 
-There is one authoritative `HeadRun` after a launch delivery. Writer order: construct and validate
-the run; persist its handleless preflight identity in the role launch intent; create and bind the
-pane; persist the rebound handle and leaf; bind and persist the Codex source when applicable; capture
-that post-delivery run; then write routing, role state and clear the intent. `head_ops.spawn` returns
-the captured run, and worker, reviewer and observer launchers, intent confirmation and adoption
+There is one authoritative `HeadRun` after a launch delivery. Writer order: construct and validate the
+run; persist its handleless preflight identity in the role launch intent; start the supervised head;
+persist its handle (the supervisor socket) and leaf; bind and persist the Codex source when applicable;
+capture that post-delivery run; then write routing, role state and clear the intent. `head_ops.spawn`
+returns the captured run, and worker, reviewer and observer launchers, intent confirmation and adoption
 consume that value, not a pre-delivery copy.
 
-The provider callback owns source facts. A later launcher or lifecycle writer may add only the pane
+The provider callback owns source facts. A later launcher or lifecycle writer may add only the head
 address it proved and its own forward lifecycle evidence. It cannot remove a bound source, move a
 cursor backwards, replace a bound session/range, or replace run id, spec, workspace, task, role or
 pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
@@ -264,7 +264,8 @@ adopted, resumed, signalled, stopped, replaced or attributed. Worker, reviewer a
 use the same merge. Source binding never gives fan-out telemetry lifecycle authority.
 
 Observer event delivery: when a retained Codex observer HeadRun carries its v1 source descriptor, the
-dispatcher persists a versioned `wake_liveness` episode before it interprets `tui-idle`. The episode
+dispatcher persists a versioned `wake_liveness` episode before it interprets the head's readiness
+(busy while its supervisor has a turn open). The episode
 names the exact run id and HeadRun fingerprint, source fingerprint and opaque cursor, first
 observation, last admitted progress, no-progress rung and terminal outcome. A new admitted cursor
 keeps the same head and event batch and resets only that batch's no-progress ladder. Missing,
@@ -300,7 +301,7 @@ The dispatcher persists the receipt with the active card, renders it into the re
 document, replaces it with the fresh post-review receipt in the Assessment delivery, and writes the
 fresh final receipt into the release audit after the mandatory exact-SHA pre-merge re-check. The
 reviewer document is written outside the checkout, under the installation-private run artifacts; the
-pane receives only a bounded pointer. `TASK.md` is a generated, git-ignored workspace handoff packet.
+head receives only a bounded pointer. `TASK.md` is a generated, git-ignored workspace handoff packet.
 Neither is repository documentation or a candidate change. A receipt does not permit skipping the
 pre-merge check or independent review.
 
@@ -456,56 +457,41 @@ without launching another head or consuming the headless-failure ceiling. Those 
 resulting block use the [bring-up](#bring-up-outcomes) vocabulary: the ceiling is spent before the
 outcome is written and yields an infrastructure outcome over the held candidate.
 
-When a reviewer pane and heartbeat exist but the document nudge gets typed `busy` evidence before any
+When a reviewer head and heartbeat exist but the document nudge gets typed `busy` evidence before any
 send, delivery is pending, not started. The launch intent keeps the exact reviewer HeadRun,
 handle/leaf binding and workspace with a capped durable retry schedule. Until a later nudge confirms
 delivery, recovery does not freeze or signal the worker, write reviewer routing or lifecycle
-attribution, clear the intent, or replace the pane. Confirmation crosses the ordinary launch adoption
+attribution, clear the intent, or replace the head. Confirmation crosses the ordinary launch adoption
 boundary once; `unavailable`, malformed and stale-handle evidence keep their own conservative paths.
 
-### A pane that is ready is not a pane that is sendable
+### A settled head is not a delivered prompt
 
-Orca answers `tui-idle` from the pane's agent status or a quiescence window. A TUI holding an update
-dialog or still starting MCP servers is quiescent: `tui-idle` is satisfied, `terminal send` answers
-`accepted`, and nothing reaches the provider. The delivery boundary therefore classifies the screen
-into a typed **pre-delivery state**, distinct from `busy` and `blocked`.
+The `local-pty` supervisor waits for the head to settle, types the line, waits for the turn over that
+line to close, then sends Enter alone and watches the head answer. Only output that shows a turn
+started sets `turn_confirmed`; a line typed and not taken is `payload_left_in_composer`, never `ok`.
+Codex's `Update available!` modal is prevented before the head starts, best effort: preflight sets
+`dismissed_version` in the runtime `CODEX_HOME`'s `version.json` to the version found, the same thing
+"Skip until next version" writes. No delivery ever upgrades.
 
-Nothing the backend offers before a write asserts a live idle composer. The pre-write step checks for
-dialogs only; otherwise it records `sendability=unestablished`, which is not a proof of readiness.
-The guarantee rests on the delivery receipt.
-
-Classification reads the **live screen**, never the whole `terminal read` output. Orca retains raw
-output and a TUI redraws in place, so old frames (e.g. `Starting MCP servers`, a settled modal) stay
-in the tail. The live screen is what follows the last prompt marker the TUI paints, or the bounded end
-of the tail when no composer is painted (a dialog owning the terminal).
-
-- `update-modal` — Codex's `Update available! … 1. Update now 2. Skip 3. Skip until next version`.
-  Preflight prevents it: before the pane exists, the runtime `CODEX_HOME`'s `version.json` gets
-  `dismissed_version` set to the version found, the same thing "Skip until next version" writes. If
-  one appears anyway it is answered on screen with that choice, a bounded number of times, and
-  readiness is proved again before the pointer is written. No delivery ever upgrades. The keystroke
-  requires both that the screen is the known modal and that the modal is the frame painted now; a
-  modal recognised only in history is a refusal with nothing typed.
-- `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
-  queue message`). A post-write observation, recorded in `pre_delivery_after`; not a pre-write gate.
-- `unknown-dialog` — anything else dialog-shaped: an Orca `blockedReason`, or Codex's `Press enter to
-  continue` footer under an unmatched screen. Fails closed: no keystroke, a typed refusal, a bounded
-  caller retry, and an operator-visible infrastructure outcome at the ceiling. Never a second head.
+The pre-delivery states (`update-modal`, `starting`, `unknown-dialog`) and `sendability`
+(`unestablished`, `dialog-refused`) are delivery-record vocabulary from before A20, when heads ran as
+Orca panes: a pane's readiness answer held for a TUI quiescent in a dialog, so that delivery
+classified the live screen before writing. Records written then carry those fields and read back
+unchanged (`runtime/tui_delivery.py`).
 
 The evidence keeps apart **modal resolution** (`modal_resolution`, `modal_answers`,
-`pre_delivery_*`), **delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and
-`turn_confirmed`) and **provider binding** (`provider_bound`, the caller's criterion), with
-`sendability` beside them. A head a dialog will not release inside the bounded window is a typed
-refusal.
+`pre_delivery_*`, empty on a `local-pty` delivery), **delivery receipt** (`delivery_receipt`, from
+`payload_left_in_composer` and `turn_confirmed`) and **provider binding** (`provider_bound`, the
+caller's criterion), with `sendability` beside them.
 
 ### A live head is not a delivered pointer
 
 `delivery_receipt` is the one predicate launch, recovery and adoption all ask. It reads only the
-delivery boundary's evidence; a live pid, a writable pane and Orca's `accepted`/`bytesWritten` are
-never consulted. Positive `payload_left_in_composer` evidence is a determinate `refused` and outranks
-a provider turn.
+delivery boundary's evidence; a live pid and a transport's write acceptance (`send_accepted` /
+`bytes_written`, which pane-era records carry as Orca's answer) are never consulted. Positive
+`payload_left_in_composer` evidence is a determinate `refused` and outranks a provider turn.
 
-A bring-up that aborted with its pane open carries that receipt onto its launch intent. Adoption
+A bring-up that aborted with its head still running carries that receipt onto its launch intent. Adoption
 refuses an undelivered launch: no claim, no routing event, no `review_starting`, no `reviewing`, no
 `waiting-review-verdict`, no worker freeze, and the intent is **not spent**. The refusal is bounded by
 `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (default 5). Inside it, a reviewer re-delivers the *same*
@@ -605,8 +591,8 @@ One production-runtime provenance probe fences workspace prepare, worker/reviewe
 of a gate query, both sides of release, and worktree removal. It runs the fixed production
 interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`
 and `workspace_targeted_editable` (plain editable paths, executable editable finder modules named by
-`.pth`, and `direct_url.json`, including vanished paths under either workspaces root: the Orca root
-and `<data_dir>/workspaces`). Any
+`.pth`, and `direct_url.json`, including vanished paths under either workspaces root: the Orca
+workspaces root of A20 steps 8 and 11, `~/orca/workspaces`, and `<data_dir>/workspaces`). Any
 refusal becomes durable blocked evidence and keeps the checkout; installation metadata is never
 repaired implicitly.
 
@@ -1045,7 +1031,7 @@ observer state); an unreadable live board is reported in `installation.sprints.e
 
 Only these open observer work: semantic card edges (Assessment, Blocked, Done), an eligible human
 control-plane return to Issues, sprint budget events and PO sprint comments. Claims, routing, reports,
-validation telemetry and observer-authored writes do not. Delivery records only that the pane took the
+validation telemetry and observer-authored writes do not. Delivery records only that the head took the
 prompt; the next ordinary reconciliation reads one durable audit snapshot and closes the batch only on
 the matching resume. Delivery never polls the board or calls an observer-facing `Monitor` command.
 
@@ -1498,7 +1484,7 @@ record is not a zero.
 `report:blocked` the dispatcher accepts, and a `review:green` or `review:red` it acts on. A done report
 bounced at an already-rejected checkout writes nothing. The write happens while the completed run and
 its provider session are still on the record (a retained worker before its freeze; a reviewer after its
-pane is confirmed closed).
+head is confirmed stopped).
 
 **Fields.** Card ref and subject, numeric attempt and attempt id, the report generation closed, role
 (`worker`/`reviewer`) and phase (`worker`/`review`), head id, adapter, resolved model and
@@ -1702,8 +1688,8 @@ instructions. Missing, malformed or ambiguous binding omits historical feedback.
 
 Every dispatcher-launched worker, reviewer and observer writes one atomically replaced version-1 JSON
 heartbeat before its shell `exec`s the provider: pid, Linux boot id, process start ticks, durable
-`HeadRun` id, role, card or sprint binding, and the pane leaf once known. Terminal creation and the
-writer are unordered, so pane creation first atomically writes a matching leaf handoff beside the
+`HeadRun` id, role, card or sprint binding, and the head's leaf once known. Head creation and the
+writer are unordered, so the launcher first atomically writes a matching leaf handoff beside the
 heartbeat: a later writer incorporates it in its first record, and an already-written matching record
 gets a guarded second atomic replace. The writer re-checks the handoff after its base replace, and a late
 binder never annotates another process that reused the pid-file path.
@@ -1712,27 +1698,27 @@ Readers classify a matching live record, a dead record, a live identity mismatch
 record and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf must
 all agree. Lifecycle and recovery consumers use one HeadRun classification boundary, which builds the
 expected identity before a stop can persist `finishing` or `stopped_by`, a review launch can become
-`reviewing`, or a pane/workspace can be relocated or closed. A mismatch is an operator-facing degraded
+`reviewing`, or a head or workspace can be stopped or relocated. A mismatch is an operator-facing degraded
 state: retention, launch recovery, watchdogs, stop paths and observer reconciliation leave the prior run
 unattributed and never open a replacement beside it. The guard is rechecked immediately before every
-destructive pane close, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
-and get no synthetic identity; they keep only the launch grace and pane-output fallbacks.
+destructive head stop, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
+and get no synthetic identity; they keep only the launch grace and output fallbacks.
 
 A head is alive only by its own observation: a live matching heartbeat whose process is running or
 suspended, or an advancing provider cursor bound to the same `HeadRun`. Only the heartbeat may say a
 head is gone. Anything else is `unproven`, including a role with a head identity but no durable
-`HeadRun`. Pane and terminal readings never enter the answer. `secretary head-status` shows the answer
+`HeadRun`. Terminal readings never enter the answer. `secretary head-status` shows the answer
 and which source proved it; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
 Stall ageing, rungs and the destructive guard are in [Head vitality](HEAD_VITALITY.md).
 
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable session before moving the
-card to Validate. A head with no pane handle is stopped with a confirmed stop instead. The retained
+card to Validate. A head that is not addressable is stopped with a confirmed stop instead. The retained
 state stays on the record through the mechanical gate and the following review, so the worker cannot
 change the checkout while it is judged. Before the reviewer starts, the suspension is confirmed from the
 heartbeat; an unconfirmable session gets a confirmed stop and the round loses its continuation. The
-worker's pane stays the reviewer's split anchor.
+reviewer runs as a second supervised process in the same worktree.
 
 While retention is on the record, no vitality path wakes the session: a confirmed retention reduces to
 `Retained`, which earns no recovery rung and is refused by the destructive guard. A head stopped without
@@ -1769,8 +1755,8 @@ delivery boundary, on recovery as on the first attempt; an unconfirmed session i
 once. The dispatcher updates `TASK.md` with the failure and the round's report identity, persists a
 pending-delivery boundary before SIGCONT, and checkpoints confirmation only after the provider durably
 records the continuation user turn. Terminal activity is only a recovery hint for records without that
-boundary. A refused `tui-idle` wait carrying `timeout` or `satisfied:false` is busy evidence, not a
-transport failure: the wait runs before SIGCONT, so HeadRun, pane binding, workspace and pending
+boundary. A delivery the runtime refuses as busy (the supervisor has a turn open) is busy evidence,
+not a transport failure: the check runs before SIGCONT, so HeadRun, handle binding, workspace and pending
 continuation stay as recorded, and its bounded retry delay authorizes no stop, replacement or new
 attribution. Unavailable transport, malformed evidence and `terminal_handle_stale` remain separately
 typed conservative failures; absent fields on older evidence are unknown, never busy. Recovery cannot
@@ -1805,10 +1791,10 @@ audit data and cannot bind a later run, reset the ladder or spend a rung.
 
 Before every retained-continuation retry, one admission step validates the durable episode and exact
 `HeadRun`, resolves its launch-bound provider source, and persists/uses the v1 baseline for that source.
-Codex reads only the bound session journal selected from its pre-pane baseline; Claude reads only the
-exactly-one transcript selected from its pre-pane baseline; neither uses a workspace-wide newest-file
+Codex reads only the bound session journal selected from its pre-launch baseline; Claude reads only the
+exactly-one transcript selected from its pre-launch baseline; neither uses a workspace-wide newest-file
 mtime. A changed opaque cursor is fresh progress: it keeps run, workspace, claim, continuation intent
-and retry owner, resets only the no-progress ladder, and makes a `tui-idle` busy result non-destructive.
+and retry owner, resets only the no-progress ladder, and makes a busy delivery refusal non-destructive.
 Source absence, ambiguity, a foreign or malformed source, or an episode without a baseline is typed
 unavailable or unknown and cannot become progress, reset or advance the ladder, or authorise recovery
 or replacement. Fan-out telemetry and recorder failures never enter this decision. The worker/reviewer
@@ -1834,7 +1820,7 @@ raw interrupt, generic key chord or screen-derived action. The current host has 
 records the typed absence and takes the confirmed-stop/HeadRun fence to one replacement. A capability
 must return a safe receipt bound to the same run; its response window is rechecked for admitted progress
 and may return to normal delivery once; otherwise the recorded replacement path follows. A source
-identity failure is a typed blocked outcome and never touches a potentially foreign pane. A stop that
+identity failure is a typed blocked outcome and never touches a potentially foreign head. A stop that
 cannot yet be confirmed stays identity-fenced and never opens a second worker.
 
 ## Production dispatcher
@@ -1876,11 +1862,11 @@ A bring-up is everything between giving a card to a head and that head existing.
 head, the outcome is classified in one place for the worker path (claim, respawn, rework) and the
 reviewer path (`start_review`). A closed set of causes decides the class:
 
-- `infrastructure` — `pane_never_ready` (the pane was busy or held in a dialog for every attempt and
-  never took its launch prompt); `launch_aborted` (a launch that may have left a head running, never
-  turned into a second one); `host_unavailable` (anything else the host could not do: a pane that would
-  not open, an inventory that would not answer, a registry that cannot supply a usable broad-check
-  contract);
+- `infrastructure` — `launch_aborted` (a launch that may have left a head running, never turned into
+  a second one); `host_unavailable` (anything else the host could not do: a head that would not start,
+  a supervisor that would not answer, a registry that cannot supply a usable broad-check contract);
+  `pane_never_ready`, a pane-era cause name: before A20 a pane busy or held in a dialog for every
+  attempt, which no `local-pty` bring-up produces;
 - `task` — `workspace_contract` (the checkout the card was requeued onto is gone, or is not the
   worktree on the branch its claim recorded); `base_branch_contract` (an integration base the project
   cannot integrate into, or a seed the project remote does not carry).
@@ -1898,19 +1884,18 @@ The card's Blocked reason and the tick's outcome are built from one object. The 
 naming class, cause, stage (`claim`, `respawn`, `rework`, `review`), head and attempt id, followed by
 the class sentence (for infrastructure: the head never came up, so this is not a verdict about the
 card). The tick outcome carries `failure_class`, `failure_cause`, the same `failure_reason` string, and
-a `bring_up` object with the same fields plus the host's detail and, where the pane was the cause, its
-readiness and attempt count.
+a `bring_up` object with the same fields plus the host's detail (and, on a pane-era deferral record,
+its readiness and attempt count).
 
 The dispatcher classifies and presents the evidence and stops there: after an infrastructure outcome it
 opens no attempt, schedules no return and moves the card nowhere else. Whether to retry or block the
 sprint is the observer's decision, carried out by moving the card out of Blocked; a card back in Ready
 is claimed under a fresh attempt id.
 
-Bounded retries are spent before an outcome is written. A busy or dialog-held pane parks the bring-up
-as `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up to the configured
-ceiling, each naming its attempt, with the counter on the record and reset when that role's head comes
-up. An unanswered probe is not deferred. When the ceiling is spent the outcome is `pane_never_ready`.
-The reviewer's bounded relaunch over a green candidate
+Bounded retries are spent before an outcome is written. Before A20 a busy or dialog-held pane parked
+the bring-up as `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up to the
+configured ceiling, ending in `pane_never_ready`; only the removed Orca spawn raised that deferral, so
+a `local-pty` bring-up is never parked this way. The reviewer's bounded relaunch over a green candidate
 ([Review infrastructure retries](#review-infrastructure-retries)) ends the same way.
 
 An infrastructure outcome charges nothing. It is recorded as the uncharged event type
@@ -2281,7 +2266,7 @@ means an answer, and an unreachable board store blanks the card list, not the pa
 
 Liveness is process state only. A head's shell publishes a launch-identity heartbeat (pid, boot id,
 process start ticks, run id, role, task) before it `exec`s, and the layer classifies it against the
-durable `HeadRun`. A terminal, pane or window is never consulted.
+durable `HeadRun`. A terminal or window is never consulted.
 
 | state | what it means |
 | --- | --- |
@@ -2378,7 +2363,7 @@ Every document validates against the packaged `web-run` schema and carries `sche
 of `product_run` or `product_review`, and `observed_at`. A run id is `pr-` prefixed.
 
 `--profile` is required, with no default. The profile comes from the head registry and must declare the
-`local-pty` runtime; a profile on Orca's backend is refused. `--heads-registry` (or
+`local-pty` runtime; a profile naming any other runtime is refused. `--heads-registry` (or
 `TA_HEADS_REGISTRY`) points one run at another registry.
 
 **`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points it at
@@ -2471,10 +2456,10 @@ whether the run is over and is never derived from the value.
 
 A settled run is over whatever value it carries.
 
-Evidence is the launch-identity heartbeat, the supervisor journal and the result file; a window or pane
-is never evidence. The first observation of an ended run settles it, recording state, reason, exit
-status and result together, and a settled run answers the same forever, even after its run directory is
-swept. A failed bring-up settles `process_failed` with its named cause.
+Evidence is the launch-identity heartbeat, the supervisor journal and the result file; a window or
+terminal screen is never evidence. The first observation of an ended run settles it, recording state,
+reason, exit status and result together, and a settled run answers the same forever, even after its run
+directory is swept. A failed bring-up settles `process_failed` with its named cause.
 
 ### Where a run is read back
 
@@ -2594,7 +2579,7 @@ sprint's fields and marks liveness unavailable. The sprint is read through `Spri
 `show` (which would create the sprint board).
 
 Liveness comes from the dispatcher's production state, classified by the same `observer_snapshot` rows
-`secretary sprint status` shows; no pane is evidence. `observer.launch.state` is one of:
+`secretary sprint status` shows; no terminal screen is evidence. `observer.launch.state` is one of:
 
 | state | what it means |
 | --- | --- |
@@ -2676,7 +2661,7 @@ Limits:
   on it, or that the comment caused the batch;
 * a comment by a role other than `po` is not a semantic wake (`is_significant_observer_event`); it is
   carried when a later significant event moves the cursor past it;
-* the answer is as fresh as the durable state; it consults no terminal, pane or head.
+* the answer is as fresh as the durable state; it consults no terminal or head.
 
 The read performs no delivery: no wake, nudge, retry, head launch or dispatcher-state write.
 
@@ -2853,7 +2838,7 @@ product, issues, reservations, repositories, executor pins, budget, its `observe
 
 Cost per document regardless of sprint count: one sprint-board pass with batched metadata, one Pipeline
 listing with batched metadata, one read of production state, at most one committed-audit traversal. No
-sprint comments, card opens, CI calls, terminals or panes. `cards.source`, `journal.source`,
+sprint comments, card opens, CI calls or terminals. `cards.source`, `journal.source`,
 `liveness.source` and `installation.source` carry document-level availability.
 
 `secretary sprint list` and `secretary sprint status` are clients of these two reads and map codes as
