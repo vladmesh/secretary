@@ -375,7 +375,7 @@ def _not_applicable(reason: str) -> dict[str, Any]:
 def _source(name: str, read: Callable[[], dict[str, Any]], **empty: Any) -> dict[str, Any]:
     """One source's answer, or the uniform shape of a source that did not answer; never raises.
 
-    `secretary.dispatch.head_status._source`, for the same reason: a supervisor, a lock file, an
+    `secretary.dispatch.head_status._source`, for the same reason: a supervisor, a lock file,
     and a journal are outside this process's control, so anything their read raises
     is that source not answering and never a failed page.
     """

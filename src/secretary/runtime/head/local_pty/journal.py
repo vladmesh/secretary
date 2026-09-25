@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 JOURNAL_SCHEMA_VERSION = 1
 
@@ -47,10 +47,11 @@ RUN_STARTED = "run.started"
 INPUT_ACCEPTED = "input.accepted"
 #: A turn opened — the first accepted input since the head last went quiet.
 TURN_STARTED = "turn.started"
-#: The head produced a normalized line not yet seen in this turn. Repeated output windows are
+#: The head's modeled screen showed a normalized line not yet seen in this turn. Repeated windows are
 #: folded into the next record's `output_bytes`, with their number in `folded_windows`.
 PROVIDER_PROGRESSED = "provider.progressed"
-#: The open turn's head went quiet for the configured settle time.
+#: The open turn's head went quiet for the configured settle time. Any still-pending fold count is
+#: carried here as `folded_windows`.
 TURN_FINISHED = "turn.finished"
 #: Admission closed: this supervisor takes no further input for this head.
 DRAIN_REQUESTED = "drain.requested"
@@ -174,7 +175,7 @@ class JournalWriter:
         os.fsync(self._fd)
         return record
 
-    def __enter__(self) -> JournalWriter:
+    def __enter__(self) -> Self:
         return self.open()
 
     def __exit__(self, *exc_info: object) -> None:

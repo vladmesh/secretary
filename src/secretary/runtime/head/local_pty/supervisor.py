@@ -47,6 +47,7 @@ import sys
 import termios
 import time
 import traceback
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -63,6 +64,7 @@ from .journal import (
     TURN_STARTED,
     JournalWriter,
 )
+from .screen import ScreenModel
 
 #: A turn is over when the head has said nothing for this long. The substrate cannot see a
 #: provider's own end-of-turn marker — that is an adapter's knowledge, and inventing one here would
@@ -96,29 +98,13 @@ START_ALREADY_RUNNING = "already_running"
 START_FAILED = "startup_failed"
 RUN_FAILED = "run_failed"
 
-_ESC_STRING = re.compile(r"(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]).*?(?:\x07|\x1b\\|\x9c|$)", re.DOTALL)
-_CSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
-_CSI_CUT = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*$")
-_ESC_OTHER = re.compile(r"\x1b[ -/]*[0-~]?")
-_SPINNER = re.compile(r"[\u2700-\u27bf\u2800-\u28ff]|(?<!\w)[*·](?!\w)")
+_SPINNER = re.compile(r"[\u2700-\u27bf\u2800-\u28ff\u25a0-\u25ff\u2022\u00b7]|(?<!\w)\*(?!\w)")
 _DIGITS = re.compile(r"\d+")
-_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-def _progress_lines(data: bytes) -> set[str]:
-    """Normalize one output window into the distinct visible lines it introduced."""
-    output = data.decode("utf-8", errors="replace")
-    output = _ESC_STRING.sub("", output)
-    output = _CSI.sub("", output)
-    output = _CSI_CUT.sub("", output)
-    output = _ESC_OTHER.sub("", output)
-    output = _SPINNER.sub("", output)
-    output = _DIGITS.sub("#", output)
-    return {
-        line
-        for raw in output.replace("\r", "\n").split("\n")
-        if (line := " ".join(_CONTROLS.sub("", raw).split()))
-    }
+def _progress_lines(lines: Iterable[str]) -> set[str]:
+    """Normalize visible screen lines, never unplaced fragments of the PTY byte stream."""
+    return {line for raw in lines if (line := " ".join(_DIGITS.sub("#", _SPINNER.sub("", raw)).split()))}
 
 
 class SupervisorStartupError(RuntimeError):
@@ -235,6 +221,7 @@ class Supervisor:
         self._output = bytearray()
         self._output_dropped = 0
         self._output_total = 0
+        self._screen = ScreenModel(self.rows, self.cols)
 
         self._turn_open = False
         self._turn_id = 0
@@ -242,7 +229,7 @@ class Supervisor:
         self._last_output_at = 0.0
         self._progress_bytes = 0
         self._progress_at = 0.0
-        self._progress_window = bytearray()
+        self._progress_window_bytes = 0
         self._progress_seen: set[bytes] = set()
         self._folded_windows = 0
 
@@ -373,7 +360,7 @@ class Supervisor:
                 for number in (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH, signal.SIGHUP):
                     signal.signal(number, signal.SIG_DFL)
                 os.execvpe(argv[0], argv, environment)
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - a forked child must exit on every failure
                 os._exit(127)
         os.close(slave)
         self._head_pid = pid
@@ -432,6 +419,7 @@ class Supervisor:
         """Set the pty's size. The kernel delivers `SIGWINCH` to the head from here."""
         self.rows = max(1, int(rows))
         self.cols = max(1, int(cols))
+        self._screen.resize(self.rows, self.cols)
         if self._master < 0:
             return
         packed = struct.pack("HHHH", self.rows, self.cols, 0, 0)
@@ -550,10 +538,13 @@ class Supervisor:
                 reason="quiet",
                 quiet_seconds=self.quiet_seconds,
                 output_bytes=self._turn_bytes,
+                folded_windows=self._folded_windows,
             )
             self._turn_open = False
         elif (
-            self._turn_open and self._progress_bytes and now - self._progress_at >= PROGRESS_COALESCE_SECONDS
+            self._turn_open
+            and self._progress_window_bytes
+            and now - self._progress_at >= PROGRESS_COALESCE_SECONDS
         ):
             self._flush_progress()
         # A terminal that never becomes writable raises no event, so the delivery bound is a thing
@@ -609,6 +600,7 @@ class Supervisor:
         self._reap()
 
     def _record_output(self, chunk: bytes) -> None:
+        self._screen.feed(chunk)
         self._output_total += len(chunk)
         self._output += chunk
         if len(self._output) > protocol.OUTPUT_BUFFER_BYTES:
@@ -619,7 +611,7 @@ class Supervisor:
         if self._turn_open:
             self._turn_bytes += len(chunk)
             self._progress_bytes += len(chunk)
-            self._progress_window += chunk
+            self._progress_window_bytes += len(chunk)
             if not self._progress_at:
                 self._progress_at = self._last_output_at
         for client in list(self._clients.values()):
@@ -627,10 +619,10 @@ class Supervisor:
                 self._push_output(client, chunk)
 
     def _flush_progress(self) -> None:
-        if not self._progress_window:
+        if not self._progress_window_bytes:
             return
-        lines = _progress_lines(bytes(self._progress_window))
-        self._progress_window.clear()
+        lines = _progress_lines(self._screen.lines())
+        self._progress_window_bytes = 0
         self._progress_at = 0.0
         new = False
         for line in lines:
@@ -775,7 +767,7 @@ class Supervisor:
             self._turn_bytes = 0
             self._last_output_at = time.time()
             self._progress_bytes = 0
-            self._progress_window.clear()
+            self._progress_window_bytes = 0
             self._progress_at = 0.0
             self._progress_seen.clear()
             self._folded_windows = 0
@@ -1148,7 +1140,11 @@ class Supervisor:
         self._flush_progress()
         if self._turn_open:
             self._append(
-                TURN_FINISHED, turn=self._turn_id, reason="head_exited", output_bytes=self._turn_bytes
+                TURN_FINISHED,
+                turn=self._turn_id,
+                reason="head_exited",
+                output_bytes=self._turn_bytes,
+                folded_windows=self._folded_windows,
             )
             self._turn_open = False
         exited: dict[str, Any] = {

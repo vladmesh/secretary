@@ -11,15 +11,19 @@ to reach, and the A20 exit checklist that removed Orca from the product, step by
 
 ## Supervisor progress journal
 
-The supervisor considers PTY output in 0.5-second windows during an open turn. It writes
-`provider.progressed` only when a window contains a normalized line it has not seen in that turn.
-Normalization strips terminal escape sequences, masks digit runs, removes Dingbat and Braille
-spinner glyphs and lone `*` or `·` bullets, and collapses whitespace. Empty lines are ignored.
+The supervisor feeds every PTY output chunk into a bounded text screen (rows and columns follow
+the PTY size). It considers that screen in 0.5-second windows during an open turn. It writes
+`provider.progressed` only when the screen contains a normalized line it has not seen in that turn.
+The screen places printable text, tracks cursor moves, erasure, scrolling and the alternate screen,
+and ignores colour and other non-text terminal controls. Normalization masks digit runs, removes
+Dingbat, Braille, Geometric Shapes, `•` and `·` spinner glyphs and a lone `*`, and collapses
+whitespace. Empty lines are ignored.
 The supervisor keeps at most 4096 line hashes per turn and clears them at `turn.started`.
 Windows whose lines remain in that set write no progress record; their bytes accumulate in the next
 progress record's `output_bytes`, which also carries `folded_windows`. Once the cap is full, new
 untracked lines continue to progress. `turn.finished.output_bytes` still counts all
-output in the turn, including folded windows. Quiet turn timing is unchanged.
+output in the turn, including folded windows; `turn.finished.folded_windows` reports any folds
+still pending at the end. Quiet turn timing is unchanged.
 
 ## The runtime default
 
