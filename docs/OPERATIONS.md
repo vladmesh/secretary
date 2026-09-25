@@ -1967,7 +1967,9 @@ mismatched receipt is stale, never `unchanged`; do not copy or edit it.
 `--dry-run` compares `HEAD` with `origin/<branch>`, names the actions the target revision would cause
 (`would restart secretary-web.service and probe ...`), and writes nothing.
 
-`upgrade` restarts onto whatever dependency set it installed; it does not correct a wrong set.
+`upgrade` restarts onto the dependency set `dependencies` left. That step reinstalls when the venv does
+not match the checkout by its receipt ([Upgrade](#upgrade)); it does not inspect a venv edited by hand
+behind a matching receipt.
 
 #### When the restart or the probe fails
 
@@ -1989,16 +1991,19 @@ sudo journalctl -u secretary-web.service -n 50 --no-pager     # the reference, t
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system
 ```
 
-**Rollback** is the checkout plus a restart (`upgrade` is `--ff-only`):
+**Rollback** is the checkout plus `upgrade --no-pull` (`upgrade` is `--ff-only`):
 
 ```bash
 git -C ~/secretary log --oneline -3                  # the revision to go back to
 git -C ~/secretary switch --detach <previous-sha>
-sudo systemctl restart secretary-web.service         # the front is PartOf= and comes with it
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
-`git switch` alone leaves the head-registry pin, units and dependencies as the upgrade put them; rerun
-`secretary upgrade --no-pull` to realign them.
+`git switch` alone leaves the head-registry pin, units, dependencies and the memory and web processes as
+the upgrade put them. `upgrade --no-pull` realigns them against the moved checkout: the venv and the memory
+service through their receipts, the web transport through its own (the front is `PartOf=` and comes with
+it). See [Taking the slice down, and rolling the application back a
+revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
 
 When an upgrade did not finish, or a service was restarted by hand, check whether the process is newer than
 the checkout:
@@ -2023,31 +2028,28 @@ A request in flight during the restart fails; a reload a moment later reaches th
 **Taking the slice down** is `sudo systemctl stop secretary-web-front.service`; the transport and pipeline
 keep running ([Rolling back to before this front existed](#rolling-back-to-before-this-front-existed)).
 
-**Rolling the application back a revision** while staying published: move the tree, then restart (the
-restart last):
+**Rolling the application back a revision** while staying published: move the tree, then run
+`upgrade --no-pull` against it (the upgrade last):
 
 ```bash
 git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
 git -C ~/secretary switch --detach <revision>
-sudo systemctl restart secretary-web.service
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
-- `upgrade --no-pull` does not reinstall dependencies for a hand-moved checkout (no pull, so no recorded
-  dependency change). If requirements differ, reinstall deliberately:
-
-  ```bash
-  ~/secretary/.venv/bin/python -m pip install -e "$HOME/secretary[dev]"
-  sudo systemctl restart secretary-web.service
-  ```
-
+- `upgrade --no-pull` compares the venv and the memory service with the moved checkout through the
+  dependency and memory process receipts ([Upgrade](#upgrade)), and reconciles both: it reinstalls the
+  product with every extra the installation uses when the dependency manifests differ, and restarts the
+  memory service when its revision, code, dependencies, model or pack differ. The `web` step restarts the
+  transport through its own receipt. Do not install `[dev]` or restart units by hand.
 - An `upgrade` that ends `status: failed` did only the steps printed before the failure; it rolls nothing
   back.
 
-A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly:
+A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly, the same way:
 
 ```bash
 git -C ~/secretary switch main
-sudo systemctl restart secretary-web.service
+secretary upgrade --instance ~/secretary-instance --no-pull
 ```
 
 ### A snapshot of the whole thing, in one go
