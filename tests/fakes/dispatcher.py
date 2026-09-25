@@ -1612,6 +1612,12 @@ class FakeHost:
         self.calls.append("is_instance_publish_recovery")
         return (reviewed_commit, current_commit) in self.instance_publish_recoveries
 
+    def reconcile_reviewed_base_move(
+        self, task: dict, record, reviewed_commit: str, current_commit: str
+    ) -> dict[str, str | int] | None:
+        self.calls.append("reconcile_reviewed_base_move")
+        return None
+
     def teardown(self, record) -> None:
         self.calls.append("teardown")
         self.stop(record)

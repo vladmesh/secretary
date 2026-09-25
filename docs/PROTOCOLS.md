@@ -299,8 +299,16 @@ receipts; `none` and noop are valid only without one; an unknown mode is never a
 
 The dispatcher persists the receipt with the active card, renders it into the reviewer's task
 document, replaces it with the fresh post-review receipt in the Assessment delivery, and writes the
-fresh final receipt into the release audit after the mandatory exact-SHA pre-merge re-check. The
-reviewer document is written outside the checkout, under the installation-private run artifacts; the
+fresh final receipt into the release audit after the mandatory exact-SHA pre-merge re-check.
+
+The review remains valid across a gate refresh-merge only when the reviewed commit is an ancestor of
+HEAD, every intervening commit outside `origin/<base>` is a merge commit, and every path changed
+from `merge-base(reviewed commit, origin/<base>)` to the reviewed commit is byte-for-byte unchanged
+at HEAD. The release audit records the reviewed SHA, HEAD, base SHA, reviewed path count and that
+the reviewed paths are unchanged. An unreadable git answer or any failed condition keeps the drift
+refusal. The existing instance publication recovery remains a separate exception.
+
+The reviewer document is written outside the checkout, under the installation-private run artifacts; the
 head receives only a bounded pointer. `TASK.md` is a generated, git-ignored workspace handoff packet.
 Neither is repository documentation or a candidate change. A receipt does not permit skipping the
 pre-merge check or independent review.

@@ -11,8 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from secretary.dispatch import release_lifecycle
-from secretary.dispatch import attempt_accounting
+from secretary.dispatch import attempt_accounting, release_lifecycle
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -27,7 +26,12 @@ from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
-from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, GateTransportError, HostError, ProjectGitAccessError
+from secretary.dispatch.types import (
+    STOPPED_BY_REPLACEMENT,
+    GateTransportError,
+    HostError,
+    ProjectGitAccessError,
+)
 from secretary.dispatch.wait_vitality import execute_recovery_intent as _execute_recovery_intent
 from secretary.dispatch.wait_vitality import recovery_policy_outcome as _recovery_policy_outcome
 from secretary.dispatch.wait_vitality import (
@@ -168,6 +172,16 @@ def accept_green_gate(
             body=(
                 f"## Mechanical gate attestation — {label}\n\n"
                 + accepted.receipt.render()
+                + (
+                    "\n\nReview/base reconciliation: "
+                    f"reviewed SHA `{record.review_reconciliation['reviewed_sha']}`; "
+                    f"HEAD `{record.review_reconciliation['head_sha']}`; "
+                    f"base SHA `{record.review_reconciliation['base_sha']}`; "
+                    f"{record.review_reconciliation['reviewed_paths']} reviewed paths; "
+                    "reviewed paths unchanged."
+                    if stage == "release" and record.review_reconciliation is not None
+                    else ""
+                )
                 + f"\n\n{closing}"
             ),
             request_id=_attempt_request_id(

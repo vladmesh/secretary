@@ -746,6 +746,8 @@ class DispatcherRecord:
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
+    # Set by the release identity check for the gate audit in this tick only.
+    review_reconciliation: dict[str, str | int] | None = field(default=None, compare=False)
     # Re-review packet: the last rejected checkout and the reviewer's prior blocker text.  These
     # survive the red transition so the next independent reviewer can inspect the delta rather
     # than rediscovering the full historical diff.

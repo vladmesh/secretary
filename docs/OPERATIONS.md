@@ -2004,6 +2004,10 @@ the upgrade put them. `upgrade --no-pull` realigns them against the moved checko
 service through their receipts, the web transport through its own (the front is `PartOf=` and comes with
 it). See [Taking the slice down, and rolling the application back a
 revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
+For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+dependency or memory receipts. After `secretary upgrade --no-pull`, also run
+`"$HOME/secretary/.venv/bin/pip" install -e "$HOME/secretary[dev,memory]"` and restart
+`secretary-memory.service`.
 
 When an upgrade did not finish, or a service was restarted by hand, check whether the process is newer than
 the checkout:
@@ -2044,6 +2048,11 @@ secretary upgrade --instance ~/secretary-instance --no-pull
   transport through its own receipt. Do not install `[dev]` or restart units by hand.
 - An `upgrade` that ends `status: failed` did only the steps printed before the failure; it rolls nothing
   back.
+
+For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+dependency or memory receipts. After `secretary upgrade --no-pull`, also run
+`"$HOME/secretary/.venv/bin/pip" install -e "$HOME/secretary[dev,memory]"` and restart
+`secretary-memory.service`.
 
 A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly, the same way:
 

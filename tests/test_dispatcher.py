@@ -12919,6 +12919,130 @@ def _build_gated_workspace(root: Path, base: str, branch: str) -> Path:
     return ws
 
 
+class ReviewGateHost(GateHost):
+    def gate_check(self, task: dict, record: DispatcherRecord) -> GateResult:
+        # Exercise the real git gate without the live-installation provenance preflight.
+        from secretary.dispatch.gate import gate_check
+
+        return gate_check(self, task, record)
+
+
+class ReviewBaseReconciliationTests(unittest.TestCase):
+    def _setup(self, root: Path) -> tuple[Path, Path, Path, GateHost, DispatcherRecord, dict]:
+        workspace = _build_gated_workspace(root, "main", "pipeline/secretary-633")
+        reviewed = git(workspace, "rev-parse", "HEAD")
+        base_writer = root / "base-writer"
+        git(root, "clone", "--quiet", str(root / "origin.git"), str(base_writer))
+        _configure_git_user(base_writer)
+        host = ReviewGateHost(root, {"validation": {"ci": "local", "command": "true"}})
+        host.catalog.instance_dir = root / "not-instance"
+        record = DispatcherRecord(
+            worker="worker", workspace=str(workspace), handle="term:worker", head="codex",
+            review_head="codex-reviewer", comment_baseline=0, review_baseline=0,
+            state="reviewing", claimed_at=time.time(), review_commit=reviewed,
+            attempt_id="attempt-1",
+        )
+        task = {"ref": "secretary-633", "project": "secretary", "type": "code", "workspace": {"base_branch": "main"}}
+        return workspace, base_writer, root / "origin.git", host, record, task
+
+    def test_unrelated_base_commit_refresh_merges_and_release_audits_reconciliation(self) -> None:
+        from types import SimpleNamespace
+
+        from secretary.dispatch import release_lifecycle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, base_writer, _, host, record, task = self._setup(Path(tmp))
+            _commit_file(base_writer, "state/checkpoint.txt", "checkpoint\n", "checkpoint")
+            git(base_writer, "push", "--quiet", "origin", "main")
+            writer = mock.Mock()
+            runtime = SimpleNamespace(host=host, writer=writer, owner="dispatcher", save_records=mock.Mock())
+            with (
+                mock.patch.object(host, "complete_green", return_value=None) as merge,
+                mock.patch.object(host, "teardown"),
+                mock.patch.object(attempt_accounting, "terminal_effect"),
+            ):
+                outcome = release_lifecycle.release_parked(
+                    runtime, task, record, {task["ref"]: record}, {}, "attempt-1", reason="approved"
+                )
+
+            head = git(workspace, "rev-parse", "HEAD")
+            base = git(workspace, "rev-parse", "origin/main")
+            self.assertEqual(outcome.get("to"), "done", outcome)
+            merge.assert_called_once()
+            self.assertNotEqual(head, record.review_commit)
+            self.assertEqual(record.review_reconciliation, {
+                "reviewed_sha": record.review_commit,
+                "head_sha": head,
+                "base_sha": base,
+                "reviewed_paths": 1,
+            })
+            audit = writer.comment.call_args.kwargs["body"]
+            self.assertIn("release audit", audit)
+            for evidence in (record.review_commit, head, base, "1 reviewed paths", "reviewed paths unchanged"):
+                self.assertIn(evidence, audit)
+
+    def test_base_change_to_reviewed_path_keeps_drift(self) -> None:
+        from types import SimpleNamespace
+
+        from secretary.dispatch.release_lifecycle import merge_readiness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, base_writer, _, host, record, task = self._setup(Path(tmp))
+            # Establish a shared multi-line path, then review one end and move the base at the other.
+            git(workspace, "checkout", "--quiet", "main")
+            _commit_file(workspace, "shared.txt", "".join(f"line {n}\n" for n in range(12)), "shared")
+            git(workspace, "push", "--quiet", "origin", "main")
+            git(workspace, "checkout", "--quiet", "pipeline/secretary-633")
+            git(workspace, "merge", "--quiet", "--no-edit", "main")
+            record.review_commit = _commit_file(
+                workspace, "shared.txt", "reviewed\n" + "".join(f"line {n}\n" for n in range(1, 12)), "review"
+            )
+            git(base_writer, "pull", "--quiet", "--ff-only")
+            _commit_file(
+                base_writer, "shared.txt", "".join(f"line {n}\n" for n in range(11)) + "base\n", "base change"
+            )
+            git(base_writer, "push", "--quiet", "origin", "main")
+            runtime = SimpleNamespace(host=host)
+            kind, _, detail = merge_readiness(runtime, task, record)
+            self.assertEqual(kind, "drift", detail)
+            self.assertIn("review was given", detail)
+            self.assertIsNone(record.review_reconciliation)
+
+    def test_new_nonmerge_candidate_commit_keeps_drift(self) -> None:
+        from types import SimpleNamespace
+
+        from secretary.dispatch.release_lifecycle import review_drift
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, host, record, task = self._setup(Path(tmp))
+            _commit_file(workspace, "late.txt", "unreviewed\n", "late change")
+            self.assertIn("review was given", review_drift(SimpleNamespace(host=host), task, record))
+            self.assertIsNone(record.review_reconciliation)
+
+    def test_head_outside_reviewed_history_keeps_drift(self) -> None:
+        from types import SimpleNamespace
+
+        from secretary.dispatch.release_lifecycle import review_drift
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, host, record, task = self._setup(Path(tmp))
+            git(workspace, "checkout", "--quiet", "main")
+            self.assertIn("review was given", review_drift(SimpleNamespace(host=host), task, record))
+            self.assertIsNone(record.review_reconciliation)
+
+    def test_unreadable_base_ref_keeps_drift(self) -> None:
+        from types import SimpleNamespace
+
+        from secretary.dispatch.release_lifecycle import review_drift
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, host, record, task = self._setup(Path(tmp))
+            _commit_file(workspace, "late.txt", "unreviewed\n", "late change")
+            git(workspace, "update-ref", "-d", "refs/remotes/origin/main")
+            self.assertIn("review was given", review_drift(SimpleNamespace(host=host), task, record))
+            self.assertIsNone(record.review_reconciliation)
+
+
 class DispatcherGateTests(unittest.TestCase):
     def _record(self, workspace: Path, *, wrote: GithubGateHost | None = None, number: int = 42):
         """The durable record the gate is handed, with its PR-authorship field.
