@@ -9,16 +9,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from secretary.runtime.head import HeadRun
-from secretary.runtime.tui_delivery import DeliveryEvidence
-
 from secretary.dispatch.types import DispatcherError
-from secretary.routing_journal import RoutingHeadSnapshot
 from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationLiveness,
     WorkerReportNudge,
 )
+from secretary.routing_journal import RoutingHeadSnapshot
+from secretary.runtime.head import HeadRun
+from secretary.runtime.tui_delivery import DeliveryEvidence
 
 # ``VitalityEpisode`` is imported lazily in ``DispatcherRecord.from_json``: the episode module
 # reads the heartbeat vocabulary from ``dispatcher_watchdog``, whose own imports reach back into
@@ -26,8 +25,8 @@ from secretary.dispatch.worker_lifecycle import (
 # the record's typed persistence without making the state module an ancestor of the vocabulary.
 
 if TYPE_CHECKING:
-    from secretary.dispatch.head_vitality_episode import VitalityEpisode
     from secretary.dispatch.gate_receipt import GateReceipt
+    from secretary.dispatch.head_vitality_episode import VitalityEpisode
 
     # Registry of claim skips: Ready records these and continues scanning.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
@@ -829,17 +828,9 @@ class DispatcherRecord:
     review_head_run: PersistedHeadRun = field(default_factory=PersistedHeadRun)
     worker_run: PersistedRoutingHeadSnapshot = field(default_factory=PersistedRoutingHeadSnapshot)
     review_run: PersistedRoutingHeadSnapshot = field(default_factory=PersistedRoutingHeadSnapshot)
-    # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
-    # over a pane that was not ready for its prompt. The same shape the observer's record carries
-    # (`launch_attempts`), without its retry deadline: a worker or reviewer launch is retried by the
-    # next dispatcher tick rather than on a backoff of its own, so the count is the whole fence.
-    # Reset whenever that role's head does come up, so the bound covers one episode, not a card's
-    # whole history.
-    worker_launch_attempts: int = 0
-    review_launch_attempts: int = 0
     # Aborted reviewer bring-ups (issue:aa9a8ae4): consecutive ticks whose reviewer launch came up
     # but could not confirm the worker was frozen, so it handed the pane back as
-    # `review-launch-aborted` and kept its intent. Unlike a deferral this never blocks the card on
+    # `review-launch-aborted` and kept its intent. This never blocks the card on
     # its own — the head may still be running — so without a bound it repeats silently. Past the
     # stuck ceiling one operator escalation is emitted. Reset the moment a reviewer does take the
     # checkout, so the count covers one stuck episode rather than the card's whole history.
@@ -983,8 +974,6 @@ class DispatcherRecord:
             "review_head_run": self.review_head_run.to_json(),
             "worker_run": self.worker_run.to_json(),
             "review_run": self.review_run.to_json(),
-            "worker_launch_attempts": self.worker_launch_attempts,
-            "review_launch_attempts": self.review_launch_attempts,
             "review_launch_aborts": self.review_launch_aborts,
             "review_infra_failures": self.review_infra_failures,
             "review_infra_error": self.review_infra_error,
@@ -1078,8 +1067,6 @@ class DispatcherRecord:
             worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_pid_file=str(payload.get("worker_pid_file") or ""),
             review_pid_file=str(payload.get("review_pid_file") or ""),
-            worker_launch_attempts=int(payload.get("worker_launch_attempts") or 0),
-            review_launch_attempts=int(payload.get("review_launch_attempts") or 0),
             review_launch_aborts=int(payload.get("review_launch_aborts") or 0),
             review_infra_failures=int(payload.get("review_infra_failures") or 0),
             review_infra_error=str(payload.get("review_infra_error") or ""),

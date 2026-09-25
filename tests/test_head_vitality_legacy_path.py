@@ -5,8 +5,6 @@ tests pin what the watchdog's existing wait-tick / gate machinery *does* today f
 the incidents. They exist so S1-4's switch can be reviewed as a diff against recorded
 behaviour instead of memory:
 
-* where today's behaviour already matches the plan (the busy-readiness deferral), the test
-  is a real assertion;
 * where it still contradicts the plan, the test is marked ``expectedFailure`` with the
   sprint that flips it named in the docstring -- none is silently skipped.
 """
@@ -258,56 +256,6 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
             " ".join(record.worker_vitality_episode.basis),
             "the working head's own evidence says its transcript advances",
         )
-
-
-class Issue3e7abdf9LegacyBusyReadinessTests(LegacyPathTests):
-    """issue:3e7abdf91b8cd8a16254: busy must not read as unavailability.
-
-    The original defect -- a readiness timeout on a working head classified as
-    ``transport-refused-wait-for-readiness`` and answered with a replacement -- was fixed
-    by secretary-1425/secretary-1163: the refusal is now classified by what Orca said
-    about the pane, and a busy answer defers the launch instead of failing the round.
-    This characterisation pins that corrected behaviour as a REAL assertion.
-    """
-
-    def test_a_busy_pane_at_launch_defers_instead_of_replacing(self) -> None:
-        """/proc alive + readiness busy => deferred launch, same claim, no replacement.
-
-        The bring-up raises ``HeadPaneNotReady(readiness='busy')``, which the claim path
-        turns into ``worker-launch-deferred``: the card keeps its claim and the identical
-        bring-up is retried next tick. No head is stopped and nothing is replaced.
-        """
-        from secretary.dispatch.types import HeadPaneNotReady
-
-        self.start_dispatcher()
-        self.host.fail_prepare_error = HeadPaneNotReady(
-            "the head pane was busy and never took its launch prompt: "
-            "orca terminal wait --for tui-idle timeout",
-            readiness="busy",
-            pane="term-head",
-        )
-
-        deferred = self.tick()
-
-        self.assertEqual(deferred["status"], "skipped")
-        self.assertEqual(deferred["action"], "worker-launch-deferred")
-        self.assertIn("busy", deferred["reason"])
-        task = self.reader.show(CARD_REF)
-        self.assertEqual(task["state"], "in_progress", "a deferral is not a failed round")
-        record = self.record_of()
-        self.assertEqual(record.state, "claim_verified")
-        self.assertEqual(record.launch_intent, {}, "no head came up, so no intent stays open")
-        # Nothing was stopped or replaced behind the busy pane.
-        self.assertNotIn("restart_worker", self.host.calls)
-        self.assertNotIn("stop_head:worker", self.host.calls)
-        self.assertNotIn("stop_workspace", self.host.calls)
-
-        # And the retry is the very next tick once the pane frees up.
-        self.host.fail_prepare_error = None
-        launched = self.tick()
-        self.assertEqual(launched["status"], "ok")
-        self.assertEqual(launched["step"], "claim")
-        self.assertEqual(self.host.prepared, [CARD_REF])
 
 
 class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):

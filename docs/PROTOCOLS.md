@@ -1907,8 +1907,6 @@ reviewer path (`start_review`). A closed set of causes decides the class:
 - `infrastructure` — `launch_aborted` (a launch that may have left a head running, never turned into
   a second one); `host_unavailable` (anything else the host could not do: a head that would not start,
   a supervisor that would not answer, a registry that cannot supply a usable broad-check contract);
-  `pane_never_ready`, a pane-era cause name: before A20 a pane busy or held in a dialog for every
-  attempt, which no `local-pty` bring-up produces;
 - `task` — `workspace_contract` (the checkout the card was requeued onto is gone, or is not the
   worktree on the branch its claim recorded); `base_branch_contract` (an integration base the project
   cannot integrate into, or a seed the project remote does not carry).
@@ -1926,19 +1924,15 @@ The card's Blocked reason and the tick's outcome are built from one object. The 
 naming class, cause, stage (`claim`, `respawn`, `rework`, `review`), head and attempt id, followed by
 the class sentence (for infrastructure: the head never came up, so this is not a verdict about the
 card). The tick outcome carries `failure_class`, `failure_cause`, the same `failure_reason` string, and
-a `bring_up` object with the same fields plus the host's detail (and, on a pane-era deferral record,
-its readiness and attempt count).
+a `bring_up` object with the same fields plus the host's detail.
 
 The dispatcher classifies and presents the evidence and stops there: after an infrastructure outcome it
 opens no attempt, schedules no return and moves the card nowhere else. Whether to retry or block the
 sprint is the observer's decision, carried out by moving the card out of Blocked; a card back in Ready
 is claimed under a fresh attempt id.
 
-Bounded retries are spent before an outcome is written. Before A20 a busy or dialog-held pane parked
-the bring-up as `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up to the
-configured ceiling, ending in `pane_never_ready`; only the removed Orca spawn raised that deferral, so
-a `local-pty` bring-up is never parked this way. The reviewer's bounded relaunch over a green candidate
-([Review infrastructure retries](#review-infrastructure-retries)) ends the same way.
+The reviewer's bounded relaunch over a green candidate
+([Review infrastructure retries](#review-infrastructure-retries)) ends in an infrastructure outcome.
 
 An infrastructure outcome charges nothing. It is recorded as the uncharged event type
 `infrastructure_blocked`, shown as `budget.uncharged` in `sprint show` and `sprint status`, and enters

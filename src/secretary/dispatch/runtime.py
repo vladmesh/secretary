@@ -6,12 +6,13 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from secretary.dispatch import attempt_accounting
 from secretary.board.completion_evidence import has_candidate, review_required
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
+from secretary.dispatch import attempt_accounting
 from secretary.dispatch.assessment_decision import advance_assessment as _advance_assessment
 from secretary.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
@@ -26,7 +27,6 @@ from secretary.dispatch.claim import (
 )
 from secretary.dispatch.gate_lifecycle import run_gate as _run_gate
 from secretary.dispatch.helpers import (
-    _last_marker,
     _report_adoption_baseline,
     _review_adoption_baseline,
     _spent_report_generations,
@@ -127,6 +127,8 @@ from secretary.dispatch.review import (
 )
 from secretary.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
+)
+from secretary.dispatch.review_verdict import (
     park_green_verdict as _park_green_verdict,
 )
 from secretary.dispatch.state import (
@@ -146,9 +148,6 @@ from secretary.dispatch.state import (
 from secretary.dispatch.state import (
     outcome_terminal_path as _outcome_terminal_path,
 )
-from secretary.dispatch.state import (
-    request_token as _request_token,
-)
 from secretary.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
@@ -160,6 +159,7 @@ from secretary.dispatch.types import (
     HostError,
 )
 from secretary.dispatch.types import DispatcherError as DispatcherError
+from secretary.dispatch.wait_vitality import wait_watchdog as _wait_watchdog
 from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
 )
@@ -175,7 +175,6 @@ from secretary.dispatch.worker_continuation import (
 from secretary.dispatch.worker_continuation import (
     recover_worker_continuation as _recover_worker_continuation,
 )
-from secretary.dispatch.wait_vitality import wait_watchdog as _wait_watchdog
 from secretary.dispatch.worker_launch import (
     launch_worker_after_claim as _launch_worker_after_claim,
 )
@@ -211,13 +210,6 @@ from secretary.routing_journal import (
 from secretary.routing_journal import (
     run_key as _run_key,
 )
-from secretary.sprints import SprintReader, budget_thresholds
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.tasks import (
-    TaskError,
-    TaskReader,
-    TaskWriter,
-)
 from secretary.runtime import head as head_ops
 from secretary.runtime.codex_preflight import (
     CodexFanoutRecordingError,
@@ -229,6 +221,11 @@ from secretary.runtime.head import (
     HeadSpec,
 )
 from secretary.runtime.launch_prefix import pythonpath_prefix
+from secretary.sprints import SprintReader, budget_thresholds
+from secretary.tasks import (
+    TaskReader,
+    TaskWriter,
+)
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
@@ -782,7 +779,7 @@ class DispatcherRuntime:
         failure = _classify_bring_up_failure(
             error, record, WORKER_ROLE, stage=stage, attempt_id=record.attempt_id or attempt_id
         )
-        blocked_reason = _bring_up_blocked_reason(reason, error, record, WORKER_ROLE, failure=failure)
+        blocked_reason = _bring_up_blocked_reason(reason, error, failure=failure)
         attempt_accounting.terminal_effect(self, 
             {"ref": ref},
             record,
@@ -1066,5 +1063,3 @@ class DispatcherRuntime:
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:
     return _attempt_request_id("review", "start-intent", reference, str(review_baseline))
-
-

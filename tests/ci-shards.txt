@@ -3,6 +3,7 @@
 # test process.
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
+unit tests/test_dead_pane_history.py
 unit tests/test_codex_home_launch_config.py
 unit tests/test_board_identity.py
 unit tests/test_agent_state_lock.py

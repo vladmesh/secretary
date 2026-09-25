@@ -60,7 +60,6 @@ from secretary.dispatch.tui import (
 )
 from secretary.dispatch.types import (
     HeadLaunchAborted,
-    HeadPaneNotReady,
     HostError,
     LegacyDispatcherRecord,
     ReviewLaunch,
@@ -82,9 +81,9 @@ from secretary.projects.contract import (
 from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import RoutingHeadSnapshot
 from secretary.routing_journal import attempts as routing_attempts
+from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from secretary.runtime.head import (
     HEAD_ALIVE,
-    HEAD_BUSY,
     HEAD_GONE,
     HEAD_OK,
     DeliverReceipt,
@@ -94,7 +93,6 @@ from secretary.runtime.head import (
 )
 from secretary.runtime.head import operations as head_ops
 from secretary.runtime.head.command import with_pid_heartbeat
-from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.prompt_document import NUDGE_MAX_BYTES
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
@@ -2848,12 +2846,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertNotIn("freeze_worker", self.host.calls)
         self.assertTrue(self.stored_intent(), "the exact reviewer launch stays recoverable")
 
-    def test_a_pane_that_would_not_take_the_prompt_counts_once_on_the_ordinary_path(self) -> None:
-        """The other half of the sink's exception family, and the no-double-count case.
-
-        Here the pane did close, so nothing of the reviewer is left and the card takes its ordinary
-        failure path rather than keeping an intent. The same one recorder ran, once.
-        """
+    def test_a_failed_review_delivery_counts_once_on_the_ordinary_path(self) -> None:
+        """A failure with delivery evidence reaches the recorder once."""
         self.run_to_validate()
         evidence = {
             "subject": "reviewer-launch",
@@ -2863,12 +2857,9 @@ class LaunchIntentTests(unittest.TestCase):
             "payload_sha256": "0f1e2d3c4b5a6978",
             "reason": "pane-stayed-ready",
         }
-        self.host.fail_review_error = HeadPaneNotReady(
-            "the head pane was held in a dialog and never took its launch prompt",
-            readiness="blocked",
-            pane=f"review:{REF}",
-            evidence=evidence,
-        )
+        error = HostError("review launch prompt was refused")
+        error.evidence = evidence
+        self.host.fail_review_error = error
 
         outcome = self.tick()
 
@@ -3704,70 +3695,6 @@ class HostLaunchContourTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
         self.assertIn("never took the prompt", str(caught.exception))
 
-    def test_busy_spawn_binds_its_live_heartbeat_leaf_before_translation(self) -> None:
-        """A busy delivery returns its live head in ``run`` before the host translates it."""
-        run_id = "host-test-run"
-        leaf = "leaf:busy"
-        with mock.patch.dict(
-            os.environ,
-            {
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir),
-                "SECRETARY_UNSET_COMMAND": "run-worker",
-            },
-        ):
-            pid_file = Path(pid_file_path("worker", REF))
-
-            def busy_start(**kwargs: Any) -> StartReceipt:
-                run = kwargs["run"].rebound("term:busy", leaf=leaf)
-                self.assertTrue(run.running)
-                self._write_test_heartbeat(pid_file, os.getpid())
-                base = head_process_status(
-                    str(pid_file),
-                    expected=heartbeat_identity(
-                        run_id=run_id,
-                        role="worker",
-                        task=f"card:{REF}",
-                    ),
-                )
-                self.assertEqual((base["state"], base["record"]["leaf"]), ("live-match", ""))
-                error = head_ops.HeadPaneBusy(
-                    "the head stayed busy",
-                    readiness="busy",
-                    pane="term:busy",
-                )
-                error.run = run
-                return StartReceipt(status=HEAD_BUSY, run=run, reason=str(error), failure=error)
-
-            self.backend.on_start = busy_start
-            with mock.patch.object(
-                self.host.catalog,
-                "prepare_head_workspace",
-                lambda *_args, **_kwargs: None,
-                create=True,
-            ):
-                with self.assertRaises(HeadPaneNotReady) as caught:
-                    self.host._launch(
-                        str(self.data_dir),
-                        "title",
-                        "codex",
-                        "TASK.md",
-                        role="worker",
-                        env_name="SECRETARY_UNSET_COMMAND",
-                        task={"ref": REF, "project": "secretary"},
-                        heartbeat_run_id=run_id,
-                    )
-
-        self.assertEqual(caught.exception.readiness, "busy")
-        bound = head_process_status(
-            str(pid_file),
-            expected=heartbeat_identity(
-                run_id=run_id,
-                role="worker",
-                task=f"card:{REF}",
-                leaf=leaf,
-            ),
-        )
-        self.assertEqual((bound["state"], bound["record"]["leaf"]), ("live-match", leaf))
 
     # a stop that is not confirmed -------------------------------------------
 

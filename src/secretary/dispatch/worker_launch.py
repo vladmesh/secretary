@@ -30,37 +30,71 @@ from secretary.dispatch.launch import (
     STAGE_CLAIM,
     STAGE_RESPAWN,
     WORKER_ROLE,
+)
+from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
+)
+from secretary.dispatch.launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
+)
+from secretary.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
+)
+from secretary.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
+)
+from secretary.dispatch.launch import (
     clear_launch_intent as _clear_launch_intent,
+)
+from secretary.dispatch.launch import (
     confirm_launch_intent as _confirm_launch_intent,
-    keep_reserved_round as _keep_reserved_round,
+)
+from secretary.dispatch.launch import (
     launch_aborted as _launch_aborted,
-    launch_deferred as _launch_deferred,
+)
+from secretary.dispatch.launch import (
     launch_delivery_receipt as _launch_delivery_receipt,
-    launch_intent as _launch_intent,
+)
+from secretary.dispatch.launch import (
     launch_intent_unwritable as _launch_intent_unwritable,
+)
+from secretary.dispatch.launch import (
     launch_left_a_head as _launch_left_a_head,
+)
+from secretary.dispatch.launch import (
     launch_pid_file as _launch_pid_file,
+)
+from secretary.dispatch.launch import (
     mark_launch_aborted as _mark_launch_aborted,
-    reset_launch_attempts as _reset_launch_attempts,
+)
+from secretary.dispatch.launch import (
     write_launch_intent as _write_launch_intent,
 )
 from secretary.dispatch.state import (
     DispatcherRecord,
     HeadlessRecoveryEpisode,
     PersistedHeadlessRecoveryEpisode,
+)
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
+)
+from secretary.dispatch.state import (
     claim_actual as _claim_actual,
+)
+from secretary.dispatch.state import (
     claim_mismatch as _claim_mismatch,
+)
+from secretary.dispatch.state import (
     record_divergence as _record_divergence,
 )
 from secretary.dispatch.types import HeadLaunchAborted, HostError
 from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
+)
+from secretary.dispatch.watchdog import (
     reset_idle as _reset_idle,
+)
+from secretary.dispatch.watchdog import (
     reset_wait as _reset_wait,
 )
 
@@ -261,24 +295,12 @@ def launch_worker_after_claim(
         if aborted is not None:
             return aborted
         _clear_launch_intent(record)
-        deferred = _launch_deferred(
-            record,
-            exc,
-            step="claim",
-            ref=ref,
-            attempt_id=record.attempt_id,
-            role=WORKER_ROLE,
-        )
-        if deferred is not None:
-            records[ref] = record
-            runtime.save_records(payload, records)
-            return deferred
         # An infrastructure outcome blocks for a person; it is not a new attempt.
         failure = _classify_bring_up_failure(
             exc, record, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=record.attempt_id
         )
         reason = _bring_up_blocked_reason(
-            "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
+            "dispatcher bring-up failed", exc, failure=failure
         )
         attempt_accounting.terminal_effect(runtime, 
             claimed,
@@ -332,7 +354,6 @@ def launch_worker_after_claim(
         )
     record.worker_started_at = record.worker_progress_at = time.time()
     record.state = "claimed"
-    _reset_launch_attempts(record, WORKER_ROLE)
     resume_workspaces = payload.get("resume_workspaces")
     if isinstance(resume_workspaces, dict):
         resume_workspaces.pop(ref, None)
@@ -466,24 +487,7 @@ def bring_up_worker_head(
         )
         if aborted is not None:
             return None, aborted
-        intent = dict(_launch_intent(record))
         _clear_launch_intent(record)
-        deferred = _launch_deferred(
-            record,
-            exc,
-            step=step,
-            ref=ref,
-            attempt_id=record.attempt_id or attempt_id,
-            role=WORKER_ROLE,
-        )
-        if deferred is not None:
-            # A rework reserved its round before the host call, and that round is over whether
-            # or not its head lived: the deferred relaunch belongs to the round the rework opened.
-            _keep_reserved_round(runtime, record, intent)
-            # Nothing of this launch is running and the record names no head, so the next tick retries.
-            records[ref] = record
-            runtime.save_records(payload, records)
-            return None, deferred
         return None, runtime._block_failed_worker_restart(
             ref=ref,
             record=record,
@@ -518,7 +522,6 @@ def bring_up_worker_head(
         return None, _worker_launch_aborted(runtime,
             payload, records, ref, record, exc, step=step, attempt_id=attempt_id
         )
-    _reset_launch_attempts(record, WORKER_ROLE)
     return launched, None
 
 

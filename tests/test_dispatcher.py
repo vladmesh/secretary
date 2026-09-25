@@ -69,7 +69,6 @@ from secretary.dispatch.host import (
 from secretary.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
-    CAUSE_PANE_NEVER_READY,
     CAUSE_WORKSPACE_CONTRACT,
     FAILURE_CLASS_INFRASTRUCTURE,
     FAILURE_CLASS_TASK,
@@ -118,15 +117,12 @@ from secretary.dispatch.tui import (
 )
 from secretary.dispatch.types import (
     GateTransportError,
-    HeadPaneNotReady,
 )
 from secretary.dispatch.watchdog import (
-    BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
-    bring_up_defer_attempts,
     idle_stall_seconds,
     initial_output_stall_seconds,
     pid_file_path,
@@ -6733,7 +6729,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
     def test_an_unconfirmed_reviewer_nudge_keeps_the_head_and_the_exact_green_evidence(self) -> None:
-        """The live failure is a generic delivery failure, not HeadPaneNotReady.
+        """An unconfirmed reviewer delivery keeps its exact green evidence.
 
         The reviewer receives a nudge at a task document, so an unconfirmed delivery is ambiguous
         by construction: the line is short enough that no provider has failed to take one, and the
@@ -6808,7 +6804,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             worker_identity,
         )
         self.assertEqual(record.review_launch_aborts, 1)
-        self.assertEqual(record.review_launch_attempts, 0)
         # What the delivery boundary saw is durable card telemetry rather than a scrubbed sentence.
         self.assertEqual(record.review_delivery_failures, 1)
         evidence = record.review_delivery_evidence
@@ -6869,107 +6864,13 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "the escalation is the only budget event, and it is the uncharged one",
         )
 
-    # secretary-1163: a head pane that is not ready for its launch prompt defers the bring-up.
-    # Twice in 33 minutes on the `sprint:1200` canary a codex update dialog held the pane a worker
-    # or a reviewer had just been launched into. The card went straight to Blocked with "bring-up
-    # failed", and the observer pulled it back out by hand both times.
-    def _pane_not_ready(self, readiness: str = "blocked") -> HeadPaneNotReady:
-        return HeadPaneNotReady(
-            "the head pane was held in a dialog and never took its launch prompt: "
-            '"blockedReason": "codex-update-prompt"',
-            readiness=readiness,
-            pane="term-head",
-        )
 
     def _record_of(self, ref: str = "secretary-510") -> DispatcherRecord:
         return self.runtime.production_state.records(self.runtime.production_state.load())[ref]
 
-    def _bound_bring_up_attempts(self, limit: int) -> int:
-        """Pin the deferral bound for this test, so the assertions do not ride on the default."""
-        patch = mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": str(limit)})
-        patch.start()
-        self.addCleanup(patch.stop)
-        return limit
-
-    def test_a_busy_worker_pane_defers_the_claim_launch_instead_of_failing_the_round(self) -> None:
-        """The pane is working, so the launch prompt went nowhere. The card keeps its claim and the
-        same bring-up is made again on the next tick, which is what the observer path already does
-        with a busy observer pane."""
-        limit = self._bound_bring_up_attempts(3)
-        self.start_dispatcher()
-        self.host.fail_prepare_error = self._pane_not_ready("busy")
-
-        deferred = self.tick()
-
-        self.assertEqual(deferred["status"], "skipped")
-        self.assertEqual(deferred["action"], "worker-launch-deferred")
-        self.assertEqual(deferred["readiness"], "busy")
-        self.assertEqual(deferred["attempts"], 1)
-        self.assertIn("worker head pane is busy", deferred["reason"])
-        self.assertIn(f"attempt 1 of {limit}", deferred["reason"])
-        task = self.reader.show("secretary-510")
-        self.assertEqual(task["state"], "in_progress", "a deferred launch is not a failed round")
-        record = self._record_of()
-        self.assertEqual(record.state, "claim_verified", "the next tick launches from this state")
-        self.assertEqual(record.worker_launch_attempts, 1)
-        self.assertEqual(record.launch_intent, {}, "no head came up, so no intent is left open")
-
-    def test_a_worker_pane_held_in_a_dialog_defers_the_claim_launch(self) -> None:
-        """The canary's own failure: a codex update prompt nothing in the pipeline answers."""
-        self.start_dispatcher()
-        self.host.fail_prepare_error = self._pane_not_ready("blocked")
-
-        deferred = self.tick()
-
-        self.assertEqual(deferred["action"], "worker-launch-deferred")
-        self.assertEqual(deferred["readiness"], "blocked")
-        self.assertIn("worker head pane is held in a dialog", deferred["reason"])
-        self.assertIn("codex-update-prompt", deferred["reason"])
-        self.assertEqual(self.reader.show("secretary-510")["state"], "in_progress")
-
-    def test_a_deferred_worker_launch_is_retried_and_the_count_resets(self) -> None:
-        """The retry is the next tick, and a head that does come up ends the episode: the deferrals
-        before it must not count against the next one."""
-        self.start_dispatcher()
-        self.host.fail_prepare_error = self._pane_not_ready("blocked")
-        self.tick()
-        self.host.fail_prepare_error = None
-
-        launched = self.tick()
-
-        self.assertEqual(launched["status"], "ok")
-        self.assertEqual(launched["step"], "claim")
-        self.assertEqual(self.host.prepared, ["secretary-510"])
-        record = self._record_of()
-        self.assertEqual(record.state, "claimed")
-        self.assertEqual(record.worker_launch_attempts, 0)
-
-    def test_a_worker_pane_that_never_frees_up_blocks_the_card_over_that_pane(self) -> None:
-        """The deferral is bounded, and what the card is blocked over is the pane and its state:
-        "bring-up failed" sends an operator looking for a broken head or a broken host."""
-        limit = self._bound_bring_up_attempts(3)
-        self.start_dispatcher()
-        self.host.fail_prepare_error = self._pane_not_ready("blocked")
-
-        for attempt in range(limit):
-            deferred = self.tick()
-            self.assertEqual(deferred["action"], "worker-launch-deferred")
-            self.assertEqual(deferred["attempts"], attempt + 1)
-
-        blocked = self.tick()
-
-        self.assertEqual(blocked["status"], "blocked")
-        task = self.reader.show("secretary-510")
-        self.assertEqual(task["state"], "blocked")
-        reason = task["comments"][-1]["body"]
-        self.assertIn("worker head pane was held in a dialog", reason)
-        self.assertIn(f"all {limit + 1} bring-up attempts", reason)
-        self.assertNotIn("dispatcher bring-up failed", reason)
-        self.assertNotIn("secretary-510", self.runtime.production_state.load()["records"])
 
     def test_an_ordinary_worker_bringup_failure_still_blocks_at_once(self) -> None:
-        """Only a pane that is busy or held in a dialog is worth another tick. Everything else is
-        the failure it always was."""
+        """A failed worker bring-up blocks the card on its first attempt."""
         self.start_dispatcher()
         self.host.fail_prepare_reason = "resume workspace is missing"
 
@@ -6981,61 +6882,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "dispatcher bring-up failed", self.reader.show("secretary-510")["comments"][-1]["body"]
         )
 
-    def test_a_busy_reviewer_pane_defers_the_review_launch(self) -> None:
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.host.fail_review_error = self._pane_not_ready("busy")
-
-        deferred = self.tick()
-
-        self.assertEqual(deferred["status"], "degraded")
-        self.assertEqual(deferred["action"], "review-infrastructure-retry")
-        self.assertIn("held in a dialog", deferred["reason"])
-        task = self.reader.show("secretary-510")
-        self.assertEqual(task["state"], "validate", "a deferred reviewer is not a failed round")
-        record = self._record_of()
-        self.assertEqual(record.state, "review_starting", "the next tick recovers this launch")
-        self.assertEqual(record.review_launch_attempts, 0)
-        self.assertEqual(record.review_infra_failures, 1)
-        self.assertEqual(self.host.torn_down, [], "a deferred reviewer must not touch the checkout")
-
-    def test_a_deferred_review_launch_is_retried_on_the_next_tick(self) -> None:
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.host.fail_review_error = self._pane_not_ready("blocked")
-        deferred = self.tick()
-        self.assertEqual(deferred["action"], "review-infrastructure-retry")
-        self.host.fail_review_error = None
-
-        started = self.tick()
-
-        self.assertEqual(started["status"], "ok")
-        self.assertEqual(self.host.reviews, ["secretary-510"])
-        record = self._record_of()
-        self.assertEqual(record.state, "reviewing")
-        self.assertEqual(record.review_launch_attempts, 0)
-
-    def test_a_reviewer_pane_that_never_frees_up_blocks_the_card_over_that_pane(self) -> None:
-        limit = self._bound_review_infra_retries(3)
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.host.fail_review_error = self._pane_not_ready("blocked")
-
-        for attempt in range(limit - 1):
-            deferred = self.tick()
-            self.assertEqual(deferred["attempts"], attempt + 1)
-
-        blocked = self.tick()
-
-        self.assertEqual(blocked["status"], "blocked")
-        task = self.reader.show("secretary-510")
-        self.assertEqual(task["state"], "blocked")
-        reason = task["comments"][-1]["body"]
-        self.assertIn("head pane was held in a dialog", reason)
-        self.assertIn("reviewer infrastructure failed", reason)
-        self.assertNotIn("review bring-up failed", reason)
-        self.assertEqual(self._record_of().review_infra_failures, limit)
-        self.assertEqual(self._record_of().review_launch_attempts, 0)
 
     # --- secretary-1456: one classification of a bring-up that produced no head -----------------
 
@@ -7398,33 +7244,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotIn("infrastructure", transition["request_id"])
         self.assertEqual(transition["data"]["terminal_taxonomy"]["blocked_reason"], "task_contract")
 
-    def test_a_worker_pane_that_never_frees_up_ends_as_an_infrastructure_outcome(self) -> None:
-        """The bounded deferral is unchanged, and what it ends in is a statement about the pane."""
-        limit = self._bound_bring_up_attempts(2)
-        self.start_dispatcher()
-        self.host.fail_prepare_error = self._pane_not_ready("blocked")
-
-        for _ in range(limit):
-            self.assertEqual(self.tick()["action"], "worker-launch-deferred")
-        blocked = self.tick()
-
-        self.assertEqual(blocked["status"], "blocked")
-        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
-        self.assertEqual(blocked["failure_cause"], CAUSE_PANE_NEVER_READY)
-        self.assertEqual(blocked["bring_up"]["readiness"], "blocked")
-        self.assertEqual(blocked["bring_up"]["attempts"], limit + 1)
-        self.assertTrue(
-            self.reader.show("secretary-510")["comments"][-1]["body"].endswith(
-                blocked["failure_reason"]
-            )
-        )
-        self.assertEqual(
-            bring_up_failure_class(self._blocked_transition()["request_id"]),
-            FAILURE_CLASS_INFRASTRUCTURE,
-        )
-        # The ceiling is a ceiling: nothing relaunches the head after it.
-        self.assertEqual(self.host.calls.count("prepare_worker"), limit + 1)
-        self.assertEqual(self.reader.show("secretary-510")["state"], "blocked")
 
     def test_a_reviewer_bringup_that_never_came_up_is_the_same_infrastructure_outcome(self) -> None:
         """The reviewer's hold over a green candidate stays, and past its ceiling the outcome is
@@ -7482,40 +7301,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.calls.count("start_review"), 1)
         self.assertEqual(transition["data"]["terminal_taxonomy"]["blocked_reason"], "task_contract")
 
-    def test_a_rework_bringup_defers_on_a_pane_that_is_not_ready(self) -> None:
-        """A rework is a bring-up like any other: a red gate that lands while the head's pane is
-        held in a dialog must not turn the rework into a Blocked card either."""
-        self.start_dispatcher()
-        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
-        self.host.fail_restart_error = self._pane_not_ready("blocked")
-        self._run_worker_to_validate()
-
-        deferred = self.tick()
-
-        self.assertEqual(deferred["status"], "skipped")
-        self.assertEqual(deferred["action"], "worker-launch-deferred")
-        self.assertEqual(self.reader.show("secretary-510")["state"], "in_progress")
-        self.assertEqual(self._record_of().worker_launch_attempts, 1)
-        # And the next tick brings the rework up again. The record names no head, which is what the
-        # dispatcher reads as a worker pane that is not there and replaces. S1-4: the replaced
-        # head's heartbeat must agree it is gone for the reclaim to run.
-        self.host.fail_restart_error = None
-        self.host.head_pid = self._dead_pid()
-        current = self.runtime.production_state.records(self.runtime.production_state.load())[
-            "secretary-510"
-        ]
-        self.host._write_head_pid(
-            "worker",
-            "secretary-510",
-            head_run=current.worker_head_run,
-            leaf=current.worker_leaf,
-        )
-        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        self.tick()
-        record = self._record_of()
-        self.assertEqual(record.state, "claimed")
-        self.assertEqual(record.worker_launch_attempts, 0)
-        self.assertEqual(self.host.calls.count("restart_worker"), 2)
 
     def _reviewer_red_request_id(self) -> str:
         """The red request-id the dispatcher actually hands the reviewer, taken from the prompt
@@ -11178,18 +10963,8 @@ class WaitWatchdogTests(unittest.TestCase):
             "SECRETARY_REVIEW_VERDICT_STALL_SECONDS",
             "SECRETARY_WORKER_REPORT_STALL_SECONDS",
             "SECRETARY_HEAD_IDLE_STALL_SECONDS",
-            "SECRETARY_BRINGUP_DEFER_ATTEMPTS",
         )
 
-    def test_the_bringup_deferral_bound_comes_from_the_env_at_call_time(self) -> None:
-        with mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": "2"}):
-            self.assertEqual(bring_up_defer_attempts(), 2)
-        self.assertEqual(bring_up_defer_attempts(), BRING_UP_DEFER_ATTEMPTS_DEFAULT)
-
-    def test_an_unparseable_bringup_deferral_bound_falls_back_to_the_default(self) -> None:
-        for bogus in ("", "a few", "0", "-1"):
-            with mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": bogus}):
-                self.assertEqual(bring_up_defer_attempts(), BRING_UP_DEFER_ATTEMPTS_DEFAULT)
 
     def test_the_idle_window_comes_from_the_env_at_call_time(self) -> None:
         with mock.patch.dict(os.environ, {"SECRETARY_HEAD_IDLE_STALL_SECONDS": "30"}):

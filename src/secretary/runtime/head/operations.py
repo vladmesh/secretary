@@ -31,7 +31,6 @@ from .task_ref import TaskRef
 __all__ = [
     "HeadNudgeFailed",
     "HeadOperationError",
-    "HeadPaneBusy",
     "HeadRun",
     "HeadSpawnAborted",
     "HeadSpawnFailed",
@@ -79,21 +78,6 @@ class HeadSpawnAborted(HeadOperationError):
 
     def __init__(self, message: str, *, run: HeadRun, evidence: Any = None) -> None:
         super().__init__(message, evidence=evidence, run=run)
-
-
-class HeadPaneBusy(HeadOperationError):
-    """The head was working, or held in a dialog, and never took its launch prompt.
-
-    Not a failed bring-up: it is worth making again, so the caller defers rather than blocking the
-    work (the dispatcher reads it as `HeadPaneNotReady`). The address it names was already closed.
-    Only the removed Orca spawn raised it; the type stays because the dispatcher's deferral path
-    still classifies it.
-    """
-
-    def __init__(self, message: str, *, readiness: str, pane: str, evidence: Any = None) -> None:
-        super().__init__(message, evidence=evidence)
-        self.readiness = readiness
-        self.pane = pane
 
 
 class HeadNudgeFailed(HeadOperationError):

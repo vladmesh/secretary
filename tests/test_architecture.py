@@ -13,6 +13,24 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+class DeadPaneDeferralTests(unittest.TestCase):
+    def test_retired_pane_names_stay_out_of_source_and_docs(self) -> None:
+        banned = (
+            "HeadPaneBusy",
+            "HeadPaneNotReady",
+            "SECRETARY_BRINGUP_DEFER_ATTEMPTS",
+            "pane_never_ready",
+        )
+        for directory in (ROOT / "src", ROOT / "docs"):
+            for path in directory.rglob("*"):
+                if not path.is_file() or path.suffix == ".pyc":
+                    continue
+                content = path.read_text(encoding="utf-8", errors="replace")
+                for name in banned:
+                    with self.subTest(file=str(path.relative_to(ROOT)), name=name):
+                        self.assertNotIn(name, content, f"{path.relative_to(ROOT)} contains {name}")
+
 # Existing flat modules may leave this set one feature at a time. New modules belong in one of the
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(

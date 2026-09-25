@@ -47,7 +47,6 @@ from .command import (
 from .operations import (
     HeadNudgeFailed,
     HeadOperationError,
-    HeadPaneBusy,
     HeadSpawnAborted,
     HeadSpawnFailed,
     HeadStopFailed,
@@ -139,7 +138,6 @@ __all__ = [
     "HeadCommandError",
     "HeadNudgeFailed",
     "HeadOperationError",
-    "HeadPaneBusy",
     "HeadReceipt",
     "HeadRun",
     "HeadRunError",
