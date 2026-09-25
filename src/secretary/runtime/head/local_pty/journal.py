@@ -47,7 +47,8 @@ RUN_STARTED = "run.started"
 INPUT_ACCEPTED = "input.accepted"
 #: A turn opened — the first accepted input since the head last went quiet.
 TURN_STARTED = "turn.started"
-#: The head produced output during an open turn, coalesced so that one chatty second is one record.
+#: The head produced a normalized line not yet seen in this turn. Repeated output windows are
+#: folded into the next record's `output_bytes`, with their number in `folded_windows`.
 PROVIDER_PROGRESSED = "provider.progressed"
 #: The open turn's head went quiet for the configured settle time.
 TURN_FINISHED = "turn.finished"

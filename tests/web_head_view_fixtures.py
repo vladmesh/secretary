@@ -165,7 +165,7 @@ class HeadViewFixture(unittest.TestCase):
         tail: bytes | None = None,
         subject: str = "a nudge",
     ) -> Path:
-        """A run directory as a supervisor that has let go of its head leaves it."""
+        """A finished run directory, optionally with an old tail to prove the page ignores it."""
         directory = self.root / run_id
         directory.mkdir(parents=True)
         with JournalWriter(directory / "journal.jsonl", run_id) as journal:

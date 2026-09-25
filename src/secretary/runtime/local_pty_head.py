@@ -2919,26 +2919,6 @@ def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLeas
     )
 
 
-#: The most of a head's terminal output a reader outside its lifecycle is given, running or finished:
-#: the size of the tail a supervisor leaves behind, so a live view and a finished one show as much.
-HEAD_OUTPUT_TAIL_BYTES = protocol.OUTPUT_TAIL_BYTES
-#: How long a reader outside the lifecycle waits for a supervisor to answer its one question.
-HEAD_OUTPUT_READ_SECONDS = 2.0
-
-
-@dataclass(frozen=True)
-class HeadOutputTail:
-    """The end of one head's terminal output, as raw bytes, and what is known about the rest.
-
-    `total_bytes` is how much the head has written in all, when the supervisor said so; a tail
-    read back from the run directory does not know it and says `None`.
-    """
-
-    data: bytes
-    total_bytes: int | None = None
-    truncated: bool = False
-
-
 def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
     """The run directory `run_id` names under `root`, refused for anything that is not a run id.
 
@@ -2981,52 +2961,6 @@ def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalR
     its end and nothing else. `OSError` propagates for the reason it does there.
     """
     return local_pty.read_tail(Path(run_dir) / protocol.JOURNAL_NAME)
-
-
-def head_run_live_output(
-    run_dir: str | os.PathLike[str],
-    *,
-    max_bytes: int = HEAD_OUTPUT_TAIL_BYTES,
-    timeout: float = HEAD_OUTPUT_READ_SECONDS,
-) -> HeadOutputTail:
-    """Ask a running head's supervisor for the end of its output: one `output` question, no other.
-
-    Read-only in the strong sense: the connection asks `output` and closes, so nothing is delivered,
-    attached, drained or stopped, and the head's turn accounting is untouched. A supervisor that
-    does not answer, or answers with a refusal, raises -- `LocalPtyError`, `OSError` or
-    `ProtocolError` -- and saying so is the caller's.
-    """
-    limit = max(0, min(int(max_bytes), HEAD_OUTPUT_TAIL_BYTES))
-    with local_pty.SupervisorClient.connect(protocol.socket_path_for(run_dir), timeout=timeout) as client:
-        answer = client.read_output(limit)
-    if not answer.get("ok"):
-        raise local_pty.LocalPtyError(f"the supervisor refused the output read: {str(answer)[:200]}")
-    data = bytes(answer.get("bytes_data") or b"")[-limit:] if limit else b""
-    total = answer.get("total_bytes")
-    return HeadOutputTail(
-        data=data,
-        total_bytes=total if isinstance(total, int) and not isinstance(total, bool) else None,
-        truncated=bool(answer.get("truncated")),
-    )
-
-
-def head_run_output_tail(run_dir: str | os.PathLike[str]) -> HeadOutputTail | None:
-    """The output tail a supervisor left in a run directory when it let go, or `None` if it left none.
-
-    `None` is a run that ended before supervisors kept one, or one whose supervisor never wrote it
-    (killed outright); either way nothing was kept. At most `HEAD_OUTPUT_TAIL_BYTES` are read,
-    from the end, whatever the file's size. `OSError` other than a missing file propagates.
-    """
-    path = Path(run_dir) / protocol.OUTPUT_TAIL_NAME
-    try:
-        with open(path, "rb") as tail:
-            size = os.fstat(tail.fileno()).st_size
-            if size > HEAD_OUTPUT_TAIL_BYTES:
-                tail.seek(size - HEAD_OUTPUT_TAIL_BYTES)
-            data = tail.read(HEAD_OUTPUT_TAIL_BYTES)
-    except FileNotFoundError:
-        return None
-    return HeadOutputTail(data=data, truncated=size > len(data))
 
 
 def _flock_holders(info: os.stat_result) -> list[int]:

@@ -34,9 +34,11 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import pty
+import re
 import selectors
 import signal
 import socket
@@ -67,8 +69,10 @@ from .journal import (
 #: be a lie in the journal — so what it records is the fact it can actually observe: the head went
 #: quiet.
 TURN_QUIET_SECONDS = 2.0
-#: One chatty second of output is one `provider.progressed` record, with the bytes it covered.
+#: Output is considered for progress at this interval; repeated screen content is folded.
 PROGRESS_COALESCE_SECONDS = 0.5
+#: Maximum distinct normalized lines remembered during one turn.
+PROGRESS_SEEN_LINES_MAX = 4096
 #: How long a stopping head is given before the signal is escalated.
 STOP_GRACE_SECONDS = 5.0
 #: The loop's own resolution: what bounds how late a quiet turn or a stop deadline is noticed.
@@ -91,6 +95,30 @@ EXIT_RUN_FAILED = 4
 START_ALREADY_RUNNING = "already_running"
 START_FAILED = "startup_failed"
 RUN_FAILED = "run_failed"
+
+_ESC_STRING = re.compile(r"(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f]).*?(?:\x07|\x1b\\|\x9c|$)", re.DOTALL)
+_CSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+_CSI_CUT = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*$")
+_ESC_OTHER = re.compile(r"\x1b[ -/]*[0-~]?")
+_SPINNER = re.compile(r"[\u2700-\u27bf\u2800-\u28ff]|(?<!\w)[*·](?!\w)")
+_DIGITS = re.compile(r"\d+")
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _progress_lines(data: bytes) -> set[str]:
+    """Normalize one output window into the distinct visible lines it introduced."""
+    output = data.decode("utf-8", errors="replace")
+    output = _ESC_STRING.sub("", output)
+    output = _CSI.sub("", output)
+    output = _CSI_CUT.sub("", output)
+    output = _ESC_OTHER.sub("", output)
+    output = _SPINNER.sub("", output)
+    output = _DIGITS.sub("#", output)
+    return {
+        line
+        for raw in output.replace("\r", "\n").split("\n")
+        if (line := " ".join(_CONTROLS.sub("", raw).split()))
+    }
 
 
 class SupervisorStartupError(RuntimeError):
@@ -214,6 +242,9 @@ class Supervisor:
         self._last_output_at = 0.0
         self._progress_bytes = 0
         self._progress_at = 0.0
+        self._progress_window = bytearray()
+        self._progress_seen: set[bytes] = set()
+        self._folded_windows = 0
 
         self._delivery: _Delivery | None = None
         self._delivery_seq = 0
@@ -432,14 +463,7 @@ class Supervisor:
             self._shutdown()
 
     def _begin(self) -> None:
-        """Bring the head up and say so, in the order a reader of the run directory needs.
-
-        An output tail belongs to exactly one incarnation. A run id can be brought up again once
-        its head is dead, so the tail a previous incarnation left is removed here -- under the lock,
-        before anything of this incarnation is written -- and no reader can ever find it beside a
-        `run.started` it does not belong to.
-        """
-        (self.run_dir / protocol.OUTPUT_TAIL_NAME).unlink(missing_ok=True)
+        """Bring the head up and say so, in the order a reader of the run directory needs."""
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
         self.start_head()
@@ -595,6 +619,7 @@ class Supervisor:
         if self._turn_open:
             self._turn_bytes += len(chunk)
             self._progress_bytes += len(chunk)
+            self._progress_window += chunk
             if not self._progress_at:
                 self._progress_at = self._last_output_at
         for client in list(self._clients.values()):
@@ -602,7 +627,20 @@ class Supervisor:
                 self._push_output(client, chunk)
 
     def _flush_progress(self) -> None:
-        if not self._progress_bytes:
+        if not self._progress_window:
+            return
+        lines = _progress_lines(bytes(self._progress_window))
+        self._progress_window.clear()
+        self._progress_at = 0.0
+        new = False
+        for line in lines:
+            digest = hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest()
+            if digest not in self._progress_seen:
+                new = True
+                if len(self._progress_seen) < PROGRESS_SEEN_LINES_MAX:
+                    self._progress_seen.add(digest)
+        if not new:
+            self._folded_windows += 1
             return
         self._append(
             PROVIDER_PROGRESSED,
@@ -610,9 +648,10 @@ class Supervisor:
             output_bytes=self._progress_bytes,
             total_output_bytes=self._output_total,
             dropped_bytes=self._output_dropped,
+            folded_windows=self._folded_windows,
         )
         self._progress_bytes = 0
-        self._progress_at = 0.0
+        self._folded_windows = 0
 
     # -- delivery: admitted by the socket, written by the loop -----------------------------
 
@@ -735,6 +774,11 @@ class Supervisor:
             self._turn_open = True
             self._turn_bytes = 0
             self._last_output_at = time.time()
+            self._progress_bytes = 0
+            self._progress_window.clear()
+            self._progress_at = 0.0
+            self._progress_seen.clear()
+            self._folded_windows = 0
             self._append(TURN_STARTED, turn=self._turn_id, subject=delivery.subject)
 
     def _delivery_view(self) -> dict[str, Any] | None:
@@ -1134,12 +1178,7 @@ class Supervisor:
         return EXIT_OK
 
     def _shutdown(self) -> None:
-        """Let go of everything, in the order that leaves nothing addressable behind.
-
-        The output tail is written first, while the socket still answers: a reader that finds the
-        socket gone then finds the tail, and there is no moment when a finished run has neither.
-        """
-        self._persist_output_tail()
+        """Let go of everything, in the order that leaves nothing addressable behind."""
         if self._listener is not None:
             try:
                 self._selector.unregister(self._listener)
@@ -1164,59 +1203,6 @@ class Supervisor:
         if self._lock_fd >= 0:
             os.close(self._lock_fd)
             self._lock_fd = -1
-
-    def _persist_output_tail(self) -> None:
-        """Leave the last `OUTPUT_TAIL_BYTES` of the head's output in the run directory.
-
-        Reached from `_shutdown`, so from every ending of a run that was up: the head's own exit, a
-        stop or a drain, a head killed by a signal, and a supervisor that failed after `run.started`.
-        A run that never came up has no transcript to keep; its reason is `startup.error`.
-
-        What the head wrote just before it exited can still be in the pty when the loop sees the
-        exit, so that is read first. The file is written beside its final name and renamed over it,
-        owner-only like everything else here, so a reader sees the whole tail or none of it. Failing
-        to write it is said on stderr and nothing more: the socket and the lock are still to be let
-        go of, and a missing transcript is a smaller loss than a run directory left addressable.
-        """
-        if not self.started:
-            return
-        self._drain_head_output()
-        tail = bytes(self._output[-protocol.OUTPUT_TAIL_BYTES :])
-        target = self.run_dir / protocol.OUTPUT_TAIL_NAME
-        staged = self.run_dir / f".{protocol.OUTPUT_TAIL_NAME}.{os.getpid()}"
-        try:
-            fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            try:
-                view = memoryview(tail)
-                while view:
-                    view = view[os.write(fd, view) :]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(staged, target)
-        except OSError as exc:
-            staged.unlink(missing_ok=True)
-            print(f"supervisor could not keep the output tail: {exc}", file=sys.stderr)
-
-    def _drain_head_output(self) -> None:
-        """Take into the buffer what the pty still holds, without waiting and within a bound.
-
-        Deliberately not `_read_head`: this is the tail's last read, not the loop's, so it opens no
-        turn, pushes nothing to a client and writes nothing to the journal. The bound keeps a head
-        that is still printing — a supervisor failing under a live head — from holding it here.
-        """
-        if self._master < 0:
-            return
-        for _ in range(protocol.OUTPUT_BUFFER_BYTES // _READ_CHUNK + 1):
-            try:
-                chunk = os.read(self._master, _READ_CHUNK)
-            except OSError:
-                return
-            if not chunk:
-                return
-            self._output += chunk
-            if len(self._output) > protocol.OUTPUT_BUFFER_BYTES:
-                del self._output[: len(self._output) - protocol.OUTPUT_BUFFER_BYTES]
 
     def _append(self, kind: str, **fields: Any) -> dict[str, Any]:
         assert self._journal is not None

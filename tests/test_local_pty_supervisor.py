@@ -23,7 +23,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import ClassVar
 from unittest import mock
 
 from secretary.dispatch.watchdog import (
@@ -1313,190 +1312,23 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self._await(lambda: not _alive(handle.supervisor_pid), message="the supervisor survived")
 
 
-    # -- the output tail a finished run keeps (secretary-1703) --------------------------------
-
-    #: Every field `run.exited` carried before the tail existed, and still the only ones.
-    RUN_EXITED_FIELDS: ClassVar[set[str]] = {
-        "schema_version",
-        "seq",
-        "run_id",
-        "kind",
-        "at",
-        "head_pid",
-        "output_bytes",
-        "dropped_bytes",
-        "stopping",
-        "signal",
-        "exit_code",
-    }
-
-    def _await_tail(self, handle: HeadHandle) -> bytes:
-        self._await(
-            lambda: not _alive(handle.supervisor_pid),
-            timeout=15.0,
-            message="the supervisor never let go of its run",
-        )
-        tail = handle.run_dir / protocol.OUTPUT_TAIL_NAME
-        self.assertTrue(tail.is_file(), "the supervisor let go without keeping the output tail")
-        self.assertEqual(tail.stat().st_mode & 0o777, 0o600, "the tail is the head's output: owner-only")
-        self.assertEqual(
-            sorted(path.name for path in handle.run_dir.iterdir() if path.name.startswith(".")),
-            [],
-            "a staged tail was left behind",
-        )
-        exited = handle.events().of_kind(RUN_EXITED)[-1]
-        self.assertEqual(set(exited), self.RUN_EXITED_FIELDS, "the journal's exit record changed shape")
-        return tail.read_bytes()
-
-    def test_a_heads_own_exit_leaves_its_output_tail(self) -> None:
-        handle = self._start(run_id="tail-exit")
+    def test_spinner_redraws_fold_but_new_lines_progress_and_quiet_finishes(self) -> None:
+        command = f"{sys.executable} -u {REPO / 'tests' / 'fixtures' / 'local_pty_spinner.py'}"
+        handle = self._start(run_id="spinner", command=command, quiet_seconds=2.0)
         client = self._client(handle)
-        self._await_output(client, b"SIZE ")
-        self.assertTrue(client.send_input("hello\n")["ok"])
-        self._await_output(client, b"ECHO hello")
-        self.assertTrue(client.send_input("exit 3\n")["ok"])
-        kept = self._await_tail(handle)
-        self.assertIn(b"ECHO hello", kept)
-        self.assertTrue(kept.rstrip().endswith(b"BYE"), f"the last thing the head said is missing: {kept[-80:]!r}")
-        self.assertEqual(handle.events().of_kind(RUN_EXITED)[-1]["exit_code"], 3)
-
-    def test_a_drain_and_a_stop_leave_the_output_tail(self) -> None:
-        handle = self._start(
-            run_id="tail-stop",
-            command=f"{sys.executable} -u -c "
-            "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_DFL);"
-            'print("UP-AND-WAITING",flush=True);time.sleep(600)\'',
-        )
-        client = self._client(handle)
-        self._await_output(client, b"UP-AND-WAITING")
-        self.assertTrue(client.drain("observer")["ok"])
-        self.assertTrue(client.stop("observer")["ok"])
-        self.assertIn(b"UP-AND-WAITING", self._await_tail(handle))
-        self.assertTrue(handle.events().of_kind(RUN_EXITED)[-1]["stopping"])
-
-    def test_a_head_that_crashes_leaves_the_output_tail(self) -> None:
-        handle = self._start(run_id="tail-crash")
-        client = self._client(handle)
-        self.assertTrue(client.send_input("before the crash\n")["ok"])
-        self._await_output(client, b"ECHO before the crash")
-        _kill(handle.head_pid, signal.SIGKILL)
-        self.assertIn(b"ECHO before the crash", self._await_tail(handle))
-        self.assertEqual(handle.events().of_kind(RUN_EXITED)[-1]["signal"], int(signal.SIGKILL))
-
-    def test_the_output_tail_is_bounded_to_its_end(self) -> None:
-        handle = self._start(run_id="tail-bound")
-        client = self._client(handle)
-        self.assertTrue(client.send_input("spew 120\n")["ok"])
-        self._await_output(client, b"SPEWDONE", timeout=15.0)
-        self.assertTrue(client.send_input("quit\n")["ok"])
-        kept = self._await_tail(handle)
-        self.assertEqual(protocol.OUTPUT_TAIL_BYTES, 64 * 1024)
-        self.assertEqual(len(kept), protocol.OUTPUT_TAIL_BYTES, "120 KB of output keeps exactly the bound")
-        self.assertIn(b"SPEWDONE", kept)
-        self.assertTrue(kept.rstrip().endswith(b"BYE"))
-        self.assertNotIn(b"000000 ", kept, "the start of the output is what the bound drops")
-
-    def test_a_supervisor_that_fails_after_the_run_was_up_still_keeps_the_tail(self) -> None:
-        """`run`'s one `finally` is `_shutdown`, and the tail is its first act; a run never up keeps none."""
-        for started, expected in ((True, True), (False, False)):
-            with self.subTest(started=started):
-                run_dir = self.root / f"failed-{started}"
-                run_dir.mkdir()
-                supervisor = supervisor_module.Supervisor(
-                    run_dir=run_dir, run_id="failed", role="worker", task="t", command="true"
-                )
-                supervisor.started = started
-                supervisor._output = bytearray(b"x" * (protocol.OUTPUT_TAIL_BYTES + 10) + b"last words")
-                supervisor._shutdown()
-                tail = run_dir / protocol.OUTPUT_TAIL_NAME
-                self.assertEqual(tail.exists(), expected)
-                if expected:
-                    kept = tail.read_bytes()
-                    self.assertEqual(len(kept), protocol.OUTPUT_TAIL_BYTES)
-                    self.assertTrue(kept.endswith(b"last words"))
-
-    def test_a_bring_up_removes_the_last_incarnation_s_tail_before_its_run_started(self) -> None:
-        """Rule A of secretary-1703's round 3: a tail belongs to one incarnation only.
-
-        In-process and without a head: `start_head` is replaced by a pipe, so the one thing observed
-        is the order `_begin` does things in, under the lock `claim` took.
-        """
-        run_dir = self.root / "reused"
-        run_dir.mkdir()
-        (run_dir / protocol.OUTPUT_TAIL_NAME).write_bytes(b"the previous incarnation's last words")
-        supervisor = supervisor_module.Supervisor(
-            run_dir=run_dir, run_id="reused", role="worker", task="t", command="true"
-        )
-        supervisor.claim()
-        master, master_end = os.pipe()
-        wakeup, wakeup_end = os.pipe()
-        self.addCleanup(os.close, master_end)
-        self.addCleanup(os.close, wakeup_end)
-        seen: list[bool] = []
-        real_append = supervisor._append
-
-        def append(kind: str, **fields: object) -> dict:
-            if kind == RUN_STARTED:
-                seen.append((run_dir / protocol.OUTPUT_TAIL_NAME).exists())
-            return real_append(kind, **fields)
-
-        def start_head() -> int:
-            supervisor._master = master
-            return 0
-
-        def install_signals() -> None:
-            supervisor._wakeup_read = wakeup
-
-        with (
-            mock.patch.object(supervisor, "_append", append),
-            mock.patch.object(supervisor, "start_head", start_head),
-            mock.patch.object(supervisor, "_install_signals", install_signals),
-        ):
-            try:
-                supervisor._begin()
-            finally:
-                supervisor.started = False  # this incarnation printed nothing worth keeping
-                supervisor._shutdown()
-                os.close(wakeup)
-        self.assertEqual(seen, [False], "run.started was written beside the last incarnation's tail")
-        self.assertFalse((run_dir / protocol.OUTPUT_TAIL_NAME).exists())
-
-    def test_a_run_id_brought_up_again_keeps_only_its_own_tail(self) -> None:
-        first = self._start(run_id="again")
-        client = self._client(first)
-        self.assertTrue(client.send_input("first incarnation\n")["ok"])
-        self._await_output(client, b"ECHO first incarnation")
-        self.assertTrue(client.send_input("quit\n")["ok"])
-        self.assertIn(b"ECHO first incarnation", self._await_tail(first))
-
-        second = self._start(run_id="again")
-        self.assertEqual(len(second.events().of_kind(RUN_STARTED)), 2)
-        self.assertFalse(
-            (second.run_dir / protocol.OUTPUT_TAIL_NAME).exists(),
-            "a running incarnation has the previous one's tail beside it",
-        )
-        client = self._client(second)
-        self.assertTrue(client.send_input("second incarnation\n")["ok"])
-        self._await_output(client, b"ECHO second incarnation")
-        self.assertTrue(client.send_input("quit\n")["ok"])
-        kept = self._await_tail(second)
-        self.assertIn(b"ECHO second incarnation", kept)
-        self.assertNotIn(b"first incarnation", kept)
-
-    def test_a_tail_that_cannot_be_written_does_not_keep_the_supervisor_from_letting_go(self) -> None:
-        run_dir = self.root / "unwritable"
-        run_dir.mkdir()
-        (run_dir / protocol.OUTPUT_TAIL_NAME).mkdir()  # a directory where the file would be renamed
-        supervisor = supervisor_module.Supervisor(
-            run_dir=run_dir, run_id="unwritable", role="worker", task="t", command="true"
-        )
-        supervisor.started = True
-        supervisor._output = bytearray(b"output")
-        (run_dir / protocol.SUPERVISOR_PID_NAME).write_text("1\n")
-        with mock.patch("sys.stderr"):
-            supervisor._shutdown()
-        self.assertFalse((run_dir / protocol.SUPERVISOR_PID_NAME).exists(), "shutdown stopped at the tail")
-        self.assertEqual([path.name for path in run_dir.iterdir() if path.name.startswith(".")], [])
+        self.assertTrue(client.send_input("begin\n")["ok"])
+        self._await_output(client, b"14763 tokens", timeout=10.0)
+        time.sleep(0.6)  # let the last spinner window flush before the child's new text
+        before_new_text = len(handle.events().of_kind(PROVIDER_PROGRESSED))
+        self._await(lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=15.0, message="spinner did not exit")
+        events = handle.events()
+        progress = events.of_kind(PROVIDER_PROGRESSED)
+        self.assertLessEqual(len(progress), 5, "spinner redraws grew the journal")
+        self.assertGreater(len(progress), before_new_text, "new text after the spinner did not progress")
+        self.assertTrue(any(event.get("folded_windows", 0) > 0 for event in progress))
+        self.assertEqual(len(events.of_kind(TURN_FINISHED)), 1)
+        self.assertEqual(events.of_kind(TURN_FINISHED)[0]["reason"], "quiet")
+        self.assertGreater(events.of_kind(TURN_FINISHED)[0]["output_bytes"], 400 * 20)
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):

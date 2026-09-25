@@ -9,6 +9,18 @@ The lifecycle boundary is in [Architecture](ARCHITECTURE.md#head-runtime-ownersh
 [Head vitality](HEAD_VITALITY.md). This page records how `local-pty` replaced Orca: the parity it had
 to reach, and the A20 exit checklist that removed Orca from the product, step by step.
 
+## Supervisor progress journal
+
+The supervisor considers PTY output in 0.5-second windows during an open turn. It writes
+`provider.progressed` only when a window contains a normalized line it has not seen in that turn.
+Normalization strips terminal escape sequences, masks digit runs, removes Dingbat and Braille
+spinner glyphs and lone `*` or `·` bullets, and collapses whitespace. Empty lines are ignored.
+The supervisor keeps at most 4096 line hashes per turn and clears them at `turn.started`.
+Windows whose lines remain in that set write no progress record; their bytes accumulate in the next
+progress record's `output_bytes`, which also carries `folded_windows`. Once the cap is full, new
+untracked lines continue to progress. `turn.finished.output_bytes` still counts all
+output in the turn, including folded windows. Quiet turn timing is unchanged.
+
 ## The runtime default
 
 `secretary.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and
@@ -74,7 +86,7 @@ commits on `main`.
 | Worker and reviewer share one workspace as two supervised processes | proven live | secretary-1700 (24931d6). Live: secretary-1701, worker run `1d15915f…`, reviewer run `f5d8d2a2…`. |
 | A continuation reaches a retained (SIGSTOPped) worker | proven live | secretary-1702 (10392c6): the runtime runs the transport's `before_send` (SIGCONT) for a suspended head. Live: "retained worker resumed" on secretary-1703 at 2026-09-24 00:33Z. secretary-1719 runs the same hook for a running head too (row below). |
 | `head-status` reads a local-pty head (pid, heartbeat, lease, supervisor, journal tail) | proven live | secretary-1701 (5a1cba2). Live: secretary-1702's worker at 2026-09-23 23:36Z. |
-| The web shows a head's transcript tail and journal, read-only | merged, live proof pending | secretary-1703 (5b8336e). Live proof waits for the PO upgrade. |
+| The web shows a head's journal, read-only | merged, live proof pending | secretary-1703 (5b8336e). Live proof waits for the PO upgrade. |
 | A project runs without Orca: optional `orca_binding`, no Orca kind in reconcile or doctor | merged, live proof pending | secretary-1704 (7f092ae). Live proof: a `project add` / `reconcile apply` after the final upgrade. Since secretary-1722 `orca_binding` has one reader: curator routing of any source whose derived cwd is under the Orca workspaces root, for example Claude and Codex sessions or Claude personal-memory files (`automations/agents/curator/discover.py`, `RouteResolver.resolve`), which does not depend on the runtime. |
 | The observer workspace is a detached `git worktree` | merged, live proof pending | secretary-1705 (1cbf343). Live proof comes at the next local-pty observer launch. |
 | Background agents run from the product's systemd units, with no Orca automations; the old top-level agents package is deleted | merged, live proof pending | secretary-1706 (6d866de), secretary-1707 (3240db2). Live proof: one tick per agent after the final upgrade. |
@@ -83,7 +95,7 @@ commits on `main`.
 | Codex heads use a `CODEX_HOME` under the data dir; card and observer workspace roots are disjoint | proven live | secretary-1710 (ca96b09); secretary-1723 removed the legacy rung. Live on 2026-09-24: `secretary doctor` reports `codex home: /home/dev/secretary-data/codex-home (data-dir home)`, every live Codex process has `CODEX_HOME=/home/dev/secretary-data/codex-home`, no `*.jsonl` under the legacy home's `sessions/` was written after 12:00Z (newest 08:38Z), and `resolve_codex_home` resolves all six installed Codex profiles to `/home/dev/secretary-data/codex-home` (`data-dir`). |
 | The Codex provider-ingress `before_send` (`bind_before_delivery`) runs for a running head | merged, live proof pending | secretary-1719: `LocalPtyHeadRuntime._before_send` runs the transport's `before_send` once per admitted delivery, after admission and before the first byte, whatever the head's stop state (it ran for a suspended head only). The run the hook returns is merged into the receipt as the transport's handoff merges it (`post_delivery_run`). Live proof: the next Codex head on `local-pty` with a provider source. |
 | Vitality does not read a working resumed worker as stalled | merged, live proof pending | secretary-1719. Cause: `command_terminal_status` read the provider cursor only for a head in Orca's pane inventory, so a `local-pty` head's episode aged on the pid alone. Its `reason: "pid"` status now carries the run's provider cursor. secretary-1703's worker read `suspected_stall` (01:16Z) and `confirmed_stall` (01:21Z) while its supervisor journal logged output every minute. Live proof: the next retained-then-continued `local-pty` worker. |
-| The dashboard shows the steward's "Needs a human" | accepted | issue:57ddd3549f21eff1abda option (a) is merged: the steward files proposals in Issues (secretary-1709, d148fa5). The steward's own report stays readable on its Blocked report card and in the web's read-only head view of its transcript and journal (secretary-1703, 5b8336e). The dashboard showing it is a web feature, not something Orca gave a head, so it does not block removing Orca. The issue stays open for option (c). |
+| The dashboard shows the steward's "Needs a human" | accepted | issue:57ddd3549f21eff1abda option (a) is merged: the steward files proposals in Issues (secretary-1709, d148fa5). The steward's own report stays readable on its Blocked report card and in the web's read-only head view of its journal (secretary-1703, 5b8336e). The dashboard showing it is a web feature, not something Orca gave a head, so it does not block removing Orca. The issue stays open for option (c). |
 
 The live proof of every "merged, live proof pending" row is the sprint's final acceptance after
 the last upgrade; the observer records it when sprint:1461 closes.

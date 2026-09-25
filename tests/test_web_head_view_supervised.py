@@ -1,9 +1,8 @@
 """secretary-1703: the head view against a real supervisor, while its head runs and after it ends.
 
-The hermetic half is `test_web_head_view`. This half starts a real supervisor on a real pty -- the
-trivial child `test_local_pty_supervisor` uses -- under the card's own run id, and reads it through
-the web app exactly as an operator would: the live tail while the head runs, the kept tail once it
-has ended, and the journal both times. Every process started here is taken back.
+The hermetic half is `test_web_head_view`. This half starts a real supervisor on a real pty
+under the card's own run id and reads its journal through the web app while running and after
+exit. Every process started here is taken back.
 """
 
 from __future__ import annotations
@@ -76,83 +75,35 @@ class ARunningHeadAndThenAFinishedOneTests(HeadViewFixture):
         self.assertEqual(response.status, 200)
         return json.loads(response.body)
 
-    def test_the_view_follows_a_head_from_its_live_tail_to_the_tail_it_kept(self) -> None:
+    def test_the_view_shows_the_journal_while_running_and_after_exit(self) -> None:
         handle = self._start()
         client = handle.connect()
         self.addCleanup(client.close)
-        # One delivery: the supervisor admits one at a time and refuses a second while one is in flight.
         self.assertTrue(client.send_input(f"<script>x</script>\ntoken {TOKEN}\n")["ok"])
         self._await(
             lambda: b"ECHO token" in client.read_output()["bytes_data"],
             message="the head never echoed its input",
         )
-
-        # Running: the supervisor answers, and its answer is the freshest tail there is.
         live = self._document()
         self.assertEqual(live["head"]["state"], head_reads.RUNNING)
-        self.assertEqual(live["transcript"]["source"], "supervisor")
-        self.assertIn("ECHO <script>x</script>", live["transcript"]["text"])
+        self.assertNotIn("transcript", live)
         self.assertIn("input.accepted", [record.get("kind") for record in live["journal"]["tail"]])
         status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
         self.assertEqual(status, 200)
-        self.assertIn("its supervisor, live", page)
-        self.assertIn("ECHO &lt;script&gt;x&lt;/script&gt;", page)
+        self.assertNotIn("Terminal output", page)
         for body in (page, json.dumps(live)):
             self.assertNotIn(TOKEN, body)
             self.assertNotIn(SECRET, body)
-        rows = {row["run_id"]: row for row in self.layer().task_snapshot(REF)["heads"]["items"]}
-        self.assertEqual(rows[WORKER]["state"], head_reads.RUNNING)
-        # Asking was all it did: the head is still up and nothing was typed into it.
+            self.assertNotIn("ECHO <script>", body)
         self.assertTrue(client.status()["alive"])
 
-        # Finished: the socket is gone, and the tail the supervisor kept is what is shown.
         self.assertTrue(client.send_input("quit\n")["ok"])
         self._await(lambda: not _alive(handle.supervisor_pid), message="the supervisor never let go")
-        kept = self._document()
-        self.assertEqual(kept["head"]["state"], head_reads.FINISHED)
-        self.assertEqual(kept["transcript"]["source"], "output.tail")
-        self.assertIn("ECHO <script>x</script>", kept["transcript"]["text"])
-        self.assertIn("BYE", kept["transcript"]["text"])
-        self.assertIn("run.exited", [record.get("kind") for record in kept["journal"]["tail"]])
-        self.assertNotIn(TOKEN, json.dumps(kept))
-        self.assertNotIn(SECRET, json.dumps(kept))
-
-    def test_a_run_id_brought_up_again_is_never_shown_the_last_incarnation_s_tail(self) -> None:
-        """Rule A: same run id, a normal exit, a new incarnation whose socket fails while it runs."""
-        first = self._start()
-        client = first.connect()
-        self.addCleanup(client.close)
-        self.assertTrue(client.send_input("OLD-INCARNATION\nquit\n")["ok"])
-        self._await(lambda: not _alive(first.supervisor_pid), message="the first supervisor never let go")
-        self.assertIn("ECHO OLD-INCARNATION", self._document()["transcript"]["text"])
-
-        second = self._start()
-        self.assertFalse((second.run_dir / "output.tail").exists(), "the old tail outlived the bring-up")
-        client = second.connect()
-        self.addCleanup(client.close)
-        self.assertTrue(client.send_input("NEW-INCARNATION\n")["ok"])
-        self._await(
-            lambda: b"ECHO NEW-INCARNATION" in client.read_output()["bytes_data"],
-            message="the second head never echoed its input",
-        )
-        # The running head's address goes away while its supervisor still holds the lock.
-        second.socket_path.unlink()
-        running = self._document()
-        self.assertEqual(running["head"]["state"], head_reads.RUNNING)
-        self.assertFalse(running["transcript"]["answered"])
-        self.assertNotIn("OLD-INCARNATION", json.dumps(running))
-        status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-        self.assertEqual(status, 200)
-        self.assertIn("output is not answering", page)
-        self.assertNotIn("OLD-INCARNATION", page)
-
-        # Finished again: the tail shown is this incarnation's own.
-        self.assertTrue(client.send_input("quit\n")["ok"])
-        self._await(lambda: not _alive(second.supervisor_pid), message="the second supervisor never let go")
-        kept = self._document()
-        self.assertEqual(kept["transcript"]["source"], "output.tail")
-        self.assertIn("ECHO NEW-INCARNATION", kept["transcript"]["text"])
-        self.assertNotIn("OLD-INCARNATION", kept["transcript"]["text"])
+        finished = self._document()
+        self.assertEqual(finished["head"]["state"], head_reads.FINISHED)
+        self.assertNotIn("transcript", finished)
+        self.assertIn("run.exited", [record.get("kind") for record in finished["journal"]["tail"]])
+        self.assertNotIn(TOKEN, json.dumps(finished))
 
 
 if __name__ == "__main__":  # pragma: no cover
