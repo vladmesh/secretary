@@ -31,7 +31,9 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import select
 import threading
+import time
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +98,13 @@ _METADATA_COLUMNS = {
     "sprint_ref": "sprint_ref",
     "review": "review",
 }
+
+#: The most connections one client holds open at once (§5.6).  The web serves each request on its
+#: own thread, and a dashboard asked from four places at once should not queue; the dispatcher and
+#: a CLI process use one thread and so one connection.
+POOL_SIZE = 4
+#: How long a call waits for a free connection before it fails as `backend_unavailable`.
+POOL_WAIT_SECONDS = 10.0
 
 #: `live_impact` is a boolean column and `"1"` or absence on the board.
 _METADATA_FLAG = ("live_impact", "live_impact")
@@ -169,6 +178,29 @@ def _unusable(connection: Any) -> bool:
     return getattr(connection, "closed", False) is True or getattr(connection, "broken", False) is True
 
 
+def _hung_up(connection: Any) -> bool:
+    """Whether the server has already spoken on an idle connection, which it does only to end it.
+
+    A terminated backend or a restarted server sends its farewell and closes the socket, and
+    psycopg learns of it only from the next statement, which then fails.  An idle connection has
+    nothing to read, so a readable socket is a dead one.  A stand-in without `fileno` reads as alive.
+    """
+    fileno = getattr(connection, "fileno", None)
+    if fileno is None:
+        return False
+    try:
+        poller = select.poll()
+        poller.register(fileno(), select.POLLIN | select.POLLERR | select.POLLHUP)
+        return bool(poller.poll(0))
+    except Exception:  # noqa: BLE001 - a socket that cannot be asked cannot be trusted either.
+        return True
+
+
+def _transaction_state(connection: Any) -> str | None:
+    """psycopg's local name for where the connection's transaction stands, or None for a stand-in."""
+    return getattr(getattr(getattr(connection, "info", None), "transaction_status", None), "name", None)
+
+
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
 
@@ -238,60 +270,210 @@ def _task_number_of(ref: str) -> int:
     return int(match.group(1))
 
 
+class _ThreadState(threading.local):
+    """What one thread holds of a client: its pinned connection, open sessions, transaction depth."""
+
+    connection: Any = None
+    sessions = 0
+    depth = 0
+
+
 class SqlCardClient:
     """The board vocabulary of §2.2, answered from PostgreSQL instead of JSON-RPC.
 
-    One connection, opened lazily and kept (§5.6); a client that reconnected per call would spend
-    its time on handshakes.  Autocommit is off, so
-    a mutation issued inside `transaction()` is one transaction (§7.1) and one issued outside it
-    still commits on its own — which is what keeps the reads of a read-only consumer cheap.
+    A bounded pool of connections, opened lazily and kept (§5.6); a client that reconnected per
+    call would spend its time on handshakes.  A thread pins one of them for a session — one board
+    call, one `transaction()` — so threads read at once and never share a transaction.  Autocommit
+    is off, so a mutation issued inside `transaction()` is one transaction (§7.1) and one issued
+    outside it still commits on its own.
     """
 
-    def __init__(self, credentials: BoardStoreCredentials, instance_dir: Path | str) -> None:
+    def __init__(
+        self,
+        credentials: BoardStoreCredentials,
+        instance_dir: Path | str,
+        *,
+        pool_size: int = POOL_SIZE,
+        pool_wait_seconds: float = POOL_WAIT_SECONDS,
+    ) -> None:
         self.credentials = credentials
         self.instance_dir = Path(instance_dir)
-        self._connection: Any = None
-        self._depth = 0
+        self.pool_size = pool_size
+        self.pool_wait_seconds = pool_wait_seconds
+        # The pool: idle connections, newest last, and how many are open, idle or pinned.
+        self._pool = threading.Condition()
+        self._idle: list[Any] = []
+        self._open = 0
+        self._local = _ThreadState()
+        # Transactions of different threads take turns: the staged creates and the lane table
+        # below are one per client, and a transaction derives them from its own rows.
         self._transaction_lock = threading.RLock()
         # The virtual lane table: names the rows themselves carry, plus what `addSwimlane` adds.
         self._lanes: list[str] | None = None
-        # The Product/Issue half of the same vocabulary, over the same connection (§3.1, §3.2).
+        # The Product/Issue half of the same vocabulary, over the same pool (§3.1, §3.2).
         self.records = ProductIssueRecords(self)
         self.sprints = SqlSprintRecords(self)
 
     # --- connection ------------------------------------------------------------------
 
     @property
-    def connection(self) -> Any:
-        """The kept connection, replaced first when it is dead and no transaction holds it (§5.6).
+    def _depth(self) -> int:
+        """This thread's `transaction()` nesting; another thread's transaction is not this one's."""
+        return self._local.depth
 
-        A board-store restart leaves the kept object `closed` or `broken` for good; without this
+    @_depth.setter
+    def _depth(self, value: int) -> None:
+        self._local.depth = value
+
+    @property
+    def _connection(self) -> Any:
+        """The connection this thread has pinned, or None."""
+        return self._local.connection
+
+    @property
+    def connection(self) -> Any:
+        """This thread's pinned connection, replaced first when it is dead and no transaction holds
+        it (§5.6).
+
+        A board-store restart leaves a kept object `closed` or `broken` for good; without this
         check every later call of a long-lived holder (the web layer) failed with "the connection
         is closed" until the process restarted.  Inside `transaction()` a dead connection is kept,
         so the statement fails and the transaction with it: a reconnect there would run the rest
         of the transaction on a connection that never saw its first half.
+
+        Asked outside every session (a caller closing the client's connection, a test reading its
+        backend pid), it answers the connection this thread would use next, borrowed and returned
+        at once.
         """
-        if self._connection is not None and not self._depth and _unusable(self._connection):
+        local = self._local
+        if not local.sessions:
+            with self._session():
+                return self.connection
+        if local.connection is not None and not local.depth and _unusable(local.connection):
             self._discard()
-        if self._connection is None:
+        if local.connection is None:
+            local.connection = self._borrow()
+        return local.connection
+
+    def close(self) -> None:
+        """Close the idle connections and this thread's own; one in use elsewhere returns first."""
+        with self._pool:
+            closing, self._idle = self._idle, []
+            pinned, self._local.connection = self._local.connection, None
+            if pinned is not None:
+                closing.append(pinned)
+            self._open -= len(closing)
+            self._pool.notify_all()
+        for connection in closing:
+            with _translated("close its connection"):
+                connection.close()
+
+    def _borrow(self) -> Any:
+        """An idle live connection, a new one while fewer than `pool_size` are open, or a wait.
+
+        An idle connection that is dead, or whose server has hung up on it, is closed and never
+        handed out.  A caller that finds every connection in use waits `pool_wait_seconds`, then
+        fails as `backend_unavailable`.
+        """
+        deadline = time.monotonic() + self.pool_wait_seconds
+        with self._pool:
+            while True:
+                while self._idle:
+                    candidate = self._idle.pop()
+                    if not (_unusable(candidate) or _hung_up(candidate)):
+                        return candidate
+                    self._open -= 1
+                    with contextlib.suppress(Exception):
+                        candidate.close()
+                if self._open < self.pool_size:
+                    self._open += 1
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TaskError(
+                        "backend_unavailable",
+                        f"all {self.pool_size} board store connections of this process stayed in use "
+                        f"for {self.pool_wait_seconds:g} s",
+                        1,
+                    )
+                self._pool.wait(remaining)
+        try:
             with _translated("open a connection"):
                 import psycopg
 
-                self._connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
-        return self._connection
+                return psycopg.connect(self.credentials.conninfo(), autocommit=False)
+        except BaseException:
+            self._give_back(None)
+            raise
 
-    def close(self) -> None:
-        if self._connection is not None:
-            with _translated("close its connection"):
-                self._connection.close()
-            self._connection = None
+    def _give_back(self, connection: Any) -> None:
+        """Return a live connection to the pool, or with None free the slot of a dead one."""
+        with self._pool:
+            if connection is None:
+                self._open -= 1
+            else:
+                self._idle.append(connection)
+            self._pool.notify()
 
     def _discard(self) -> None:
-        """Drop the kept connection so the next call opens a new one; closing it may fail."""
-        connection, self._connection = self._connection, None
+        """Drop this thread's pinned connection so the next statement borrows another; closing it
+        may fail."""
+        connection, self._local.connection = self._local.connection, None
         if connection is not None:
             with contextlib.suppress(Exception):
                 connection.close()
+            self._give_back(None)
+
+    @contextlib.contextmanager
+    def _session(self) -> Iterator[None]:
+        """Pin one pooled connection to this thread for the block, borrowed on first use.
+
+        Re-entrant: an inner session, a `transaction()` and every statement inside join the pin.
+        The outermost exit ends what the connection still has open — commits it, or rolls it back
+        when the block failed or a statement left it aborted — and returns it to the pool, or
+        discards it if it is dead, so an idle pooled connection never holds a transaction.
+        """
+        local = self._local
+        local.sessions += 1
+        failed = True
+        try:
+            yield
+            failed = False
+        finally:
+            local.sessions -= 1
+            if not local.sessions:
+                self._unpin(failed=failed)
+
+    def _unpin(self, *, failed: bool) -> None:
+        connection, self._local.connection = self._local.connection, None
+        if connection is None:
+            return
+        state = _transaction_state(connection)
+        committing = False
+        try:
+            if state == "INERROR":
+                # A statement failed and nothing rolled it back.  A session-level advisory lock
+                # taken in this session may have outlived its own unlock the same way.
+                connection.rollback()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_unlock_all()")
+                connection.rollback()
+            elif state == "INTRANS" and failed:
+                connection.rollback()
+            elif state == "INTRANS":
+                committing = True
+                connection.commit()
+        except Exception as exc:  # noqa: BLE001 - a connection that cannot end its work is not reused.
+            self._local.connection = connection
+            self._discard()
+            if committing:
+                raise _driver_error("commit", exc) from None
+            return
+        if _unusable(connection):
+            self._local.connection = connection
+            self._discard()
+        else:
+            self._give_back(connection)
 
     @contextlib.contextmanager
     def _statement(self, action: str) -> Iterator[None]:
@@ -308,9 +490,16 @@ class SqlCardClient:
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
-        """Serialize use of this client's single connection, including cross-thread tests."""
-        with self._transaction_lock, self._transaction():
-            yield
+        """One transaction on this thread's pinned connection; other threads' ones wait their turn.
+
+        The connection is borrowed before the turn is awaited, so the thread holding the turn
+        never waits for the pool.
+        """
+        with self._session():
+            if not self._depth:
+                self.connection  # noqa: B018 - borrowed here, before the lock.
+            with self._transaction_lock, self._transaction():
+                yield
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -378,16 +567,16 @@ class SqlCardClient:
 
     def _commit_unless_nested(self) -> None:
         if not self._depth:
-            with self._statement("commit"):
+            with self._session(), self._statement("commit"):
                 self.connection.commit()
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        with self._statement("answer a read"), self.connection.cursor() as cursor:
+        with self._session(), self._statement("answer a read"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.fetchall()
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
-        with self._statement("apply a write"), self.connection.cursor() as cursor:
+        with self._session(), self._statement("apply a write"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.rowcount
 
@@ -397,7 +586,9 @@ class SqlCardClient:
         handler = getattr(self, f"_rpc_{method}", None)
         if handler is None:
             raise SqlCardError(f"the board store does not serve {method}")
-        return handler(**params)
+        # One call is one session: its statements and its commit share a connection.
+        with self._session():
+            return handler(**params)
 
     def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
         """Run the calls and answer in call order.
@@ -409,14 +600,16 @@ class SqlCardClient:
         """
         prepared = [(method, dict(arguments)) for method, arguments in calls]
         if not all(method in _BULK_READS for method, _ in prepared):
-            return [self.call(method, **arguments) for method, arguments in prepared]
+            with self._session():
+                return [self.call(method, **arguments) for method, arguments in prepared]
         wanted: dict[str, list[Any]] = {method: [] for method in _BULK_READS}
         for method, arguments in prepared:
             wanted[method].append(arguments["task_id"])
-        answers = {
-            "getTaskMetadata": self._metadata_of(wanted["getTaskMetadata"]),
-            "getAllComments": self._comments_of(wanted["getAllComments"]),
-        }
+        with self._session():
+            answers = {
+                "getTaskMetadata": self._metadata_of(wanted["getTaskMetadata"]),
+                "getAllComments": self._comments_of(wanted["getAllComments"]),
+            }
         return [answers[method][_batch_key(arguments["task_id"])] for method, arguments in prepared]
 
     def _metadata_of(self, task_ids: list[Any]) -> dict[Any, dict[str, str]]:

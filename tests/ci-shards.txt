@@ -154,6 +154,7 @@ integration-board tests/test_sprints_sql_backend.py
 integration-board tests/test_sql_board_bulk_reads.py
 integration-board tests/test_sql_card_reconnect_backend.py
 unit tests/test_sql_card_reconnect.py
+unit tests/test_sql_card_pool.py
 integration-board tests/test_sql_audit_reads.py
 integration-heads tests/test_stale_staged_settlement.py
 integration-heads tests/test_budget_candidates.py

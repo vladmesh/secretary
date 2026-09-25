@@ -851,17 +851,43 @@ later requires `ALTER ROLE`. Rotation procedure: [OPERATIONS.md](OPERATIONS.md#p
 
 ### 5.6 Connections
 
-`SqlCardClient` opens one psycopg connection lazily and keeps it for its lifetime, with autocommit
-off. There is no connection pool: one libpq connection carries one transaction at a time, and the
-client serializes use with a re-entrant lock. The web process, dispatcher tick and each CLI process
-build their own clients.
+`SqlCardClient` keeps a bounded pool of psycopg connections, opened lazily, with autocommit off.
+The bound is `POOL_SIZE` (4) per client. The web process serves each request on its own thread,
+so four readers of one client run at once instead of queueing on one connection. The dispatcher
+tick and each CLI process use one thread and so hold one connection. The web process, dispatcher
+tick and each CLI process build their own clients.
+
+A thread pins one pooled connection for a **session**:
+
+- a read or write outside every session borrows a connection for that one statement;
+- one board call (`call`, `call_batch`) is one session, so its statements and its commit share a
+  connection;
+- `transaction()` pins one connection for its whole extent, per thread. Nested `transaction()`
+  calls, board calls and statements on the same thread join it. The connection is borrowed before
+  the thread waits for its turn: transactions of different threads still take turns (the staged
+  creates and the lane table are per client), so the thread holding the turn never waits for the
+  pool;
+- a session-level advisory lock (`SqlTaskAudit._locked`, `marker_comment_lock`) is a session, so
+  the lock and its unlock run on one server session.
+
+When the outermost session ends, the connection's open work is ended before it returns to the
+pool: committed after a clean exit, rolled back after a failure or an aborted statement (with
+`pg_advisory_unlock_all()`, since an aborted session cannot have run its unlock). An idle pooled
+connection never holds a transaction.
+
+Exhaustion: a thread that finds all `POOL_SIZE` connections in use waits up to
+`POOL_WAIT_SECONDS` (10 s) for one to return, then fails as `backend_unavailable`. A thread never
+holds more than one connection of a client.
 
 Reconnect rule: a long-lived client survives a board-store restart without a process restart.
-Connection acquisition is the one place that enforces it, using psycopg's own `closed` and
-`broken`:
+Dead connections are never handed out and never returned to the pool:
 
-- outside a transaction, a kept connection that is `closed` or `broken` is discarded and a new
-  one is opened;
+- outside a transaction, a pinned connection that is `closed` or `broken` (psycopg's own verdict)
+  is discarded and another is borrowed;
+- an idle pooled connection is checked before it is handed out: `closed`, `broken`, or a socket
+  with something to read. An idle connection has nothing to read unless the server hung up on it
+  (a terminated backend or a restarted server), so that connection is closed and the next idle or
+  new one is used. A read between a server restart and the next call therefore succeeds;
 - a statement outside a transaction that fails and leaves the connection `closed` or `broken`
   still fails as `backend_unavailable`, and the connection is discarded, so the next call
   reconnects. The failed call is not retried;
