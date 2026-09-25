@@ -72,38 +72,29 @@ class TheCardPageListsItsHeadsTests(HeadViewFixture):
 
 
 class AFinishedHeadTests(HeadViewFixture):
-    def test_a_finished_head_shows_its_kept_tail_and_its_journal(self) -> None:
-        self.run_dir(WORKER, tail=b"\x1b[1;32mDONE\x1b[0m all good\r\n")
+    def test_a_finished_head_shows_its_journal_without_terminal_output(self) -> None:
+        self.run_dir(WORKER, tail=b"printed only to the terminal\n")
         status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
         self.assertEqual(status, 200)
-        self.assertIn("DONE all good", page)
-        self.assertIn("the tail its supervisor kept", page)
         self.assertIn("turn.finished", page)
         self.assertIn("input.accepted", page)
-        self.assertNotIn("\x1b", page)
+        self.assertNotIn("printed only to the terminal", page)
+        self.assertNotIn("Terminal output", page)
 
-    def test_a_head_that_finished_before_tails_were_kept_says_so(self) -> None:
-        self.run_dir(WORKER)
-        status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-        self.assertEqual(status, 200)
-        self.assertIn(head_reads.NOT_KEPT_NOTICE, page)
-        self.assertIn("turn.started", page, "the journal is still shown")
-
-    def test_the_json_twin_carries_the_same_view(self) -> None:
+    def test_the_json_twin_has_the_journal_and_no_transcript(self) -> None:
         self.run_dir(WORKER, tail=b"plain\n")
         response = self.app().handle("GET", f"/api/tasks/{REF}/heads/{WORKER}")
         self.assertEqual(response.status, 200)
         document = json.loads(response.body)
         self.assertEqual(document["kind"], "head_view")
-        self.assertEqual(document["transcript"]["text"], "plain")
-        self.assertEqual(document["transcript"]["source"], "output.tail")
+        self.assertNotIn("transcript", document)
         self.assertEqual({key for record in document["journal"]["tail"] for key in record} - set(head_reads.JOURNAL_KEYS), set())
 
-    def test_a_legacy_head_s_view_says_it_has_no_local_pty_transcript(self) -> None:
+    def test_a_legacy_head_has_no_local_pty_journal(self) -> None:
         status, page = self.get(f"/tasks/{REF}/heads/{LEGACY}")
         self.assertEqual(status, 200)
         self.assertIn(head_reads.LEGACY_NOTICE, page)
-        self.assertNotIn("not answering", page, "a legacy head has no source to fail")
+        self.assertNotIn("not answering", page)
 
 
 class NothingSecretReachesThePageTests(HeadViewFixture):
@@ -124,13 +115,6 @@ class NothingSecretReachesThePageTests(HeadViewFixture):
                 self.assertNotIn(SECRET, body)
                 self.assertNotIn("--dangerously", body, "run.started's command is never shown")
 
-    def test_markup_in_the_output_is_escaped(self) -> None:
-        self.run_dir(WORKER, tail=b"<script>alert('x')</script><img src=x onerror=y>\n")
-        status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-        self.assertEqual(status, 200)
-        self.assertNotIn("<script>alert", page)
-        self.assertNotIn("<img src=x", page)
-        self.assertIn("&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;", page)
 
 
 class OnlyTheCardsOwnRunsTests(HeadViewFixture):
@@ -176,63 +160,13 @@ class OnlyTheCardsOwnRunsTests(HeadViewFixture):
 
 
 class ASourceInAnyStateIsAPageTests(HeadViewFixture):
-    def test_a_damaged_journal_and_an_unreadable_tail_are_said_not_answering(self) -> None:
+    def test_a_damaged_journal_is_said_to_be_degraded(self) -> None:
         directory = self.run_dir(WORKER)
         with open(directory / "journal.jsonl", "ab") as journal:
             journal.write(b"{not json\n\xff\xfe torn")
-        (directory / "output.tail").mkdir()
         status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
         self.assertEqual(status, 200)
-        self.assertIn("output is not answering", page)
         self.assertIn("the journal answered in part", page)
-
-    def hold_lock(self, directory) -> None:
-        """Hold the run's supervisor lock as a live supervisor does, so the run reads as running."""
-        import fcntl
-
-        fd = os.open(directory / "supervisor.lock", os.O_RDWR)
-        self.addCleanup(os.close, fd)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    def test_a_running_head_whose_supervisor_does_not_answer_is_not_answering_never_a_file(self) -> None:
-        """Rule A: a held lock is read from the supervisor alone, whatever the run dir holds."""
-        directory = self.run_dir(WORKER, tail=b"STALE BYTES OF AN EARLIER INCARNATION\n")
-        self.hold_lock(directory)
-        for socket in ("debris", "absent"):
-            with self.subTest(socket=socket):
-                if socket == "debris":
-                    (directory / "head.sock").write_text("debris of a killed supervisor")
-                else:
-                    (directory / "head.sock").unlink(missing_ok=True)
-                status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-                self.assertEqual(status, 200)
-                self.assertIn("output is not answering", page)
-                self.assertIn("supervisor output could not be read", page)
-                self.assertNotIn("STALE BYTES", page)
-                document = json.loads(self.app().handle("GET", f"/api/tasks/{REF}/heads/{WORKER}").body)
-                self.assertEqual(document["transcript"]["state"], "unavailable")
-                self.assertNotIn("STALE BYTES", json.dumps(document))
-
-    def test_a_finished_head_reads_its_tail_and_never_asks_a_socket(self) -> None:
-        """Rule A: a free lock is read from `output.tail` alone; a socket file left there is not asked."""
-        directory = self.run_dir(WORKER, tail=b"its own last words\n")
-        (directory / "head.sock").write_text("debris")
-        with mock.patch.object(head_reads, "head_run_live_output", side_effect=AssertionError("asked")) as live:
-            status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-        self.assertEqual(status, 200)
-        self.assertIn("its own last words", page)
-        live.assert_not_called()
-
-    def test_a_lock_that_cannot_be_read_leaves_the_transcript_not_answering(self) -> None:
-        from secretary.runtime.local_pty_head import SupervisorLease
-
-        self.run_dir(WORKER, tail=b"a tail nobody may pick without knowing the state\n")
-        unreadable = SupervisorLease(lock_readable=False, error="Permission denied")
-        with mock.patch.object(head_reads, "head_run_supervisor_lease", return_value=unreadable):
-            status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
-        self.assertEqual(status, 200)
-        self.assertIn("output is not answering", page)
-        self.assertNotIn("a tail nobody may pick", page)
 
     def test_a_journal_that_is_not_a_file_and_a_lock_that_is_garbage_are_still_a_page(self) -> None:
         directory = self.root / WORKER
@@ -244,14 +178,8 @@ class ASourceInAnyStateIsAPageTests(HeadViewFixture):
                 self.assertEqual(self.get(path)[0], 200)
 
     def test_every_reader_raising_is_still_a_page(self) -> None:
-        self.run_dir(WORKER, tail=b"x\n")
-        for name in (
-            "head_run_first_record",
-            "head_run_supervisor_lease",
-            "head_run_output_tail",
-            "head_run_journal_tail",
-            "head_run_live_output",
-        ):
+        self.run_dir(WORKER)
+        for name in ("head_run_first_record", "head_run_supervisor_lease", "head_run_journal_tail"):
             with self.subTest(reader=name), mock.patch.object(head_reads, name, side_effect=RuntimeError("boom")):
                 for path in (f"/tasks/{REF}", f"/tasks/{REF}/heads/{WORKER}"):
                     status, _body = self.get(path)
@@ -282,6 +210,8 @@ class HostileJournalValuesTests(HeadViewFixture):
         ("turn", "1"),
         ("bytes", HUGE),
         ("bytes", "12"),
+        ("output_bytes", HUGE),
+        ("folded_windows", "12"),
         ("kind", 5),
         ("kind", {"nested": True}),
         ("subject", ["a", "list"]),
@@ -330,7 +260,7 @@ class HostileJournalValuesTests(HeadViewFixture):
         from secretary.web import pages
 
         self.run_dir(WORKER, tail=b"x\n")
-        for section in ("_head_header", "_transcript", "_head_journal"):
+        for section in ("_head_header", "_head_journal"):
             with self.subTest(section=section), mock.patch.object(pages, section, side_effect=RuntimeError("boom")):
                 status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
                 self.assertEqual(status, 200)
@@ -367,31 +297,6 @@ class NoOrcaOnThesePathsTests(HeadViewFixture):
                     self.assertEqual(self.get(path)[0], 200)
         self.assertEqual([call for call in calls if "orca" in json.dumps(call, default=str)], [])
         self.assertEqual(calls, [])
-
-
-class TerminalTextTests(unittest.TestCase):
-    def test_colour_and_title_sequences_are_removed(self) -> None:
-        raw = b"\x1b]0;window title\x07\x1b[38;5;208mwarm\x1b[0m \x1b[1mbold\x1b[22m\x1b(B"
-        self.assertEqual(head_reads.terminal_text(raw), "warm bold")
-
-    def test_a_carriage_return_overwrites_the_line_and_crlf_is_one_break(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"50%\r100%\r\ndone\r\n"), "100%\ndone")
-
-    def test_a_backspace_steps_back(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"cax\b\bat"), "cat")
-
-    def test_cursor_forward_keeps_words_apart_and_placement_breaks_lines(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"one\x1b[1Ctwo\x1b[5;1Hthree"), "one two\nthree")
-
-    def test_an_unterminated_sequence_at_the_end_is_dropped(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"ok\x1b]8;;http://x"), "ok")
-        self.assertEqual(head_reads.terminal_text(b"ok\x1b[3"), "ok")
-
-    def test_controls_are_removed_and_invalid_utf8_is_replaced(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"a\x00b\x07c\x7f\xffd"), "abc�d")
-
-    def test_blank_runs_collapse(self) -> None:
-        self.assertEqual(head_reads.terminal_text(b"a\n\n\n\n\nb"), "a\n\nb")
 
 
 if __name__ == "__main__":  # pragma: no cover

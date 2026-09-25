@@ -357,7 +357,6 @@ TAB_RULES
 .head-chip .role { color: var(--faint); }
 .lead .head-chip { align-self: center; }
 .effort-cell { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--muted); white-space: nowrap; }
-pre.transcript { max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .5rem .7rem; }
 
 /* the transition timeline */
 ol.timeline { list-style: none; margin: 0; padding: 0; }
@@ -2043,7 +2042,7 @@ def _head_run(ref: str, run: dict[str, Any]) -> str:
 
 
 def _head_run_ref(ref: str, run: dict[str, Any]) -> str:
-    """The run id, as a link to its transcript when a local-pty supervisor kept one."""
+    """The run id, as a link to its journal when a local-pty supervisor kept one."""
     run_id = str(run.get("run_id") or "")
     if run.get("local_pty"):
         return f'<a class="ref" href="{escape(_head_href(ref, run_id))}">{escape(run_id)}</a>'
@@ -2055,10 +2054,8 @@ def _head_href(ref: str, run_id: str) -> str:
 
 
 def head_view(document: dict[str, Any]) -> str:
-    """One local-pty head, read-only: the end of its terminal output and of its journal.
+    """One local-pty head, read-only: the tail of its journal.
 
-    The output is the layer's plain text, already stripped of escape sequences and redacted, and it
-    is escaped here like every other value: it is what a head printed, and a head may print markup.
     There is no form on this page and no script of its own.
 
     The layer hands over normalised values only, and each section is still drawn under
@@ -2068,14 +2065,12 @@ def head_view(document: dict[str, Any]) -> str:
     ref = str(document.get("ref") or "")
     run_id = str(document.get("run_id") or "")
     head = _mapping(document.get("head"))
-    transcript = _mapping(document.get("transcript"))
     journal = _mapping(document.get("journal"))
     card = f"/tasks/{quote(ref, safe='')}"
     tail = journal.get("tail")
     body = "\n".join(
         [
             _shown(lambda: _head_header(document, head, run_id)),
-            _panel("Terminal output", _shown(lambda: _transcript(transcript))),
             _panel(
                 "Journal",
                 _shown(lambda: _head_journal(journal)),
@@ -2116,39 +2111,6 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _transcript(section: dict[str, Any]) -> str:
-    """The head's output as the layer gave it, or why there is none; never as markup."""
-    reason = str(section.get("reason") or "")
-    if section.get("state") == "not_applicable":
-        return f'<p class="empty">{escape(reason)}</p>'
-    if not section.get("answered"):
-        also = f" ({section['also']})" if section.get("also") else ""
-        return (
-            '<p class="unavailable"><b>the head\'s output is not answering:</b> '
-            f"{escape(reason or 'no reason was recorded')}{escape(also)}</p>"
-        )
-    if section.get("state") == "not_kept":
-        return f'<p class="empty">{escape(reason)}</p>'
-    source = (
-        "its supervisor, live" if section.get("source") == "supervisor" else "the tail its supervisor kept"
-    )
-    shown = f"the last {section.get('bytes') or 0} bytes"
-    total = section.get("total_bytes")
-    if isinstance(total, int) and not isinstance(total, bool):
-        shown += f" of {total}"
-    elif section.get("truncated"):
-        shown += " (earlier output was not kept)"
-    text = str(section.get("text") or "")
-    output = (
-        f'<pre class="transcript">{escape(text)}</pre>'
-        if text
-        else '<p class="empty">the head printed nothing.</p>'
-    )
-    return (
-        f'<p class="age">from {escape(source)}: {escape(shown)}, as plain text, secrets redacted</p>{output}'
-    )
-
-
 def _head_journal(section: dict[str, Any]) -> str:
     """The journal's last records, through the layer's whitelist, and what the read left out."""
     parts = []
@@ -2180,11 +2142,13 @@ def _head_journal(section: dict[str, Any]) -> str:
                 _or_dash(when),
                 _or_dash(record.get("turn")),
                 _or_dash(record.get("bytes")),
+                _or_dash(record.get("output_bytes")),
+                _or_dash(record.get("folded_windows")),
                 _or_dash(said),
             ]
         )
     if rows:
-        parts.append(_rows(["seq", "kind", "at (UTC)", "turn", "bytes", "reason"], rows))
+        parts.append(_rows(["seq", "kind", "at (UTC)", "turn", "bytes", "output bytes", "folded windows", "reason"], rows))
     elif section.get("answered"):
         parts.append('<p class="empty">the journal holds no record.</p>')
     return "\n".join(parts)

@@ -97,6 +97,8 @@ integration-heads tests/test_live_telemetry.py
 runtime-component tests/test_local_pty_head_runtime.py
 runtime-component tests/test_local_pty_dispatcher_launch.py
 runtime-component tests/test_local_pty_supervisor.py
+unit tests/test_local_pty_progress.py
+unit tests/test_local_pty_screen.py
 runtime-component tests/test_runtime_deadline_contract.py
 integration-memory tests/test_memory_acceptance.py
 integration-memory tests/test_memory_access.py

@@ -80,15 +80,6 @@ STARTUP_ERROR_NAME = "startup.error"
 #: A failure *after* the run was up, which is a different fact and deserves a different name: a
 #: head that worked for an hour and then lost its supervisor was never a startup failure.
 SUPERVISOR_ERROR_NAME = "supervisor.error"
-#: The last of the head's terminal output, left by the supervisor when it lets go of a run that was
-#: up, whatever ended it. The output buffer dies with the supervisor, so without this a finished
-#: run has no transcript at all. Raw bytes and nothing else: no header, no field of its own, and
-#: nothing in the journal, the lock or the pid file says anything new because of it.
-OUTPUT_TAIL_NAME = "output.tail"
-#: How much of the buffer `OUTPUT_TAIL_NAME` keeps: a screenful many times over, and a fixed cost
-#: for every run directory on the host rather than the output buffer's larger one.
-OUTPUT_TAIL_BYTES = 64 * 1024
-
 #: Request verbs.
 OP_STATUS = "status"
 OP_INPUT = "input"
