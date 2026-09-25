@@ -17,6 +17,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -60,6 +61,7 @@ from secretary.host_apply import (
     resolve_packaged,
     resolve_runtime_owner,
 )
+from secretary.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from secretary.memory.client_config import (
     CODEX_HOME_SEEDED_FILES,
     ClientConfigError,
@@ -138,6 +140,8 @@ class UpgradeContext:
     # Product-pack changes require incremental memory reconciliation.
     memory_pack_changed: bool = False
     memory_pack: Any = None
+    # The shipped pack's digest once `step_memory_pack` materialized it; the memory receipt binds it.
+    memory_pack_digest: str | None = None
     # Resolve home-relative artifacts from the installation owner, not the invoker.
     runtime_user: str | None = None
     runtime_home: Path | None = None
@@ -343,26 +347,198 @@ def _ruff_runtime_problem(product_root: Path, venv_python: Path) -> str:
     return ""
 
 
+# Receipts an upgrade writes after it has done a step's work, so the next run can compare the
+# installed state with the checkout instead of trusting its own pull delta (secretary-1743). They
+# live under `DATA_DIR/upgrade/`, which no backup carries: like the web receipt, each one describes
+# this host's venv or process generation and is recreated by the next upgrade.
+UPGRADE_RECEIPT_ROOT = Path("upgrade")
+DEPENDENCY_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "dependency-receipt.json"
+DEPENDENCY_RECEIPT_VERSION = 1
+# A receipt is a few hundred bytes; anything much larger is not one of ours.
+RECEIPT_MAX_BYTES = 64 * 1024
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+EXTRA_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+REQUIREMENT_NAME_RE = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
+
+
+class ReceiptError(RuntimeError):
+    """A receipt or one of the inputs it binds cannot be read or written."""
+
+
+def _upgrade_receipt_path(context: UpgradeContext, relative: Path) -> Path:
+    data_dir = _data_dir(context)
+    if not isinstance(data_dir, Path):
+        raise ReceiptError("instance has no resolved data directory")
+    return data_dir / relative
+
+
+def _load_receipt(path: Path, label: str) -> tuple[dict[str, Any] | None, str]:
+    """Read one receipt as a JSON object, totally: every way it can be wrong is "no receipt"."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None, f"the {label} is missing"
+    except OSError as exc:
+        return None, f"the {label} cannot be read: {exc}"
+    if not stat.S_ISREG(info.st_mode) or info.st_size > RECEIPT_MAX_BYTES:
+        return None, f"the {label} is malformed"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as source:
+            raw = source.read(RECEIPT_MAX_BYTES + 1)
+        payload = json.loads(raw.decode("utf-8")) if len(raw) <= RECEIPT_MAX_BYTES else None
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return None, f"the {label} is malformed"
+    if not isinstance(payload, dict):
+        return None, f"the {label} is malformed"
+    return payload, ""
+
+
+def _normalized_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _declared_extras(product_root: Path) -> dict[str, frozenset[str]]:
+    """The checkout's optional extras, each as the distribution names it requires."""
+    try:
+        pyproject = tomllib.loads((product_root / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = pyproject["project"]["optional-dependencies"]
+    except (OSError, UnicodeError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return {}
+    if not isinstance(declared, dict):
+        return {}
+    extras = {}
+    for name, requirements in declared.items():
+        if not isinstance(name, str) or not isinstance(requirements, list):
+            continue
+        extras[_normalized_name(name)] = frozenset(
+            _normalized_name(match.group(1))
+            for requirement in requirements
+            if isinstance(requirement, str) and (match := REQUIREMENT_NAME_RE.match(requirement))
+        )
+    return extras
+
+
+def _venv_distributions(venv: Path) -> frozenset[str]:
+    """The distribution names installed into ``venv``, read from its ``*.dist-info`` directories."""
+    return frozenset(
+        _normalized_name(dist_info.name.split("-", 1)[0])
+        for dist_info in (venv / "lib").glob("python*/site-packages/*.dist-info")
+    )
+
+
+def required_extras(context: UpgradeContext, venv: Path) -> tuple[str, ...]:
+    """The extras `dependencies` installs: ``dev`` plus every extra this installation uses.
+
+    Which extras an installation uses is a property of the installation, not of the manifest, and
+    this is the one place that rule lives. ``memory`` is used when the memory unit is installed or
+    active, because `secretary-memory-mcp` runs from this venv and its pins are that extra's. Any
+    declared extra is used when the venv already carries all of its distributions, so a reinstall
+    never drops what an operator added. An extra the checkout does not declare is never asked for.
+    """
+    declared = _declared_extras(context.product_root)
+    extras = {"dev"}
+    unit = f"{_memory_unit_prefix(context.report)}service"
+    if MEMORY_COMPONENT in declared and (
+        context.units.installed(unit) is not None or context.units.is_active(unit)
+    ):
+        extras.add(MEMORY_COMPONENT)
+    carried = _venv_distributions(venv)
+    extras.update(
+        name for name, distributions in declared.items() if distributions and distributions <= carried
+    )
+    return tuple(sorted(extras))
+
+
+def _read_dependency_receipt(context: UpgradeContext, venv: Path) -> tuple[dict[str, Any] | None, str]:
+    try:
+        path = _upgrade_receipt_path(context, DEPENDENCY_RECEIPT_RELATIVE)
+    except ReceiptError as exc:
+        return None, f"the dependency receipt cannot be located: {exc}"
+    payload, reason = _load_receipt(path, "dependency receipt")
+    if payload is None:
+        return None, reason
+    malformed = "the dependency receipt is malformed"
+    if set(payload) != {"version", "venv", "dependency_sha256", "extras"}:
+        return None, malformed
+    version = payload["version"]
+    digest = payload["dependency_sha256"]
+    extras = payload["extras"]
+    if type(version) is not int or version != DEPENDENCY_RECEIPT_VERSION:
+        return None, malformed
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        return None, malformed
+    if (
+        not isinstance(extras, list)
+        or len(extras) > 64
+        or not all(isinstance(extra, str) and EXTRA_NAME_RE.fullmatch(extra) for extra in extras)
+        or len(set(extras)) != len(extras)
+    ):
+        return None, malformed
+    if not isinstance(payload["venv"], str):
+        return None, malformed
+    if payload["venv"] != str(venv.resolve()):
+        return None, "the dependency receipt names another venv"
+    return {"dependency_sha256": digest, "extras": tuple(sorted(extras))}, ""
+
+
+def _write_dependency_receipt(
+    context: UpgradeContext, venv: Path, digest: str, extras: tuple[str, ...]
+) -> None:
+    path = _upgrade_receipt_path(context, DEPENDENCY_RECEIPT_RELATIVE)
+    payload = {
+        "version": DEPENDENCY_RECEIPT_VERSION,
+        "venv": str(venv.resolve()),
+        "dependency_sha256": digest,
+        "extras": list(extras),
+    }
+    _write_private_receipt(path, payload, context.runtime_user, ReceiptError, "dependency receipt")
+
+
 def step_dependencies(context: UpgradeContext) -> StepResult:
-    venv_python = context.product_root / ".venv" / "bin" / "python"
+    """Install the product into its venv when the venv does not match the checkout.
+
+    The question is the venv's state, not this run's pull delta: a checkout moved by hand, by the
+    dispatcher or by `--no-pull` has an empty delta and a stale venv all the same. So the step
+    compares the dependency receipt the last successful install wrote — the tracked dependency
+    manifests' digest, the extras and the venv — with the checkout and this installation's extras.
+    A missing or unreadable receipt is a reason to install, never `unchanged`.
+    """
+    venv = context.product_root / ".venv"
+    venv_python = venv / "bin" / "python"
     if not venv_python.is_file():
         return StepResult("dependencies", "skipped", "no .venv in the product checkout")
-    snapshot = _snapshot_install(venv_python)
-    manifest_moved = _touches(context.changed_paths, DEPENDENCY_PATHS)
-    ruff_problem = _ruff_runtime_problem(context.product_root, venv_python)
-    if not snapshot and not manifest_moved and not ruff_problem:
-        return StepResult("dependencies", "unchanged", "no dependency manifest moved")
+    try:
+        digest = _git_tracked_digest(context.product_root, DEPENDENCY_PATHS)
+    except ReceiptError as exc:
+        return StepResult("dependencies", "failed", f"cannot compare the venv with the checkout: {exc}")
+    extras = required_extras(context, venv)
+    listed = ",".join(extras)
+    compared = f"deps sha256 {digest[:12]}, extras {listed}"
     reasons = []
-    if snapshot:
+    receipt, receipt_reason = _read_dependency_receipt(context, venv)
+    if receipt is None:
+        reasons.append(receipt_reason)
+    else:
+        if receipt["dependency_sha256"] != digest:
+            reasons.append(f"deps sha256 {receipt['dependency_sha256'][:12]} -> {digest[:12]}")
+        if receipt["extras"] != extras:
+            reasons.append(f"extras {','.join(receipt['extras']) or 'none'} -> {listed}")
+    if _snapshot_install(venv_python):
         reasons.append("the venv holds a snapshot install")
-    if manifest_moved:
+    # Under `--dry-run` the checkout has not moved yet, so the digest cannot see a pending manifest
+    # change; the plan can.
+    if _touches(context.changed_paths, DEPENDENCY_PATHS):
         reasons.append("a dependency manifest moved")
+    ruff_problem = _ruff_runtime_problem(context.product_root, venv_python)
     if ruff_problem:
         reasons.append(ruff_problem)
+    if not reasons:
+        return StepResult("dependencies", "unchanged", f"venv matches checkout ({compared})")
     reason = "; ".join(reasons)
     if context.dry_run:
         return StepResult(
-            "dependencies", "changed", f"would reinstall the product dev extra into .venv: {reason}"
+            "dependencies", "changed", f"would reinstall the product into .venv ({compared}): {reason}"
         )
     try:
         _proc.run(
@@ -373,7 +549,7 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
                 "install",
                 "--quiet",
                 "-e",
-                f"{context.product_root}[dev]",
+                f"{context.product_root}[{listed}]",
             ],
             timeout=900,
             check=True,
@@ -383,7 +559,15 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     except (OSError, subprocess.TimeoutExpired):
         return StepResult("dependencies", "failed", "pip install could not run")
     context.code_changed = True
-    return StepResult("dependencies", "changed", f"installed the product dev extra into .venv: {reason}")
+    try:
+        _write_dependency_receipt(context, venv, digest, extras)
+    except ReceiptError as exc:
+        return StepResult("dependencies", "failed", f"installed the product into .venv but {exc}")
+    return StepResult(
+        "dependencies",
+        "changed",
+        f"installed the product into .venv ({compared}) and wrote the dependency receipt: {reason}",
+    )
 
 
 def step_dependency_provenance(context: UpgradeContext) -> StepResult:
@@ -624,6 +808,7 @@ def step_memory_pack(context: UpgradeContext) -> StepResult:
     except MemoryPackError as exc:
         return StepResult("memory-pack", "failed", str(exc))
     context.memory_pack_changed = result.changed
+    context.memory_pack_digest = pack.digest
     if not result.changed:
         return StepResult("memory-pack", "unchanged", "installed digest matches product pack")
     verb = "would reconcile" if context.dry_run else "reconciled"
@@ -1066,25 +1251,184 @@ def _memory_unit_prefix(report: Any) -> str:
     return f"{_component_unit_prefix(report, MEMORY_COMPONENT)}."
 
 
+MEMORY_PROCESS_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "memory-process-receipt.json"
+MEMORY_PROCESS_RECEIPT_VERSION = 1
+MEMORY_PROCESS_INPUT_KEYS = (
+    "product_revision",
+    "product_sha256",
+    "dependency_sha256",
+    "memory_model",
+    "memory_pack_sha256",
+)
+MEMORY_MODEL_RE = re.compile(r"[\x21-\x7e]{1,256}")
+
+
+def _unit_environment(unit_text: bytes | None, key: str) -> str | None:
+    """The last ``Environment=`` assignment of ``key`` in a unit file, if it makes one."""
+    if unit_text is None:
+        return None
+    try:
+        lines = unit_text.decode("utf-8").splitlines()
+    except UnicodeError:
+        return None
+    value = None
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("Environment="):
+            continue
+        try:
+            words = shlex.split(line[len("Environment=") :])
+        except ValueError:
+            continue
+        for word in words:
+            name, separator, item = word.partition("=")
+            if separator and name == key:
+                value = item
+    return value
+
+
+def memory_process_inputs(context: UpgradeContext, unit: str) -> dict[str, str | None]:
+    """The checkout and installed state an active memory process has to be bound to."""
+    model = _unit_environment(context.units.installed(unit), "MEMORY_MODEL") or DEFAULT_MEMORY_MODEL
+    return {
+        "product_revision": _product_revision(context.product_root, ReceiptError),
+        "product_sha256": _git_tracked_digest(context.product_root, PRODUCT_SOURCE_PATHS),
+        "dependency_sha256": _git_tracked_digest(context.product_root, DEPENDENCY_PATHS),
+        "memory_model": model,
+        "memory_pack_sha256": context.memory_pack_digest,
+    }
+
+
+def _valid_memory_inputs(value: object) -> dict[str, str | None] | None:
+    if not isinstance(value, dict) or set(value) != set(MEMORY_PROCESS_INPUT_KEYS):
+        return None
+    revision = value["product_revision"]
+    model = value["memory_model"]
+    pack = value["memory_pack_sha256"]
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40,64}", revision):
+        return None
+    for key in ("product_sha256", "dependency_sha256"):
+        if not isinstance(value[key], str) or not SHA256_RE.fullmatch(value[key]):
+            return None
+    if not isinstance(model, str) or not MEMORY_MODEL_RE.fullmatch(model):
+        return None
+    if pack is not None and (not isinstance(pack, str) or not SHA256_RE.fullmatch(pack)):
+        return None
+    return {key: value[key] for key in MEMORY_PROCESS_INPUT_KEYS}
+
+
+def _read_memory_process_receipt(
+    context: UpgradeContext, unit: str
+) -> tuple[tuple[UnitProcessIdentity, dict[str, str | None]] | None, str]:
+    try:
+        path = _upgrade_receipt_path(context, MEMORY_PROCESS_RECEIPT_RELATIVE)
+    except ReceiptError as exc:
+        return None, f"the memory process receipt cannot be located: {exc}"
+    payload, reason = _load_receipt(path, "memory process receipt")
+    if payload is None:
+        return None, reason
+    malformed = "the memory process receipt is malformed"
+    if set(payload) != {"version", "unit", "process", "inputs"}:
+        return None, malformed
+    version = payload["version"]
+    if type(version) is not int or version != MEMORY_PROCESS_RECEIPT_VERSION or payload["unit"] != unit:
+        return None, malformed
+    identity = _receipt_identity(payload["process"])
+    inputs = _valid_memory_inputs(payload["inputs"])
+    if identity is None or inputs is None:
+        return None, malformed
+    return (identity, inputs), ""
+
+
+def _short(value: str | None) -> str:
+    if value is None:
+        return "none"
+    return value[:12] if re.fullmatch(r"[0-9a-f]{40,64}", value) else value
+
+
+def _memory_receipt_evidence(
+    context: UpgradeContext,
+    unit: str,
+    identity: UnitProcessIdentity | None,
+    inputs: dict[str, str | None],
+) -> tuple[bool, str]:
+    """Whether the active memory process is the one the receipt bound to these inputs, and why."""
+    if identity is None:
+        return False, "the active memory process identity is unavailable"
+    receipt, reason = _read_memory_process_receipt(context, unit)
+    if receipt is None:
+        return False, reason
+    recorded_identity, recorded = receipt
+    if recorded_identity != identity:
+        return False, "the memory process receipt belongs to a different process generation"
+    moved = [
+        f"{key.replace('_', ' ')} {_short(recorded[key])} -> {_short(inputs[key])}"
+        for key in MEMORY_PROCESS_INPUT_KEYS
+        if recorded[key] != inputs[key]
+    ]
+    if moved:
+        return False, "; ".join(moved)
+    return True, f"memory process receipt verified: pid {identity.pid}; {_memory_inputs_summary(inputs)}"
+
+
+def _memory_inputs_summary(inputs: dict[str, str | None]) -> str:
+    return (
+        f"product revision {_short(inputs['product_revision'])}, "
+        f"product sha256 {_short(inputs['product_sha256'])}, "
+        f"deps sha256 {_short(inputs['dependency_sha256'])}, "
+        f"model {inputs['memory_model']}, pack sha256 {_short(inputs['memory_pack_sha256'])}"
+    )
+
+
 def step_memory(context: UpgradeContext) -> StepResult:
+    """Keep the memory service running the checkout's code, dependencies, model and pack.
+
+    Like `step_web`, the service is bound to what it was started on by a process receipt, so a
+    service started before the checkout moved outside this upgrade is restarted, not reported as
+    current. Unlike the web, a stopped memory service is started: the pipeline cannot run without it.
+    """
     report = context.report
     unit = f"{_memory_unit_prefix(report)}service"
-    if not context.units.is_active(unit):
-        reason = "service is not active"
-    elif context.unit_changed:
-        reason = "unit file changed"
-    elif context.code_changed:
-        reason = "product code or dependencies changed"
-    elif context.memory_pack_changed:
-        reason = "memory pack export changed"
-    else:
-        return StepResult("memory", "unchanged", "serving the current code")
+    try:
+        inputs = memory_process_inputs(context, unit)
+    except ReceiptError as exc:
+        return StepResult("memory", "failed", f"cannot compare the memory service with the checkout: {exc}")
+    reasons = []
+    active = context.units.is_active(unit)
+    if not active:
+        reasons.append("service is not active")
+    if context.unit_changed:
+        reasons.append("unit file changed")
+    if context.code_changed:
+        reasons.append("product code or dependencies changed")
+    if context.memory_pack_changed:
+        reasons.append("memory pack export changed")
+    if active:
+        try:
+            identity = context.units.process_identity(unit)
+        except HostCommandError as exc:
+            reasons.append(f"the active memory process identity could not be observed: {exc}")
+        else:
+            verified, evidence = _memory_receipt_evidence(context, unit, identity, inputs)
+            if verified and not reasons:
+                return StepResult("memory", "unchanged", evidence)
+            if not verified:
+                reasons.append(evidence)
+    reason = "; ".join(reasons)
     if context.dry_run:
         return StepResult("memory", "changed", f"would restart {unit}: {reason}")
     try:
         context.units.restart(unit)
     except HostCommandError as exc:
         return StepResult("memory", "failed", str(exc))
+    try:
+        before_probe = context.units.process_identity(unit)
+    except HostCommandError as exc:
+        return StepResult(
+            "memory", "failed", f"{unit} restarted but its process identity is unavailable: {exc}"
+        )
+    if before_probe is None:
+        return StepResult("memory", "failed", f"{unit} restarted but its process identity is unavailable")
     try:
         data_dir = report.data_dir
         if data_dir is None:
@@ -1098,7 +1442,41 @@ def step_memory(context: UpgradeContext) -> StepResult:
         )
     except (MemoryProbeError, GitError) as exc:
         return StepResult("memory", "failed", f"authenticated probe failed: {exc}")
-    return StepResult("memory", "changed", f"restarted and authenticated {unit}: {reason}")
+    try:
+        after_probe = context.units.process_identity(unit)
+        final_inputs = memory_process_inputs(context, unit)
+    except (HostCommandError, ReceiptError) as exc:
+        return StepResult("memory", "failed", f"{unit} probe passed but its receipt cannot be bound: {exc}")
+    if after_probe != before_probe:
+        return StepResult(
+            "memory", "failed", f"{unit} changed process generation during the probe; no receipt was written"
+        )
+    if final_inputs != inputs:
+        return StepResult(
+            "memory", "failed", f"{unit} inputs changed during the restart; no receipt was written"
+        )
+    payload = {
+        "version": MEMORY_PROCESS_RECEIPT_VERSION,
+        "unit": unit,
+        "process": _receipt_process(after_probe),
+        "inputs": final_inputs,
+    }
+    try:
+        _write_private_receipt(
+            _upgrade_receipt_path(context, MEMORY_PROCESS_RECEIPT_RELATIVE),
+            payload,
+            context.runtime_user,
+            ReceiptError,
+            "memory process receipt",
+        )
+    except ReceiptError as exc:
+        return StepResult("memory", "failed", f"restarted and authenticated {unit} but {exc}")
+    return StepResult(
+        "memory",
+        "changed",
+        f"restarted and authenticated {unit} ({_memory_inputs_summary(final_inputs)}) and wrote the "
+        f"memory process receipt: {reason}",
+    )
 
 
 WEB_PROCESS_RECEIPT_RELATIVE = Path("web") / "process-receipt.json"
@@ -1113,7 +1491,7 @@ WEB_PROCESS_INPUT_KEYS = (
 )
 
 
-class WebProcessReceiptError(RuntimeError):
+class WebProcessReceiptError(ReceiptError):
     """The small, private receipt that binds a successful web generation to its inputs."""
 
 
@@ -1177,14 +1555,19 @@ def _digest_web_units(context: UpgradeContext, name_prefix: str) -> str:
     return digest.hexdigest()
 
 
+def _product_revision(product_root: Path, error: type[ReceiptError]) -> str:
+    try:
+        revision = _git(product_root, ["rev-parse", "HEAD"])
+    except GitError as exc:
+        raise error(f"cannot read product revision: {exc}") from None
+    if not re.fullmatch(r"[0-9a-f]{40,64}", revision):
+        raise error("cannot read an exact product revision")
+    return revision
+
+
 def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, str]:
     """The product and materialized state an active web process has to be bound to."""
-    try:
-        revision = _git(context.product_root, ["rev-parse", "HEAD"])
-    except GitError as exc:
-        raise WebProcessReceiptError(f"cannot read product revision: {exc}") from None
-    if not re.fullmatch(r"[0-9a-f]{40,64}", revision):
-        raise WebProcessReceiptError("cannot read an exact product revision")
+    revision = _product_revision(context.product_root, WebProcessReceiptError)
     snapshot = snapshot_path(context.instance_path)
     try:
         snapshot_bytes = snapshot.read_bytes()
@@ -1294,13 +1677,13 @@ def _receipt_evidence(
     return True, evidence
 
 
-def _receipt_owner(path: Path, runtime_user: str | None) -> tuple[int, int] | None:
+def _receipt_owner(runtime_user: str | None, error: type[ReceiptError]) -> tuple[int, int] | None:
     if not runtime_user or os.geteuid() != 0:
         return None
     try:
         account = pwd.getpwnam(runtime_user)
     except KeyError:
-        raise WebProcessReceiptError(f"runtime user {runtime_user!r} does not exist") from None
+        raise error(f"runtime user {runtime_user!r} does not exist") from None
     return account.pw_uid, account.pw_gid
 
 
@@ -1311,17 +1694,33 @@ def _write_web_process_receipt(
     inputs: dict[str, str],
 ) -> None:
     """Publish the receipt only after a proved generation, as one private atomic replacement."""
-    path = web_process_receipt_path(context)
     payload = {
         "version": WEB_PROCESS_RECEIPT_VERSION,
         "unit": unit,
         "process": _receipt_process(identity),
         "inputs": inputs,
     }
+    _write_private_receipt(
+        web_process_receipt_path(context),
+        payload,
+        context.runtime_user,
+        WebProcessReceiptError,
+        "web process receipt",
+    )
+
+
+def _write_private_receipt(
+    path: Path,
+    payload: dict[str, Any],
+    runtime_user: str | None,
+    error: type[ReceiptError],
+    label: str,
+) -> None:
+    """Write one receipt as a private (0600, runtime-owned) atomic replacement."""
     temporary: Path | None = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        owner = _receipt_owner(path, context.runtime_user)
+        owner = _receipt_owner(runtime_user, error)
         parent_info = path.parent.lstat()
         if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
             raise OSError("receipt directory is not a real directory")
@@ -1346,7 +1745,7 @@ def _write_web_process_receipt(
         finally:
             os.close(directory)
     except OSError as exc:
-        raise WebProcessReceiptError(f"could not write web process receipt {path}: {exc}") from None
+        raise error(f"could not write {label} {path}: {exc}") from None
     finally:
         if temporary is not None:
             try:

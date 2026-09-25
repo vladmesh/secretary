@@ -506,18 +506,24 @@ class AgentSpecsTests(unittest.TestCase):
 class UpgradeStepTests(unittest.TestCase):
     def setUp(self) -> None:
         self.memory_probe = mock.patch("secretary.upgrade.probe_memory").start()
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        # The dependency and memory steps write their receipts under the data dir.
+        self.data_dir = Path(data.name)
 
     def tearDown(self) -> None:
         self.memory_probe.stop()
 
     def context(self, units: FakeUnitInstaller, **overrides) -> upgrade.UpgradeContext:
+        report = _Report()
+        report.data_dir = self.data_dir
         base = upgrade.UpgradeContext(
             instance_path=Path("/tmp/instance"),
             product_root=upgrade.running_product_root(),
             base_branch="main",
             dry_run=False,
             units=units,
-            report=_Report(),
+            report=report,
         )
         return replace(base, **overrides)
 
@@ -698,10 +704,14 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_memory_is_left_alone_when_nothing_moved(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
+        # Nothing moved since the restart that wrote the memory process receipt.
+        self.assertEqual(upgrade.step_memory(self.context(units, code_changed=True)).status, "changed")
+        units.calls.clear()
 
         result = upgrade.step_memory(self.context(units))
 
         self.assertEqual(result.status, "unchanged")
+        self.assertIn("memory process receipt verified", result.detail)
         self.assertEqual(units.calls, [])
 
     def test_a_stopped_memory_service_is_started_even_with_no_change(self):
@@ -967,16 +977,27 @@ class UpgradeStepTests(unittest.TestCase):
         dist_info.mkdir(parents=True)
         if direct_url is not None:
             (dist_info / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
+        # The dependency receipt binds the tracked manifests, so the checkout is a Git one.
+        (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        _commit_all(root, "product")
         return root
 
     def test_an_editable_install_that_moved_no_manifest_is_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}})
-            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+            context = self.context(FakeUnitInstaller(), product_root=root)
+            upgrade._write_dependency_receipt(
+                context,
+                root / ".venv",
+                upgrade._git_tracked_digest(root, upgrade.DEPENDENCY_PATHS),
+                ("dev",),
+            )
 
-            result = upgrade.step_dependencies(context)
+            result = upgrade.step_dependencies(replace(context, dry_run=True))
 
-        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertIn("venv matches checkout (deps sha256 ", result.detail)
+        self.assertIn("extras dev)", result.detail)
 
     def test_an_editable_install_with_missing_pinned_ruff_is_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1973,6 +1994,30 @@ def _restore_mode(path: Path, mode: int = 0o644) -> None:
         path.chmod(mode)
     except OSError:
         pass
+
+
+def _commit_all(root: Path, message: str) -> None:
+    """Commit every file under ``root``, initializing the repository the first time."""
+    if not (root / ".git").exists():
+        subprocess.run(["git", "-C", str(root), "init", "--quiet", "--initial-branch=main"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            message,
+        ],
+        check=True,
+    )
 
 
 class _Report:
