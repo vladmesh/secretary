@@ -166,6 +166,7 @@ class DeliveryEvidence:
     # the turn — answered yes. `turn_confirmed` beside it is what the pane showed. Neither implies
     # the other, and "delivered" is not one bit.
     provider_bound: bool = False
+    provider_source_state: str = ""
     cursor_before: str = ""
     cursor_after: str = ""
     cursor_moved: bool = False
@@ -213,6 +214,7 @@ class DeliveryEvidence:
             "modal_resolution": self.modal_resolution,
             "modal_answers": self.modal_answers,
             "provider_bound": self.provider_bound,
+            "provider_source_state": self.provider_source_state,
             # Derived, and kept in the record so a reader of a persisted receipt does not have to
             # re-derive it: modal resolution, delivery receipt and provider binding, side by side.
             "delivery_receipt": self.receipt,

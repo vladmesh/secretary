@@ -381,6 +381,11 @@ def _deliver_red_continuation(
             records[ref] = record
             runtime.save_records(payload, records)
         try:
+            # A restarted dispatcher has no process-local ingress. Install from the durable run
+            # with the runtime's usual persist/stop/block callbacks before this delivery.
+            runtime.bind_codex_provider_ingress(
+                record, records, payload, role="worker", reference=ref
+            )
             runtime.host.resume_worker(task, record)
         except HostError as exc:
             if _delivery_readiness_state(exc) == READINESS_BUSY:
@@ -836,6 +841,13 @@ def _record_worker_continuation(
 ) -> None:
     """Leave the red-verdict ownership decision on the card with its frozen launch snapshot."""
     run = record.worker_run
+    evidence = record.worker_delivery_evidence
+    source_state = str(evidence.get("provider_source_state") or "")
+    provider_note = (
+        f"provider bound: {bool(evidence.get('provider_bound'))}; source state: {source_state}; "
+        if mode == "reused" and source_state
+        else ""
+    )
     runtime.writer.comment(
         role="dispatcher",
         actor=runtime.owner,
@@ -843,7 +855,7 @@ def _record_worker_continuation(
         body=(
             f"Dispatcher {phase} red continuation: {mode}; worker profile {run.get('head') or record.head}, "
             f"model {run.get('model') or 'unknown'}, effort {run.get('effort') or 'default'}; "
-            f"reason: {reason}; timestamp: {now_rfc3339()}."
+            f"reason: {reason}; {provider_note}timestamp: {now_rfc3339()}."
         ),
         request_id=_attempt_request_id(
             record.attempt_id, f"{phase}-red-continuation", ref, str(record.attempt_round)
