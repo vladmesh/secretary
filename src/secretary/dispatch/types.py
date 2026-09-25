@@ -122,38 +122,6 @@ class HeadLaunchAborted(HostError):
         self.evidence = dict(evidence or {})
 
 
-class HeadPaneNotReady(HostError):
-    """A bring-up that left nothing running because its head pane would not take the prompt.
-
-    Orca answers the readiness question in three states, and two of them are this one: a pane that
-    is working, and a pane held in a dialog its head cannot leave on its own — the codex update
-    prompt that ate two bring-ups in 33 minutes on `sprint:1200` (secretary-1163). Neither is a
-    failed round. The head never received its prompt and the pane was closed behind it, so the same
-    launch is worth making again on the next tick, the way the observer's lifecycle already defers
-    its own.
-
-    The state travels with the failure because it is what the card is eventually blocked over: an
-    operator reading "bring-up failed" goes looking for a broken head or a broken host, and the
-    answer is a dialog nobody answered.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        readiness: str,
-        pane: str = "",
-        evidence: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.readiness = readiness
-        self.pane = pane
-        # What the shared delivery boundary saw of the prompt this pane would not take. The pane
-        # is closed behind this failure, so nothing can be asked of it afterwards: whatever is not
-        # carried here is gone, and the caller's durable telemetry is the only place left to put it.
-        self.evidence = dict(evidence or {})
-
-
 @dataclass(frozen=True)
 class ReviewLaunch:
     """What a reviewer bring-up hands back to the runtime: the pane the reviewer runs in and the

@@ -76,14 +76,9 @@ INITIAL_OUTPUT_STALL_DEFAULT = 3 * 60
 # just resumed — so this is a window rather than a single reading. It is short next to the silence
 # ceilings above because it is not measuring silence: readiness says the head is not working.
 IDLE_STALL_DEFAULT = 5 * 60
-# How many bring-ups of one role's head are parked over a pane that is not ready for its launch
-# prompt before the card is blocked over that pane (secretary-1163). A count rather than a window,
-# because the retry is the dispatcher tick itself: the deferred launch is made again on the next
-# one, so this is also how many ticks a head is given to get past whatever is holding its pane.
-BRING_UP_DEFER_ATTEMPTS_DEFAULT = 5
 
 # How many consecutive `review-launch-aborted` ticks a card is given before one operator
-# escalation is emitted (issue:aa9a8ae4). Unlike a deferral this abort never blocks the card on its
+# escalation is emitted (issue:aa9a8ae4). This abort never blocks the card on its
 # own, because the reviewer pane came up and its worker could not be confirmed gone, so the loop is
 # otherwise silent to everyone but the steward's degraded-health line. The count is one tick each,
 # so this is also how many ticks the recovery path is given to freeze or adopt before an operator
@@ -92,10 +87,8 @@ REVIEW_LAUNCH_ABORT_STUCK_DEFAULT = 10
 
 # How many consecutive ticks may fail to bring a reviewer up over a green candidate before the card
 # is blocked for an operator (secretary-1401). Each failure is one tick, so this is also how long
-# the reviewer's runtime is given to come back. It is deliberately larger than the deferral bound:
-# a deferred bring-up has a pane to point at and a head that may yet answer, while these are
-# failures of the review stage's own machinery, and the alternative to waiting them out is a green
-# candidate re-run from Ready.
+# the reviewer's runtime is given to come back. These are failures of the review stage's own
+# machinery, and the alternative to waiting them out is a green candidate re-run from Ready.
 REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT = 10
 
 
@@ -133,11 +126,6 @@ def suspension_response_window_seconds() -> int:
         "SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS",
         SUSPENSION_RESPONSE_WINDOW_DEFAULT,
     )
-
-
-def bring_up_defer_attempts() -> int:
-    """How many deferred bring-ups one role's head gets before its card is blocked."""
-    return positive_int("SECRETARY_BRINGUP_DEFER_ATTEMPTS", BRING_UP_DEFER_ATTEMPTS_DEFAULT)
 
 
 def review_launch_abort_stuck_ticks() -> int:

@@ -1220,8 +1220,8 @@ A card blocked because a head never came up says so. Vocabulary:
 [Bring-up outcomes](PROTOCOLS.md#bring-up-outcomes).
 
 - On the card: the Blocked reason ends in `[bring-up outcome: class=infrastructure,
-  cause=pane_never_ready, stage=claim, head=worker, attempt=ATTEMPT_ID]`. Infrastructure causes:
-  `pane_never_ready`, `launch_aborted`, `host_unavailable`; task causes: `workspace_contract`,
+  cause=host_unavailable, stage=claim, head=worker, attempt=ATTEMPT_ID]`. Infrastructure causes:
+  `launch_aborted`, `host_unavailable`; task causes: `workspace_contract`,
   `base_branch_contract`.
 - In the tick: `failure_class`, `failure_cause`, `failure_reason`, `bring_up`, and `contract_refusal`
   for a broad-check contract preflight refusal.
@@ -1532,19 +1532,10 @@ Returning the same card again gets a fresh answer. While unresolved, `secretary 
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — report ceiling after first output, default 21600.
 - `SECRETARY_HEAD_IDLE_STALL_SECONDS` — no production effect since the wait tick moved onto the vitality
   verdict; the vitality thresholds do not read it (see `docs/HEAD_VITALITY.md`, Thresholds).
-- `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — pane-era: before A20, bring-ups deferred over a pane not ready
-  for its launch prompt before Blocked, default 5. Only the removed Orca spawn raised that deferral, so
-  no `local-pty` bring-up reads it.
 - `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,
   default 5.
 
 The stall settings are read at check time; garbage or zero falls back to the default.
-
-Before A20 a bring-up whose pane was working, held in a dialog or still starting was deferred, not
-failed: `worker-launch-deferred` / `review-launch-deferred` with the pane state and attempt, and at the
-limit Blocked with the infrastructure class
-([An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome)). A `local-pty` bring-up has
-no such deferral: a head that does not come up is an ordinary bring-up failure.
 
 ### Reports and verdicts
 

@@ -69,12 +69,10 @@ from secretary.dispatch.tui import (
 from secretary.dispatch.types import (
     STOPPED_BY_LAUNCH_RECOVERY,
     HeadLaunchAborted,
-    HeadPaneNotReady,
     HostError,
 )
 from secretary.dispatch.watchdog import (
     bind_head_heartbeat,
-    bring_up_defer_attempts,
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
@@ -190,7 +188,7 @@ def remember_launch_delivery(intent: dict[str, Any], evidence: Any) -> None:
 
 
 def defer_launch_delivery(
-    record: DispatcherRecord,
+    record: DispatcherRecord | None,
     evidence: dict[str, Any],
     *,
     state: str = READINESS_BUSY,
@@ -217,7 +215,7 @@ def defer_launch_delivery(
 
 
 def defer_busy_launch_delivery(
-    record: DispatcherRecord,
+    record: DispatcherRecord | None,
     evidence: dict[str, Any],
     *,
     now: float | None = None,
@@ -265,7 +263,7 @@ def write_launch_intent(
                 pid_file=launch_pid_file(role, ref),
                 run_id=run_id,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — report any host preflight refusal
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
         preflight_run = candidate
     record.workspace_settled = False
@@ -612,62 +610,11 @@ def pane_state_label(readiness: str) -> str:
     return PANE_STATE_LABELS.get(readiness, readiness or "not ready")
 
 
-def launch_attempts(record: DispatcherRecord, role: str) -> int:
-    return int(getattr(record, role_field(role, "launch_attempts"), 0) or 0)
-
-
-def reset_launch_attempts(record: DispatcherRecord, role: str) -> None:
-    """This role's head came up. The deferrals before it belong to an episode that is over."""
-    setattr(record, role_field(role, "launch_attempts"), 0)
-
-
-def launch_deferred(
-    record: DispatcherRecord,
-    exc: Exception,
-    *,
-    step: str,
-    ref: str,
-    attempt_id: str,
-    role: str,
-) -> dict[str, Any] | None:
-    """Park a bring-up whose head pane would not take its prompt. None when it cannot be parked.
-
-    None means the ordinary failure path owns this failure: either it is not a pane that was busy or
-    held in a dialog — a probe nobody answered is deliberately not one — or this role has spent its
-    attempts. A parked launch changes nothing else on the record; only the counter moves, and the
-    caller persists it, since a deferral nobody wrote down is an unbounded retry.
-    """
-    if not isinstance(exc, HeadPaneNotReady):
-        return None
-    limit = bring_up_defer_attempts()
-    attempts = launch_attempts(record, role) + 1
-    if attempts > limit:
-        return None
-    setattr(record, role_field(role, "launch_attempts"), attempts)
-    return {
-        "status": "skipped",
-        "step": step,
-        "pilot_ref": ref,
-        "attempt_id": attempt_id,
-        "action": f"{role}-launch-deferred",
-        "readiness": exc.readiness,
-        "attempts": attempts,
-        # Every deferred attempt says which one it is, so an operator reading the tick can tell a
-        # head that is still coming up from a head that has not come up for ten minutes.
-        "reason": (
-            f"the {role_label(role)} head pane is {pane_state_label(exc.readiness)}; bring-up "
-            f"attempt {attempts} of {limit} is deferred to the next tick: "
-            f"{scrub_host_output(str(exc))}"
-        ),
-    }
-
-
 # Classify shared worker/reviewer bring-up failures as infrastructure unless the card contract failed.
 FAILURE_CLASS_INFRASTRUCTURE = "infrastructure"
 FAILURE_CLASS_TASK = "task"
 GATE_NAME_FOR_TASK_CLASS = "substantive"
 
-CAUSE_PANE_NEVER_READY = "pane_never_ready"
 CAUSE_LAUNCH_ABORTED = "launch_aborted"
 CAUSE_HOST_UNAVAILABLE = "host_unavailable"
 CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
@@ -675,7 +622,6 @@ CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
 # about the code was judged, but no host repairs it either: it is the card's own contract.
 CAUSE_BASE_BRANCH_CONTRACT = "base_branch_contract"
 BRING_UP_CAUSE_CLASSES = {
-    CAUSE_PANE_NEVER_READY: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
@@ -730,8 +676,6 @@ class BringUpFailure:
     role: str
     attempt_id: str
     detail: str
-    readiness: str = ""
-    attempts: int = 0
 
     @property
     def infrastructure(self) -> bool:
@@ -747,10 +691,6 @@ class BringUpFailure:
             "attempt_id": self.attempt_id,
             "detail": self.detail,
         }
-        if self.readiness:
-            evidence["readiness"] = self.readiness
-        if self.attempts:
-            evidence["attempts"] = self.attempts
         return evidence
 
     def clause(self) -> str:
@@ -778,7 +718,7 @@ class BringUpFailure:
 
 def classify_bring_up_failure(
     exc: BaseException | None,
-    record: DispatcherRecord,
+    record: DispatcherRecord | None,
     role: str,
     *,
     stage: str,
@@ -794,15 +734,7 @@ def classify_bring_up_failure(
     unknown cause there is ignored rather than trusted.
     """
     cause = ""
-    readiness = ""
-    attempts = 0
-    if isinstance(exc, HeadPaneNotReady):
-        # The bounded deferral is spent by the time this is asked (`launch_deferred` answered None),
-        # so the pane was busy or held in a dialog for every attempt this role was given.
-        cause = CAUSE_PANE_NEVER_READY
-        readiness = exc.readiness
-        attempts = launch_attempts(record, role) + 1
-    elif isinstance(exc, HeadLaunchAborted):
+    if isinstance(exc, HeadLaunchAborted):
         cause = CAUSE_LAUNCH_ABORTED
     else:
         declared = str(getattr(exc, "bring_up_cause", "") or "")
@@ -815,16 +747,12 @@ def classify_bring_up_failure(
         role=role,
         attempt_id=attempt_id,
         detail=text,
-        readiness=readiness,
-        attempts=attempts,
     )
 
 
 def bring_up_blocked_reason(
     default: str,
     exc: Exception,
-    record: DispatcherRecord,
-    role: str,
     *,
     failure: BringUpFailure,
 ) -> str:
@@ -834,13 +762,7 @@ def bring_up_blocked_reason(
     having classified the failure first: the class the observer reads on the card is the same
     object the tick outcome and the request id are built from.
     """
-    if not isinstance(exc, HeadPaneNotReady):
-        return f"{default}: {scrub_host_output(str(exc))}\n{failure.clause()}"
-    return (
-        f"the {role_label(role)} head pane was {pane_state_label(exc.readiness)} on all "
-        f"{launch_attempts(record, role) + 1} bring-up attempts and never took its launch prompt: "
-        f"{scrub_host_output(str(exc))}\n{failure.clause()}"
-    )
+    return f"{default}: {scrub_host_output(str(exc))}\n{failure.clause()}"
 
 
 def head_stop_unconfirmed(*, step: str, ref: str, attempt_id: str, role: str, reason: str) -> dict[str, Any]:

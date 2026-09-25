@@ -14,14 +14,20 @@ from typing import Any
 
 from secretary.board.completion_evidence import has_candidate
 from secretary.dispatch import attempt_accounting
-from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from secretary.dispatch.helpers import _worker_id, scrub_host_output
+from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from secretary.dispatch.launch import (
     STAGE_CLAIM,
     WORKER_ROLE,
     BringUpFailure,
+)
+from secretary.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
+)
+from secretary.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
+)
+from secretary.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
 )
 from secretary.dispatch.state import (
@@ -30,12 +36,18 @@ from secretary.dispatch.state import (
     CLAIM_SKIP_RESOURCE_NOT_READY,
     CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     DispatcherRecord,
+)
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
+)
+from secretary.dispatch.state import (
     new_attempt_id as _new_attempt_id,
+)
+from secretary.dispatch.state import (
     record_attempt as _record_attempt,
 )
-from secretary.dispatch.worker_launch import launch_worker_after_claim
 from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, HostError
+from secretary.dispatch.worker_launch import launch_worker_after_claim
 from secretary.head_health import HeadChoice, resolve_head_chain
 from secretary.infra.github_credential import ProjectGitAccess
 from secretary.projects.contract import (
@@ -242,37 +254,18 @@ def _contract_preflight_outcome(
         f"the broad-check contract of registered project {task.get('project')!r} cannot "
         f"attest this card: {refusal.detail()}"
     )
-    failure = _unclaimed_preflight_failure(runtime, 
-        task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-    )
+    failure = _unclaimed_preflight_failure(attempt_id=attempt_id, detail=detail)
     reason = (
         "the card was not given to a worker: this project's broad-check contract cannot "
         f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
     )
     return failure, reason
 
-def _unclaimed_preflight_failure(
-    runtime: Any, task: dict[str, Any], *, attempt_id: str, head: str, review_head: str, detail: str
-) -> BringUpFailure:
+def _unclaimed_preflight_failure(*, attempt_id: str, detail: str) -> BringUpFailure:
     """A pre-claim refusal as the bring-up taxonomy names it: infrastructure, never retried."""
-    # The card has no record and will get none. The classifier reads one only to count the
-    # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
-    # own identity is what the outcome carries.
-    unclaimed = DispatcherRecord(
-        worker=_worker_id(task),
-        workspace="",
-        handle="",
-        head=head,
-        review_head=review_head,
-        attempt_id=attempt_id,
-        comment_baseline=0,
-        review_baseline=0,
-        state="",
-        claimed_at=0.0,
-    )
     return _classify_bring_up_failure(
         None,
-        unclaimed,
+        None,
         WORKER_ROLE,
         stage=STAGE_CLAIM,
         attempt_id=attempt_id,
@@ -329,9 +322,7 @@ def _sprint_admission_blocked(
     refusal: SprintAdmissionRefusal,
 ) -> dict[str, Any]:
     """Write the sprint admission refusal decided before the claim, immediately after it."""
-    failure = _unclaimed_preflight_failure(runtime, 
-        task, attempt_id=attempt_id, head=head, review_head=review_head, detail=refusal.detail
-    )
+    failure = _unclaimed_preflight_failure(attempt_id=attempt_id, detail=refusal.detail)
     reason = (
         "the card was not given to a worker: it was refused at admission, so no workspace and "
         f"no head were created. [sprint admission: refusal={refusal.code}, "
@@ -388,9 +379,7 @@ def _git_access_preflight_outcome(
         f"registered project {task.get('project')!r} refused remote Git access "
         f"(refusal={access.code}, transport={access.transport}): {access.reason}"
     )
-    failure = _unclaimed_preflight_failure(runtime, 
-        task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
-    )
+    failure = _unclaimed_preflight_failure(attempt_id=attempt_id, detail=detail)
     reason = (
         "the card was not given to a worker: this project's remote Git access was refused "
         f"before the claim, so no workspace and no head were created. {detail}\n{failure.clause()}"

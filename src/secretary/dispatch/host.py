@@ -36,10 +36,6 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.config import validate_instance
-from secretary.dispatch.head_vitality_episode import (
-    VitalityVerdict as VitalityVerdict,
-)
-from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatch.gate import (
     GateResult,
 )
@@ -62,9 +58,11 @@ from secretary.dispatch.gate_receipt import (
     render_receipt,
 )
 from secretary.dispatch.git_workspace import WORKSPACES_DIR as GIT_WORKSPACES_DIR
-from secretary.dispatch.git_workspace import orca_workspaces_root
-from secretary.dispatch.git_workspace import GitWorkspaceManager
+from secretary.dispatch.git_workspace import GitWorkspaceManager, orca_workspaces_root
 from secretary.dispatch.git_workspace import _resolved as _resolved_path
+from secretary.dispatch.head_vitality_episode import (
+    VitalityVerdict as VitalityVerdict,
+)
 from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
 from secretary.dispatch.helpers import (
     _decision_record_line,
@@ -86,9 +84,6 @@ from secretary.dispatch.launch import (
 )
 from secretary.dispatch.launch import (
     infrastructure_action as _infrastructure_action,
-)
-from secretary.dispatch.launch import (
-    pane_state_label as _pane_state_label,
 )
 from secretary.dispatch.launcher import (
     HeadLaunchError,
@@ -123,6 +118,7 @@ from secretary.dispatch.post_merge import pr_merge_commit
 from secretary.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
@@ -163,7 +159,6 @@ from secretary.dispatch.types import (
     STOPPED_BY_REVIEW_FREEZE,
     DispatcherError,
     HeadLaunchAborted,
-    HeadPaneNotReady,
     HostError,
     LegacyDispatcherRecord,
     MergeLanding,
@@ -235,20 +230,7 @@ from secretary.routing_journal import (
     HeadRun,
     head_run_from_profile,
 )
-from secretary.tasks import (
-    durability_dirt,
-    specification_revision,
-)
-from secretary.runtime.heads import (
-    HeadRegistryError,
-)
-from secretary.runtime.heads import (
-    required_role_default as _required_role_default,
-    resolve_head_id as _resolve_head_id,
-)
 from secretary.runtime import head as head_ops
-from secretary.runtime.head.children import read_head_children
-from secretary.runtime.local_pty_head import head_run_turn_reading
 from secretary.runtime.codex_preflight import (
     CodexFanoutPolicyError,
     preflight_codex_launch,
@@ -275,6 +257,7 @@ from secretary.runtime.head import (
 from secretary.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
+from secretary.runtime.head.children import read_head_children
 from secretary.runtime.head_runtime_backends import (
     LegacyHeadRecordError,
     UnknownHeadRuntimeError,
@@ -283,7 +266,17 @@ from secretary.runtime.head_runtime_backends import (
     is_legacy_record,
 )
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from secretary.runtime.heads import (
+    HeadRegistryError,
+)
+from secretary.runtime.heads import (
+    required_role_default as _required_role_default,
+)
+from secretary.runtime.heads import (
+    resolve_head_id as _resolve_head_id,
+)
 from secretary.runtime.launch_prefix import pythonpath_prefix
+from secretary.runtime.local_pty_head import head_run_turn_reading
 from secretary.runtime.paths import configured_product_root
 from secretary.runtime.prompt_document import (
     PromptDocumentError,
@@ -295,6 +288,10 @@ from secretary.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 from secretary.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
+from secretary.tasks import (
+    durability_dirt,
+    specification_revision,
+)
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 
@@ -3282,14 +3279,6 @@ class CommandHostRuntime:
                 pid_file=pid_file or exc.run.pid_file,
                 evidence=evidence,
                 head_run=exc.run.to_json(),
-            )
-        if isinstance(exc, head_ops.HeadPaneBusy):
-            return HeadPaneNotReady(
-                f"the head pane was {_pane_state_label(exc.readiness)} and never took its launch "
-                f"prompt: {exc}",
-                readiness=exc.readiness,
-                pane=exc.pane,
-                evidence=evidence,
             )
         failure = HostError(str(exc))
         failure.evidence = evidence

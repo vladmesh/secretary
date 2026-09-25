@@ -8,6 +8,7 @@ from typing import Any
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.launch import (
+    LAUNCH_DELIVERY_MAX_ATTEMPTS,
     REVIEW_ROLE,
     STAGE_REVIEW,
     WORKER_ROLE,
@@ -15,7 +16,6 @@ from secretary.dispatch.launch import (
     bring_up_blocked_action,
     bring_up_blocked_reason,
     bring_up_terminal_reason,
-    LAUNCH_DELIVERY_MAX_ATTEMPTS,
     busy_launch_delivery,
     classify_bring_up_failure,
     clear_launch_intent,
@@ -24,12 +24,10 @@ from secretary.dispatch.launch import (
     defer_launch_delivery,
     forget_role_head,
     launch_aborted,
-    launch_deferred,
     launch_intent_unwritable,
     launch_left_a_head,
     mark_launch_aborted,
     pane_state_label,
-    reset_launch_attempts,
     undelivered_launch_delivery,
     write_launch_intent,
 )
@@ -339,7 +337,7 @@ def _provider_progress_for_status(
         provider_progress = getattr(
             host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
         )(task, record, kind)
-    except Exception:
+    except Exception:  # noqa: BLE001 — status probes can fail through any provider adapter
         provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
     return _admitted_provider_progress_for_status(
         provider_progress,
@@ -460,7 +458,7 @@ def recover_review_launch(
     ref = task["ref"]
     try:
         status = runtime.host.review_status(task, record)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — preserve ambiguous launches after any host failure
         # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
         # the same liveness question next tick; never launch beside a possibly-live head.
         return {
@@ -895,7 +893,7 @@ def start_review(
         bind_ingress(record, records, payload, role=REVIEW_ROLE, reference=ref)
     try:
         launch = runtime.host.start_review(task, record)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — classify every host launch refusal
         # Normalize and persist prompt evidence once; infrastructure failures carry none.
         _record_review_delivery_failure(record, exc)
         if isinstance(exc, HeadLaunchAborted):
@@ -934,26 +932,8 @@ def start_review(
                 outcome_reason="host review failed",
                 exc=exc,
             )
-        else:
-            deferred = launch_deferred(
-                record,
-                exc,
-                step="review",
-                ref=ref,
-                attempt_id=record.attempt_id or attempt_id,
-                role=REVIEW_ROLE,
-            )
-        if record.gate_state != "green" and deferred is not None:
-            # No green candidate to preserve, but a pane that is merely busy still defers: the card
-            # keeps its record in `review_starting`, which is the state the next tick recovers the
-            # launch from, so the round is delayed by a tick rather than lost to Blocked.
-            record.state = "review_starting"
-            records[ref] = record
-            runtime.save_records(payload, records)
-            return deferred
-        # No green candidate to hold, and the bounded pane deferral is spent. The classification is
-        # the same call the worker path makes, so the card's reason, the class in the transition and
-        # this tick's outcome are one statement. Nothing is relaunched from here.
+        # No green candidate to hold. The classification is the same call the worker path makes,
+        # so the card's reason, transition class and tick outcome are one statement.
         failure = classify_bring_up_failure(
             exc,
             record,
@@ -962,7 +942,7 @@ def start_review(
             attempt_id=record.attempt_id or attempt_id,
         )
         blocked_reason = bring_up_blocked_reason(
-            "review bring-up failed", exc, record, REVIEW_ROLE, failure=failure
+            "review bring-up failed", exc, failure=failure
         )
         attempt_accounting.terminal_effect(runtime, 
             task,
@@ -1014,7 +994,6 @@ def start_review(
     runtime.record_review_routing(task, record, launch.run)
     clear_launch_intent(record)
     record.review_started_at = record.review_progress_at = time.time()
-    reset_launch_attempts(record, REVIEW_ROLE)
     # The reviewer took the checkout, so any stuck-launch episode before it is over and its abort
     # ceiling starts fresh for the next one (issue:aa9a8ae4), as does any infrastructure hold the
     # card was retrying under (secretary-1401).
