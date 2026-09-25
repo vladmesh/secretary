@@ -677,6 +677,8 @@ def _github_gate(
 # can ever post them for this base".
 _WORKFLOW_DIR = Path(".github") / "workflows"
 _PR_EVENTS = ("pull_request", "pull_request_target")
+# The event a release merge raises on the integration base, read by the post-merge CI watch.
+_PUSH_EVENTS = ("push",)
 
 
 def _branch_pattern_matches(pattern: str, branch: str) -> bool:
@@ -695,13 +697,16 @@ def _branch_pattern_matches(pattern: str, branch: str) -> bool:
     return re.fullmatch(expression, branch) is not None
 
 
-def _event_triggers_base(spec: object, base: str) -> bool:
-    """Would this `on: pull_request:` block fire for a pull request whose base is `base`?"""
+def _event_triggers_base(spec: object, base: str, *, event: str = "pull_request") -> bool:
+    """Would this `on: <event>:` block fire for `base` (the PR's base, or the pushed branch)?"""
     if not isinstance(spec, dict):
-        # `pull_request:` with no filter at all fires for every base.
+        # `pull_request:` or `push:` with no filter at all fires for every base.
         return True
     include = spec.get("branches")
     exclude = spec.get("branches-ignore")
+    if event == "push" and include is None and exclude is None and ("tags" in spec or "tags-ignore" in spec):
+        # A push filter that names only tags never fires for a branch push.
+        return False
     if isinstance(exclude, list) and any(_branch_pattern_matches(str(item), base) for item in exclude):
         return False
     if isinstance(include, list):
@@ -709,8 +714,8 @@ def _event_triggers_base(spec: object, base: str) -> bool:
     return True
 
 
-def _workflow_triggers_base(document: object, base: str) -> bool:
-    """Does one parsed workflow declare a pull-request trigger that admits `base`?
+def _workflow_triggers_base(document: object, base: str, events: tuple[str, ...] = _PR_EVENTS) -> bool:
+    """Does one parsed workflow declare a trigger among `events` that admits `base`?
 
     YAML 1.1 reads a bare `on:` key as the boolean true, which is why both spellings are looked up.
     """
@@ -718,14 +723,41 @@ def _workflow_triggers_base(document: object, base: str) -> bool:
         return False
     triggers = document.get("on", document.get(True))
     if isinstance(triggers, str):
-        return triggers in _PR_EVENTS
+        return triggers in events
     if isinstance(triggers, list):
-        return any(str(item) in _PR_EVENTS for item in triggers)
+        return any(str(item) in events for item in triggers)
     if isinstance(triggers, dict):
-        for event in _PR_EVENTS:
-            if event in triggers and _event_triggers_base(triggers[event], base):
+        for event in events:
+            if event in triggers and _event_triggers_base(triggers[event], base, event=event):
                 return True
     return False
+
+
+def _workflows_missing_base(workspace: str, base: str, events: tuple[str, ...]) -> list[str] | None:
+    """The workflow files read when it is established that none of them fires on `events` for
+    `base`, or None when that cannot be established (no directory, no files, an unparsable file, or
+    one workflow that does fire)."""
+    root = Path(workspace) / _WORKFLOW_DIR
+    try:
+        files = sorted(path for path in root.iterdir() if path.suffix in (".yml", ".yaml") and path.is_file())
+    except OSError:
+        return None
+    if not files:
+        return None
+    names = []
+    for path in files:
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return None
+        if _workflow_triggers_base(document, base, events):
+            return None
+        names.append(path.name)
+    return names
+
+
+def _listed_workflows(names: list[str]) -> str:
+    return ", ".join(names[:6]) + (", …" if len(names) > 6 else "")
 
 
 def _impossible_trigger_reason(workspace: str, base: str) -> str:
@@ -738,27 +770,29 @@ def _impossible_trigger_reason(workspace: str, base: str) -> str:
     the base all leave the verdict where it was — ordinary pending — because a project may also be
     checked by something that is not Actions at all.
     """
-    root = Path(workspace) / _WORKFLOW_DIR
-    try:
-        files = sorted(path for path in root.iterdir() if path.suffix in (".yml", ".yaml") and path.is_file())
-    except OSError:
+    names = _workflows_missing_base(workspace, base, _PR_EVENTS)
+    if names is None:
         return ""
-    if not files:
-        return ""
-    names = []
-    for path in files:
-        try:
-            document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, yaml.YAMLError):
-            return ""
-        if _workflow_triggers_base(document, base):
-            return ""
-        names.append(path.name)
-    listed = ", ".join(names[:6]) + (", …" if len(names) > 6 else "")
     return (
         f"no workflow in this candidate triggers on a pull request into `{base}` "
-        f"({len(names)} workflow file(s) read: {listed}), so GitHub will never create a check-run "
+        f"({len(names)} workflow file(s) read: {_listed_workflows(names)}), so GitHub will never create a check-run "
         "for it: this rollup is empty because nothing can fill it, not because CI is still starting"
+    )
+
+
+def push_trigger_absent_reason(workspace: str, base: str) -> str:
+    """Why a push to `base` starts no workflow of this checkout, or "".
+
+    The same trigger analysis as `_impossible_trigger_reason`, asked about the `push` event a
+    release merge raises on the integration base, with the same rule: only a positive answer counts,
+    and anything unreadable leaves the post-merge watch waiting for a run.
+    """
+    names = _workflows_missing_base(workspace, base, _PUSH_EVENTS)
+    if names is None:
+        return ""
+    return (
+        f"no workflow triggers on a push to `{base}` ({len(names)} workflow file(s) read: "
+        f"{_listed_workflows(names)}), so the merge starts no CI run on the base"
     )
 
 

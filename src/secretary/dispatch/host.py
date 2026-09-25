@@ -119,6 +119,7 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
+from secretary.dispatch.post_merge import pr_merge_commit
 from secretary.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
@@ -165,6 +166,7 @@ from secretary.dispatch.types import (
     HeadPaneNotReady,
     HostError,
     LegacyDispatcherRecord,
+    MergeLanding,
     ProjectGitAccessError,
     ReviewLaunch,
     review_pane_label,
@@ -1623,7 +1625,14 @@ class CommandHostRuntime:
                 run = updated
         return _provider_progress_for_run(run)
 
-    def nudge_observer(self, record: Any, *, sprint: dict[str, Any], change: str = "linked-card") -> str:
+    def nudge_observer(
+        self,
+        record: Any,
+        *,
+        sprint: dict[str, Any],
+        change: str = "linked-card",
+        post_merge: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Give an idle observer one event-driven turn without replacing its head."""
         if self.mode == "noop":
             return DELIVERY_ACCEPTED
@@ -1637,7 +1646,9 @@ class CommandHostRuntime:
         # (issue:70562b15a7dc8764437e).
         waking = self._observer_lifecycle_run(record)
         delivery = getattr(record, "delivery", None)
-        message = _render_observer_wake_context(sprint, change=change, delivery=delivery)
+        message = _render_observer_wake_context(
+            sprint, change=change, delivery=delivery, post_merge=post_merge
+        )
         document = Path(workspace) / OBSERVER_PROMPT_FILE
         try:
             # One boundary for every adapter: atomically replace the complete live document before
@@ -2120,24 +2131,39 @@ class CommandHostRuntime:
         if not availability.allows(project):
             raise HostError(f"project repo for {project!r} is unavailable")
 
-    def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+    def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> MergeLanding | None:
+        """Land the reviewed branch on the card's integration base and say what landed.
+
+        Returns the `MergeLanding` of each of the three merge paths, which the release turns into a
+        post-merge CI watch, or None when nothing was merged (noop mode, no workspace, automerge off):
+        a release that merged nothing wakes the observer on its Done as before.
+        """
         self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
-            return
+            return None
         self._decide_workspace_environment_ownership(record.workspace)
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
-            return
+            return None
         branch = _legacy_worker_branch(task["ref"])
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
-        if _validation_ci(self, task) == "github":
+        ci = _validation_ci(self, task)
+        if ci == "github":
             self._merge_github_pr(task, record, branch, base)
             self._require_production_runtime("release-after")
-            return
+            return MergeLanding(
+                sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                base=base,
+                path="github-pr",
+                ci=ci,
+                branch=branch,
+            )
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo, project=task["project"])
             self._require_production_runtime("release-after")
-            return
+            return MergeLanding(
+                sha=self._pushed_branch_head(record, branch), base=base, path="instance-repo", ci=ci
+            )
         # Publish onto the card's integration base (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the checkout: that is how a merged self-modification
         # reaches the next oneshot tick. The base is read from the card rather than hard-coded to
@@ -2151,6 +2177,17 @@ class CommandHostRuntime:
         self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
         self._require_production_runtime("release-after")
+        return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
+
+    def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
+        """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
+        a successful one the base is exactly this branch head."""
+        try:
+            return self._run(
+                ["git", "-C", record.workspace, "rev-parse", branch], "post-merge landed commit"
+            ).stdout.strip()
+        except HostError:
+            return ""
 
     def _complete_green_instance_repo(
         self,

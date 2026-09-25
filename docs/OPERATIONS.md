@@ -1074,7 +1074,8 @@ Each sprint's decision appears under the `observer-reconcile` step:
 - `observer-live` — alive, nothing done;
 - `observer-waiting` — working, no durable event needs a turn;
 - `observer-idle` — ready for input, nothing owed;
-- `observer-nudged` — a committed linked-card event woke an idle observer;
+- `observer-nudged` — a committed linked-card event woke an idle observer (after a release that merged,
+  the post-merge CI result is that event, not the Done);
 - `observer-wake-pending` — a sent batch awaits acknowledgement;
 - `observer-wake-waiting` — an event arrived while working; the next tick with a ready observer nudges
   unless exact provider progress shows the run advancing. `admission` says what the provider source
@@ -1381,6 +1382,13 @@ publishing, the remote default branch is merged into the local instance checkout
 between publish and merge is repeated idempotently.
 
 Teardown happens only on this path; parked and rework cards keep their workspace and branch.
+
+A merge that landed opens a post-merge CI watch before the card reaches Done, and the observer is woken
+on its result (`green`, `red`, `absent` or `timeout`), not on the Done
+([Protocols](PROTOCOLS.md#post-merge-ci)). `secretary dispatcher production-observe` lists open watches
+under `post_merge_watches`; each resolution is a `post-merge-ci` tick action, and the result is a
+dispatcher comment on the card and on its sprint. `SECRETARY_POST_MERGE_CI_CEILING_SECONDS` (3600)
+bounds the wait.
 
 Kill switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` disables push and fast-forward. The card still reaches
 done and needs a manual merge. Default on.
