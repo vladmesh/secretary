@@ -1046,9 +1046,12 @@ landed on the base, start time) before the Done move, and the Done carries a `re
 The watch survives a restart and holds no claim: the card is Done and is not active for claims or for
 the sprint's one-card rule.
 
-Each tick reads the base's CI for that exact commit with the gate's own reading (check-runs and commit
-statuses, narrowed to `validation.required_checks` when declared) and resolves the watch to exactly one
-of:
+Each tick reads the base's CI for that exact commit (every check-runs page and the combined status) and
+judges it in one place, `post_merge.read_merge_ci`, with the gate's rollup narrowed to
+`validation.required_checks` when declared. The result is terminal only for a reading that is complete
+and exact: every answer a well-formed JSON object of the expected shape, every check run and the status
+naming the full merge commit, the check runs read across all pages adding up to `total_count`, and
+every required check present. The watch resolves to exactly one of:
 
 - `green` — every selected check finished successfully;
 - `red` — at least one failed; the result carries the run ids, the failed check names and the gate's
@@ -1058,14 +1061,15 @@ of:
 - `timeout` — no terminal result within `SECRETARY_POST_MERGE_CI_CEILING_SECONDS`, default 3600 (one
   hour).
 
-A transport error, an unreadable or malformed `gh` answer, a check for another commit, a completed
-check without a conclusion and a run that has not started are all pending until the ceiling; none is
-ever `green`. A required check that runs only on pull requests therefore holds the watch to the
+If any one condition fails, the whole reading is pending, whatever the other answer says: a transport
+error, an unreadable or malformed `gh` answer, a partial page set, a check for another commit, a
+completed check without a conclusion, a run that has not started. Pending lasts until the ceiling and
+then resolves `timeout`; none of it is ever `green`. A required check that runs only on pull requests therefore holds the watch to the
 ceiling.
 
 The result is written to the watch first and then published once, under fixed request ids: one
 dispatcher card event (a comment carrying the `post_merge_ci` payload) and, for a sprint card, one
-dispatcher comment on the sprint naming the card, merge commit, result and runs. A replay after a crash
+dispatcher comment on the sprint naming the card, the full 40-hex merge commit, result and runs. A replay after a crash
 republishes the same fact and writes nothing new. The one enforcement place is the observer
 significance predicate (`tasks.is_significant_card_event`): the Done of a release that merged is not a
 wake, the post-merge result is. A Done with no merge (research and infra cards, a release that merged

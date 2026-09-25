@@ -13,10 +13,12 @@ with the gate's own machinery and resolves the watch to exactly one of four resu
   decided when the watch is opened, without waiting;
 - `timeout`: no terminal result within `SECRETARY_POST_MERGE_CI_CEILING_SECONDS` (default 3600).
 
-Anything that is not a terminal answer about this commit (a transport error, an unreadable or
-malformed `gh` answer, a check for another commit, a completed check with no conclusion, a run that
-has not started) is pending until the ceiling. Nothing but a complete set of successful checks is
-ever `green`.
+`read_merge_ci` is the one place the answers become green or red, and only from a reading that is
+complete and exact: every answer well-formed, every check run and the status naming the full merge
+commit, all check-run pages read up to `total_count`, every required check present. Anything else
+(a transport error, an unreadable or malformed `gh` answer, a partial page set, a check for another
+commit, a completed check with no conclusion, a run that has not started) is pending until the
+ceiling, whatever the other answer says.
 
 The result is written to the watch before anything is published, so a replayed tick publishes the
 same fact under the same request ids: one card event (the observer wake, see
@@ -26,19 +28,21 @@ sprint. The watch is dropped only after both are on the board.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from secretary.dispatch.gate import (
     _actions_run_id,
+    _backend_call,
     _check_name,
     _check_result,
     _failed_log,
-    _gh_api,
     _name_with_owner,
     _required_checks,
     _rollup,
@@ -249,8 +253,8 @@ def _repo_dir(runtime: Any, project: str) -> Path | None:
 def _read_ci(runtime: Any, watch: dict[str, Any]) -> dict[str, Any] | None:
     """A terminal green/red reading of the base CI for the merge commit, or None (pending).
 
-    Every question goes through the gate's backend call; a transport or backend failure is
-    remembered on the watch as its last state and is pending, never an answer.
+    This only asks: the answers are judged by `read_merge_ci` and nowhere else. A question that
+    cannot even be put (no merge commit yet, no repository name) is pending too.
     """
     host = runtime.host
     project = str(watch.get("project") or "")
@@ -270,55 +274,179 @@ def _read_ci(runtime: Any, watch: dict[str, Any]) -> dict[str, Any] | None:
             watch["repo"] = _name_with_owner(host, str(repo_dir))
         repo = str(watch["repo"])
         required = _required_checks(host, {"project": project})
-        items = _commit_checks(host, repo, sha)
+        pages, status = _fetch_answers(host, repo, sha)
     except (HostError, OSError, ValueError, TypeError, AttributeError) as exc:
         watch["last_state"] = safe_one_line(f"CI unreadable: {exc}", limit=300)
         return None
-    rollup, _first = _rollup(items, required)
-    selected = _selected_checks(items, required)
-    runs = _runs(repo, selected)
-    watch["last_runs"] = runs
-    if rollup == "SUCCESS":
-        watch["last_state"] = "success"
-        return {"result": "green", "runs": runs}
-    if rollup != "FAILURE":
-        watch["last_state"] = f"{rollup.lower()} ({len(selected)} check(s))"
+    reading = read_merge_ci(pages, status, sha, required)
+    runs = _runs(repo, list(reading.checks))
+    if runs:
+        watch["last_runs"] = runs
+    watch["last_state"] = reading.reason or reading.result
+    if reading.result == "pending":
         return None
-    failed = [item for item in selected if _check_result(item) == "fail"]
-    classification, reasons = _classify(host, repo, failed)
-    return {
-        "result": "red",
-        "runs": runs,
-        "failed_checks": sorted({safe_one_line(_check_name(item)) or "?" for item in failed}),
-        "classification": classification,
-        **({"classification_reason": ", ".join(reasons)} if reasons else {}),
-    }
+    if reading.result == "red":
+        classification, reasons = _classify(host, repo, list(reading.failed))
+        return {
+            "result": reading.result,
+            "runs": runs,
+            "failed_checks": sorted({safe_one_line(_check_name(item)) or "?" for item in reading.failed}),
+            "classification": classification,
+            **({"classification_reason": ", ".join(reasons)} if reasons else {}),
+        }
+    return {"result": reading.result, "runs": runs}
 
 
-def _commit_checks(host: Any, repo: str, sha: str) -> list[dict[str, Any]]:
-    """Check-runs and commit statuses for exactly `sha`, with every hostile shape made pending.
+#: Check-runs are read in pages of this size, at most this many pages; a set larger than that
+#: never reads complete and times out rather than being judged on a part.
+_PAGE_SIZE = 100
+_MAX_PAGES = 20
 
-    An entry that names another commit is dropped; a completed check-run without a conclusion is
-    read as still running; a statuses answer for another commit is ignored whole.
+
+def _answer(host: Any, path: str) -> str | None:
+    """One raw `gh api` answer, or None when no answer came (transport, 5xx, 404, any non-zero)."""
+    try:
+        completed = _backend_call(host, ["gh", "api", path], "post-merge gh api")
+    except HostError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return str(completed.stdout or "")
+
+
+def _json_object(text: str | None) -> dict[str, Any] | None:
+    if text is None:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _fetch_answers(host: Any, repo: str, sha: str) -> tuple[list[str | None], str | None]:
+    """Every check-runs page up to the answer's own `total_count`, and the combined status.
+
+    Only the paging is decided here: a page that is not a usable object stops the reading, and
+    `read_merge_ci` then finds it short.
     """
-    items: list[dict[str, Any]] = []
-    runs = _gh_api(host, f"repos/{repo}/commits/{sha}/check-runs", jq=".check_runs")
-    if isinstance(runs, list):
-        for item in runs:
+    pages: list[str | None] = []
+    read = 0
+    for page in range(1, _MAX_PAGES + 1):
+        text = _answer(host, f"repos/{repo}/commits/{sha}/check-runs?per_page={_PAGE_SIZE}&page={page}")
+        pages.append(text)
+        parsed = _json_object(text)
+        items = parsed.get("check_runs") if parsed is not None else None
+        total = _count(parsed.get("total_count")) if parsed is not None else None
+        if not isinstance(items, list) or total is None or not items:
+            break
+        read += len(items)
+        if read >= total:
+            break
+    status = _answer(host, f"repos/{repo}/commits/{sha}/status?per_page={_PAGE_SIZE}")
+    return pages, status
+
+
+@dataclass(frozen=True)
+class CiReading:
+    """What `read_merge_ci` made of one tick's answers."""
+
+    result: str  # "green" | "red" | "pending"
+    reason: str = ""
+    # Every well-formed check seen, for the run list; the selected ones on a terminal reading.
+    checks: tuple[dict[str, Any], ...] = ()
+    failed: tuple[dict[str, Any], ...] = ()
+
+
+_STATUS_STATES = {"success", "failure", "error", "pending"}
+
+
+def read_merge_ci(
+    check_run_pages: list[str | None], status_answer: str | None, sha: str, required: list[str]
+) -> CiReading:
+    """The one place the post-merge watch turns raw `gh` answers for the merge commit into a result.
+
+    `green` or `red` only from a reading that is complete and exact:
+
+    - every check-runs page and the combined status answered with a JSON object of the expected
+      shape (`total_count` and `check_runs`; `sha`, `total_count` and `statuses`);
+    - every check run (`head_sha`) and the status object (`sha`) name exactly the full merge commit;
+    - the check runs read across all pages add up to the answer's `total_count`, and so do the
+      statuses;
+    - every declared required check is present.
+
+    If any one of these fails the whole reading is pending, whatever the other answer says. Only
+    then is the gate's `_rollup` asked, and only here: `SUCCESS` is green, `FAILURE` red, anything
+    else pending.
+    """
+
+    def pending(reason: str, seen: list[dict[str, Any]] | None = None) -> CiReading:
+        return CiReading("pending", reason, tuple(seen or ()))
+
+    if not _SHA_RE.fullmatch(sha):
+        return pending("the merge commit is not a full commit id")
+    if not check_run_pages:
+        return pending("no check-runs answer")
+    runs: list[dict[str, Any]] = []
+    total: int | None = None
+    for number, text in enumerate(check_run_pages, start=1):
+        page = _json_object(text)
+        items = page.get("check_runs") if page is not None else None
+        count = _count(page.get("total_count")) if page is not None else None
+        if page is None or not isinstance(items, list) or count is None:
+            return pending(f"check-runs page {number} is not a readable answer", runs)
+        if total is not None and count != total:
+            return pending("check-runs total_count changed between pages", runs)
+        total = count
+        for item in items:
             if not isinstance(item, dict):
-                continue
-            head = item.get("head_sha")
-            if head is not None and str(head) != sha:
-                continue
-            if str(item.get("status") or "").upper() == "COMPLETED" and not str(item.get("conclusion") or ""):
-                item = {**item, "status": "in_progress"}
-            items.append(item)
-    combined = _gh_api(host, f"repos/{repo}/commits/{sha}/status", jq=".")
-    if isinstance(combined, dict) and str(combined.get("sha") or "") == sha:
-        statuses = combined.get("statuses")
-        if isinstance(statuses, list):
-            items.extend(item for item in statuses if isinstance(item, dict))
-    return items
+                return pending("a check run is not an object", runs)
+            runs.append(item)
+    if len(runs) != total:
+        return pending(f"read {len(runs)} of {total} check run(s)", runs)
+    for item in runs:
+        if item.get("head_sha") != sha:
+            return pending("a check run does not name the merge commit", runs)
+        status = item.get("status")
+        if not isinstance(item.get("name"), str) or not item["name"].strip() or not isinstance(status, str):
+            return pending("a check run has no name or status", runs)
+        conclusion = item.get("conclusion")
+        if status.lower() == "completed" and (not isinstance(conclusion, str) or not conclusion):
+            return pending(f"check run {safe_one_line(item['name'])} completed without a conclusion", runs)
+    combined = _json_object(status_answer)
+    statuses = combined.get("statuses") if combined is not None else None
+    count = _count(combined.get("total_count")) if combined is not None else None
+    if combined is None or not isinstance(statuses, list) or count is None:
+        return pending("the combined status is not a readable answer", runs)
+    if combined.get("sha") != sha:
+        return pending("the combined status does not name the merge commit", runs)
+    if count != len(statuses):
+        return pending(f"read {len(statuses)} of {count} commit status(es)", runs)
+    for item in statuses:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("context"), str)
+            or not item["context"].strip()
+            or str(item.get("state")) not in _STATUS_STATES
+        ):
+            return pending("a commit status has no context or state", runs)
+    checks = runs + statuses
+    present = {_check_name(item) for item in checks}
+    missing = [name for name in required if name not in present]
+    if missing:
+        return pending("required check(s) not posted: " + ", ".join(missing), checks)
+    rollup, _first = _rollup(checks, required)
+    selected = _selected_checks(checks, required)
+    if rollup == "SUCCESS":
+        return CiReading("green", "", tuple(selected))
+    if rollup == "FAILURE":
+        failed = [item for item in selected if _check_result(item) == "fail"]
+        return CiReading("red", "", tuple(selected), tuple(failed))
+    return pending(f"{rollup.lower()} ({len(selected)} check(s))", selected)
 
 
 def _runs(repo: str, items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -357,8 +485,9 @@ def render_fact(fact: dict[str, Any]) -> str:
     card = str(fact.get("card") or "")
     base = str(fact.get("base") or "")
     sha = str(fact.get("merge_sha") or "")
-    where = f"`{base}` @ `{sha[:12]}`" if sha else f"`{base}` (merge commit unknown)"
-    runs = fact.get("runs") if isinstance(fact.get("runs"), list) else []
+    where = f"`{base}` @ `{sha}`" if sha else f"`{base}` (merge commit unknown)"
+    raw_runs = fact.get("runs")
+    runs: list[Any] = raw_runs if isinstance(raw_runs, list) else []
     run_text = ", ".join(
         f"{run.get('id')} ({run.get('url')})" for run in runs if isinstance(run, dict) and run.get("id")
     )
@@ -369,7 +498,8 @@ def render_fact(fact: dict[str, Any]) -> str:
         lines.append(
             "The release merged, but the base's CI failed on the merge commit: this is not a plain Done."
         )
-        failed = fact.get("failed_checks") if isinstance(fact.get("failed_checks"), list) else []
+        raw_failed = fact.get("failed_checks")
+        failed: list[Any] = raw_failed if isinstance(raw_failed, list) else []
         lines.append("- failed checks: " + (", ".join(str(name) for name in failed) or "(unnamed)"))
         classification = str(fact.get("classification") or "product")
         detail = str(fact.get("classification_reason") or "")

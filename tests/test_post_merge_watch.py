@@ -150,12 +150,18 @@ def _check(name: str, *, status: str = "completed", conclusion: str | None = "su
 
 
 class _GhHost:
-    """`gh` answers keyed by what is asked; an exception answer is raised as the tool failing."""
+    """`gh` answers keyed by what is asked; an exception answer is raised as the tool failing.
 
-    def __init__(self, *, check_runs: Any = (), status: Any = None, logs: dict[str, str] | None = None,
+    `check_runs` as a list is served the way GitHub serves it: in pages of the requested size, each
+    carrying the list's length as `total_count`. As a callable it answers each page number itself;
+    anything else is the raw answer for every page. `status` as a list is a well-formed combined
+    status for the merge commit; anything else is its raw answer.
+    """
+
+    def __init__(self, *, check_runs: Any = (), status: Any = (), logs: dict[str, str] | None = None,
                  required: list[str] | None = None, merge_commit: str = SHA) -> None:
         self.check_runs = check_runs
-        self.status = status if status is not None else {"sha": SHA, "statuses": []}
+        self.status = status
         self.logs = logs or {}
         self.merge_commit = merge_commit
         self.calls: list[list[str]] = []
@@ -175,14 +181,29 @@ class _GhHost:
             return value
         return _completed(value if isinstance(value, str) else json.dumps(value))
 
+    def _check_runs_page(self, query: dict[str, str]) -> Any:
+        page = int(query.get("page", "1"))
+        if callable(self.check_runs):
+            return self.check_runs(page)
+        if isinstance(self.check_runs, (list, tuple)):
+            size = int(query.get("per_page", "30"))
+            items = list(self.check_runs)
+            return {"total_count": len(items), "check_runs": items[(page - 1) * size : page * size]}
+        return self.check_runs
+
     def run_capture(self, args, label, *, cwd=None):
         self.calls.append(list(args))
         if args[:3] == ["gh", "repo", "view"]:
             return _completed(REPO + "\n")
-        if args[:2] == ["gh", "api"] and args[2].endswith("/check-runs"):
-            return self._answer(self.check_runs)
-        if args[:2] == ["gh", "api"] and args[2].endswith("/status"):
-            return self._answer(self.status)
+        if args[:2] == ["gh", "api"]:
+            path, _, raw_query = args[2].partition("?")
+            query = dict(part.split("=", 1) for part in raw_query.split("&") if "=" in part)
+            if path.endswith("/check-runs"):
+                return self._answer(self._check_runs_page(query))
+            if path.endswith("/status"):
+                if isinstance(self.status, (list, tuple)):
+                    return self._answer({"sha": SHA, "total_count": len(self.status), "statuses": list(self.status)})
+                return self._answer(self.status)
         if args[:3] == ["gh", "run", "view"] and "--log-failed" in args:
             return _completed(self.logs.get(args[3], ""))
         raise AssertionError(f"unexpected gh call {args}")
@@ -377,8 +398,11 @@ class ResolutionTests(unittest.TestCase):
         # The sprint's evidence: one dispatcher comment naming card, commit, result and run.
         [sprint_comment] = runtime.sprint_writer.events
         self.assertEqual(sprint_comment["ref"], SPRINT)
-        for needle in (REF, SHA[:12], "GREEN", f"https://github.com/{REPO}/actions/runs/501"):
+        for needle in (REF, SHA, "GREEN", f"https://github.com/{REPO}/actions/runs/501"):
             self.assertIn(needle, sprint_comment["body"])
+        # The full 40-hex merge commit, in the sprint comment and in the card event text alike.
+        self.assertIn(f"`{SHA}`", sprint_comment["body"])
+        self.assertIn(f"`{SHA}`", woken[0]["body"])
 
     def test_red_carries_runs_failed_checks_and_the_gate_classification(self) -> None:
         infra_log = (
@@ -464,40 +488,120 @@ class ResolutionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {post_merge.CEILING_ENV: "not-a-number"}):
             self.assertEqual(post_merge.ceiling_seconds(), 3600)
 
-    def test_hostile_gh_answers_are_pending_never_green(self) -> None:
-        green = [_check("unit")]
-        table = [
-            ("empty answer", "", None),
-            ("not json", "<html>rate limited</html>", None),
-            ("an object, not a list", {"message": "Not Found"}, None),
-            ("entries without status", [{"name": "unit"}], None),
-            ("check for another commit", [_check("unit", head_sha=OTHER_SHA)], None),
-            ("completed with a null conclusion", [_check("unit", conclusion=None)], None),
-            ("transport failure", HostError("gh: connection reset"), None),
-            ("backend 5xx", _completed("", 1, "gh: Server Error (HTTP 502)"), None),
-            ("backend 404", _completed("", 1, "gh: Not Found (HTTP 404)"), None),
-            ("statuses for another commit", [], {"sha": OTHER_SHA, "statuses": [{"context": "ci", "state": "success"}]}),
-            ("statuses without a commit", [], {"statuses": [{"context": "ci", "state": "success"}]}),
-        ]
-        for label, check_runs, status in table:
-            with self.subTest(label):
-                runtime = _runtime(_GhHost(check_runs=check_runs, status=status))
-                payload: dict = {}
-                watch = _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
-                for now in (1001.0, 2000.0, 4599.0):
-                    self.assertEqual(post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=now), [])
-                self.assertTrue(watch["last_state"])
-                outcomes = post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=4600.0)
-                self.assertEqual([outcome["result"] for outcome in outcomes], ["timeout"])
-                self.assertNotIn("green", [event["payload"]["post_merge_ci"]["result"] for event in runtime.writer.events])
-        # The control: the same scripted host with a real answer is green.
-        runtime = _runtime(_GhHost(check_runs=green))
-        payload = {}
+    def _never_green_until_timeout(self, host: _GhHost) -> None:
+        runtime = _runtime(host)
+        payload: dict = {}
+        watch = _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        for now in (1001.0, 2000.0, 4599.0):
+            self.assertEqual(post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=now), [])
+        self.assertTrue(watch["last_state"])
+        outcomes = post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=4600.0)
+        self.assertEqual([outcome["result"] for outcome in outcomes], ["timeout"])
+        self.assertEqual(
+            [event["payload"]["post_merge_ci"]["result"] for event in runtime.writer.events], ["timeout"]
+        )
+
+    def test_one_hostile_endpoint_holds_the_reading_whatever_the_other_says(self) -> None:
+        """The product of both endpoints: one green and well-formed, the other hostile. Every cell
+        is pending until the ceiling, then `timeout`, never green."""
+        green_runs = [_check("unit")]
+        green_status = [{"context": "ci/external", "state": "success"}]
+        green_status_object = {"sha": SHA, "total_count": 1, "statuses": green_status}
+        hostile_check_runs = {
+            "empty": "",
+            "non-JSON": "{not json",
+            "HTML": "<html><body>rate limited</body></html>",
+            "wrong shape": {"message": "ok", "check_runs": "none"},
+            "missing SHA": {"total_count": 1, "check_runs": [_check("unit", head_sha=None)]},
+            "wrong SHA": {"total_count": 1, "check_runs": [_check("unit", head_sha=OTHER_SHA)]},
+            "null conclusion": {"total_count": 1, "check_runs": [_check("unit", conclusion=None)]},
+            "transport error": HostError("gh: connection reset"),
+            "5xx": _completed("", 1, "gh: Server Error (HTTP 502)"),
+            "404": _completed("", 1, "gh: Not Found (HTTP 404)"),
+        }
+        hostile_status = {
+            "empty": "",
+            "non-JSON": "{not json",
+            "HTML": "<html><body>rate limited</body></html>",
+            "wrong shape": {"sha": SHA, "total_count": 1, "statuses": "none"},
+            "missing SHA": {"total_count": 1, "statuses": green_status},
+            "wrong SHA": {"sha": OTHER_SHA, "total_count": 1, "statuses": green_status},
+            "null conclusion": {"sha": SHA, "total_count": 1, "statuses": [{"context": "ci/external", "state": None}]},
+            "transport error": HostError("gh: connection reset"),
+            "5xx": _completed("", 1, "gh: Server Error (HTTP 502)"),
+            "404": _completed("", 1, "gh: Not Found (HTTP 404)"),
+        }
+        self.assertEqual(set(hostile_check_runs), set(hostile_status))
+        for kind, answer in hostile_check_runs.items():
+            with self.subTest(hostile="check-runs", kind=kind):
+                self._never_green_until_timeout(_GhHost(check_runs=answer, status=green_status_object))
+        for kind, answer in hostile_status.items():
+            with self.subTest(hostile="status", kind=kind):
+                self._never_green_until_timeout(_GhHost(check_runs=green_runs, status=answer))
+        # The control: both endpoints green and well-formed is green.
+        runtime = _runtime(_GhHost(check_runs=green_runs, status=green_status))
+        payload: dict = {}
         _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
         self.assertEqual(
             [o["result"] for o in post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0)],
             ["green"],
         )
+
+    def test_check_runs_are_judged_only_across_every_page(self) -> None:
+        """Page 1 is all green; a later page holds a pending and then a failed check. Partial pages
+        are pending, the complete set is red, and nothing is ever green."""
+        first_page = [_check(f"check-{index:03d}") for index in range(100)]
+        later_pages = [
+            ("the later page is missing from the answer", {"total_count": 101, "check_runs": []}),
+            ("the later page is unreadable", HostError("gh: connection reset")),
+            ("page 1 alone claims to be all", {"total_count": 100, "check_runs": []}),
+            ("the later check is still running", {"total_count": 101, "check_runs": [_check("check-100", status="in_progress", conclusion=None)]}),
+            ("the later check failed", {"total_count": 101, "check_runs": [_check("check-100", conclusion="failure", run="990")]}),
+        ]
+        runtime = _runtime(_GhHost(logs={"990": "check-100\tRun tests\t##[error]boom\n"}))
+        payload: dict = {}
+        _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        results = []
+        for tick, (label, later) in enumerate(later_pages, start=1):
+            with self.subTest(label):
+
+                def page(number: int, later: Any = later) -> Any:
+                    return {"total_count": 101, "check_runs": first_page} if number == 1 else later
+
+                runtime.host.check_runs = page
+                outcomes = post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1000.0 + tick)
+                results.append([outcome["result"] for outcome in outcomes])
+        self.assertEqual(results, [[], [], [], [], ["red"]])
+        [event] = runtime.writer.events
+        fact = event["payload"]["post_merge_ci"]
+        self.assertEqual(fact["failed_checks"], ["check-100"])
+        self.assertIn("990", [run["id"] for run in fact["runs"]])
+        pages_asked = [call[2] for call in runtime.host.calls if call[:2] == ["gh", "api"] and "/check-runs" in call[2]]
+        self.assertTrue(all("per_page=100" in path for path in pages_asked))
+        self.assertIn("page=2", pages_asked[-1])
+
+    def test_only_read_merge_ci_rolls_up_or_says_green(self) -> None:
+        """The one enforcement place, checked on the source: no other function of the watch calls
+        `_rollup`, and the only terminal `CiReading` values are built inside `read_merge_ci`."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(post_merge))
+        rollups, terminal = set(), set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_rollup":
+                    rollups.add(function.name)
+                if (
+                    isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "CiReading"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in {"green", "red"}
+                ):
+                    terminal.add(function.name)
+        self.assertEqual(rollups, {"read_merge_ci"})
+        self.assertEqual(terminal, {"read_merge_ci"})
 
     def test_a_required_check_that_never_ran_holds_the_watch(self) -> None:
         runtime = _runtime(_GhHost(check_runs=[_check("lint")], required=["unit"]))
