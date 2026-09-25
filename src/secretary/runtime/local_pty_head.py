@@ -163,6 +163,7 @@ prevent.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -2482,31 +2483,267 @@ def _journal_state(address: _Address, run_id: str) -> _DurableHead:
     seq = int(events[-1].get("seq") or 0)
     if result.truncated_tail or result.malformed or result.partial_head or not result.ordered:
         return _DurableHead(source=REHYDRATED_UNKNOWN, seq=seq)
-    draining = turn_open = exited = False
-    turn = 0
-    for event in events:
-        kind = str(event.get("kind") or "")
-        if kind == local_pty.RUN_STARTED:
-            draining = turn_open = exited = False
-            turn = 0
-        elif kind == local_pty.TURN_STARTED:
-            turn_open = True
-            turn = int(event.get("turn") or turn)
-        elif kind == local_pty.TURN_FINISHED:
-            turn_open = False
-        elif kind in (local_pty.DRAIN_REQUESTED, local_pty.RUN_STOPPING):
-            draining = True
-        elif kind == local_pty.RUN_EXITED:
-            exited = True
-            turn_open = False
+    replay = _replay_journal(events)
     return _DurableHead(
         source=REHYDRATED_FROM_JOURNAL,
         seq=seq,
-        draining=draining,
-        turn_open=turn_open,
-        turn=turn,
-        exited=exited,
+        draining=replay.draining,
+        turn_open=replay.turn_open,
+        turn=replay.turn,
+        exited=replay.exited,
     )
+
+
+@dataclass(frozen=True)
+class _JournalReplay:
+    """One run's records folded in sequence order: the head's shape as of the last of them.
+
+    The first five fields are what `_journal_state` has always derived. The rest are the times the
+    vitality reading needs (secretary-1739), carried on the same fold so that the two readers can
+    never disagree about when a turn opened or closed. Every time is the journal's own `at`, and
+    `times_valid` is false when a record whose time a field needs carried none a reader may
+    believe: the admission reader ignores it, the vitality reader refuses the whole window.
+    """
+
+    draining: bool = False
+    turn_open: bool = False
+    turn: int = 0
+    exited: bool = False
+    # A `turn.started` or `turn.finished` of the current incarnation was seen: a turn exists.
+    turn_seen: bool = False
+    # Any record that fixes the turn state by itself (`run.started`, `turn.*`, `run.exited`) was
+    # seen. A window that began mid-history can say the turn state only if this is true.
+    anchored: bool = False
+    turn_started_at: float = 0.0
+    turn_finished_at: float = 0.0
+    input_at: float = 0.0
+    progress_seq: int = 0
+    progress_at: float = 0.0
+    times_valid: bool = True
+
+
+def _replay_journal(events: Any) -> _JournalReplay:
+    """Fold one run's usable records, never raising on a value a record should not hold."""
+    replay = _JournalReplay()
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind == local_pty.RUN_STARTED:
+            # A new incarnation: nothing an older one wrote, its times included, answers for it.
+            replay = _JournalReplay(anchored=True)
+        elif kind == local_pty.TURN_STARTED:
+            at = _journal_time(event.get("at"))
+            replay = replace(
+                replay,
+                turn_open=True,
+                turn=_journal_count(event.get("turn"), replay.turn),
+                turn_seen=True,
+                anchored=True,
+                turn_started_at=at or 0.0,
+                times_valid=replay.times_valid and at is not None,
+            )
+        elif kind == local_pty.TURN_FINISHED:
+            at = _journal_time(event.get("at"))
+            replay = replace(
+                replay,
+                turn_open=False,
+                turn_seen=True,
+                anchored=True,
+                turn_finished_at=at or 0.0,
+                times_valid=replay.times_valid and at is not None,
+            )
+        elif kind == local_pty.INPUT_ACCEPTED:
+            at = _journal_time(event.get("at"))
+            replay = replace(replay, input_at=at or 0.0, times_valid=replay.times_valid and at is not None)
+        elif kind == local_pty.PROVIDER_PROGRESSED:
+            at = _journal_time(event.get("at"))
+            replay = replace(
+                replay,
+                progress_seq=_journal_count(event.get("seq"), 0),
+                progress_at=at or 0.0,
+                times_valid=replay.times_valid and at is not None,
+            )
+        elif kind in (local_pty.DRAIN_REQUESTED, local_pty.RUN_STOPPING):
+            replay = replace(replay, draining=True)
+        elif kind == local_pty.RUN_EXITED:
+            replay = replace(replay, exited=True, turn_open=False, anchored=True)
+    return replay
+
+
+#: The largest sequence or turn number a journal reading hands on. The writer counts from 1 in
+#: steps of one, so nothing real comes near it; a record that claims more is damaged, and a bound
+#: keeps a hostile `10**400` from reaching a cursor that is compared as text.
+_JOURNAL_COUNT_LIMIT = 2**53
+
+
+def _journal_count(value: Any, fallback: int) -> int:
+    """A positive record count (`seq`, `turn`) as the writer wrote it, else `fallback`."""
+    if type(value) is not int or not 0 < value <= _JOURNAL_COUNT_LIMIT:
+        return fallback
+    return value
+
+
+def _journal_time(value: Any) -> float | None:
+    """A record's `at` as epoch seconds, or `None` for anything the writer could not have written."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        at = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(at) or at <= 0:
+        return None
+    return at
+
+
+def head_run_turn_reading(
+    root: str | os.PathLike[str], run_id: str, *, max_bytes: int = local_pty.JOURNAL_TAIL_BYTES
+) -> dict[str, Any]:
+    """Whether this run's head is in a turn, and since when, from its supervisor's journal.
+
+    The vitality reading of the journal (secretary-1739): the Turn axis a local-pty head had no
+    source for, and a progress cursor that moves only on new screen content (since secretary-1738
+    `provider.progressed` is written for a line the head's screen had not shown in this turn). It
+    is the same bounded tail and the same fold as `_journal_state`, answered as data:
+
+      * `turn` is `active` while the last `turn.started` has no `turn.finished` after it, else
+        `idle`;
+      * `turn_since` is when that state began: the open turn's `turn.started`, or, for an idle
+        head, the later of the last `turn.finished`, `input.accepted` and `turn.started`, so a
+        delivery that reached the head restarts the clock even before its turn is folded;
+      * `progress_seq`/`progress_at` are the last `provider.progressed` in the window, 0 when the
+        window holds none.
+
+    **Every failure is an answer, never an exception** (the one guard of this source). A journal
+    that cannot be read, a window that holds no record of this run, a torn last line, any line the
+    strict validator (`_strict_record`) refuses -- another run's, out of order, or carrying a value
+    its writer could not have written -- a head the journal says exited, and a run with no turn yet
+    all come back as `{"state": "unavailable", "reason": ...}`. The caller reads that as a channel
+    that did not answer, never as a head that stopped. The window is read raw (`tail_window`),
+    because `read_tail` coerces `seq` for the admission reader and a coerced value must not become
+    stall evidence.
+
+    A window that began mid-history (`partial_head`, the usual case: a worker's journal outgrows
+    `JOURNAL_TAIL_BYTES` within minutes) is not refused as `_journal_state` refuses it. That reader
+    must not say "no drain" on the strength of a drain it may not have seen; this one asks only
+    about the turn, and the turn state after a `turn.started`, `turn.finished`, `run.started` or
+    `run.exited` depends on nothing older. So a partial window answers when it holds one of them,
+    and is unavailable when it does not.
+    """
+    try:
+        return _turn_reading(
+            protocol.run_dir_for(root, run_id) / protocol.JOURNAL_NAME, str(run_id), max_bytes
+        )
+    except Exception as exc:  # noqa: BLE001 - the source's one guard: a failed read is no answer
+        return _turn_unavailable(f"the supervisor journal could not be read ({type(exc).__name__})")
+
+
+def _turn_reading(path: Path, run_id: str, max_bytes: int) -> dict[str, Any]:
+    window = local_pty.tail_window(path, max_bytes=max_bytes)
+    if window is None:
+        return _turn_unavailable("the supervisor journal holds no record of this run")
+    raw, partial_head = window
+    if raw and not raw.endswith(b"\n"):
+        return _turn_unavailable("the supervisor journal's last line is torn")
+    events: list[dict[str, Any]] = []
+    for number, line in enumerate(raw.split(b"\n")[:-1] if raw else (), start=1):
+        refusal = _strict_record(line, run_id, events[-1] if events else None)
+        if isinstance(refusal, str):
+            return _turn_unavailable(f"supervisor journal line {number} of the window {refusal}")
+        events.append(refusal)
+    if not events:
+        return _turn_unavailable("the supervisor journal holds no record of this run")
+    replay = _replay_journal(events)
+    if partial_head and not replay.anchored:
+        return _turn_unavailable(
+            "the supervisor journal window begins mid-history and holds no turn boundary"
+        )
+    if not replay.times_valid:
+        return _turn_unavailable("a supervisor journal record carries no valid time")
+    if replay.exited:
+        return _turn_unavailable("the supervisor journal says the head exited")
+    if not replay.turn_seen:
+        return _turn_unavailable("no turn has started in this run yet")
+    since = (
+        replay.turn_started_at
+        if replay.turn_open
+        else max(replay.turn_finished_at, replay.input_at, replay.turn_started_at)
+    )
+    return {
+        "state": "observed",
+        "run_id": run_id,
+        "turn": "active" if replay.turn_open else "idle",
+        "turn_since": since,
+        "turn_number": replay.turn,
+        "progress_seq": replay.progress_seq,
+        "progress_at": replay.progress_at,
+        "seq": events[-1]["seq"],
+    }
+
+
+#: The epoch-seconds range a record's `at` may hold: 2000-01-01 to 2100-01-01. The writer stamps
+#: `time.time()`, so anything outside is damage, not an early or late clock.
+_JOURNAL_EPOCH_MIN = 946_684_800.0
+_JOURNAL_EPOCH_MAX = 4_102_444_800.0
+#: Kinds whose writer always stamps the turn number (`supervisor.py`); on them `turn` is required.
+_TURN_NUMBERED = frozenset({local_pty.TURN_STARTED, local_pty.TURN_FINISHED, local_pty.PROVIDER_PROGRESSED})
+
+
+def _strict_int(value: Any) -> bool:
+    """A JSON integer in `(0, 2**63)`: never a bool, float or string that could be coerced to one."""
+    return type(value) is int and 0 < value < 2**63
+
+
+def _strict_record(line: bytes, run_id: str, previous: dict[str, Any] | None) -> dict[str, Any] | str:
+    """One window line as the record its writer wrote, or why it is not one (secretary-1739 r2).
+
+    The vitality reading's one validator, applied to every line before the replay and never
+    coercing: `read_tail` turns a `seq` of `"12"` or `1e300` into an integer for the admission
+    reader, and a coerced value must not become stall evidence. A record of this run needs
+    `schema_version` exactly 1, `kind` a known string, `run_id` this run's string, `seq` a JSON
+    integer in `(0, 2**63)` greater than the line before, `at` a finite number inside
+    `[2000, 2100)`, and `turn` an integer in `(0, 2**63)` wherever present (required on the kinds
+    that always carry it). A blank line, bytes that are not UTF-8 JSON, a record of another run
+    and any failed field are all the same answer: the whole window is refused.
+    """
+    try:
+        record = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "is not a JSON record"
+    if not isinstance(record, dict):
+        return "is not a JSON object"
+    if (
+        type(record.get("schema_version")) is not int
+        or record.get("schema_version") != local_pty.JOURNAL_SCHEMA_VERSION
+    ):
+        return "has an unsupported schema_version"
+    kind = record.get("kind")
+    if not isinstance(kind, str) or kind not in local_pty.EVENT_KINDS:
+        return "has no known kind"
+    if not isinstance(record.get("run_id"), str):
+        return "has no run_id string"
+    if record["run_id"] != run_id:
+        return "names another run"
+    seq = record.get("seq")
+    if not _strict_int(seq):
+        return "has a seq that is not a positive JSON integer"
+    if previous is not None and seq <= previous["seq"]:
+        return "is out of sequence order"
+    at = record.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return "has a time that is not a number"
+    try:
+        at_seconds = float(at)
+    except OverflowError:
+        return "has a time that is not finite"
+    if not math.isfinite(at_seconds) or not _JOURNAL_EPOCH_MIN <= at_seconds < _JOURNAL_EPOCH_MAX:
+        return "has a time outside the epoch range"
+    if ("turn" in record or kind in _TURN_NUMBERED) and not _strict_int(record.get("turn")):
+        return "has a turn that is not a positive JSON integer"
+    return record
+
+
+def _turn_unavailable(reason: str) -> dict[str, Any]:
+    return {"state": "unavailable", "reason": reason}
 
 
 def _supervisor_state(status: Mapping[str, Any]) -> _DurableHead:

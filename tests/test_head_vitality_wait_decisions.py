@@ -744,7 +744,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
         seen: list[float] = []
         real = _reduce_vitality_under_test()
 
-        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0):
+        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0, **declared):
             seen.append(answer_owed_since)
             return real(
                 previous,
@@ -753,6 +753,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
                 thresholds,
                 retained=retained,
                 answer_owed_since=answer_owed_since,
+                **declared,
             )
 
         with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
@@ -984,6 +985,120 @@ class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase)
 
         self.assertEqual(outcome["action"], "worker-respawned")
         self.assertEqual(self._pilot_record()["worker_respawns"], 1)
+
+
+class IdleTurnOwedAnswerWaitTickTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """secretary-1739: the wait tick declares the owed answer and hands the journal cursor back.
+
+    The reducer's own tests (``tests/test_local_pty_journal_turn.py``) own the idle-turn
+    arithmetic; this pins the wiring: the worker's wait tick declares ``worker_started_at``, the
+    journal reading reaches the reduction, and the gate path's call declares nothing.
+    """
+
+    LIVE_MATCH: ClassVar[dict] = {
+        "known": True,
+        "alive": True,
+        "match": True,
+        "state": "live-match",
+        "stopped": False,
+    }
+
+    def test_the_owed_answer_is_the_phase_start_or_a_bounced_report(self) -> None:
+        from secretary.dispatch.state import DispatcherRecord
+
+        record = DispatcherRecord(
+            worker="w",
+            workspace="/tmp/w",
+            handle="",
+            head="h",
+            review_head="h",
+            attempt_id="a",
+            comment_baseline=0,
+            review_baseline=0,
+            state="in_progress",
+            claimed_at=0.0,
+        )
+        record.worker_started_at = 100.0
+        self.assertEqual(wait_vitality_module.answer_owed_since_for_wait(record, "worker"), 100.0)
+        record.worker_answer_owed_since = 150.0
+        self.assertEqual(wait_vitality_module.answer_owed_since_for_wait(record, "worker"), 150.0)
+        record.review_started_at = 300.0
+        self.assertEqual(wait_vitality_module.answer_owed_since_for_wait(record, "review"), 300.0)
+
+    def test_the_wait_tick_confirms_an_idle_worker_and_the_gate_path_does_not(self) -> None:
+        from secretary.dispatch.head_vitality import SnapshotSource
+        from secretary.dispatch.head_vitality_episode import (
+            DEFAULT_VITALITY_THRESHOLDS,
+            VitalityVerdict,
+            reduce_vitality,
+        )
+
+        self.start_dispatcher()
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"][CARD_REF]
+        run_id = record["worker_head_run"]["run_id"]
+        asked = time.time() - DEFAULT_VITALITY_THRESHOLDS.idle_turn_confirm_after - 120.0
+        record["worker_started_at"] = asked
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": True,
+            "reason": "pid",
+            "pid_confirmed": True,
+            "pid_status": dict(self.LIVE_MATCH),
+            "supervisor_journal": {
+                "state": "observed",
+                "run_id": run_id,
+                "turn": "idle",
+                "turn_since": asked + 30.0,
+                "progress_seq": 12,
+            },
+        }
+        seen: list[float] = []
+        adapters: list[str] = []
+
+        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0, adapter=""):
+            seen.append(answer_owed_since)
+            adapters.append(adapter)
+            return reduce_vitality(
+                previous,
+                snapshots,
+                now,
+                thresholds,
+                retained=retained,
+                answer_owed_since=answer_owed_since,
+                adapter=adapter,
+            )
+
+        with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
+            self.tick()
+        self.assertEqual(seen[0], asked)
+        # The fixture's worker runs on the codex adapter: a head the idle-turn premise holds for.
+        self.assertEqual(adapters[0], "codex")
+        stored = self.runtime.production_state.records(self.runtime.production_state.load())[CARD_REF]
+        episode = stored.worker_vitality_episode
+        self.assertIs(episode.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(episode.idle_turn_since, asked + 30.0)
+        self.assertIn(SnapshotSource.SUPERVISOR_JOURNAL.value, episode.evidence_cursors)
+
+        # The same observation reduced by the gate path's call, which declares nothing.
+        payload = self.runtime.production_state.load()
+        records = self.runtime.production_state.records(payload)
+        target = records[CARD_REF]
+        target.worker_vitality_episode = None
+        gate_episode = wait_vitality_module.reduce_and_store_vitality_episode(
+            self.runtime,
+            {"ref": CARD_REF},
+            target,
+            records,
+            payload,
+            dict(self.host.worker_status_result),
+            kind="worker",
+            now=time.time(),
+        )
+        self.assertEqual(gate_episode.idle_turn_since, 0.0)
+        self.assertIsNot(gate_episode.verdict, VitalityVerdict.CONFIRMED_STALL)
 
 
 if __name__ == "__main__":  # pragma: no cover

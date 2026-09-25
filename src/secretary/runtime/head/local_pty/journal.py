@@ -201,7 +201,9 @@ def _usable(record: Any) -> dict[str, Any] | None:
         return None
     try:
         seq = int(record["seq"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # `OverflowError` is `int(inf)`: `json.loads` reads a bare `Infinity`, and a damaged line
+        # is a malformed record, not an exception out of every reader of the file.
         return None
     if seq <= 0:
         return None
@@ -244,6 +246,22 @@ def read_tail(path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYT
 
     A missing file reads as an empty journal, exactly as it does for `read_events`.
     """
+    window = tail_window(path, max_bytes=max_bytes)
+    if window is None:
+        return JournalReadResult()
+    raw, partial_head = window
+    return _parsed(raw, partial_head=partial_head)
+
+
+def tail_window(
+    path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES
+) -> tuple[bytes, bool] | None:
+    """The raw bytes `read_tail` parses, and whether the window began mid-history.
+
+    `None` for a missing file. A window that did not start at the file's beginning has its first
+    (cut) line already dropped. Exposed for a reader that must judge the records' own values rather
+    than the coerced ones `read_tail` hands back (the vitality reading, secretary-1739).
+    """
     if max_bytes <= 0:
         raise JournalError("a bounded journal read is bounded by a positive number of bytes")
     try:
@@ -253,11 +271,11 @@ def read_tail(path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYT
             handle.seek(start)
             raw = handle.read(min(max_bytes, max(0, size - start)))
     except FileNotFoundError:
-        return JournalReadResult()
+        return None
     if start <= 0:
-        return _parsed(raw, partial_head=False)
+        return raw, False
     cut = raw.find(b"\n")
-    return _parsed(b"" if cut < 0 else raw[cut + 1 :], partial_head=True)
+    return (b"" if cut < 0 else raw[cut + 1 :]), True
 
 
 def _parsed(raw: bytes, *, partial_head: bool) -> JournalReadResult:
