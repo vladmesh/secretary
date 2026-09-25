@@ -3626,6 +3626,19 @@ class CommandHostRuntime:
         """Point this card's live worker at one thing, through the head operation (secretary-1412)."""
         self._refuse_legacy_record(record, "deliver to the worker of")
         run = self.worker_lifecycle_run(record)
+        ingress = self._codex_provider_ingress(run)
+        if run.spec.adapter == "codex" and isinstance(run.fanout_policy.get("provider_source"), dict) and ingress:
+            def activate_and_bind() -> head_ops.HeadRun:
+                if before_send is not None:
+                    before_send()
+                try:
+                    return ingress.bind_before_delivery()
+                except Exception:  # noqa: BLE001 — provider telemetry cannot refuse a delivery
+                    return ingress.run
+
+            delivery_hook: Callable[[], head_ops.HeadRun | None] | None = activate_and_bind
+        else:
+            delivery_hook = before_send
         try:
             receipt = self.head_runtime_for(run).deliver(
                 run,
@@ -3634,7 +3647,7 @@ class CommandHostRuntime:
                     record.workspace,
                     "TASK.md",
                     self._prompt_adapter(record.worker_run, record.head),
-                    before_send=before_send,
+                    before_send=delivery_hook,
                 ),
                 subject=subject,
             )
@@ -3649,7 +3662,12 @@ class CommandHostRuntime:
             failure.evidence = receipt.evidence
             raise failure from None
         record.worker_head_run = receipt.run.to_json()
-        _record_worker_delivery_evidence(record, receipt.delivery)
+        evidence = _delivery_evidence_json(receipt.delivery, subject)
+        source = receipt.run.fanout_policy.get("provider_source")
+        if receipt.run.spec.adapter == "codex" and isinstance(source, dict):
+            evidence["provider_bound"] = source.get("state") == "bound"
+            evidence["provider_source_state"] = str(source.get("state") or "unknown")
+        _record_worker_delivery_evidence(record, evidence)
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)

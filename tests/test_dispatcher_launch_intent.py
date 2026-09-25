@@ -74,6 +74,7 @@ from secretary.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
+from secretary.dispatch.worker_report import prompt_worker_report as deliver_worker_report_prompt
 from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
@@ -93,6 +94,7 @@ from secretary.runtime.head import (
 )
 from secretary.runtime.head import operations as head_ops
 from secretary.runtime.head.command import with_pid_heartbeat
+from secretary.runtime.codex_preflight import codex_provider_source_descriptor
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.prompt_document import NUDGE_MAX_BYTES
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
@@ -157,7 +159,9 @@ class _SupervisedBackend:
     def deliver(self, run, pointer, *, transport: Any = None, subject: str = "", **_ignored: Any) -> DeliverReceipt:
         hook = getattr(transport, "before_send", None)
         if hook is not None:
-            hook()
+            handed = hook()
+            if isinstance(handed, head_ops.HeadRun):
+                run = head_ops.post_delivery_run(run, handed)
         self.deliveries.append((run, pointer, subject))
         if self.on_deliver is not None:
             self.on_deliver(run, pointer)
@@ -3528,6 +3532,129 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         Path(record.worker_pid_file).write_text(json.dumps(raw), encoding="utf-8")
         return record
+
+    def codex_worker_for_delivery(self) -> tuple[subprocess.Popen, DispatcherRecord, head_ops.HeadRun]:
+        head = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(self._reap_head, head)
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="codex",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0,
+            review_baseline=0, state="claimed", claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
+            worker_run={"adapter": "codex", "codex_mode": "tui", "head": "codex"},
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING, phase="gate",
+                retained_at=time.time(), sent_at=time.time(),
+            ),
+        )
+        self.track_worker(record)
+        run = head_ops.HeadRun(
+            run_id="host-test-run",
+            spec=head_ops.HeadSpec(
+                profile_id="codex", adapter="codex", model="gpt-5.6-terra", runtime=LOCAL_PTY_RUNTIME
+            ),
+            workspace=record.workspace, task_ref=head_ops.TaskRef.card(REF), role="worker",
+            handle=record.handle, pid_file=record.worker_pid_file,
+        )
+        attested = accepted_transport_run(
+            "codex", role="worker", workspace=record.workspace, task_ref=run.task_ref,
+            pid_file=record.worker_pid_file, run_id=run.run_id,
+        )
+        sessions = self.data_dir / "sessions"
+        sessions.mkdir(exist_ok=True)
+        (sessions / "rollout.jsonl").write_text(
+            json.dumps({"type": "session_meta", "payload": {"session_id": "s-1", "cwd": str(self.data_dir.resolve())}})
+            + "\n" + json.dumps({"type": "thread.started", "thread_id": "parent-1"}) + "\n",
+            encoding="utf-8",
+        )
+        run = run.with_fanout_policy({**attested.fanout_policy, "provider_source": {
+            "version": 1, "kind": "codex_session_event_jsonl", "state": "unbound",
+            **codex_provider_source_descriptor(run), "root": str(sessions), "baseline": [],
+        }})
+        record.worker_head_run = run.to_json()
+        return head, record, run
+
+    def test_codex_worker_continuations_and_report_bind_before_delivery(self) -> None:
+        for stopped, report in ((True, False), (False, False), (False, True)):
+            with self.subTest(stopped=stopped, report=report):
+                head, record, run = self.codex_worker_for_delivery()
+                events: list[str] = []
+                self.host.configure_codex_provider_ingress(
+                    run, persist=lambda updated, target=record: setattr(target, "worker_head_run", updated.to_json()),
+                    stop=lambda *_: None, block=lambda *_: None,
+                )
+                ingress = self.host._codex_provider_ingresses[run.run_id]
+                bind = ingress.bind_before_delivery
+
+                def record_bind(log: list[str] = events, hook: Any = bind) -> head_ops.HeadRun:
+                    log.append("bind")
+                    return hook()
+
+                self.backend.on_deliver = lambda *_, log=events: log.append("send")
+                real_signal = self.host._signal_head
+
+                def signal_then_record(*args: Any, log: list[str] = events, signal_hook: Any = real_signal, **kwargs: Any) -> None:
+                    log.append("SIGCONT")
+                    signal_hook(*args, **kwargs)
+
+                if stopped:
+                    os.kill(head.pid, signal.SIGSTOP)
+                    _wait_for_process_stop(head.pid)
+                with (
+                    mock.patch.object(self.host, "_signal_head", signal_then_record),
+                    mock.patch.object(ingress, "bind_before_delivery", record_bind),
+                    mock.patch.object(self.host, "_worker_task_doc", return_value="# Rework\n"),
+                    mock.patch.object(self.host.catalog, "integration_base", return_value="main", create=True),
+                    mock.patch("secretary.dispatch.host._provider_turn_started", return_value=False),
+                ):
+                    if report:
+                        self.host.prompt_worker_report({"ref": REF}, record)
+                    else:
+                        self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+                self.assertEqual(events, (["SIGCONT"] if stopped else []) + ["bind", "send"])
+                self.assertEqual(record.worker_head_run["fanout_policy"]["provider_source"]["state"], "bound")
+                self.assertTrue(record.worker_delivery_evidence["provider_bound"])
+                self.assertEqual(record.worker_delivery_evidence["provider_source_state"], "bound")
+
+    def test_codex_bind_failure_and_unbound_source_still_deliver(self) -> None:
+        for raises in (True, False):
+            with self.subTest(raises=raises):
+                _head, record, run = self.codex_worker_for_delivery()
+
+                def bind(*, fail: bool = raises, current: head_ops.HeadRun = run) -> head_ops.HeadRun:
+                    if fail:
+                        raise RuntimeError("source unavailable")
+                    return current
+
+                self.host._codex_provider_ingresses[run.run_id] = SimpleNamespace(  # type: ignore[assignment]
+                    run=run, bind_before_delivery=bind
+                )
+                self.host.prompt_worker_report({"ref": REF}, record)
+                self.assertFalse(record.worker_delivery_evidence["provider_bound"])
+                self.assertEqual(record.worker_delivery_evidence["provider_source_state"], "unbound")
+
+    def test_missing_codex_ingress_is_installed_from_the_durable_run(self) -> None:
+        _head, record, run = self.codex_worker_for_delivery()
+        records = {REF: record}
+        saves: list[str] = []
+        comments: list[str] = []
+        runtime = SimpleNamespace(
+            host=self.host, save_records=lambda *_: saves.append("persist"),
+            writer=SimpleNamespace(comment=lambda **kwargs: comments.append(kwargs["body"])),
+            owner="secretary-dispatcher",
+        )
+        runtime.bind_codex_provider_ingress = lambda *args, **kwargs: DispatcherRuntime.bind_codex_provider_ingress(
+            runtime, *args, **kwargs
+        )
+        self.assertNotIn(run.run_id, self.host._codex_provider_ingresses)
+        outcome, _reason = deliver_worker_report_prompt(
+            runtime, {"ref": REF}, record, records, {}, "a1", trigger="quiet"  # type: ignore[arg-type]
+        )
+        self.assertIsNotNone(outcome)
+        self.assertTrue(saves)
+        self.assertTrue(record.worker_delivery_evidence["provider_bound"])
+        self.assertEqual(record.worker_head_run["fanout_policy"]["provider_source"]["state"], "bound")
+        self.assertIn("Provider bound: True; source state: bound", comments[0])
 
     # a failure raised after the head was started ---------------------------
 

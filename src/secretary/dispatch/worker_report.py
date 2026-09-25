@@ -604,6 +604,9 @@ def prompt_worker_report(
     records[ref] = record
     runtime.save_records(payload, records)
     try:
+        runtime.bind_codex_provider_ingress(
+            record, records, payload, role="worker", reference=ref
+        )
         runtime.host.prompt_worker_report(task, record)
     except HostError as exc:
         _record_worker_delivery_evidence(record, exc, failure=True)
@@ -647,6 +650,12 @@ def prompt_worker_report(
             f"Dispatcher wait watchdog: {trigger}. The worker head was asked once to run the "
             f"report command for generation {generation}. The round, its TASK.md and its owner "
             "are unchanged. Another idle episode in this round stops the head instead."
+            + (
+                f" Provider bound: {bool(record.worker_delivery_evidence.get('provider_bound'))}; "
+                f"source state: {record.worker_delivery_evidence.get('provider_source_state')}."
+                if record.worker_delivery_evidence.get("provider_source_state")
+                else ""
+            )
         ),
         request_id=_attempt_request_id(
             record.attempt_id or attempt_id, "worker-report-prompt", ref, str(generation)
