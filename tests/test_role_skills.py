@@ -17,6 +17,7 @@ from secretary.role_skills import (
     INSTANCE_ORIGIN,
     MANIFEST,
     MANIFEST_ENV,
+    OWNERSHIP_MARKER,
     PRODUCT_ORIGIN,
     RegistryError,
     audit,
@@ -569,6 +570,50 @@ class MalformedManifestTests(OverlayFixture):
         code, output = self.run_command("audit")
 
         self.assert_bounded(code, output, self.product)
+
+
+class RetiredSkillTests(OverlayFixture):
+    """A skill the product manifest stops declaring, in a shell root under the installation's home.
+
+    This is how a shipped skill leaves a host: the manifest drops it, and the next sync removes the
+    copy it delivered there, while a copy that carries no delivery marker stays the operator's.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.home = self.root / "home"
+        self.shell = self.home / ".claude" / "skills"
+        for skill in ("kept", "dropped"):
+            self.write_skill(self.product.parent / "roles" / "secretary" / skill, f"# {skill}\n")
+
+    def declare(self, *skills: str) -> None:
+        listed = ", ".join(f'"{skill}"' for skill in skills)
+        self.product.write_text(
+            f"[roles.secretary]\nskills = [{listed}]\n\n"
+            '[targets.t]\nshell = "claude"\nroot = "~/.claude/skills"\nroles = ["secretary"]\n',
+            encoding="utf-8",
+        )
+
+    def run_sync(self) -> dict:
+        return sync(instance_path=self.instance, product_manifest=self.product, home=self.home)
+
+    def test_the_next_sync_removes_a_delivered_copy_and_leaves_an_unmarked_one(self) -> None:
+        self.declare("kept", "dropped")
+        self.run_sync()
+        self.assertTrue((self.shell / "dropped" / OWNERSHIP_MARKER).is_file())
+        unmarked = self.shell / "operators-copy" / "SKILL.md"
+        self.write_skill(unmarked.parent, "# dropped\n")
+
+        self.declare("kept")
+        before = audit(instance_path=self.instance, product_manifest=self.product, home=self.home)
+        result = self.run_sync()
+
+        self.assertEqual([(item["skill"], item["root"]) for item in before["retired"]], [("dropped", str(self.shell))])
+        self.assertEqual([item["skill"] for item in result["removed"]], ["dropped"])
+        self.assertFalse((self.shell / "dropped").exists())
+        self.assertTrue((self.shell / "kept" / "SKILL.md").is_file())
+        self.assertTrue(unmarked.is_file())
+        self.assertTrue(result["after"]["ok"], result["after"])
 
 
 class CommandEntryPointTests(OverlayFixture):
