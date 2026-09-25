@@ -1934,6 +1934,68 @@ class CommandHostRuntime:
             return ""
         return completed.stdout.strip()
 
+    def reconcile_reviewed_base_move(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        reviewed_commit: str,
+        current_commit: str,
+    ) -> dict[str, str | int] | None:
+        """Accept only base-owned history that leaves every reviewed path unchanged.
+
+        All refs are local objects already fetched by the gate. Any missing or unreadable
+        answer denies reconciliation.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return None
+        workspace = record.workspace
+        try:
+            base = self.catalog.integration_base(
+                task["project"], task.get("workspace", {}).get("base_branch")
+            )
+            base_sha = self._run(
+                ["git", "-C", workspace, "rev-parse", "--verify", f"origin/{base}^{{commit}}"],
+                "review reconciliation base",
+            ).stdout.strip()
+            if not all(_is_exact_sha(sha) for sha in (reviewed_commit, current_commit, base_sha)):
+                return None
+            self._run(
+                ["git", "-C", workspace, "merge-base", "--is-ancestor", reviewed_commit, current_commit],
+                "review reconciliation ancestry",
+            )
+            unreviewed = self._run(
+                ["git", "-C", workspace, "rev-list", "--no-merges", f"{reviewed_commit}..{current_commit}", "--not", base_sha],
+                "review reconciliation candidate commits",
+            ).stdout.strip()
+            if unreviewed:
+                return None
+            fork = self._run(
+                ["git", "-C", workspace, "merge-base", reviewed_commit, base_sha],
+                "review reconciliation fork",
+            ).stdout.strip()
+            if not _is_exact_sha(fork):
+                return None
+            changed = self._run(
+                ["git", "-C", workspace, "diff", "--name-only", "-z", "--no-renames", fork, reviewed_commit],
+                "review reconciliation reviewed paths",
+            ).stdout
+            if changed and not changed.endswith("\0"):
+                return None
+            paths = changed.split("\0")[:-1] if changed else []
+            if paths:
+                self._run(
+                    ["git", "-C", workspace, "diff", "--quiet", reviewed_commit, current_commit, "--", *paths],
+                    "review reconciliation path contents",
+                )
+        except (HostError, KeyError, TypeError, UnicodeError):
+            return None
+        return {
+            "reviewed_sha": reviewed_commit,
+            "head_sha": current_commit,
+            "base_sha": base_sha,
+            "reviewed_paths": len(paths),
+        }
+
     def is_instance_publish_recovery(
         self,
         task: dict[str, Any],

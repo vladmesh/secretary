@@ -16,7 +16,8 @@ from secretary.board.completion_evidence import (
 from secretary.dispatch import attempt_accounting, post_merge
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
-from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from secretary.dispatch.state import DispatcherRecord
+from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import GateTransportError, HostError, MergeLanding
 from secretary.knowledge_write import (
     KnowledgeError,
@@ -51,12 +52,19 @@ def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -
     bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
     the gate's failure to report, not a silent bounce.
     """
+    record.review_reconciliation = None
     if not record.review_commit:
         return ""
     current = runtime.host.head_commit(record)
     if not current or current == record.review_commit:
         return ""
     if runtime.host.is_instance_publish_recovery(task, record, record.review_commit, current):
+        return ""
+    reconciliation = runtime.host.reconcile_reviewed_base_move(
+        task, record, record.review_commit, current
+    )
+    if reconciliation is not None:
+        record.review_reconciliation = reconciliation
         return ""
     return (
         f"The review was given for commit `{record.review_commit[:12]}` while the working copy "
@@ -85,6 +93,10 @@ def merge_readiness(
     except HostError as exc:
         return "failed", None, scrub_host_output(str(exc))
     if result.status == "green":
+        # The gate may have refresh-merged the base after the first identity check.
+        drift = review_drift(runtime, task, record)
+        if drift:
+            return "drift", None, drift
         return "green", result, ""
     if result.status == "pending":
         return "pending", result, ""
@@ -260,7 +272,7 @@ def release_parked(
             prefix="Observer decision: release. ",
         )
     if kind != "drift":
-        # `drift` is decided before the gate is asked; only an answer clears the budget.
+        # Only a result handed back to this path clears the transport retry budget.
         gate_lifecycle.gate_answered(runtime, ref, record, records, payload)
     if kind == "pending":
         if result is None:

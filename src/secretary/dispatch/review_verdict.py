@@ -5,34 +5,51 @@ from __future__ import annotations
 from typing import Any
 
 from secretary.board.completion_evidence import has_candidate
-from secretary.dispatch import attempt_accounting
+from secretary.dispatch import attempt_accounting, release_lifecycle
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_lifecycle import (
     accept_green_gate as _accept_green_gate,
+)
+from secretary.dispatch.gate_lifecycle import (
     block_gate_transport as _block_gate_transport,
+)
+from secretary.dispatch.gate_lifecycle import (
     gate_answered as _gate_answered,
+)
+from secretary.dispatch.gate_lifecycle import (
     gate_pending as _gate_pending,
+)
+from secretary.dispatch.gate_lifecycle import (
     gate_red_to_worker as _gate_red_to_worker,
+)
+from secretary.dispatch.gate_lifecycle import (
     gate_transport_retry as _gate_transport_retry,
 )
 from secretary.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _last_marker,
     _last_review_red_body,
+)
+from secretary.dispatch.helpers import (
     red_review_count as _red_review_count,
+)
+from secretary.dispatch.helpers import (
     safe_one_line as _safe_one_line,
 )
-from secretary.dispatch import release_lifecycle
 from secretary.dispatch.launch import REVIEW_ROLE
 from secretary.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
+)
+from secretary.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatch.types import STOPPED_BY_REVIEW_VERDICT, GateTransportError, HostError
 from secretary.dispatch.watchdog import reset_wait as _reset_wait
 from secretary.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
+)
+from secretary.dispatch.worker_continuation import (
     complete_red_transition as _complete_red_transition,
 )
 from secretary.tasks import TaskError
@@ -265,7 +282,7 @@ def merge_ready_for_park(
             action="merge-gate-transport-blocked",
         )
     if kind == "drift":
-        # The gate was never asked here; the bounce clears the record's gate state itself.
+        # The bounce clears the record's gate state itself.
         return _gate_red_to_worker(runtime, 
             task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
         )
