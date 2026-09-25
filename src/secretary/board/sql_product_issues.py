@@ -247,7 +247,7 @@ class ProductIssueRecords:
                 f"{kind} board-key collision between {identifier!r} and {collision[0][0]!r}"
             )
         lane = identifier if kind == "product" else None
-        self.client._staged("records", create=True)[key] = {
+        self.client._staged("records")[key] = {
             "reference": reference,
             "title": title,
             "description": description or "",

@@ -430,19 +430,22 @@ class StagedStateTests(PoolCase):
         self.check_isolated(1, "product:probe")
         self.check_isolated(1, "issue:probe")
 
-    def test_a_create_outside_a_transaction_is_refused_not_staged(self) -> None:
+    def test_a_create_outside_a_transaction_stays_its_own_threads(self) -> None:
+        # The two-call create (createTask, then saveTaskMetadata) outside a transaction: the
+        # staging thread keeps seeing its create between the calls, and no other thread does.
         for project_id, reference in ((2, "sprint:loose"), (1, "product:loose")):
-            with self.subTest(reference=reference), self.assertRaises(TaskError) as refused:
+            with self.subTest(reference=reference):
                 self.client.call("createTask", project_id=project_id, title="loose", reference=reference)
-            self.assertIn("inside transaction()", refused.exception.message)
-            self.assertNotIn(reference, self.refs(project_id))
+                self.assertIn(reference, self.refs(project_id))
+                elsewhere = self.on_another_thread(lambda board=project_id: self.refs(board))
+                self.assertNotIn(reference, elsewhere)
 
     def test_an_unfinished_create_still_refuses_the_commit_and_leaves_nothing_staged(self) -> None:
         with self.assertRaises(TaskError) as refused, self.client.transaction():
             self.client.call("createTask", project_id=2, title="probe", reference="sprint:unfinished")
         self.assertIn("sprint:unfinished", refused.exception.message)
         self.assertEqual(self.refs(2), [])
-        self.assertIsNone(self.client._local.staged)
+        self.assertEqual((self.client.records.staged, self.client.sprints.staged), ({}, {}))
 
     def lanes(self) -> list[str]:
         return [lane["name"] for lane in self.client.call("getActiveSwimlanes", project_id=1)]

@@ -110,7 +110,7 @@ class SqlSprintRecords:
         if self.row_by_reference(reference) is not None:
             raise self._error(f"{reference} already exists")
         key = sprint_key(reference)
-        staged = self.client._staged("sprints", create=True)
+        staged = self.client._staged("sprints")
         if any(row["reference"] != reference for row in staged.values() if sprint_key(row["reference"]) == key):
             raise self._error("Sprint transport-key collision")
         staged[key] = {

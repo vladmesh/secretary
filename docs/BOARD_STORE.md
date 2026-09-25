@@ -865,11 +865,10 @@ A thread pins one pooled connection for a **session**:
 - `transaction()` pins one connection for its whole extent, per thread. Nested `transaction()`
   calls, board calls and statements on the same thread join it. The connection is borrowed before
   the thread waits for its turn: transactions of different threads still take turns, so the
-  thread holding the turn never waits for the pool. A transaction's staged Product/Issue and
-  Sprint creates and the lanes it adds belong to its thread (`SqlCardClient._staged`,
-  `_add_lane`): no other thread's read sees them, a read outside a transaction sees none, a
-  rollback drops them and a commit publishes the lanes. A create outside `transaction()` is
-  refused;
+  thread holding the turn never waits for the pool. Staged Product/Issue and Sprint creates
+  belong to the thread that staged them (`SqlCardClient._staged`): no other thread's read sees
+  them, and a transaction's end drops its own. Lanes a transaction adds stay its thread's until
+  it commits (`_add_lane`); a rollback drops them;
 - a session-level advisory lock (`SqlTaskAudit._locked`, `marker_comment_lock`) is a session, so
   the lock and its unlock run on one server session.
 

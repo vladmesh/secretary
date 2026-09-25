@@ -337,22 +337,16 @@ class SqlCardClient:
         """The connection this thread has pinned, or None."""
         return self._local.connection
 
-    def _staged(self, kind: str, *, create: bool = False) -> dict[int, dict[str, Any]]:
+    def _staged(self, kind: str) -> dict[int, dict[str, Any]]:
         """The one place staged Product/Issue (`"records"`) and Sprint (`"sprints"`) creates live.
 
-        They belong to this thread's open transaction (§5.6): no other thread sees them, and a
-        read outside a transaction sees none, since PostgreSQL has no such row for it either.  The
-        transaction's end drops them — a rollback discards them, and a commit refuses while any is
-        unfinished.  A create outside a transaction is refused rather than staged into nothing.
+        They belong to the thread that staged them (§5.6): no other thread's read sees them, since
+        PostgreSQL has no such row for it either.  Inside `transaction()` they are that
+        transaction's, and its end drops them — a rollback discards them, and a commit refuses while
+        any is unfinished.  Outside a transaction a create stays its thread's until the thread's own
+        `saveTaskMetadata` inserts it, the two-call create the legacy retry path and the fixtures use.
         """
         local = self._local
-        if not local.depth:
-            if create:
-                raise SqlCardError(
-                    "a Product, Issue or Sprint create is staged until `saveTaskMetadata` and "
-                    "must run inside transaction()"
-                )
-            return {}
         if local.staged is None:
             local.staged = {"records": {}, "sprints": {}}
         return local.staged[kind]
@@ -720,7 +714,8 @@ class SqlCardClient:
                     self._lanes = sorted(named)
                 committed = self._lanes
         added = self._local.lanes_added if self._depth else None
-        return sorted({*committed, *added}) if added else list(committed)
+        # Without additions of its own, the thread gets the shared table itself, as before.
+        return sorted({*committed, *added}) if added else committed
 
     def _add_lane(self, name: str) -> None:
         """A lane from now on: this thread's transaction's until it commits, else everyone's."""
