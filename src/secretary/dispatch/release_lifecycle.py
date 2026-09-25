@@ -405,7 +405,7 @@ def release_effect(
         terminal_state="done",
         disposition="release",
         verdict=verdict,
-        **({"release_merge": release_merge} if release_merge is not None else {}),
+        release_merge=release_merge,
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)

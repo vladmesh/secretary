@@ -338,14 +338,14 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.runtime.host.complete_green.return_value = None  # automerge off, noop mode
         self.release({"ref": REF, "type": "code", "project": "sample", "sprint": SPRINT})
         self.assertEqual(self.payload.get(post_merge.WATCHES_KEY) or {}, {})
-        self.assertNotIn("release_merge", self.accounting.terminal_effect.call_args.kwargs)
+        self.assertIsNone(self.accounting.terminal_effect.call_args.kwargs.get("release_merge"))
 
     def test_a_research_release_opens_no_watch(self) -> None:
         with mock.patch.object(release_lifecycle, "missing_completion_evidence", return_value=""):
             self.release({"ref": REF, "type": "research", "project": "sample", "sprint": SPRINT})
         self.runtime.host.complete_green.assert_not_called()
         self.assertEqual(self.payload.get(post_merge.WATCHES_KEY) or {}, {})
-        self.assertNotIn("release_merge", self.accounting.terminal_effect.call_args.kwargs)
+        self.assertIsNone(self.accounting.terminal_effect.call_args.kwargs.get("release_merge"))
 
 
 class ResolutionTests(unittest.TestCase):
