@@ -357,12 +357,54 @@ def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
     return (str(payload.get("from") or ""), target) if target else None
 
 
+#: The data key a dispatcher release puts on the Done transition when its release merged a commit
+#: onto the integration base. Its presence says "the post-merge CI result will follow".
+RELEASE_MERGE_KEY = "release_merge"
+#: The payload key of the one card event that records a post-merge CI result.
+POST_MERGE_CI_KEY = "post_merge_ci"
+POST_MERGE_CI_RESULTS = ("green", "red", "absent", "timeout")
+
+
+def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The post-merge CI result a dispatcher card event records, or None for any other event."""
+    if is_protocol_event(event) or str(event.get("kind") or "") != "commented":
+        return None
+    if str(event.get("outcome") or "") != "success":
+        return None
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    if str(actor.get("role") or "") != "dispatcher":
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    fact = payload.get(POST_MERGE_CI_KEY)
+    if not isinstance(fact, dict) or str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
+        return None
+    return fact
+
+
+def is_merged_release(event: dict[str, Any]) -> bool:
+    """Whether a Done transition is a dispatcher release whose merge landed on the base.
+
+    Such a Done is not yet the release's last word: the post-merge CI result is, and that is the
+    event the observer is woken on.
+    """
+    if not is_protocol_event(event):
+        return False
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return str(actor.get("role") or "") == "dispatcher" and isinstance(data.get(RELEASE_MERGE_KEY), dict)
+
+
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
     """Whether a card transition needs a new observer decision.
 
     Deliberately small, because it drives both wake delivery and resume freshness: a broad
     "successful event" rule turns every piece of machinery telemetry — the observer's own decision
     included — into another observer turn.
+
+    This is the one place the post-merge rule lives: a Done that a dispatcher release-with-merge
+    produced is not a wake, and the post-merge CI result recorded for that merge is. Every other
+    Done — a research or infra card, a release that merged nothing, a manual PO or steward Done —
+    wakes as before.
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
@@ -372,10 +414,14 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     if str(actor.get("role") or "") == "observer":
         return False
+    if post_merge_ci_fact(event) is not None:
+        return True
     moved = recorded_card_transition(event)
     if moved is None:
         return False
     source, target = moved
+    if target == "done" and is_merged_release(event):
+        return False
     # Assessment requires a decision; Blocked requires classification.
     if target in {"assessment", "blocked", "done"}:
         return True
@@ -1459,6 +1505,38 @@ class TaskWriter:
             identity=payload,
         )
 
+    def post_merge_ci(
+        self,
+        *,
+        actor: str,
+        reference: str,
+        body: str,
+        fact: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Record a release's post-merge CI result as one dispatcher comment on the card.
+
+        The comment carries the fact in its event payload, which is what the observer wake predicate
+        reads (`post_merge_ci_fact`); the body is the same fact for a human reading the card.
+        """
+        role = self._role("dispatcher", COMMENT_ROLES)
+        if str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
+            raise TaskError("validation", "post-merge CI result must be one of " + ", ".join(POST_MERGE_CI_RESULTS), 2)
+        body = self._redact_for_board(body)
+        payload = {"marker": role, "body_sha256": _digest(body), POST_MERGE_CI_KEY: dict(fact)}
+        return self._write(
+            "commented",
+            role,
+            actor,
+            reference,
+            request_id,
+            payload,
+            lambda task: self.client.call(
+                "createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"
+            ),
+            identity=payload,
+        )
+
     def _research_report_refusal(self) -> str:
         """The research report directory check, over the checkout the worker reports from."""
         if self.workspace is not None:
@@ -2182,6 +2260,7 @@ class TaskWriter:
         request_id: str | None = None,
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
+        release_merge: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES)
         reason = self._redact_for_board(reason)
@@ -2191,6 +2270,10 @@ class TaskWriter:
             raise TaskError("validation", "attempt outcome obligation must be an object", 2)
         if terminal_taxonomy is not None and not isinstance(terminal_taxonomy, dict):
             raise TaskError("validation", "terminal taxonomy must be an object", 2)
+        if release_merge is not None and (
+            not isinstance(release_merge, dict) or role != "dispatcher" or target != "done"
+        ):
+            raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
         task = self.reader.show(reference)
         if (
             role == "steward"
@@ -2235,6 +2318,10 @@ class TaskWriter:
             if terminal_taxonomy is not None:
                 stored_taxonomy = existing.data.get("terminal_taxonomy")
                 terminal_taxonomy = dict(stored_taxonomy) if isinstance(stored_taxonomy, dict) else None
+            if release_merge is not None:
+                # Same rule: the committed Done owns whether it said a merge landed.
+                stored_merge = existing.data.get(RELEASE_MERGE_KEY)
+                release_merge = dict(stored_merge) if isinstance(stored_merge, dict) else None
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2256,6 +2343,7 @@ class TaskWriter:
                 request_id=request_id,
                 outcome_owed=outcome_owed,
                 terminal_taxonomy=terminal_taxonomy,
+                release_merge=release_merge,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2315,6 +2403,7 @@ class TaskWriter:
             request_id=request_id,
             outcome_owed=outcome_owed,
             terminal_taxonomy=terminal_taxonomy,
+            release_merge=release_merge,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2447,6 +2536,7 @@ class TaskWriter:
         request_id: str,
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
+        release_merge: dict[str, Any] | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -2484,6 +2574,7 @@ class TaskWriter:
                                 if terminal_taxonomy is not None
                                 else {}
                             ),
+                            **({RELEASE_MERGE_KEY: dict(release_merge)} if release_merge is not None else {}),
                         },
                     ),
                     finish=finish,

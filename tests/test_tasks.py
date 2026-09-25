@@ -46,6 +46,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
     is_significant_observer_event,
+    recorded_card_transition,
     specification_revision,
     standing_decision,
 )
@@ -2724,6 +2725,77 @@ class AssessmentStateTests(CardStoreCase):
             ),
             1,
         )
+
+    def test_a_merged_release_wakes_on_its_post_merge_result_not_on_done(self) -> None:
+        """secretary-1736: the Done of a release that merged carries `release_merge`, which the wake
+        predicate reads as "not yet"; the post-merge CI result is one dispatcher card event that is
+        the wake, and a replay of either writes nothing new."""
+        self._park()
+        self._decide("release")
+        marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
+        first = self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="Observer decision: release.",
+            decision="release",
+            request_id="merged-release",
+            release_merge=marker,
+        )
+        replay = self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="Observer decision: release.",
+            decision="release",
+            request_id="merged-release",
+            release_merge=marker,
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["event_id"], first["event_id"])
+        fact = {
+            "result": "red",
+            "card": "secretary-468",
+            "base": "main",
+            "merge_sha": "a" * 40,
+            "runs": [{"id": "9", "url": "https://github.com/o/r/actions/runs/9"}],
+            "failed_checks": ["unit"],
+            "classification": "product",
+            "waited_seconds": 60,
+        }
+        for _ in range(2):
+            self.writer.post_merge_ci(
+                actor="d",
+                reference="secretary-468",
+                body="Post-merge CI RED for secretary-468",
+                fact=fact,
+                request_id="post-merge-ci-card",
+            )
+        events = self.writer.audit.events("secretary-468")
+        [done] = [event for event in events if (recorded_card_transition(event) or ("", ""))[1] == "done"]
+        self.assertEqual(done["data"]["release_merge"], marker)
+        woken = [
+            event
+            for event in events
+            if is_significant_observer_event(event, linked_refs={"secretary-468"}, sprint_ref=SPRINT)
+        ]
+        self.assertEqual([event["payload"]["post_merge_ci"] for event in woken[-1:]], [fact])
+        self.assertNotIn(done, woken)
+        self.assertEqual(
+            len([c for c in self.client.comments(12) if "Post-merge CI RED" in c["comment"]]), 1
+        )
+        with self.assertRaisesRegex(TaskError, "release merge marker"):
+            self.writer.move(
+                role="po",
+                actor="po",
+                reference="secretary-468",
+                target="blocked",
+                reason="not a release",
+                request_id="po-with-marker",
+                release_merge=marker,
+            )
 
     def test_exact_decision_replay_uses_its_original_assessment_visit(self) -> None:
         self._park()

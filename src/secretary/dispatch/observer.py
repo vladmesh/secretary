@@ -55,6 +55,7 @@ from typing import Any
 from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.dispatch.heartbeat import sprint_task
 from secretary.dispatch.launch import merge_launch_head_run
+from secretary.dispatch.post_merge import render_fact, wake_facts
 from secretary.dispatch.state import now_rfc3339, request_token
 from secretary.dispatch.tui import (
     COMPOSER_EMPTY,
@@ -1078,6 +1079,8 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "event_id": latest_id,
         "change": "sprint-entity" if str(latest.get("ref") or "") == ref else "linked-card",
         "sprint": sprint,
+        # The post-merge CI results in this batch, stated in the wake itself (secretary-1736).
+        "post_merge": wake_facts(significant),
         "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
@@ -1955,6 +1958,7 @@ def _wake_for_event(
             # could fail after intent persistence and needlessly list the whole Pipeline again.
             sprint=event["sprint"],
             change=str(event.get("change") or "linked-card"),
+            post_merge=list(event.get("post_merge") or []),
         )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         evidence = _evidence_of(exc)
@@ -3452,10 +3456,24 @@ def _observer_comments(sprint: dict[str, Any]) -> list[Any]:
 
 
 def render_observer_wake_context(
-    sprint: dict[str, Any], *, change: str, delivery: ObserverDelivery | None = None
+    sprint: dict[str, Any],
+    *,
+    change: str,
+    delivery: ObserverDelivery | None = None,
+    post_merge: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Wake text with the same live owner-decision context a replacement launch receives."""
+    """Wake text with the same live owner-decision context a replacement launch receives.
+
+    A post-merge CI result in the batch is stated first, as the fact it is: `green`, `red`,
+    `absent` or `timeout`, with the run and, for a red one, the failed checks and classification.
+    """
     changed = "The sprint entity changed." if change == "sprint-entity" else "A linked card changed."
+    facts = [render_fact(fact) for fact in post_merge or [] if isinstance(fact, dict)]
+    if facts:
+        changed = (
+            "A release's post-merge CI on the integration base has answered. Decide the next step "
+            "on this result, not on the card's Done:\n\n" + "\n\n".join(facts) + "\n\n" + changed
+        )
     lead = (
         changed + " Read its worker report, reviewer verdict and any valid executed dispatcher-owned "
         "exact-SHA gate receipt first. Suppress a routine broad rerun only when that receipt "

@@ -39,6 +39,7 @@ from secretary.dispatch.observer import (
 )
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
+from secretary.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from secretary.dispatch.state import (
     DispatcherRecord,
     close_divergence,
@@ -310,6 +311,9 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "owner": payload.get("owner", ""),
         "pause": runtime.pause.summary(),
         "records": list((payload.get("records") or {}).keys()),
+        "post_merge_watches": sorted(
+            (payload.get(WATCHES_KEY) or {}).keys() if isinstance(payload.get(WATCHES_KEY), dict) else ()
+        ),
         "observers": observer_snapshot(payload),
         "resource_health": runtime.head_health.snapshot(),
         "divergences": list(payload.get("controlled_divergences") or []),
@@ -432,6 +436,12 @@ def _production_tick_work(
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
+    # After the releases of this tick, before the observers: a merge whose base has no CI resolves
+    # `absent` in the tick that merged it, and a result written here is delivered below.
+    try:
+        outcomes += reconcile_post_merge_watches(runtime, payload, records)
+    except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
+        errors.append(_unexpected_error("", exc))
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:

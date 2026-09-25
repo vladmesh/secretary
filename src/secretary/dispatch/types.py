@@ -175,6 +175,24 @@ class ReviewLaunch:
     fallback_reason: str = ""
 
 
+@dataclass(frozen=True)
+class MergeLanding:
+    """What a release merge actually landed, as `complete_green` hands it back.
+
+    `sha` is the commit now on the integration base: the PR's merge commit, or the pushed branch
+    head. It can be empty only on the GitHub path, when the merge went through but its commit could
+    not be read back; `branch` then lets the post-merge watch read it from the PR later. `ci` is the
+    project's declared validation mode, which decides whether the base has a CI run to wait for.
+    A `complete_green` that merged nothing returns None, never a landing.
+    """
+
+    sha: str
+    base: str
+    path: str  # "github-pr" | "instance-repo" | "push"
+    ci: str = "none"
+    branch: str = ""
+
+
 def review_pane_label(reference: str) -> str:
     """Stable human-readable label for the reviewer pane. Carries the card reference and the role
     so an operator can tell the two panes of one worktree apart in the Orca client. Lifecycle

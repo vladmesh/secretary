@@ -13,11 +13,11 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
-from secretary.dispatch import attempt_accounting
+from secretary.dispatch import attempt_accounting, post_merge
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
-from secretary.dispatch.types import GateTransportError, HostError
+from secretary.dispatch.types import GateTransportError, HostError, MergeLanding
 from secretary.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
@@ -346,11 +346,16 @@ def release_effect(
 
     This is the only way a card reaches Done, so the completion evidence check sits here: every
     release, automatic or decided, first taken or replayed after a lost tick, goes through it.
+
+    A merge that landed a commit opens the post-merge CI watch and saves it before anything else
+    happens, so a crash between the merge and Done cannot lose it; the Done then carries the
+    `release_merge` marker, and the observer is woken on the watch's result instead of on the move.
     """
     ref = task["ref"]
+    release_merge: dict[str, Any] | None = None
     if has_candidate(task):
         try:
-            runtime.host.complete_green(task, record)
+            landing = runtime.host.complete_green(task, record)
         except HostError as exc:
             # A rejected merge must land the card in Blocked rather than escape the tick: an
             # escaping error leaves the verdict standing and every later tick retries the merge.
@@ -365,6 +370,10 @@ def release_effect(
                 step=step,
                 outcome="merge failed",
             )
+        if isinstance(landing, MergeLanding):
+            watch = post_merge.open_watch(runtime, task, payload, landing, workspace=record.workspace)
+            runtime.save_records(payload, records)
+            release_merge = post_merge.release_merge_marker(watch)
     blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
     if blocked is not None:
         return blocked
@@ -396,6 +405,7 @@ def release_effect(
         terminal_state="done",
         disposition="release",
         verdict=verdict,
+        **({"release_merge": release_merge} if release_merge is not None else {}),
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)

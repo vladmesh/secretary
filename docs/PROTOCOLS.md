@@ -1011,7 +1011,8 @@ observer and skips new linked claims; active cards continue their cycle. Only
 `rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored apart from
 normal comments with a `[sprint:resume]` marker, as a concise semantic delta rather than a copy of
 machine telemetry. For an open sprint, `show` and `status` compute freshness only from semantic
-observer work: a card entering Assessment, Blocked or Done; a budget event; or a PO sprint comment.
+observer work: a card entering Assessment, Blocked or Done (except a Done whose release merged, see
+[Post-merge CI](#post-merge-ci)); a post-merge CI result; a budget event; or a PO sprint comment.
 Claims, reports, Validate moves, reviewer launches, routing and observer-authored events do not age a
 resume. Missing data is `resume_missing`; a semantic transition may trail its resume for up to five
 minutes, then `resume_stale`.
@@ -1029,11 +1030,48 @@ observer acknowledges by passing the `--delivery-id` and `--through-event` from 
 for every sprint in `installation.sprints.items` (stopped status and reason, budget, resume freshness,
 observer state); an unreadable live board is reported in `installation.sprints.error`.
 
-Only these open observer work: semantic card edges (Assessment, Blocked, Done), an eligible human
-control-plane return to Issues, sprint budget events and PO sprint comments. Claims, routing, reports,
-validation telemetry and observer-authored writes do not. Delivery records only that the head took the
+Only these open observer work: semantic card edges (Assessment, Blocked, Done), a post-merge CI
+result, an eligible human control-plane return to Issues, sprint budget events and PO sprint comments.
+Claims, routing, reports, validation telemetry and observer-authored writes do not. Delivery records only that the head took the
 prompt; the next ordinary reconciliation reads one durable audit snapshot and closes the batch only on
 the matching resume. Delivery never polls the board or calls an observer-facing `Monitor` command.
+
+#### Post-merge CI
+
+After a release, the observer is woken on the post-merge CI result, not on the merge. When a release
+merges a card (any of the three merge paths: the GitHub pull request, the instance repository, the
+fast-forward push of a local-CI project), the dispatcher records a post-merge watch in its own
+production state (`post_merge_watches`: card ref, project, integration base, the commit that actually
+landed on the base, start time) before the Done move, and the Done carries a `release_merge` marker.
+The watch survives a restart and holds no claim: the card is Done and is not active for claims or for
+the sprint's one-card rule.
+
+Each tick reads the base's CI for that exact commit with the gate's own reading (check-runs and commit
+statuses, narrowed to `validation.required_checks` when declared) and resolves the watch to exactly one
+of:
+
+- `green` — every selected check finished successfully;
+- `red` — at least one failed; the result carries the run ids, the failed check names and the gate's
+  classification (`infrastructure` only when every failed run read is infrastructure, else `product`);
+- `absent` — the project validates without GitHub CI, or no workflow triggers on a push to the base
+  (the gate's trigger analysis, read off the merged checkout); decided at once, without waiting;
+- `timeout` — no terminal result within `SECRETARY_POST_MERGE_CI_CEILING_SECONDS`, default 3600 (one
+  hour).
+
+A transport error, an unreadable or malformed `gh` answer, a check for another commit, a completed
+check without a conclusion and a run that has not started are all pending until the ceiling; none is
+ever `green`. A required check that runs only on pull requests therefore holds the watch to the
+ceiling.
+
+The result is written to the watch first and then published once, under fixed request ids: one
+dispatcher card event (a comment carrying the `post_merge_ci` payload) and, for a sprint card, one
+dispatcher comment on the sprint naming the card, merge commit, result and runs. A replay after a crash
+republishes the same fact and writes nothing new. The one enforcement place is the observer
+significance predicate (`tasks.is_significant_card_event`): the Done of a release that merged is not a
+wake, the post-merge result is. A Done with no merge (research and infra cards, a release that merged
+nothing, automerge off, a manual PO or steward Done) wakes as before. The wake text states the result
+with its runs, and for `red` the failed checks and classification; a red result is never worded as a
+plain Done.
 
 An Assessment entry is one decision visit. The first observer `task decide` is canonical for that
 visit; a redelivered turn repeating the same kind returns that decision without another comment, and
