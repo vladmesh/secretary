@@ -746,15 +746,11 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_EXCEEDED, text)
-        rounds = re.findall(
-            r"^  round (\d+): (.*?) ms \[[^];]+; \d+ poll\(s\) in flight\]( <- judged)?$",
-            text,
-            re.MULTILINE,
-        )
+        rounds = re.findall(r"^  round (\d+): (.*?) ms \[([^];]+); polls in flight at each start: ([\d, ]+); \d+ during the round\]( <- judged)?$", text, re.MULTILINE)
         self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
         fastest = max(float(value) for value in rounds[0][1].split(", "))
         self.assertLess(fastest, measure.CONCURRENT_THRESHOLD_MS, "round one was meant to be fast")
-        self.assertNotEqual(rounds[0][2], " <- judged", "the fast first round must not be the judged one")
+        self.assertNotEqual(rounds[0][4], " <- judged", "the fast first round must not be the judged one")
         for index in range(1, measure.CONCURRENT_REQUESTS + 1):
             self.assertIn(f"concurrent GET / #{index} of {measure.CONCURRENT_REQUESTS}", text)
         self.assertIn("EXCEEDS", text)
@@ -787,26 +783,28 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.assertNotIn("MEETS", text)
 
     def test_every_round_says_it_was_launched_by_a_poll_and_what_was_in_flight(self) -> None:
-        """The two per-round facts, and which of them is the condition.
+        """The two per-round facts, and both are conditions now.
 
-        Launched by a due poll is the scenario, and it is program order inside the poll thread, so
-        it holds on any installation. The in-flight count beside it is a measurement of what that
-        produced: against this stub, which answers a session read in a millisecond, the poll has
-        finished before the four requests start, so 0 is the honest reading and the run still
-        stands. Requiring that number instead made the proof a coin toss — one run in five refused
-        a perfectly good measurement — which is why it is reported rather than required.
+        Launched by a due poll is program order inside the poll thread. The four requests are
+        released at that poll's start, so each of them starts while it is in flight, even against
+        this stub, which answers a session read in a millisecond: the count at every start is at
+        least one on every counted round. (It used to be read after the poll had answered, and was
+        0 here; review 4 of secretary-1746 refused that as a lighter load than the scenario.)
         """
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_MET, text)
-        rounds = re.findall(r"^  round \d+: .*? ms \[(.*?); (\d+) poll\(s\) in flight\]", text, re.MULTILINE)
+        rounds = re.findall(r"^  round (\d+): (.*?) ms \[([^];]+); polls in flight at each start: ([\d, ]+); \d+ during the round\]( <- judged)?$", text, re.MULTILINE)
         self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
-        for index, (launched, _count) in enumerate(rounds, start=1):
-            with self.subTest(round=index):
+        for number, _durations, launched, at_start, _judged in rounds:
+            with self.subTest(round=number):
                 self.assertEqual(launched, "launched by a due poll", text)
-        self.assertIn("the in-flight count beside it is measured during the round", text)
+                counts = [int(value) for value in at_start.split(", ")]
+                self.assertEqual(len(counts), measure.CONCURRENT_REQUESTS)
+                self.assertGreaterEqual(min(counts), 1, text)
+        self.assertIn("a round counts only when a poll was in flight at every request's start", text)
         polled = re.search(r"polled successfully (\d+) time\(s\)", text)
         self.assertIsNotNone(polled, text)
         self.assertGreaterEqual(int(polled.group(1)), measure.CONCURRENT_ROUNDS)
@@ -817,11 +815,10 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         """The rule, tested apart from the mechanism that satisfies it.
 
         This replaces an assertion this card is changing: `require_overlap` used to refuse a round
-        with `overlapping_polls == 0`. The observer withdrew that condition in this round's rework
-        decision, because strict temporal overlap cannot be made deterministic on a fast
-        installation and a flaky proof of the scenario is worse than none. The condition is now the
-        launch, which is program order, and both halves of the change are asserted here: a round
-        with nothing in flight is fine, a round nothing launched is not.
+        with `overlapping_polls == 0`. `require_launch` is about the launch alone, which is program
+        order: a round nothing launched is refused, and one with nothing in flight is not refused
+        *here* — `collect_rounds` has already set such a round aside and taken another
+        (`RoundsUnderThePollTests`).
         """
         sample = measure.Sample(route="/", status=200, started_at=10.0, ended_at=11.0)
         launched = measure.Round(samples=[sample], launched_at=9.5, polls_in_flight=1)
@@ -980,8 +977,8 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
 
         The whole run is taken once and asserted on twice: the intervals and the launches come off
         the same report, so there is no arrangement in which one of them was true at a different
-        moment than the other. The run also has to *succeed* here with nothing in flight during a
-        round, which is the reading this stub produces and the thing the previous rule refused.
+        moment than the other. The four requests are released at the launching poll's start, so
+        even here, where a session read takes a millisecond, each of them starts under the poll.
         """
         base = self.serve()
         with mock.patch.object(measure, "WARM_REQUESTS", 2):
@@ -991,14 +988,14 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         self.assertLess(slowest, 1000.0, "this stub is meant to answer in milliseconds")
         self.assert_cadence_and_launch(report)
         self.assertTrue(all(measurement.met for measurement in report.measurements))
-        # The poll answered before the round began, so the honest count is zero and the run stands.
-        self.assertEqual(
-            [item.polls_in_flight for item in report.concurrent], [0] * measure.CONCURRENT_ROUNDS
-        )
+        # Released at the poll's start: every request started while it was in flight.
+        for item in report.concurrent:
+            self.assertGreaterEqual(min(item.in_flight_at_start), 1, item.in_flight_at_start)
+            self.assertGreaterEqual(item.polls_in_flight, 1)
         text = "\n".join(measure.render(report))
         self.assertIn("the poll started every 3 s", text)
         self.assertIn("observed spacing:", text)
-        self.assertIn("[launched by a due poll; 0 poll(s) in flight]", text)
+        self.assertIn("[launched by a due poll; polls in flight at each start: 1, 1, 1, 1;", text)
 
     def test_a_round_that_outlasts_the_interval_keeps_both_properties_too(self) -> None:
         """The slow case: a round longer than one interval, which is where this sprint starts.
@@ -1189,6 +1186,93 @@ class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
         self.assertEqual(measure.turn_ended_phrase(10.5, rounds), "during round 1")
         self.assertEqual(measure.turn_ended_phrase(15.0, rounds), "before round 2")
         self.assertEqual(measure.turn_ended_phrase(30.0, rounds), "after round 2")
+
+
+class RoundsUnderThePollTests(AgainstAStubDashboard):
+    """secretary-1746 review 4: the four requests start while a poll is in flight, or do not count.
+
+    The token interval keeps these cases short; the cadence itself is proved at its real three
+    seconds in `CadenceAndLaunchTests`.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05))
+        self.enterContext(mock.patch.object(measure, "WARM_REQUESTS", 2))
+
+    def test_the_requests_start_before_the_launching_poll_has_answered(self) -> None:
+        """The reviewer's case: a session read that takes a while is still under way at every start."""
+        base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": 0.3})
+        report = measure.run(base, None)
+
+        self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)
+        windows = dict(report.poll_windows)
+        for number, item in enumerate(report.concurrent, start=1):
+            with self.subTest(round=number):
+                launch_end = windows[item.launched_at]
+                for sample in item.samples:
+                    self.assertLess(item.launched_at, sample.started_at)
+                    self.assertLess(sample.started_at, launch_end, "the request started after the poll answered")
+                self.assertGreaterEqual(min(item.in_flight_at_start), 1)
+
+    def test_a_round_whose_requests_started_with_no_poll_in_flight_is_taken_again(self) -> None:
+        base = self.serve()
+        original = measure.SessionPoll.in_flight_at
+        calls = {"count": 0}
+
+        def first_round_alone(poll: object, moment: float) -> int:
+            calls["count"] += 1
+            if calls["count"] <= measure.CONCURRENT_REQUESTS:
+                return 0
+            return original(poll, moment)  # type: ignore[arg-type]
+
+        with mock.patch.object(measure.SessionPoll, "in_flight_at", first_round_alone):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertEqual(len(re.findall(r"^  round \d+: ", text, re.MULTILINE)), measure.CONCURRENT_ROUNDS, text)
+        not_counted = re.findall(r"^  not counted: .*polls in flight at each start: 0, 0, 0, 0;", text, re.MULTILINE)
+        self.assertEqual(len(not_counted), 1, text)
+
+    def test_a_run_that_never_gets_a_round_under_the_poll_is_unmeasurable(self) -> None:
+        base = self.serve()
+        with mock.patch.object(measure.SessionPoll, "in_flight_at", lambda _poll, _moment: 0):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn(f"of {measure.MAX_CONCURRENT_ATTEMPTS} rounds had a poll in flight", text)
+        self.assertNotIn("MEETS", text)
+        self.assertEqual(
+            len(re.findall(r"^  not counted: ", text, re.MULTILINE)), measure.MAX_CONCURRENT_ATTEMPTS, text
+        )
+
+    def test_the_no_poll_baseline_asks_nothing_of_po_and_says_so(self) -> None:
+        base = self.serve()
+        with mock.patch.object(measure, "po_cookie", side_effect=AssertionError("no token is read")):
+            code, text = self.run_main(base, "--no-poll")
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertIn("/po poll: none", text)
+        self.assertIn("--no-poll", text)
+        rounds = re.findall(r"^  round \d+: .* ms \[no poll\]", text, re.MULTILINE)
+        self.assertEqual(len(rounds), measure.CONCURRENT_ROUNDS, text)
+        concurrent = [line for line in text.splitlines() if "concurrent GET / #" in line]
+        self.assertEqual(len(concurrent), measure.CONCURRENT_REQUESTS, text)
+        self.assertTrue(all("no poll" in line for line in concurrent), concurrent)
+        asked = [path for _method, path in self.server.seen if path.startswith("/po")]  # type: ignore[attr-defined]
+        self.assertEqual(asked, [])
+
+    def test_the_json_carries_the_in_flight_counts_and_the_rounds_not_counted(self) -> None:
+        base = self.serve()
+        code, document = self.run_main(base, "--json")
+        self.assertEqual(code, measure.EXIT_MET, document)
+        parsed = json.loads(document)
+        self.assertIs(parsed["no_poll"], False)
+        self.assertEqual(len(parsed["concurrent_polls_in_flight_at_start"]), measure.CONCURRENT_ROUNDS)
+        for counts in parsed["concurrent_polls_in_flight_at_start"]:
+            self.assertEqual(len(counts), measure.CONCURRENT_REQUESTS)
+            self.assertGreaterEqual(min(counts), 1)
+        self.assertIsInstance(parsed["concurrent_discarded_rounds_ms"], list)
 
 
 class DataDirectoryResolutionTests(unittest.TestCase):

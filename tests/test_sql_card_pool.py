@@ -385,5 +385,85 @@ class DeadConnectionTests(PoolCase):
         self.assertEqual((self.client._idle, self.client._open), ([], 0))
 
 
+class StagedStateTests(PoolCase):
+    """Staged creates and added lanes belong to the transaction of the thread that made them.
+
+    The store here is empty, so every row a read returns comes from staged client state; the
+    rows a transaction has not committed must never reach another thread's read.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(mock.patch.object(_Cursor, "fetchall", return_value=[]))
+
+    def refs(self, project_id: int) -> list[str]:
+        return [row["reference"] for row in self.client.call("getAllTasks", project_id=project_id)]
+
+    def on_another_thread(self, read: Any) -> Any:
+        answers: list[Any] = []
+        failures = self.threads(lambda _index: answers.append(read()), 1)
+        self.assertEqual(failures, [])
+        return answers[0]
+
+    def check_isolated(self, project_id: int, reference: str) -> None:
+        def by_reference() -> Any:
+            return self.client.call("getTaskByReference", project_id=project_id, reference=reference)
+
+        with self.assertRaises(RuntimeError), self.client.transaction():
+            self.client.call("createTask", project_id=project_id, title="probe", reference=reference)
+            # The writer sees its own staged create.
+            self.assertIn(reference, self.refs(project_id))
+            self.assertIsNotNone(by_reference())
+            # A reader on another thread, on its own pooled connection, does not.
+            self.assertNotIn(reference, self.on_another_thread(lambda: self.refs(project_id)))
+            self.assertIsNone(self.on_another_thread(by_reference))
+            raise RuntimeError("the writer rolls back")
+        # Rolled back: neither the writer's thread nor another one sees it.
+        self.assertNotIn(reference, self.refs(project_id))
+        self.assertIsNone(by_reference())
+        self.assertNotIn(reference, self.on_another_thread(lambda: self.refs(project_id)))
+
+    def test_a_staged_sprint_is_invisible_to_another_thread_and_gone_after_rollback(self) -> None:
+        self.check_isolated(2, "sprint:review-probe")
+
+    def test_a_staged_product_and_issue_are_invisible_to_another_thread(self) -> None:
+        self.check_isolated(1, "product:probe")
+        self.check_isolated(1, "issue:probe")
+
+    def test_a_create_outside_a_transaction_is_refused_not_staged(self) -> None:
+        for project_id, reference in ((2, "sprint:loose"), (1, "product:loose")):
+            with self.subTest(reference=reference), self.assertRaises(TaskError) as refused:
+                self.client.call("createTask", project_id=project_id, title="loose", reference=reference)
+            self.assertIn("inside transaction()", refused.exception.message)
+            self.assertNotIn(reference, self.refs(project_id))
+
+    def test_an_unfinished_create_still_refuses_the_commit_and_leaves_nothing_staged(self) -> None:
+        with self.assertRaises(TaskError) as refused, self.client.transaction():
+            self.client.call("createTask", project_id=2, title="probe", reference="sprint:unfinished")
+        self.assertIn("sprint:unfinished", refused.exception.message)
+        self.assertEqual(self.refs(2), [])
+        self.assertIsNone(self.client._local.staged)
+
+    def lanes(self) -> list[str]:
+        return [lane["name"] for lane in self.client.call("getActiveSwimlanes", project_id=1)]
+
+    def test_a_lane_a_transaction_adds_is_its_own_until_it_commits(self) -> None:
+        with self.client.transaction():
+            self.client.call("addSwimlane", project_id=1, name="lane-a")
+            self.assertEqual(self.lanes(), ["lane-a"])
+            self.assertEqual(self.on_another_thread(self.lanes), [])
+        self.assertEqual(self.on_another_thread(self.lanes), ["lane-a"])
+        self.assertEqual(self.lanes(), ["lane-a"])
+
+    def test_a_lane_a_rolled_back_transaction_added_is_seen_by_no_one(self) -> None:
+        self.assertEqual(self.lanes(), [])
+        with self.assertRaises(RuntimeError), self.client.transaction():
+            self.client._lane_added("product-b")
+            self.assertEqual(self.on_another_thread(self.lanes), [])
+            raise RuntimeError("rolled back")
+        self.assertEqual(self.lanes(), [])
+        self.assertEqual(self.on_another_thread(self.lanes), [])
+
+
 if __name__ == "__main__":
     unittest.main()

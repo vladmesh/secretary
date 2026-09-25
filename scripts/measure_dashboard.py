@@ -38,11 +38,11 @@ That rule lives in exactly four places, and nowhere else:
      session whose own JSON says a turn is **running**, which is the only kind of session a `/po`
      page polls at all — before any clock starts.
   3. :func:`measure_concurrent` proves the round was *launched by a due poll*: the poll for the
-     round falls due on its own cadence, is issued, and only then are the four requests released.
-     That ordering is program order inside the poll thread, so it holds at any installation speed.
-     How many polls were genuinely **in flight** during the round is measured from the recorded
-     windows and printed per round — it is a fact about the run, not a condition on it, and on a
-     fast installation it is legitimately zero.
+     round falls due on its own cadence, its clock starts, and the four requests are released then,
+     together with the poll's own request, so they go out while it is **in flight**. That ordering
+     is program order inside the poll thread. How many polls were in flight at each request's start
+     is read from the recorded windows, and :func:`collect_rounds` counts a round only when every
+     request had at least one; a round that did not is printed as not counted and taken again.
   4. :func:`require_cadence` proves the *cadence*: every poll's actual start is compared with its
      scheduled one, both ways, and the run is refused if any is off by more than the tolerance.
      Starts follow an independent three-second schedule, as the page's `setInterval` does, so an
@@ -87,6 +87,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -148,6 +149,11 @@ CADENCE_TOLERANCE_SECONDS = 0.1
 #: threshold judged on the worst: the DoD says *each* request answers within 2.0 s, so a scenario
 #: that breaches it in one round of three has not met it.
 CONCURRENT_ROUNDS = 3
+
+#: How many rounds may be attempted to collect `CONCURRENT_ROUNDS` that count. A round counts only
+#: when every one of its four requests started while a poll was in flight; one that did not is
+#: printed, not judged, and taken again. A run that cannot collect enough is unmeasurable.
+MAX_CONCURRENT_ATTEMPTS = 3 * CONCURRENT_ROUNDS
 
 #: How long a round waits at the barrier for the poll thread to join it. It has to exceed the
 #: cadence, because waiting out the rest of the interval is exactly what a round does: the four
@@ -216,10 +222,15 @@ class Round:
     #: When the poll that released this round was issued, or None if none did. A round no poll
     #: launched is refused: it is four requests beside nothing, not the scenario.
     launched_at: float | None
-    #: Selected-session polls genuinely in flight during this round's timed window. On a fast
-    #: installation the launching poll has already finished before the round starts and the next
-    #: one is seconds away, so 0 here is an ordinary reading and not a failure.
+    #: Selected-session polls genuinely in flight during this round's timed window.
     polls_in_flight: int
+    #: For each of the four requests, in `samples` order, how many polls were in flight at the
+    #: moment it started. The condition a round counts on: every entry at least one.
+    in_flight_at_start: list[int] = field(default_factory=list)
+
+    @property
+    def under_poll(self) -> bool:
+        return bool(self.in_flight_at_start) and min(self.in_flight_at_start) > 0
 
     @property
     def started_at(self) -> float:
@@ -269,6 +280,8 @@ class Scenario:
     poll_explanation: str
     #: True when no turn was running and `--poll-idle-session` chose an idle session instead.
     poll_substitute: bool = False
+    #: `--no-poll`: the baseline, four concurrent requests with no poll beside them.
+    no_poll: bool = False
 
 
 @dataclass
@@ -279,10 +292,13 @@ class Report:
     poll_target: str = ""
     poll_explanation: str = ""
     poll_substitute: bool = False
+    no_poll: bool = False
     data_dir: str = ""
     warm: list[dict[str, Any]] = field(default_factory=list)
-    #: One entry per round of the concurrent scenario.
+    #: One entry per round of the concurrent scenario that counts.
     concurrent: list[Round] = field(default_factory=list)
+    #: Rounds taken and not counted, because a request started with no poll in flight.
+    discarded: list[Round] = field(default_factory=list)
     #: Which of those rounds the threshold was judged on: the one with the slowest request in it.
     worst_round: int = 0
     measurements: list[Measurement] = field(default_factory=list)
@@ -333,6 +349,7 @@ def fetch(
     method: str = "GET",
     cookie: str = "",
     tolerate: frozenset[int] = frozenset(),
+    on_start: Callable[[float], None] | None = None,
 ) -> Sample:
     """One request, timed end to end from the client's side — and validated here, only here.
 
@@ -357,6 +374,10 @@ def fetch(
 
     The body is read before the clock stops: a response whose headers arrive quickly and whose
     body trickles is slow to the browser that is waiting for it, and the DoD is about that wait.
+
+    `on_start` is called with the start time once the clock has started, before the request is
+    sent: the poll releases its round from there, so the round's requests go out while the poll
+    is in flight rather than after it has answered.
     """
     if method not in READ_METHODS:
         raise ValueError(f"{method} is not a read; this script makes no writing request")
@@ -364,6 +385,8 @@ def fetch(
     if cookie:
         request.add_header("Cookie", cookie)
     started = time.perf_counter()
+    if on_start is not None:
+        on_start(started)
     try:
         with _OPENER.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             payload = response.read()
@@ -546,7 +569,9 @@ def choose_poll_target(base_url: str, cookie: str, *, idle: bool = False) -> tup
     ), False
 
 
-def prepare(base_url: str, data_dir_argument: str | None, *, poll_idle: bool = False) -> Scenario:
+def prepare(
+    base_url: str, data_dir_argument: str | None, *, poll_idle: bool = False, no_poll: bool = False
+) -> Scenario:
     """Prove the specified scenario can be reproduced here, before a single clock starts.
 
     Every step raises :class:`Unmeasurable` on failure, so a run that gets past this point has an
@@ -560,6 +585,17 @@ def prepare(base_url: str, data_dir_argument: str | None, *, poll_idle: bool = F
         fetch(base_url, CONCURRENT_ROUTE, method="HEAD")
     except Unmeasurable as exc:
         raise Unmeasurable(f"{base_url} is not reachable: {exc}") from None
+    if no_poll:
+        # The baseline asks nothing of /po, so it needs neither the token nor a session.
+        return Scenario(
+            base_url=base_url,
+            data_dir=data_dir,
+            data_dir_source=data_dir_source,
+            cookie="",
+            poll_target="",
+            poll_explanation="none by request (--no-poll): the baseline the poll is compared against",
+            no_poll=True,
+        )
     cookie = po_cookie(data_dir)
     poll_target, poll_explanation, substitute = choose_poll_target(base_url, cookie, idle=poll_idle)
     return Scenario(
@@ -627,10 +663,10 @@ class SessionPoll:
     answer came back, so a read slower than the interval stretched every interval and the load fell
     below the page's while the output still said "every 3 s".
 
-    *Every round is launched by a due poll.* A round hands its barrier to :meth:`arm`. The worker
-    thread for the next poll that falls due takes it, issues its read, records it, and only then
-    releases the round's four requests. That is program order inside one thread, so it holds at any
-    installation speed.
+    *Every round is launched by a due poll, while it is in flight.* A round hands its barrier to
+    :meth:`arm`. The worker thread for the next poll that falls due takes it, starts its clock and
+    releases the round's four requests from there, before its own request is sent, so all five go
+    out together. That is program order inside one thread, so it holds at any installation speed.
 
     *Every start is checked against its schedule, both ways.* Each poll records how far its actual
     start was from its scheduled one, and :func:`require_cadence` refuses a run where any start is
@@ -642,8 +678,8 @@ class SessionPoll:
     than zero, so the one-sided standard still holds and the run is not refused; the output says in
     which round it happened.
 
-    How many polls were genuinely in flight during each round is measured and reported, not
-    required: on a fast installation the launching poll has answered before the round starts.
+    How many polls were in flight at each request's start is measured, and a round counts only
+    when every request had one (:func:`collect_rounds`).
     """
 
     def __init__(self, base_url: str, route: str, cookie: str, *, substitute: bool = False) -> None:
@@ -745,10 +781,27 @@ class SessionPoll:
 
     def _poll(self, slot: int, due: float, gate: threading.Barrier | None, launch: Launch | None) -> None:
         """One poll, on its own thread, so that no outstanding read can hold up the next start."""
-        with self._lock:
-            self._pending[slot] = time.perf_counter()
+
+        def started(at: float) -> None:
+            with self._lock:
+                self._pending[slot] = at
+            if gate is None:
+                return
+            # The ordering the scenario is defined by, as program order: this poll fell due and
+            # its clock started, and only now are the round's four requests let go -- together
+            # with this poll's own request, so they go out while it is in flight.
+            record = launch if launch is not None else Launch()
+            record.started_at = at
+            record.issued.set()
+            try:
+                gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
+            except threading.BrokenBarrierError:
+                # The round gave up waiting or failed on its own. It reports that; the poll
+                # beside it is made on schedule either way.
+                pass
+
         try:
-            sample = fetch(self.base_url, self.route, cookie=self.cookie)
+            sample = fetch(self.base_url, self.route, cookie=self.cookie, on_start=started)
             running = session_is_running(self.route, sample.body)
         except Unmeasurable as exc:
             # Recorded, not swallowed: `check` reports it on the caller's thread. Scheduling stops
@@ -758,7 +811,7 @@ class SessionPoll:
                 if self.failure is None:
                     self.failure = exc
             if gate is not None:
-                # A round is waiting at that barrier for a poll that is not coming.
+                # A round may be waiting at that barrier for a poll that is not coming.
                 gate.abort()
             self._stop.set()
             return
@@ -769,18 +822,6 @@ class SessionPoll:
             ended = not running and not self.substitute
             if ended and (self.turn_ended_at is None or sample.started_at < self.turn_ended_at):
                 self.turn_ended_at = sample.started_at
-        if gate is not None:
-            # The ordering the scenario is defined by, as program order: this poll fell due, was
-            # issued and is recorded, and only now are the round's four requests let go.
-            launch = launch if launch is not None else Launch()
-            launch.started_at = sample.started_at
-            launch.issued.set()
-            try:
-                gate.wait(timeout=ROUND_GATE_TIMEOUT_SECONDS)
-            except threading.BrokenBarrierError:
-                # The round gave up waiting or failed on its own. It reports that; the poll
-                # beside it was made on schedule either way.
-                pass
 
     def overlapping(self, started_at: float, ended_at: float) -> int:
         """How many polls were genuinely in flight during `[started_at, ended_at]`.
@@ -795,6 +836,17 @@ class SessionPoll:
             pending = list(self._pending.values())
         counted = sum(1 for start, end in windows if start < ended_at and end > started_at)
         return counted + sum(1 for start in pending if start < ended_at)
+
+    def in_flight_at(self, moment: float) -> int:
+        """How many polls were in flight at `moment`: started by then and not yet answered.
+
+        A poll still under way when this is asked counts when it started by then.
+        """
+        with self._lock:
+            windows = list(self.windows)
+            pending = list(self._pending.values())
+        answered = sum(1 for start, end in windows if start <= moment < end)
+        return answered + sum(1 for start in pending if start <= moment)
 
     def check(self) -> None:
         """Raise whatever a poll hit, on the caller's thread."""
@@ -816,22 +868,23 @@ class SessionPoll:
             worker.join(timeout=REQUEST_TIMEOUT_SECONDS)
 
 
-def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
-    """One round: four `GET /` at once, released by the poll that fell due just before them.
+def measure_concurrent(base_url: str, poll: SessionPoll | None) -> Round:
+    """One round: four `GET /` at once, released at the start of the poll that fell due.
 
     The barrier has five parties — the four request threads and the poll thread — and which of them
     waits is the whole point: the requests wait for the poll's own schedule, never the other way
-    round. The poll thread arrives only after its due poll has been issued and recorded, so the
-    round's `launched_at` is a fact of program order rather than of thread scheduling. The round
-    costs up to one interval before its first clock starts, and that wait is outside every number.
+    round. The poll thread arrives once its due poll's clock has started and before its request is
+    sent, so the four requests go out beside it, while it is in flight. The round costs up to one
+    interval before its first clock starts, and that wait is outside every number.
 
-    What that ordering does *not* buy is a poll in flight during the round; on a fast installation
-    the poll has answered before the requests start. So the in-flight count is measured here from
-    the recorded windows and reported, and nothing is arranged to make it come out above zero.
+    How many polls were in flight at each request's start is read back from the recorded windows;
+    :func:`collect_rounds` counts a round only when every request had at least one.
+
+    With no poll (`--no-poll`, the baseline) the barrier has the four request threads only.
     """
     samples: list[Sample | None] = [None] * CONCURRENT_REQUESTS
     failures: list[BaseException] = []
-    gate = threading.Barrier(CONCURRENT_REQUESTS + 1)
+    gate = threading.Barrier(CONCURRENT_REQUESTS + (0 if poll is None else 1))
 
     def one(index: int) -> None:
         try:
@@ -847,9 +900,11 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
             # failed. Aborting releases it to make the poll that is due.
             gate.abort()
 
-    poll.check()
-    # Armed before the threads start, so the round is already waiting when the poll comes due.
-    launch = poll.arm(gate)
+    launch = None
+    if poll is not None:
+        poll.check()
+        # Armed before the threads start, so the round is already waiting when the poll comes due.
+        launch = poll.arm(gate)
     threads = [threading.Thread(target=one, args=(index,)) for index in range(CONCURRENT_REQUESTS)]
     for thread in threads:
         thread.start()
@@ -857,19 +912,40 @@ def measure_concurrent(base_url: str, poll: SessionPoll) -> Round:
         thread.join(timeout=REQUEST_TIMEOUT_SECONDS * 2)
     # A poll that died is the likelier cause of a broken barrier than the requests were, and its
     # message names the route and the status, so it is reported first.
-    poll.check()
+    if poll is not None:
+        poll.check()
     if failures:
         raise Unmeasurable(f"a concurrent GET {CONCURRENT_ROUTE} could not be made: {failures[0]}")
     measured = [sample for sample in samples if sample is not None]
     if len(measured) != CONCURRENT_REQUESTS:
         raise Unmeasurable(f"only {len(measured)} of {CONCURRENT_REQUESTS} concurrent requests were answered")
+    if poll is None or launch is None:
+        return Round(samples=measured, launched_at=None, polls_in_flight=0)
     started = min(sample.started_at for sample in measured)
     ended = max(sample.ended_at for sample in measured)
     return Round(
         samples=measured,
         launched_at=launch.started_at if launch.issued.is_set() else None,
         polls_in_flight=poll.overlapping(started, ended),
+        in_flight_at_start=[poll.in_flight_at(sample.started_at) for sample in measured],
     )
+
+
+def collect_rounds(base_url: str, poll: SessionPoll) -> tuple[list[Round], list[Round]]:
+    """`CONCURRENT_ROUNDS` rounds taken under the poll, and the ones taken and not counted.
+
+    A round counts when every one of its four requests started while a poll was in flight. One
+    that did not was four requests beside a poll that had already answered, a lighter load than
+    the scenario, so it is kept for the output and taken again, up to `MAX_CONCURRENT_ATTEMPTS`.
+    """
+    counted: list[Round] = []
+    discarded: list[Round] = []
+    for _attempt in range(MAX_CONCURRENT_ATTEMPTS):
+        item = measure_concurrent(base_url, poll)
+        (counted if item.under_poll else discarded).append(item)
+        if len(counted) == CONCURRENT_ROUNDS:
+            break
+    return counted, discarded
 
 
 def cadence_holds(offsets: list[float]) -> bool:
@@ -933,10 +1009,9 @@ def require_launch(rounds: list[Round]) -> None:
     judged nor compete to be the worst round — which is why this refuses any of them rather than
     only the one that happens to be judged.
 
-    What it does not refuse is a round with no poll *in flight* during it. That number is measured
-    and printed, and on an installation that answers a session read in two milliseconds it is
-    legitimately zero; requiring it made the instrument's own proof a coin toss, which is a worse
-    thing to publish than an honest zero.
+    A round whose requests started with no poll in flight is not refused here:
+    :func:`collect_rounds` has already set it aside and taken another, and `_measure` refuses a run
+    that could not collect enough rounds under the poll.
     """
     barren = [index + 1 for index, item in enumerate(rounds) if item.launched_at is None]
     if barren:
@@ -947,14 +1022,17 @@ def require_launch(rounds: list[Round]) -> None:
         )
 
 
-def run(base_url: str, data_dir_argument: str | None, *, poll_idle: bool = False) -> Report:
+def run(
+    base_url: str, data_dir_argument: str | None, *, poll_idle: bool = False, no_poll: bool = False
+) -> Report:
     """Take both measurements against `base_url`, in the order they are printed."""
-    scenario = prepare(base_url, data_dir_argument, poll_idle=poll_idle)
+    scenario = prepare(base_url, data_dir_argument, poll_idle=poll_idle, no_poll=no_poll)
     report = Report(
         base_url=scenario.base_url,
         poll_target=scenario.poll_target,
         poll_explanation=scenario.poll_explanation,
         poll_substitute=scenario.poll_substitute,
+        no_poll=scenario.no_poll,
         data_dir=f"{scenario.data_dir} (from {scenario.data_dir_source})",
     )
     try:
@@ -983,6 +1061,11 @@ def _measure(scenario: Scenario, report: Report) -> None:
             )
         )
 
+    if scenario.no_poll:
+        report.concurrent = [measure_concurrent(scenario.base_url, None) for _ in range(CONCURRENT_ROUNDS)]
+        _judge_worst_round(scenario, report)
+        return
+
     if not scenario.poll_target:
         # An installation with no PO session, or none with a turn running, is not broken, and the
         # warm half above is a real measurement of it. The concurrent half of the DoD cannot be
@@ -999,7 +1082,7 @@ def _measure(scenario: Scenario, report: Report) -> None:
     with SessionPoll(
         scenario.base_url, scenario.poll_target, scenario.cookie, substitute=scenario.poll_substitute
     ) as poll:
-        report.concurrent = [measure_concurrent(scenario.base_url, poll) for _ in range(CONCURRENT_ROUNDS)]
+        report.concurrent, report.discarded = collect_rounds(scenario.base_url, poll)
     # Read after the block, so the poll thread has been stopped and joined and the record of what
     # it did is final rather than a snapshot of a thread still running.
     report.poll_requests = poll.successes
@@ -1012,7 +1095,16 @@ def _measure(scenario: Scenario, report: Report) -> None:
     poll.check()
     require_cadence(report.poll_offsets)
     require_launch(report.concurrent)
+    if len(report.concurrent) < CONCURRENT_ROUNDS:
+        raise Unmeasurable(
+            f"only {len(report.concurrent)} of {MAX_CONCURRENT_ATTEMPTS} rounds had a poll in flight "
+            f"when each of their requests started, fewer than the {CONCURRENT_ROUNDS} the scenario "
+            f"is judged on"
+        )
+    _judge_worst_round(scenario, report)
 
+
+def _judge_worst_round(scenario: Scenario, report: Report) -> None:
     # The judged round is the one holding the slowest single request: the DoD asks that *each* of
     # the four answers within 2.0 s, so a scenario that breaches it once in three rounds has not
     # met it, and judging the best or the average would report that it had.
@@ -1026,7 +1118,8 @@ def _measure(scenario: Scenario, report: Report) -> None:
                 label=(
                     f"concurrent GET {CONCURRENT_ROUTE} #{index} of {CONCURRENT_REQUESTS} "
                     f"(worst of {CONCURRENT_ROUNDS} rounds"
-                    f"{', substitute poll' if scenario.poll_substitute else ''})"
+                    f"{', substitute poll' if scenario.poll_substitute else ''}"
+                    f"{', no poll' if scenario.no_poll else ''})"
                 ),
                 value_ms=sample.duration_ms,
                 threshold_ms=CONCURRENT_THRESHOLD_MS,
@@ -1069,6 +1162,18 @@ def cadence_lines(intervals: list[float], offsets: list[float]) -> list[str]:
             f"here is the scenario the thresholds judge"
         )
     return lines
+
+
+def _round_line(item: Round, *, no_poll: bool) -> str:
+    durations = ", ".join(f"{sample.duration_ms:.0f}" for sample in item.samples)
+    if no_poll:
+        return f"{durations} ms [no poll]"
+    launched = "launched by a due poll" if item.launched_at is not None else "NO poll was issued for this round"
+    at_start = ", ".join(str(count) for count in item.in_flight_at_start)
+    return (
+        f"{durations} ms [{launched}; polls in flight at each start: {at_start}; "
+        f"{item.polls_in_flight} during the round]"
+    )
 
 
 def render(report: Report, *, unmeasurable: str = "") -> list[str]:
@@ -1135,31 +1240,28 @@ def render(report: Report, *, unmeasurable: str = "") -> list[str]:
 
     warm_count = len(report.warm)
     lines.extend(rows(report.measurements[:warm_count]))
-    if report.concurrent:
+    if report.concurrent or report.discarded:
         lines.append("")
         lines.append(
             f"concurrent: {CONCURRENT_REQUESTS} requests at once, {CONCURRENT_ROUNDS} rounds, "
             f"judged on the worst round"
         )
-        lines.append(
-            "  each round is released by a poll issued on the cadence just before it, which is the condition;"
-        )
-        lines.append(
-            "  the in-flight count beside it is measured during the round, and is 0 whenever the "
-            "poll answered first"
-        )
-        for index, item in enumerate(report.concurrent, start=1):
-            marker = " <- judged" if index - 1 == report.worst_round and not unmeasurable else ""
-            durations = ", ".join(f"{sample.duration_ms:.0f}" for sample in item.samples)
-            launched = (
-                "launched by a due poll"
-                if item.launched_at is not None
-                else "NO poll was issued for this round"
+        if report.no_poll:
+            lines.append("  no poll runs beside them: this is the baseline the poll is compared against")
+        else:
+            lines.append(
+                "  each round is released at the start of a poll issued on the cadence, so its four "
+                "requests go out while that poll is in flight;"
             )
             lines.append(
-                f"  round {index}: {durations} ms "
-                f"[{launched}; {item.polls_in_flight} poll(s) in flight]{marker}"
+                "  a round counts only when a poll was in flight at every request's start, and is "
+                "taken again otherwise"
             )
+        for index, item in enumerate(report.concurrent, start=1):
+            marker = " <- judged" if index - 1 == report.worst_round and not unmeasurable else ""
+            lines.append(f"  round {index}: {_round_line(item, no_poll=report.no_poll)}{marker}")
+        for item in report.discarded:
+            lines.append(f"  not counted: {_round_line(item, no_poll=False)}")
     lines.extend(rows(report.measurements[warm_count:]))
     lines.append("")
     if unmeasurable:
@@ -1196,6 +1298,12 @@ def as_json(report: Report, *, unmeasurable: str = "") -> dict[str, Any]:
         # different questions: whether the round was the scenario, and what that scenario produced.
         "concurrent_launched_by_poll": [item.launched_at is not None for item in report.concurrent],
         "concurrent_polls_in_flight": [item.polls_in_flight for item in report.concurrent],
+        "concurrent_polls_in_flight_at_start": [item.in_flight_at_start for item in report.concurrent],
+        "concurrent_discarded_rounds_ms": [
+            [sample.duration_ms for sample in item.samples] for item in report.discarded
+        ],
+        "concurrent_discarded_in_flight_at_start": [item.in_flight_at_start for item in report.discarded],
+        "no_poll": report.no_poll,
         "concurrent_worst_round": report.worst_round + 1,
         "measurements": [
             {
@@ -1232,6 +1340,11 @@ def build_parser() -> argparse.ArgumentParser:
             "refusing; every number taken beside it is labelled a substitute"
         ),
     )
+    parser.add_argument(
+        "--no-poll",
+        action="store_true",
+        help="the baseline: the same four concurrent requests with no /po poll beside them",
+    )
     parser.add_argument("--json", action="store_true", help="print the same facts as one JSON document")
     return parser
 
@@ -1239,7 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        report = run(args.base_url, args.data_dir, poll_idle=args.poll_idle_session)
+        report = run(args.base_url, args.data_dir, poll_idle=args.poll_idle_session, no_poll=args.no_poll)
     except Unmeasurable as exc:
         print(f"measure_dashboard: {exc}", file=sys.stderr)
         if exc.report is not None:

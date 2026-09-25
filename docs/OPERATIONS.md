@@ -565,26 +565,26 @@ refuses to judge anything if either of them says no.
   is more than 100 ms off. The output prints the spacing and the furthest offset
   (`start against schedule: furthest +1.2 ms …`) and says `the poll started every 3 s` only where
   those numbers show it.
-- **Every round is launched by a poll that fell due.** The four requests wait for the next poll on
-  the cadence; that poll is issued, and only then are they released. A round therefore costs up to
-  three seconds of waiting before its first clock starts — that wait is in no number — and the
-  ordering holds at any installation speed, because it is the order one thread does two things in.
-  A round that no poll was issued for is refused.
+- **Every round is launched by a poll that fell due, while it is in flight.** The four requests
+  wait for the next poll on the cadence; when that poll's clock starts they are released, together
+  with the poll's own request, so all five go out at once. A round therefore costs up to three
+  seconds of waiting before its first clock starts — that wait is in no number — and the ordering
+  holds at any installation speed, because it is the order one thread does two things in. A round
+  that no poll was issued for is refused.
+- **Every request starts under a poll.** For each of the four requests the command records how many
+  polls were in flight when it started. A round counts only when every request had at least one; a
+  round that did not is printed as `not counted` and taken again, up to nine attempts for the three
+  rounds, and a run that cannot collect three is refused.
 
-Each round's line reports both facts, and only the first of them is a condition:
+Each round's line reports both facts:
 
 ```
-round 2: 21772, 22149, 22041, 21642 ms [launched by a due poll; 8 poll(s) in flight]
+round 2: 2102, 1976, 2034, 2004 ms [launched by a due poll; polls in flight at each start: 1, 1, 1, 1; 1 during the round]
 ```
 
-`launched by a due poll` is the scenario. The **in-flight count** beside it is a measurement of
-what that produced — how many session polls were genuinely running during the round, from their
-recorded start and end times. On a slow installation further polls fall due inside the round and
-the count rises; on a fast one the poll has answered before the four requests start and the count
-is **0**, which is an accurate reading and not a failure. It is printed so the two can be compared
-over time, never required: requiring it would make the command refuse perfectly good measurements
-on a fast dashboard, because whether a two-millisecond poll and a three-millisecond round genuinely
-overlap is up to the scheduler.
+`--no-poll` takes the same three rounds of four concurrent `GET /` with no poll beside them, and
+labels every number `no poll`: the baseline an under-the-poll run is compared against, so the
+difference the poll makes can be read off two runs of one command.
 
 ### The load is never lighter than the page's
 

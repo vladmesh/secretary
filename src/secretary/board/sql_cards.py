@@ -271,11 +271,16 @@ def _task_number_of(ref: str) -> int:
 
 
 class _ThreadState(threading.local):
-    """What one thread holds of a client: its pinned connection, open sessions, transaction depth."""
+    """What one thread holds of a client: its pinned connection, open sessions, transaction depth,
+    and what its open transaction has staged but not committed."""
 
     connection: Any = None
     sessions = 0
     depth = 0
+    #: Staged creates by kind ("records", "sprints"), or None outside a transaction.
+    staged: dict[str, dict[int, dict[str, Any]]] | None = None
+    #: Lanes this thread's open transaction added, merged into the shared table on commit.
+    lanes_added: list[str] | None = None
 
 
 class SqlCardClient:
@@ -305,11 +310,13 @@ class SqlCardClient:
         self._idle: list[Any] = []
         self._open = 0
         self._local = _ThreadState()
-        # Transactions of different threads take turns: the staged creates and the lane table
-        # below are one per client, and a transaction derives them from its own rows.
+        # Transactions of different threads take turns.
         self._transaction_lock = threading.RLock()
-        # The virtual lane table: names the rows themselves carry, plus what `addSwimlane` adds.
+        # The virtual lane table as committed: names the rows themselves carry, plus what
+        # `addSwimlane` adds outside a transaction.  A transaction's own additions stay in its
+        # thread's state until it commits (`_add_lane`).
         self._lanes: list[str] | None = None
+        self._lanes_lock = threading.Lock()
         # The Product/Issue half of the same vocabulary, over the same pool (§3.1, §3.2).
         self.records = ProductIssueRecords(self)
         self.sprints = SqlSprintRecords(self)
@@ -329,6 +336,26 @@ class SqlCardClient:
     def _connection(self) -> Any:
         """The connection this thread has pinned, or None."""
         return self._local.connection
+
+    def _staged(self, kind: str, *, create: bool = False) -> dict[int, dict[str, Any]]:
+        """The one place staged Product/Issue (`"records"`) and Sprint (`"sprints"`) creates live.
+
+        They belong to this thread's open transaction (§5.6): no other thread sees them, and a
+        read outside a transaction sees none, since PostgreSQL has no such row for it either.  The
+        transaction's end drops them — a rollback discards them, and a commit refuses while any is
+        unfinished.  A create outside a transaction is refused rather than staged into nothing.
+        """
+        local = self._local
+        if not local.depth:
+            if create:
+                raise SqlCardError(
+                    "a Product, Issue or Sprint create is staged until `saveTaskMetadata` and "
+                    "must run inside transaction()"
+                )
+            return {}
+        if local.staged is None:
+            local.staged = {"records": {}, "sprints": {}}
+        return local.staged[kind]
 
     @property
     def connection(self) -> Any:
@@ -536,8 +563,7 @@ class SqlCardClient:
             finally:
                 # Two pieces of state are derived from rows this transaction wrote and are wrong
                 # the moment those rows are gone: the staged creates and the virtual lane table.
-                self.records.staged.clear()
-                self.sprints.staged.clear()
+                self._local.staged = self._local.lanes_added = None
                 self._lanes = None
             raise
         else:
@@ -548,8 +574,7 @@ class SqlCardClient:
                         + [row["reference"] for row in self.sprints.staged.values()]
                     )
                 )
-                self.records.staged.clear()
-                self.sprints.staged.clear()
+                self._local.staged = self._local.lanes_added = None
                 self._lanes = None
                 self.connection.rollback()
                 raise SqlCardError(
@@ -558,8 +583,12 @@ class SqlCardClient:
                 )
             with _translated("commit"):
                 self.connection.commit()
+            # Committed: this transaction's lanes are everyone's now.
+            for name in self._local.lanes_added or ():
+                self._add_shared_lane(name)
         finally:
             self._depth = 0
+            self._local.staged = self._local.lanes_added = None
             # A transaction whose connection died, or whose rollback failed, leaves a connection
             # nothing may reuse: dropped here, so the next operation opens a new one (§5.6).
             if self._connection is not None and (suspect or _unusable(self._connection)):
@@ -675,7 +704,9 @@ class SqlCardClient:
         return [{"id": identifier, "title": title} for identifier, title in BOARD_COLUMNS]
 
     def _lane_names(self) -> list[str]:
-        if self._lanes is None:
+        """The lane table as this thread sees it: the committed one plus its transaction's own."""
+        committed = self._lanes
+        if committed is None:
             named = {
                 row[0]
                 for row in self._query(
@@ -684,8 +715,27 @@ class SqlCardClient:
                 )
             }
             named |= {row[0] for row in self._query("SELECT product_id FROM products")}
-            self._lanes = sorted(named)
-        return self._lanes
+            with self._lanes_lock:
+                if self._lanes is None:
+                    self._lanes = sorted(named)
+                committed = self._lanes
+        added = self._local.lanes_added if self._depth else None
+        return sorted({*committed, *added}) if added else list(committed)
+
+    def _add_lane(self, name: str) -> None:
+        """A lane from now on: this thread's transaction's until it commits, else everyone's."""
+        if self._depth:
+            if self._local.lanes_added is None:
+                self._local.lanes_added = []
+            self._local.lanes_added.append(name)
+        else:
+            self._add_shared_lane(name)
+
+    def _add_shared_lane(self, name: str) -> None:
+        with self._lanes_lock:
+            # Not loaded yet: the next load reads the committed rows, which name it already.
+            if self._lanes is not None and name not in self._lanes:
+                self._lanes = sorted([*self._lanes, name])
 
     def _rpc_getActiveSwimlanes(self, *, project_id: int) -> list[dict[str, Any]]:
         return [
@@ -697,16 +747,13 @@ class SqlCardClient:
         lanes = self._lane_names()
         if name in lanes:
             return False  # A duplicate name answers false, not the existing id.
-        lanes.append(name)
-        lanes.sort()
-        return lanes.index(name) + 1
+        self._add_lane(name)
+        return sorted([*lanes, name]).index(name) + 1
 
     def _lane_added(self, name: str) -> None:
         """A product this transaction created is a lane from now on (§8.6)."""
-        lanes = self._lane_names()
-        if name not in lanes:
-            lanes.append(name)
-            lanes.sort()
+        if name not in self._lane_names():
+            self._add_lane(name)
 
     def _lane_id(self, name: str | None) -> int:
         if not name:

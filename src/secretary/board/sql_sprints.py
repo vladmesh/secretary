@@ -41,7 +41,11 @@ def sprint_key(reference: str) -> int:
 class SqlSprintRecords:
     def __init__(self, client: Any) -> None:
         self.client = client
-        self.staged: dict[int, dict[str, Any]] = {}
+
+    @property
+    def staged(self) -> dict[int, dict[str, Any]]:
+        """Sprint creates this thread's open transaction staged (`SqlCardClient._staged`)."""
+        return self.client._staged("sprints")
 
     def _error(self, message: str) -> Exception:
         from secretary.board.sql_cards import SqlCardError
@@ -106,9 +110,10 @@ class SqlSprintRecords:
         if self.row_by_reference(reference) is not None:
             raise self._error(f"{reference} already exists")
         key = sprint_key(reference)
-        if any(row["reference"] != reference for row in self.staged.values() if sprint_key(row["reference"]) == key):
+        staged = self.client._staged("sprints", create=True)
+        if any(row["reference"] != reference for row in staged.values() if sprint_key(row["reference"]) == key):
             raise self._error("Sprint transport-key collision")
-        self.staged[key] = {
+        staged[key] = {
             "reference": reference, "title": title, "description": description or "",
             "created_at": _now(), "metadata": {},
         }
