@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import math
 import re
 import time
@@ -122,12 +123,28 @@ class ProgressFoldTests(unittest.TestCase):
             for line in (b"alpha", b"beta", b"gamma"):
                 self._window(b"\x1b[1;1H\x1b[2K" + line)
             self.assertEqual(len(self.supervisor._progress_seen), 2)
-            self._window(b"\x1b[1;1H\x1b[2Kalpha")
-            self.assertEqual(len(self._progress()), 3)
-            _start_turn(self.supervisor)
-            self.assertEqual(self.supervisor._progress_seen, set())
+            self.assertNotIn(
+                hashlib.blake2b(b"alpha", digest_size=16).digest(), self.supervisor._progress_seen
+            )
             self._window(b"\x1b[1;1H\x1b[2Kalpha")
             self.assertEqual(len(self._progress()), 4)
+            _start_turn(self.supervisor)
+            self.assertEqual(self.supervisor._progress_seen, {})
+            self.assertEqual(self.supervisor._progress_visible, set())
+            self._window(b"\x1b[1;1H\x1b[2Kalpha")
+            self.assertEqual(len(self._progress()), 5)
+
+    def test_visible_lines_over_cap_do_not_retrigger_on_spinner_frames(self) -> None:
+        with mock.patch.object(module, "PROGRESS_SEEN_LINES_MAX", 3):
+            for row, word in enumerate(("alpha", "beta", "gamma", "delta", "epsilon"), 1):
+                self._window(f"\x1b[{row};1H\x1b[2Kfinding {word}".encode())
+            before = len(self._progress())
+            self.assertEqual(before, 5)
+            for frame in range(120):
+                glyph = "✢ ✶ ✻ ✽ *".split()[frame % 5]
+                self._window(f"\x1b[6;1H\x1b[2K{glyph} Thinking {frame}s {frame * 3} tokens".encode())
+                self.assertLessEqual(len(self.supervisor._progress_seen), 3)
+            self.assertLessEqual(len(self._progress()) - before, 1)
 
 
 class RecordedSpinnerReplayTests(unittest.TestCase):

@@ -50,6 +50,16 @@ class ScreenModelTests(unittest.TestCase):
         self.assertEqual((screen.rows, screen.cols), (1, 1))
         self.assertEqual(len(screen.lines()), 1)
 
+    def test_utf8_title_continuation_byte_does_not_end_control_string(self) -> None:
+        screen = ScreenModel(2, 40)
+        screen.feed(b"hello")
+        for byte in "\x1b]0;✳ Task.md review\x07".encode():
+            screen.feed(bytes((byte,)))
+        screen.feed(b" world")
+        self.assertEqual(screen.lines()[0], "hello world")
+        screen.feed(b"\x1bPignored\x9cstill ignored\x1b\\!")
+        self.assertEqual(screen.lines()[0], "hello world!")
+
     def test_control_table_and_random_bytes_are_total_and_bounded(self) -> None:
         cases = (
             b"\x1b[99999999999A",

@@ -19,9 +19,10 @@ and ignores colour and other non-text terminal controls. Normalization masks dig
 Dingbat, Braille, Geometric Shapes, `•` and `·` spinner glyphs and a lone `*`, and collapses
 whitespace. Empty lines are ignored.
 The supervisor keeps at most 4096 line hashes per turn and clears them at `turn.started`.
-Windows whose lines remain in that set write no progress record; their bytes accumulate in the next
-progress record's `output_bytes`, which also carries `folded_windows`. Once the cap is full, new
-untracked lines continue to progress. `turn.finished.output_bytes` still counts all
+Windows without newly appearing lines write no progress record; their bytes accumulate in the next
+progress record's `output_bytes`, which also carries `folded_windows`. The line hashes form a
+bounded FIFO: a new line evicts the oldest hash when the cap is full. Lines still visible on the
+screen do not progress again after eviction. `turn.finished.output_bytes` still counts all
 output in the turn, including folded windows; `turn.finished.folded_windows` reports any folds
 still pending at the end. Quiet turn timing is unchanged.
 

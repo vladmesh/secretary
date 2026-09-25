@@ -196,12 +196,12 @@ class ScreenModel:
                 else:
                     self._state = "ground"
             elif state == "string":
-                if byte in (0x07, 0x9C):
+                if byte == 0x07:
                     self._state = "ground"
                 elif byte == 0x1B:
                     self._state = "string_esc"
             elif state == "string_esc":
-                if byte in (ord("\\"), 0x07, 0x9C):
+                if byte in (ord("\\"), 0x07):
                     self._state = "ground"
                 elif byte != 0x1B:
                     self._state = "string"

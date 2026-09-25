@@ -230,7 +230,8 @@ class Supervisor:
         self._progress_bytes = 0
         self._progress_at = 0.0
         self._progress_window_bytes = 0
-        self._progress_seen: set[bytes] = set()
+        self._progress_seen: dict[bytes, None] = {}
+        self._progress_visible: set[bytes] = set()
         self._folded_windows = 0
 
         self._delivery: _Delivery | None = None
@@ -624,13 +625,18 @@ class Supervisor:
         lines = _progress_lines(self._screen.lines())
         self._progress_window_bytes = 0
         self._progress_at = 0.0
-        new = False
-        for line in lines:
-            digest = hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest()
+        visible = {hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest() for line in lines}
+        # A screen may show more lines than the history cap. An evicted line that stays visible
+        # must not be rediscovered on every spinner redraw.
+        new = any(
+            digest not in self._progress_seen and digest not in self._progress_visible for digest in visible
+        )
+        self._progress_visible = visible
+        for digest in sorted(visible):
             if digest not in self._progress_seen:
-                new = True
-                if len(self._progress_seen) < PROGRESS_SEEN_LINES_MAX:
-                    self._progress_seen.add(digest)
+                if len(self._progress_seen) >= PROGRESS_SEEN_LINES_MAX:
+                    self._progress_seen.pop(next(iter(self._progress_seen)))
+                self._progress_seen[digest] = None
         if not new:
             self._folded_windows += 1
             return
@@ -770,6 +776,7 @@ class Supervisor:
             self._progress_window_bytes = 0
             self._progress_at = 0.0
             self._progress_seen.clear()
+            self._progress_visible.clear()
             self._folded_windows = 0
             self._append(TURN_STARTED, turn=self._turn_id, subject=delivery.subject)
 
