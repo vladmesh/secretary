@@ -2614,10 +2614,13 @@ def head_run_turn_reading(
         window holds none.
 
     **Every failure is an answer, never an exception** (the one guard of this source). A journal
-    that cannot be read, a window that holds no record of this run, a torn last line, a malformed
-    or out-of-order record, a record whose time is not a time, a head the journal says exited, and
-    a run with no turn yet all come back as `{"state": "unavailable", "reason": ...}`. The caller
-    reads that as a channel that did not answer, never as a head that stopped.
+    that cannot be read, a window that holds no record of this run, a torn last line, any line the
+    strict validator (`_strict_record`) refuses -- another run's, out of order, or carrying a value
+    its writer could not have written -- a head the journal says exited, and a run with no turn yet
+    all come back as `{"state": "unavailable", "reason": ...}`. The caller reads that as a channel
+    that did not answer, never as a head that stopped. The window is read raw (`tail_window`),
+    because `read_tail` coerces `seq` for the admission reader and a coerced value must not become
+    stall evidence.
 
     A window that began mid-history (`partial_head`, the usual case: a worker's journal outgrows
     `JOURNAL_TAIL_BYTES` within minutes) is not refused as `_journal_state` refuses it. That reader
@@ -2635,27 +2638,22 @@ def head_run_turn_reading(
 
 
 def _turn_reading(path: Path, run_id: str, max_bytes: int) -> dict[str, Any]:
-    result = local_pty.read_tail(path, max_bytes=max_bytes)
-    events = [event for event in result.events if str(event.get("run_id") or "") == run_id]
-    if not events:
-        return _turn_unavailable(
-            "the supervisor journal holds no record of this run"
-            if not result.events
-            else "the supervisor journal window holds records of another run only"
-        )
-    if len(events) != len(result.events):
-        # A run directory is its run's own: its writer stamps one run id on every record. A record
-        # naming another run is damage, and dropping it silently could hide the very turn.started
-        # that closes an idle span, so the window is refused rather than read around.
-        return _turn_unavailable("the supervisor journal window mixes records of another run")
-    if result.truncated_tail:
+    window = local_pty.tail_window(path, max_bytes=max_bytes)
+    if window is None:
+        return _turn_unavailable("the supervisor journal holds no record of this run")
+    raw, partial_head = window
+    if raw and not raw.endswith(b"\n"):
         return _turn_unavailable("the supervisor journal's last line is torn")
-    if result.malformed:
-        return _turn_unavailable(f"the supervisor journal window holds {result.malformed} malformed line(s)")
-    if not result.ordered:
-        return _turn_unavailable("the supervisor journal window is out of sequence order")
+    events: list[dict[str, Any]] = []
+    for number, line in enumerate(raw.split(b"\n")[:-1] if raw else (), start=1):
+        refusal = _strict_record(line, run_id, events[-1] if events else None)
+        if isinstance(refusal, str):
+            return _turn_unavailable(f"supervisor journal line {number} of the window {refusal}")
+        events.append(refusal)
+    if not events:
+        return _turn_unavailable("the supervisor journal holds no record of this run")
     replay = _replay_journal(events)
-    if result.partial_head and not replay.anchored:
+    if partial_head and not replay.anchored:
         return _turn_unavailable(
             "the supervisor journal window begins mid-history and holds no turn boundary"
         )
@@ -2678,8 +2676,70 @@ def _turn_reading(path: Path, run_id: str, max_bytes: int) -> dict[str, Any]:
         "turn_number": replay.turn,
         "progress_seq": replay.progress_seq,
         "progress_at": replay.progress_at,
-        "seq": _journal_count(events[-1].get("seq"), 0),
+        "seq": events[-1]["seq"],
     }
+
+
+#: The epoch-seconds range a record's `at` may hold: 2000-01-01 to 2100-01-01. The writer stamps
+#: `time.time()`, so anything outside is damage, not an early or late clock.
+_JOURNAL_EPOCH_MIN = 946_684_800.0
+_JOURNAL_EPOCH_MAX = 4_102_444_800.0
+#: Kinds whose writer always stamps the turn number (`supervisor.py`); on them `turn` is required.
+_TURN_NUMBERED = frozenset({local_pty.TURN_STARTED, local_pty.TURN_FINISHED, local_pty.PROVIDER_PROGRESSED})
+
+
+def _strict_int(value: Any) -> bool:
+    """A JSON integer in `(0, 2**63)`: never a bool, float or string that could be coerced to one."""
+    return type(value) is int and 0 < value < 2**63
+
+
+def _strict_record(line: bytes, run_id: str, previous: dict[str, Any] | None) -> dict[str, Any] | str:
+    """One window line as the record its writer wrote, or why it is not one (secretary-1739 r2).
+
+    The vitality reading's one validator, applied to every line before the replay and never
+    coercing: `read_tail` turns a `seq` of `"12"` or `1e300` into an integer for the admission
+    reader, and a coerced value must not become stall evidence. A record of this run needs
+    `schema_version` exactly 1, `kind` a known string, `run_id` this run's string, `seq` a JSON
+    integer in `(0, 2**63)` greater than the line before, `at` a finite number inside
+    `[2000, 2100)`, and `turn` an integer in `(0, 2**63)` wherever present (required on the kinds
+    that always carry it). A blank line, bytes that are not UTF-8 JSON, a record of another run
+    and any failed field are all the same answer: the whole window is refused.
+    """
+    try:
+        record = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "is not a JSON record"
+    if not isinstance(record, dict):
+        return "is not a JSON object"
+    if (
+        type(record.get("schema_version")) is not int
+        or record.get("schema_version") != local_pty.JOURNAL_SCHEMA_VERSION
+    ):
+        return "has an unsupported schema_version"
+    kind = record.get("kind")
+    if not isinstance(kind, str) or kind not in local_pty.EVENT_KINDS:
+        return "has no known kind"
+    if not isinstance(record.get("run_id"), str):
+        return "has no run_id string"
+    if record["run_id"] != run_id:
+        return "names another run"
+    seq = record.get("seq")
+    if not _strict_int(seq):
+        return "has a seq that is not a positive JSON integer"
+    if previous is not None and seq <= previous["seq"]:
+        return "is out of sequence order"
+    at = record.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return "has a time that is not a number"
+    try:
+        at_seconds = float(at)
+    except OverflowError:
+        return "has a time that is not finite"
+    if not math.isfinite(at_seconds) or not _JOURNAL_EPOCH_MIN <= at_seconds < _JOURNAL_EPOCH_MAX:
+        return "has a time outside the epoch range"
+    if ("turn" in record or kind in _TURN_NUMBERED) and not _strict_int(record.get("turn")):
+        return "has a turn that is not a positive JSON integer"
+    return record
 
 
 def _turn_unavailable(reason: str) -> dict[str, Any]:

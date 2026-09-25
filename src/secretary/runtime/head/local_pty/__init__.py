@@ -116,6 +116,7 @@ from .journal import (
     JournalWriter,
     read_events,
     read_tail,
+    tail_window,
 )
 from .protocol import (
     ATTACH_MAX_CLIENTS,
@@ -160,4 +161,5 @@ __all__ = [
     "read_tail",
     "socket_path_for",
     "spawn_head",
+    "tail_window",
 ]

@@ -744,7 +744,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
         seen: list[float] = []
         real = _reduce_vitality_under_test()
 
-        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0):
+        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0, **declared):
             seen.append(answer_owed_since)
             return real(
                 previous,
@@ -753,6 +753,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
                 thresholds,
                 retained=retained,
                 answer_owed_since=answer_owed_since,
+                **declared,
             )
 
         with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
@@ -1055,16 +1056,26 @@ class IdleTurnOwedAnswerWaitTickTests(DispatcherRuntimeFixture, unittest.TestCas
             },
         }
         seen: list[float] = []
+        adapters: list[str] = []
 
-        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0):
+        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0, adapter=""):
             seen.append(answer_owed_since)
+            adapters.append(adapter)
             return reduce_vitality(
-                previous, snapshots, now, thresholds, retained=retained, answer_owed_since=answer_owed_since
+                previous,
+                snapshots,
+                now,
+                thresholds,
+                retained=retained,
+                answer_owed_since=answer_owed_since,
+                adapter=adapter,
             )
 
         with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
             self.tick()
         self.assertEqual(seen[0], asked)
+        # The fixture's worker runs on the codex adapter: a head the idle-turn premise holds for.
+        self.assertEqual(adapters[0], "codex")
         stored = self.runtime.production_state.records(self.runtime.production_state.load())[CARD_REF]
         episode = stored.worker_vitality_episode
         self.assertIs(episode.verdict, VitalityVerdict.CONFIRMED_STALL)

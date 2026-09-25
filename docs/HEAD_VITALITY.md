@@ -96,16 +96,25 @@ turn, so the Progress half is real progress, not spinner redraws.
 - Bound to the run: only records whose `run_id` is the run's count, and a window that mixes in
   another run's records is refused. A reading naming another run is handed on as unavailable.
 - Unavailable (`Turn=Unknown`, a bounded reason, never stall evidence, never `Dead`): the journal
-  cannot be read; no record of this run; a torn last line; a malformed or out-of-order record; a
-  record whose `at` is not a finite positive number; `run.exited` (the heartbeat decides that one); no
-  `turn.started` yet (bring-up, waiting for the prompt).
+  cannot be read; no record of this run; a torn last line; any record the strict validator refuses
+  (below); `run.exited` (the heartbeat decides that one); no `turn.started` yet (bring-up, waiting for
+  the prompt).
+- **Strict validator** (`local_pty_head._strict_record`), applied to every line of the window before
+  the replay, never coercing. The source reads the raw window (`local_pty.tail_window`), not
+  `read_tail`'s records: `read_tail` coerces `seq` with `int()` for the admission reader, so a damaged
+  `"12"` or `1e300` would reach the replay as an ordered integer. A line must be UTF-8 JSON with
+  `schema_version` exactly `1`; `kind` a known string; `run_id` this run's string; `seq` a JSON
+  integer (not bool, float or string) in `(0, 2^63)`, strictly increasing; `at` a finite int or float
+  in `[2000-01-01, 2100-01-01)`; `turn` an integer in `(0, 2^63)` wherever present, and present on
+  `turn.started`, `turn.finished` and `provider.progressed`, which the writer always numbers. One
+  failing line makes the whole reading unavailable: no filtering, no coercion.
 - A window that begins mid-history (`partial_head`) is the usual case, because a worker's journal
   outgrows 64 KiB within minutes (1727's run is 873 KB). It answers when it holds a `turn.started`,
   `turn.finished`, `run.started` or `run.exited` of this run, since the turn state after one of those
   depends on nothing older; without one it is unavailable. `_journal_state` still refuses every partial
   window, because admission must not conclude "no drain" from a window that may have lost one.
-- One guard at the source: any exception while reading is `{"state": "unavailable"}`. One normaliser
-  for every value handed on (`head_vitality._journal_reading`): `bool` is never a number, a time must
+- One guard at the source: any exception while reading is `{"state": "unavailable"}`. The snapshot
+  builder has one normaliser for every value it is handed (`head_vitality._journal_reading`): `bool` is never a number, a time must
   be finite, positive and no later than the observation plus 60 s, a sequence an int in `[0, 2^53]`.
 
 The cursor is `j1:<progress_seq>`, kept on the episode like the other cursors. A sequence lower than
@@ -188,9 +197,10 @@ The reducer fuses it separately from the head's own channels:
   confirmed at about ceiling + 15 min;
 - a quiet child, no child, or no child reading leaves every other rule exactly as it was: the child
   source is excluded from the strong set that selects the quiet, pid-only and dark arms;
-- child advancement does **not** hold a head whose journal turn is idle while it owes its answer: a
-  head at its prompt is not running the command its children are (`basis`
-  `child-not-holding-idle-turn`). An open journal turn keeps the hold, up to the ceiling.
+- child advancement does **not** hold a claude or codex head whose journal turn is idle while it owes
+  its answer: for those TUIs a closed turn is a head at its prompt, not running the command its
+  children are (`basis` `child-not-holding-idle-turn`). An open journal turn, and a head of any other
+  adapter, keeps the hold, up to the ceiling.
 
 The episode keeps the last reading's described descendant (`last_child_key`, `last_child_command`,
 `last_child_output`, `last_child_at`). Any reading that saw a live descendant describes one: the
@@ -209,8 +219,25 @@ cleared after the bring-up, so no rework, review or restart renders a stale one.
 ### Idle-turn stall
 
 `reduce_vitality` decides it in one place, `_idle_turn_stall`, ranked after death, suspension and
-advancement and before the child hold. It applies only when the `supervisor_journal` snapshot answered
-`Turn=Idle` and the caller declares an owed answer (`answer_owed_since > 0`).
+advancement and before the child hold. It applies only when the run's adapter is in
+`IDLE_TURN_ADAPTERS`, the `supervisor_journal` snapshot answered `Turn=Idle`, and the caller declares
+an owed answer (`answer_owed_since > 0`).
+
+- **Premise, and which heads it holds for.** Idle turn = 2 s pty quiet; verified to mean at-prompt
+  only for the claude and codex TUIs, which animate during tool runs. The supervisor closes a turn on
+  output quiet alone and cannot see the foreground command: a head whose child works without printing
+  closes its turn too. The Claude Code and Codex TUIs redraw a working indicator while a tool runs, and
+  the production journals show it: `f4b466341aa0437db48e46f7ae118254` (codex-sol-high worker,
+  secretary-1738) kept each of four working turns open from delivery until 6–10 s after its report,
+  through silent broad runs of about 220–300 s; `74bdb481750e45b496f71f2ec2ada0cb` (claude-opus-high
+  worker, secretary-1739) kept one 32-minute turn open through two silent broad runs of about 180 s;
+  `dc3dfbd19abd481fbfe488ced772d97f` (a codegen worker) kept its one turn open to the end of the work;
+  and a sweep of the sixty most recent journals found no turn closed mid-work. So the rule is pinned
+  to `IDLE_TURN_ADAPTERS = {"claude", "codex"}` (`head_vitality_episode`), read from
+  `HeadRun.spec.adapter` and declared to the reducer as `adapter` by the wait tick
+  (`wait_vitality._run_adapter`). A head of any other adapter (`hermes` today), or a run whose adapter
+  cannot be read, is out of the rule: a silent-child head there keeps the child hold and the open-turn
+  ladder.
 
 - **Owed answer.** The wait tick declares it (`wait_vitality.answer_owed_since_for_wait`): a worker
   waiting for its report owes it since `worker_started_at` (every launch, continuation, rework and
@@ -238,7 +265,7 @@ provider dark it waits for the outer ceiling like any other one-channel confirma
 
 | Shape | Suspected | Confirmed | Measured from |
 |---|---|---|---|
-| Journal turn **idle**, answer owed | 5 min (`IDLE_TURN_SUSPECT_DEFAULT`) | 10 min (`IDLE_TURN_CONFIRM_DEFAULT`) | the idle turn's start (`idle_turn_since`) |
+| Journal turn **idle**, answer owed, claude/codex adapter | 5 min (`IDLE_TURN_SUSPECT_DEFAULT`) | 10 min (`IDLE_TURN_CONFIRM_DEFAULT`) | the idle turn's start (`idle_turn_since`) |
 | Journal turn **open**, journal and provider quiet | 5 min (`suspect_after`) | 15 min (`suspect_after + confirm_after`) | last progress (`_quiet_reference`) |
 | Open turn held by moving children | ceiling + 5 min | ceiling + 15 min | last accepted child progress, ceiling 45 min |
 
@@ -316,9 +343,8 @@ active retention follows the `Suspended` ladder.
 starting head from a settled one, and stay far below the six-hour ceilings. A dark and quiet head is
 nudged at `max(dark_ceiling, suspect_after)`.
 
-The idle-turn pair judges a finished, silent head. The supervisor closes a turn after 2 s with no
-terminal output at all, while a working provider redraws its spinner or timer many times a second;
-in the sixty most recent production journals (2026-09) no turn closed mid-work. The lower bound is the
+The idle-turn pair judges a finished, silent head of a verified adapter (see
+[Idle-turn stall](#idle-turn-stall) for the premise and its evidence). The lower bound is the
 dispatcher's latency in accepting an answer the head just wrote (one tick) plus a delivery about to
 land; the card bounds confirmation at 10 minutes.
 
@@ -487,7 +513,7 @@ live round, so a verdict that can stop a head needs strong admitted evidence.
 | A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Secretary1517Tests`, `Secretary1517WaitTickTests` |
 | A status with no provider channel (`reason: "pid"`, `"disconnected"`) after the provider answered once is stamped `absent@provider_cursor`, takes the `dark_ceiling` window, and a confirmation is held behind the outer ceiling. | `ProviderLessStatusShapesTests` |
 | Pid-only `Running` with no progress evidence ages to `SuspectedStall` then `ConfirmedStall`. | `Issue06dcf6cbUmbrellaLivenessContractTests` |
-| Journal `Turn=Idle` with an owed answer ⇒ `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min from the idle start, child activity notwithstanding; an open turn keeps the ladder and the child hold; a continued worker that works is never suspected; every hostile journal value is a valid reading or unavailable. | `Secretary1727ReplayTests`, `IdleTurnStallRuleTests`, `ResumedWorkerThatWorksTests`, `HostileJournalValueTests` |
+| Journal `Turn=Idle` on a claude/codex run with an owed answer ⇒ `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min from the idle start, child activity notwithstanding; the same silent-child journal on another adapter stays healthy under the child hold; an open turn keeps the ladder and the child hold; a continued worker that works is never suspected; every hostile journal value makes the reading unavailable. | `Secretary1727ReplayTests`, `IdleTurnStallRuleTests`, `IdleTurnAdapterPremiseTests`, `ResumedWorkerThatWorksTests`, `HostileJournalValueTests` |
 
 Reducer timelines live in `tests/test_head_vitality_regression.py` and
 `tests/test_head_vitality_episode.py`; wait-tick and gate behaviour in

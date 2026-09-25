@@ -59,6 +59,7 @@ from secretary.dispatch.worker_launch import (
     write_worker_relaunch_intent as _write_worker_relaunch_intent,
 )
 from secretary.dispatch.worker_report import prompt_worker_report as _prompt_worker_report
+from secretary.runtime.head import HeadRun as _HeadRun
 
 
 def wait_watchdog(
@@ -956,6 +957,17 @@ def answer_owed_since_for_wait(record: DispatcherRecord, kind: str) -> float:
     return max(float(record.worker_started_at or 0.0), float(record.worker_answer_owed_since or 0.0))
 
 
+def _run_adapter(run_payload: Any) -> str:
+    """The run's ``HeadRun.spec.adapter``, the reducer's declared input for the idle-turn rule.
+
+    An unreadable run is no adapter: the rule then stays off and nothing else changes.
+    """
+    try:
+        return str(_HeadRun.from_json(run_payload).spec.adapter or "")
+    except Exception:  # noqa: BLE001 - a damaged run declares nothing; the rule stays off
+        return ""
+
+
 def reduce_and_store_vitality_episode(
     runtime: Any,
     task: dict[str, Any],
@@ -1072,6 +1084,7 @@ def reduce_and_store_vitality_episode(
             _DEFAULT_VITALITY_THRESHOLDS,
             retained=retained,
             answer_owed_since=answer_owed_since,
+            adapter=_run_adapter(run_payload),
         )
     except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick
         # Shadow mode may never break the tick that hosts it. A reduction failure is recorded

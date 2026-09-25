@@ -28,6 +28,7 @@ from typing import Any
 from unittest import mock
 
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import wait_vitality
 from secretary.dispatch.head_vitality import (
     ProgressState,
     SnapshotSource,
@@ -39,6 +40,7 @@ from secretary.dispatch.head_vitality import (
 from secretary.dispatch.head_vitality_episode import (
     CHILD_ACTIVITY_CEILING_DEFAULT,
     DEFAULT_VITALITY_THRESHOLDS,
+    IDLE_TURN_ADAPTERS,
     IDLE_TURN_CONFIRM_DEFAULT,
     IDLE_TURN_SUSPECT_DEFAULT,
     VitalityEpisode,
@@ -102,7 +104,7 @@ def _record(seq: int, kind: str, at: float, run_id: str = "run-a", **fields: Any
     return {"schema_version": 1, "seq": seq, "run_id": run_id, "kind": kind, "at": at, **fields}
 
 
-def _clean_journal(run_id: str = "run-a", base: float = 1_000_000.0) -> list[dict[str, Any]]:
+def _clean_journal(run_id: str = "run-a", base: float = 1_790_000_000.0) -> list[dict[str, Any]]:
     """Bring-up, one delivered turn with progress, and the turn closed on quiet."""
     return [
         _record(1, "run.started", base, run_id, role="worker"),
@@ -124,23 +126,23 @@ class SupervisorJournalSourceTests(unittest.TestCase):
         self.assertEqual(reading["state"], "observed")
         self.assertEqual(reading["run_id"], "run-a")
         self.assertEqual(reading["turn"], "active")
-        self.assertEqual(reading["turn_since"], 1_000_005.0)
-        self.assertEqual((reading["progress_seq"], reading["progress_at"]), (5, 1_000_090.0))
+        self.assertEqual(reading["turn_since"], 1_790_000_005.0)
+        self.assertEqual((reading["progress_seq"], reading["progress_at"]), (5, 1_790_000_090.0))
 
     def test_a_closed_turn_is_idle_since_it_finished(self) -> None:
         journal = _JournalDir(self, "run-a")
         journal.write(_clean_journal())
         reading = journal.read()
-        self.assertEqual((reading["turn"], reading["turn_since"]), ("idle", 1_000_120.0))
+        self.assertEqual((reading["turn"], reading["turn_since"]), ("idle", 1_790_000_120.0))
 
     def test_a_delivery_after_the_turn_finished_restarts_the_idle_clock(self) -> None:
         # `input.accepted` is written when the bytes land, before the turn is opened for them.
         journal = _JournalDir(self, "run-a")
         journal.write(
-            [*_clean_journal(), _record(7, "input.accepted", 1_000_400.0, subject="worker-continuation")]
+            [*_clean_journal(), _record(7, "input.accepted", 1_790_000_400.0, subject="worker-continuation")]
         )
         reading = journal.read()
-        self.assertEqual((reading["turn"], reading["turn_since"]), ("idle", 1_000_400.0))
+        self.assertEqual((reading["turn"], reading["turn_since"]), ("idle", 1_790_000_400.0))
 
     def test_every_window_that_cannot_answer_is_unavailable_with_a_reason(self) -> None:
         clean = _clean_journal()
@@ -153,8 +155,11 @@ class SupervisorJournalSourceTests(unittest.TestCase):
             "invalid utf-8": (clean, b"\xff\xfe\xfd\n"),
             "out of order": ([*clean[:4], clean[5], clean[4]], b""),
             "another run only": (_clean_journal("run-b"), b""),
-            "another run mixed in": ([*clean, _record(7, "turn.started", 1_000_130.0, "run-b", turn=2)], b""),
-            "head exited": ([*clean, _record(7, "run.exited", 1_000_130.0, exit_code=0)], b""),
+            "another run mixed in": (
+                [*clean, _record(7, "turn.started", 1_790_000_130.0, "run-b", turn=2)],
+                b"",
+            ),
+            "head exited": ([*clean, _record(7, "run.exited", 1_790_000_130.0, exit_code=0)], b""),
         }
         for name, (records, tail) in cases.items():
             with self.subTest(name):
@@ -171,13 +176,15 @@ class SupervisorJournalSourceTests(unittest.TestCase):
         # partial window is the ordinary case, not a failure.
         journal = _JournalDir(self, "run-a")
         padding = [
-            _record(seq, "provider.progressed", 1_000_000.0 + seq, turn=1, output_bytes=100, note="x" * 200)
+            _record(
+                seq, "provider.progressed", 1_790_000_000.0 + seq, turn=1, output_bytes=100, note="x" * 200
+            )
             for seq in range(4, 60)
         ]
         records = [*_clean_journal()[:3], *padding]
-        journal.write([*records, _record(60, "turn.finished", 1_000_070.0, turn=1, reason="quiet")])
+        journal.write([*records, _record(60, "turn.finished", 1_790_000_070.0, turn=1, reason="quiet")])
         anchored = journal.read(max_bytes=2048)
-        self.assertEqual((anchored["turn"], anchored["turn_since"]), ("idle", 1_000_070.0))
+        self.assertEqual((anchored["turn"], anchored["turn_since"]), ("idle", 1_790_000_070.0))
         journal.write(records)
         unanchored = journal.read(max_bytes=2048)
         self.assertEqual(unanchored["state"], "unavailable")
@@ -347,6 +354,7 @@ class _Timeline:
         self.child_moves = False
         self.provider = 0
         self.provider_moves = False
+        self.adapter = "claude"
 
     def cursor(self, source: SnapshotSource) -> str:
         return (self.episode.evidence_cursors if self.episode else {}).get(source.value, "")
@@ -369,7 +377,7 @@ class _Timeline:
             ),
         ]
         self.episode = reduce_vitality(
-            self.episode, snapshots, self.now, retained=retained, answer_owed_since=owed
+            self.episode, snapshots, self.now, retained=retained, answer_owed_since=owed, adapter=self.adapter
         )
         return self.episode
 
@@ -525,13 +533,13 @@ class IdleTurnStallRuleTests(unittest.TestCase):
     def test_no_idle_verdict_before_the_first_turn(self) -> None:
         journal = _JournalDir(self, "run-a")
         journal.write(_clean_journal()[:2])
-        now = 1_000_000.0 + 3 * CONFIRM_IDLE
+        now = 1_790_000_000.0 + 3 * CONFIRM_IDLE
         snapshots = [
             _pid(now),
             *snapshots_from_status({"supervisor_journal": journal.read()}, run_id="run-a", observed_at=now),
         ]
         self.assertIs(snapshots[1].availability, SourceAvailability.UNAVAILABLE)
-        episode = reduce_vitality(None, snapshots, now, answer_owed_since=1_000_000.0)
+        episode = reduce_vitality(None, snapshots, now, answer_owed_since=1_790_000_000.0, adapter="claude")
         self.assertIs(episode.verdict, VitalityVerdict.HEALTHY_QUIET)
         self.assertEqual(episode.idle_turn_since, 0.0)
 
@@ -575,66 +583,80 @@ class HostileJournalValueTests(unittest.TestCase):
     """The card's hostile-value table, end to end: file → source → snapshot → reducer.
 
     Each case damages one field of one record of an otherwise clean journal (or the file itself),
-    and the head is judged an hour after its turn ended with an answer owed -- the moment a
-    believed idle reading would confirm a stall. Every case must give either the clean reading's
-    own turn answer or the unavailable snapshot, and no case may raise or produce a stall verdict
-    the clean journal would not.
+    and the head -- a `claude` run, so the idle-turn rule is live -- is judged an hour after its
+    turn ended with an answer owed: the moment a believed idle reading would confirm a stall.
+    Every field damaged is one the source reads, so the only accepted outcome is the unavailable
+    snapshot (secretary-1739 round 2): never the clean journal's verdict, never an exception.
     """
 
     RUN = "run-a"
 
     def judge(self, reading: dict[str, Any]) -> tuple[VitalitySnapshot, VitalityEpisode]:
-        now = 1_000_120.0 + 3_600.0
+        now = 1_790_000_120.0 + 3_600.0
         journal = snapshots_from_status({"supervisor_journal": reading}, run_id=self.RUN, observed_at=now)[0]
         # Episode started now: the pid alone has aged nothing, so a stall can come from the journal only.
-        episode = reduce_vitality(None, [_pid(now), journal], now, answer_owed_since=1_000_000.0)
+        episode = reduce_vitality(
+            None, [_pid(now), journal], now, answer_owed_since=1_790_000_000.0, adapter="claude"
+        )
         return journal, episode
 
-    def assert_safe(self, raw: bytes, clean: VitalitySnapshot, clean_verdict: VitalityVerdict) -> None:
+    def assert_unavailable(self, raw: bytes) -> None:
         journal = _JournalDir(self, self.RUN)
         journal.path.write_bytes(raw)
         reading = journal.read()
+        self.assertEqual(reading["state"], "unavailable", reading)
         snapshot, episode = self.judge(reading)
-        if snapshot.availability is SourceAvailability.UNAVAILABLE:
-            self.assertIs(snapshot.turn, TurnState.UNKNOWN)
-            self.assertTrue(snapshot.reason)
-            self.assertNotIn(
-                episode.verdict,
-                (VitalityVerdict.SUSPECTED_STALL, VitalityVerdict.CONFIRMED_STALL, VitalityVerdict.DEAD),
-            )
-            return
-        self.assertEqual((snapshot.turn, snapshot.turn_since), (clean.turn, clean.turn_since))
-        self.assertIs(episode.verdict, clean_verdict)
+        self.assertIs(snapshot.availability, SourceAvailability.UNAVAILABLE)
+        self.assertIs(snapshot.turn, TurnState.UNKNOWN)
+        self.assertTrue(snapshot.reason)
+        self.assertNotIn(
+            episode.verdict,
+            (VitalityVerdict.SUSPECTED_STALL, VitalityVerdict.CONFIRMED_STALL, VitalityVerdict.DEAD),
+        )
 
-    def test_every_hostile_value_in_every_read_field(self) -> None:
-        records = _clean_journal(self.RUN)
-        clean_raw = b"".join(_line(record) for record in records)
+    def test_the_clean_journal_is_what_a_believed_value_would_convict(self) -> None:
         clean_dir = _JournalDir(self, self.RUN)
-        clean_dir.path.write_bytes(clean_raw)
+        clean_dir.write(_clean_journal(self.RUN))
         clean, clean_episode = self.judge(clean_dir.read())
         self.assertIs(clean.turn, TurnState.IDLE)
         self.assertIs(clean_episode.verdict, VitalityVerdict.CONFIRMED_STALL)
+
+    def test_the_reviewers_final_seq_rows(self) -> None:
+        # The damaged final `turn.finished` of review 4: `read_tail` coerces both to an int, and
+        # before round 2 both were read as an ordered idle window and confirmed a stall.
+        records = _clean_journal(self.RUN)
+        for name, value in (('seq "12"', "12"), ("seq 1e300", 1e300)):
+            with self.subTest(name):
+                raw = b"".join(_line(record) for record in records[:-1]) + _hostile_line(
+                    records[-1], "seq", value
+                )
+                self.assert_unavailable(raw)
+
+    def test_every_hostile_value_in_every_read_field(self) -> None:
+        records = _clean_journal(self.RUN)
         for index, record in enumerate(records):
             for field in _READ_FIELDS:
                 for value in _HOSTILE_VALUES:
+                    damaged = _hostile_line(record, field, value)
+                    if damaged == _line(record):
+                        continue  # removing a field the record never had damages nothing
                     with self.subTest(record=record["kind"], field=field, value=repr(value)[:16]):
                         raw = b"".join(
-                            _hostile_line(other, field, value) if position == index else _line(other)
+                            damaged if position == index else _line(other)
                             for position, other in enumerate(records)
                         )
-                        self.assert_safe(raw, clean, clean_episode.verdict)
+                        self.assert_unavailable(raw)
 
     def test_damaged_files_and_foreign_records(self) -> None:
         records = _clean_journal(self.RUN)
         clean_raw = b"".join(_line(record) for record in records)
-        clean_dir = _JournalDir(self, self.RUN)
-        clean_dir.path.write_bytes(clean_raw)
-        clean, clean_episode = self.judge(clean_dir.read())
-        foreign = _record(7, "turn.started", 1_000_130.0, "run-b", turn=2)
+        foreign = _record(7, "turn.started", 1_790_000_130.0, "run-b", turn=2)
         cases = {
             "invalid utf-8 line": clean_raw + b"\xc3\x28\xa0\xa1\n",
+            "blank line": clean_raw + b"\n",
             "torn last line": clean_raw + b'{"kind":"turn.started","seq":7',
             "out-of-order seq": b"".join(_line(record) for record in [*records[:4], records[5], records[4]]),
+            "repeated seq": clean_raw + _line({**records[-1], "kind": "input.accepted"}),
             "records of another run": clean_raw + _line(foreign),
             "another run only": b"".join(_line({**record, "run_id": "run-b"}) for record in records),
             "binary noise": bytes(range(256)) * 4,
@@ -642,13 +664,15 @@ class HostileJournalValueTests(unittest.TestCase):
         }
         for name, raw in cases.items():
             with self.subTest(name):
-                self.assert_safe(raw, clean, clean_episode.verdict)
+                self.assert_unavailable(raw)
 
 
-def _worker_record(run_id: str, runtime: str = LOCAL_PTY_RUNTIME) -> DispatcherRecord:
+def _worker_record(
+    run_id: str, runtime: str = LOCAL_PTY_RUNTIME, adapter: str = "claude"
+) -> DispatcherRecord:
     run = HeadRun(
         run_id=run_id,
-        spec=HeadSpec(profile_id="claude-opus-high-local-pty", adapter="claude", runtime=runtime),
+        spec=HeadSpec(profile_id=f"{adapter}-local-pty", adapter=adapter, runtime=runtime),
         workspace="/tmp/secretary-9739",
         task_ref=TaskRef.card(REF),
         role="worker",
@@ -808,7 +832,9 @@ class Secretary1727ReplayTests(unittest.TestCase):
                 previous_journal_cursor=cursors.get(SnapshotSource.SUPERVISOR_JOURNAL.value, ""),
                 observed_at=now,
             )
-            episode = reduce_vitality(episode, snapshots, now, retained=retained, answer_owed_since=owed)
+            episode = reduce_vitality(
+                episode, snapshots, now, retained=retained, answer_owed_since=owed, adapter="claude"
+            )
             seen.append((now, episode))
 
         # Retained (SIGSTOP) from 23:26:10Z while the reviewer ran: the gate/review path, nothing owed.
@@ -865,6 +891,76 @@ class Secretary1727ReplayTests(unittest.TestCase):
         self.assertEqual({episode.verdict for episode in after}, {VitalityVerdict.HEALTHY_ACTIVE})
 
 
+class IdleTurnAdapterPremiseTests(unittest.TestCase):
+    """Review 4's scenario: a turn closed on 2 s of pty quiet while a silent child keeps working.
+
+    The supervisor closes a turn on quiet alone, so a head whose foreground child prints nothing
+    reads `Idle`. That means "at its prompt" only for the TUIs verified to animate while a tool runs
+    (`IDLE_TURN_ADAPTERS`); on any other adapter the child hold keeps the head healthy, as before.
+    """
+
+    def run_scenario(self, adapter: str) -> list[tuple[float, VitalityVerdict]]:
+        base = 1_790_200_000.0
+        journal = _JournalDir(self, "run-a")
+        journal.write(
+            [
+                _record(1, "run.started", base),
+                _record(2, "input.accepted", base + 5, subject="worker-launch"),
+                _record(3, "turn.started", base + 5, turn=1),
+                _record(4, "provider.progressed", base + 20, turn=1),
+                # The foreground command starts and prints nothing: the turn closes 2 s later.
+                _record(5, "turn.finished", base + 22, turn=1, reason="quiet"),
+            ]
+        )
+        record = _worker_record("run-a", adapter=adapter)
+        host = _JournalHost(record.worker_head_run, journal)
+        declared = wait_vitality._run_adapter(record.worker_head_run)
+        self.assertEqual(declared, adapter)
+        episode: VitalityEpisode | None = None
+        seen: list[tuple[float, VitalityVerdict]] = []
+        now = base + 30.0
+        while now < base + 22 + CONFIRM_IDLE + 300.0:
+            host.child_cpu += 3_000  # the silent child burns CPU on every tick
+            cursors = episode.evidence_cursors if episode is not None else {}
+            snapshots = snapshots_from_status(
+                _status(host, record),
+                run_id="run-a",
+                previous_cursor=cursors.get(SnapshotSource.PROVIDER_CURSOR.value, ""),
+                previous_child_cursor=cursors.get(SnapshotSource.EXECUTION_CHILD.value, ""),
+                previous_child_key=episode.last_child_key if episode is not None else "",
+                previous_journal_cursor=cursors.get(SnapshotSource.SUPERVISOR_JOURNAL.value, ""),
+                observed_at=now,
+            )
+            episode = reduce_vitality(episode, snapshots, now, answer_owed_since=base + 5, adapter=declared)
+            seen.append((now - (base + 22), episode.verdict))
+            now += 60.0
+        return seen
+
+    def test_the_verified_adapters_are_claude_and_codex(self) -> None:
+        self.assertEqual(IDLE_TURN_ADAPTERS, frozenset({"claude", "codex"}))
+
+    def test_another_adapter_stays_healthy_under_the_child_hold(self) -> None:
+        seen = self.run_scenario("hermes")
+        self.assertEqual({verdict for _, verdict in seen[1:]}, {VitalityVerdict.HEALTHY_ACTIVE}, seen)
+
+    def test_the_same_journal_on_claude_is_confirmed(self) -> None:
+        for idle, verdict in self.run_scenario("claude"):
+            if idle >= CONFIRM_IDLE:
+                self.assertIs(verdict, VitalityVerdict.CONFIRMED_STALL, idle)
+            elif idle >= SUSPECT_IDLE:
+                self.assertIs(verdict, VitalityVerdict.SUSPECTED_STALL, idle)
+
+    def test_no_adapter_keeps_the_rule_off(self) -> None:
+        timeline = _Timeline(10_000.0)
+        timeline.adapter = ""
+        timeline.tick(owed=9_000.0)
+        timeline.turn, timeline.turn_since = "idle", timeline.now
+        timeline.now += CONFIRM_IDLE + 60.0
+        episode = timeline.tick(owed=9_000.0)
+        self.assertEqual(episode.idle_turn_since, 0.0)
+        self.assertNotIn("idle-turn", " ".join(episode.basis))
+
+
 class ResumedWorkerThatWorksTests(unittest.TestCase):
     """A continued worker is not read as stalled: the delivery that resumes it restarts the clock."""
 
@@ -872,7 +968,7 @@ class ResumedWorkerThatWorksTests(unittest.TestCase):
         journal = _JournalDir(self, "run-a")
         record = _worker_record("run-a")
         host = _JournalHost(record.worker_head_run, journal)
-        base = 2_000_000.0
+        base = 1_790_100_000.0
         # Round 1 ended long ago; the head was retained, then continued at `resumed`.
         records = [
             _record(1, "run.started", base),
@@ -904,7 +1000,9 @@ class ResumedWorkerThatWorksTests(unittest.TestCase):
                 previous_journal_cursor=cursors.get(SnapshotSource.SUPERVISOR_JOURNAL.value, ""),
                 observed_at=now,
             )
-            episode = reduce_vitality(episode, snapshots, now, answer_owed_since=resumed + 1.0)
+            episode = reduce_vitality(
+                episode, snapshots, now, answer_owed_since=resumed + 1.0, adapter="claude"
+            )
             verdicts.append(episode.verdict)
             now += 60.0
         self.assertNotIn(VitalityVerdict.SUSPECTED_STALL, verdicts)

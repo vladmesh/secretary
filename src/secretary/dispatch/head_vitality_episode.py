@@ -116,6 +116,15 @@ CHILD_ACTIVITY_CEILING_DEFAULT = 45.0 * 60.0
 IDLE_TURN_SUSPECT_DEFAULT = float(IDLE_STALL_DEFAULT)
 IDLE_TURN_CONFIRM_DEFAULT = 2.0 * float(IDLE_STALL_DEFAULT)
 
+# The head adapters (``HeadRun.spec.adapter``) for which a closed journal turn was verified to mean
+# "at its prompt" (secretary-1739 round 2). The supervisor closes a turn after two seconds with no
+# pty output at all, which proves nothing about a foreground command: a head whose child works
+# silently would close its turn too. The Claude Code and Codex TUIs redraw a working indicator
+# while a tool runs, and their production journals show turns open through silent broad runs of
+# three to five minutes (runs f4b46634…, 74bdb481…, dc3dfbd1…). Any other adapter, or none, is
+# outside the idle-turn rule and keeps the child hold and the open-turn ladder.
+IDLE_TURN_ADAPTERS = frozenset({"claude", "codex"})
+
 
 class VitalityVerdict(StrEnum):
     """What the reducer concludes about one run, as of one reduction."""
@@ -172,12 +181,11 @@ class VitalityThresholds:
     ``idle_turn_suspect_after`` and ``idle_turn_confirm_after`` (secretary-1739) are the idle-turn
     stall, and unlike the pair above both are measured from ONE instant: when the head's journal
     turn became idle. The shape they judge is not "quiet while working" but "finished and
-    silent": the supervisor closed the turn after two seconds with no terminal output at all --
-    a working provider's TUI redraws its spinner or timer many times a second, and across the
-    sixty most recent local-pty journals on the production host (2026-09) the only output outside
-    a delivered turn is the bring-up banner and what a head prints after its last turn, so no turn
-    was seen to close mid-work -- and the head still owes the dispatcher its report or verdict.
-    Nothing is running to wait for, so the quiet ladder's fifteen minutes protect nothing here.
+    silent": the supervisor closed the turn after two seconds with no terminal output at all, the
+    run's adapter is one whose TUI animates while a tool runs (``IDLE_TURN_ADAPTERS``, where a
+    closed turn is a head at its prompt), and the head still owes the dispatcher its report or
+    verdict. Nothing is running to wait for, so the quiet ladder's fifteen minutes protect
+    nothing here.
     Lower bound: the dispatcher's own latency in accepting an answer the head just wrote (one
     tick, about a minute) plus room for a delivery that is about to land. Upper bound: the card
     asks that a stall be confirmed in minutes, at most ten. Suspicion at five minutes spends the
@@ -508,6 +516,7 @@ def reduce_vitality(
     *,
     retained: bool = False,
     answer_owed_since: float = 0.0,
+    adapter: str = "",
 ) -> VitalityEpisode:
     """Fold one tick's snapshots into the run's episode, purely and deterministically.
 
@@ -540,6 +549,10 @@ def reduce_vitality(
     The advisory reading still cannot convict on its own -- with no owed answer it stays exactly
     as weightless as before -- and it can never raise anything but ``HealthyQuiet``, so it lowers
     no verdict and launders no confirmation.
+
+    ``adapter`` is the run's ``HeadRun.spec.adapter``, declared by the caller like the two above.
+    The idle-turn rule applies only to an adapter in ``IDLE_TURN_ADAPTERS``; any other value,
+    including the empty default, leaves every rule exactly as it was before that rule existed.
     """
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         raise HeadVitalityError("reduce_vitality needs a finite now")
@@ -560,6 +573,8 @@ def reduce_vitality(
     ):
         raise HeadVitalityError("reduce_vitality needs a finite answer_owed_since")
     answer_owed_since = float(answer_owed_since)
+    if not isinstance(adapter, str):
+        raise HeadVitalityError("reduce_vitality needs the adapter as a string")
 
     if not snapshots:
         # No observation, no movement: an episode must not age on ticks that looked at nothing.
@@ -700,7 +715,7 @@ def reduce_vitality(
     episode = replace(episode, idle_turn_since=0.0)
     idle_turn = _idle_turn_stall(
         episode,
-        owned.get(SnapshotSource.SUPERVISOR_JOURNAL),
+        owned.get(SnapshotSource.SUPERVISOR_JOURNAL) if adapter in IDLE_TURN_ADAPTERS else None,
         now,
         thresholds,
         answer_owed_since=answer_owed_since,
@@ -1007,11 +1022,12 @@ def _idle_turn_stall(
 ) -> tuple[VitalityVerdict, VitalityEpisode, list[str]] | None:
     """THE IDLE-TURN STALL RULE (secretary-1739): the one place a finished, silent head is judged.
 
-    It decides only when all three hold: the ``supervisor_journal`` snapshot answered, it says the
-    head's turn is ``Idle``, and the caller declares an owed answer (``answer_owed_since`` > 0: a
-    worker before its report is accepted, a reviewer before its verdict). Otherwise it returns
-    ``None`` and the ordinary arms decide exactly as before -- an open turn keeps the quiet
-    ladder and the child hold, and a head that owes nothing (the gate phase) is not judged here.
+    It decides only when all four hold: the run's adapter is in ``IDLE_TURN_ADAPTERS`` (the caller
+    hands ``None`` otherwise), the ``supervisor_journal`` snapshot answered, it says the head's
+    turn is ``Idle``, and the caller declares an owed answer (``answer_owed_since`` > 0: a worker
+    before its report is accepted, a reviewer before its verdict). Otherwise it returns ``None``
+    and the ordinary arms decide exactly as before -- an open turn keeps the quiet ladder and the
+    child hold, and a head that owes nothing (the gate phase) is not judged here.
 
     The idle turn is charged from ``reference``, the latest of: the journal's own idle start (the
     last ``turn.finished``, or a later ``input.accepted``/``turn.started``, so the delivery that
