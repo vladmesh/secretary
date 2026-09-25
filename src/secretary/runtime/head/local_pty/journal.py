@@ -121,7 +121,7 @@ class JournalWriter:
             raise JournalError("a journal names the run it belongs to")
         self.path = Path(self.path)
 
-    def open(self) -> JournalWriter:
+    def open(self) -> Self:
         """Open for append, continuing the sequence already in the file."""
         self._seq = _last_seq(self.path)
         self._fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
