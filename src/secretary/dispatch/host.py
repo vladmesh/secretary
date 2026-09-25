@@ -248,6 +248,7 @@ from secretary.runtime.heads import (
 )
 from secretary.runtime import head as head_ops
 from secretary.runtime.head.children import read_head_children
+from secretary.runtime.local_pty_head import head_run_turn_reading
 from secretary.runtime.codex_preflight import (
     CodexFanoutPolicyError,
     preflight_codex_launch,
@@ -1753,6 +1754,18 @@ class CommandHostRuntime:
         counts their CPU/IO movement as the head's activity while it waits on its own command.
         """
         return read_head_children(head_pid)
+
+    def supervisor_journal(
+        self, _task: dict[str, Any], record: DispatcherRecord, kind: str
+    ) -> dict[str, Any]:
+        """This role's head's turn and progress, read from its own supervisor's journal.
+
+        Read-only: a bounded tail of `heads/<run_id>/journal.jsonl` folded by the local-pty backend
+        (secretary-1739). The reading names the run it read, and `command_terminal_status` hands it
+        on only for the run the heartbeat proved.
+        """
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        return head_run_turn_reading(self._local_pty_root(), str((run or {}).get("run_id") or ""))
 
     def safe_recover_worker_continuation(
         self,

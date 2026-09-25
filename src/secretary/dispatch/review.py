@@ -270,6 +270,13 @@ def command_terminal_status(
             # record keeps the provider-less shape, whose darkness the episode records
             # (secretary-1543).
             status["provider_progress"] = _provider_progress_for_status(host, task, record, kind)
+            # The head's own supervisor journal answers the Turn axis (secretary-1739): whether a
+            # turn is open, since when the head has been at its prompt, and whether new screen
+            # content was journalled. Without it a head that ended its turn and sat idle was held
+            # healthy by child processes and aged only on the provider's quiet.
+            journal = _supervisor_journal_for_status(host, task, record, kind, run)
+            if journal is not None:
+                status["supervisor_journal"] = journal
         child_activity = _head_child_activity(host, pid_status)
         if child_activity is not None:
             status["child_activity"] = child_activity
@@ -338,6 +345,29 @@ def _provider_progress_for_status(
         provider_progress,
         record.review_head_run if kind == "review" else record.worker_head_run,
     )
+
+
+def _supervisor_journal_for_status(
+    host: Any, task: dict[str, Any], record: DispatcherRecord, kind: str, run: Any
+) -> dict[str, Any] | None:
+    """This role's journal reading, bound to the run on the record; `None` from a host with none.
+
+    A reading that names another run is not this head's: it is handed on as unavailable, never as
+    an answer, and a probe that raised is a channel that did not answer.
+    """
+    probe = getattr(host, "supervisor_journal", None)
+    if probe is None:
+        return None
+    try:
+        reading = probe(task, record, kind)
+    except Exception:  # noqa: BLE001 - an observation failure is not evidence about the head
+        return {"state": "unavailable", "reason": "supervisor journal probe failed"}
+    if not isinstance(reading, dict):
+        return {"state": "unavailable", "reason": "invalid supervisor journal reading shape"}
+    run_id = str((run or {}).get("run_id") or "") if isinstance(run, dict) else ""
+    if str(reading.get("state") or "") == "observed" and str(reading.get("run_id") or "") != run_id:
+        return {"state": "unavailable", "reason": "supervisor journal reading names another HeadRun"}
+    return reading
 
 
 def _supervised(run: Any) -> bool:

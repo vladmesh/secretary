@@ -201,7 +201,9 @@ def _usable(record: Any) -> dict[str, Any] | None:
         return None
     try:
         seq = int(record["seq"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # `OverflowError` is `int(inf)`: `json.loads` reads a bare `Infinity`, and a damaged line
+        # is a malformed record, not an exception out of every reader of the file.
         return None
     if seq <= 0:
         return None

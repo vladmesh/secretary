@@ -111,7 +111,14 @@ def wait_watchdog(
             runtime.save_records(payload, records)
     now = time.time()
     episode = reduce_and_store_vitality_episode(runtime,
-        task, record, records, payload, status, kind=kind, now=now
+        task,
+        record,
+        records,
+        payload,
+        status,
+        kind=kind,
+        now=now,
+        answer_owed_since=answer_owed_since_for_wait(record, kind),
     )
     # THE DECISION IS THE VERDICT (S1-4): the persisted episode -- reduced from this
     # very tick's observations on every shape the status carries, including the
@@ -933,6 +940,22 @@ def _guard_or_wait(
     }
 
 
+def answer_owed_since_for_wait(record: DispatcherRecord, kind: str) -> float:
+    """When the head this wait tick watches was put the question it has not answered yet.
+
+    The wait tick runs only while the dispatcher waits on this head's answer -- a worker before
+    its report is accepted, a reviewer before its verdict -- so the question stands from the
+    bring-up or delivery that opened the phase (``{kind}_started_at``, stamped by every launch,
+    continuation, rework and respawn), or, for a worker, from a done report bounced back to rework
+    (``worker_answer_owed_since``, secretary-1543), whichever is later. This is the one notion of
+    an owed answer the reducer reads (``answer_owed_since``); the gate phase, where the worker's
+    report is already accepted, does not come through here and owes nothing.
+    """
+    if kind == "review":
+        return float(record.review_started_at or 0.0)
+    return max(float(record.worker_started_at or 0.0), float(record.worker_answer_owed_since or 0.0))
+
+
 def reduce_and_store_vitality_episode(
     runtime: Any,
     task: dict[str, Any],
@@ -943,6 +966,7 @@ def reduce_and_store_vitality_episode(
     *,
     kind: str,
     now: float,
+    answer_owed_since: float | None = None,
 ) -> Any:
     """Reduce and persist one vitality episode for this role's head run; return it.
 
@@ -969,6 +993,12 @@ def reduce_and_store_vitality_episode(
     * ``execution_child`` -- from ``status["child_activity"]``, the head's descendants read
       from ``/proc`` by ``command_terminal_status`` for a pid the heartbeat proved; compared
       against the previous child cursor and described child kept on the episode.
+    * ``supervisor_journal`` -- from ``status["supervisor_journal"]``, the local-pty head's own
+      journal reading (Turn, and Progress against the previous journal cursor on the episode).
+
+    ``answer_owed_since`` is the wait tick's declaration (``answer_owed_since_for_wait``);
+    a caller that waits on no answer (the gate phase) leaves it ``None`` and only a bounced report
+    counts, as before.
     """
     field_name = f"{kind}_vitality_episode"
     previous = getattr(record, field_name)
@@ -988,6 +1018,7 @@ def reduce_and_store_vitality_episode(
         and not isinstance(provider_progress, dict)
         and "idle" not in status
         and not isinstance(status.get("child_activity"), dict)
+        and "supervisor_journal" not in status
     ):
         # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
         # no reduction to run and no episode to write, so return before saving anything.
@@ -1013,6 +1044,11 @@ def reduce_and_store_vitality_episode(
         previous_child_key=(
             previous.last_child_key if previous is not None and previous.run_id == run_id else ""
         ),
+        previous_journal_cursor=(
+            (previous.evidence_cursors or {}).get(_SnapshotSource.SUPERVISOR_JOURNAL.value, "")
+            if previous is not None and previous.run_id == run_id
+            else ""
+        ),
         observed_at=now,
     )
     # The one fact the reduction cannot observe: whether THIS dispatcher is the one holding
@@ -1022,10 +1058,12 @@ def reduce_and_store_vitality_episode(
     # (secretary-1539). The review head has no retention of its own, so it always passes
     # False and its ladder is untouched.
     retained = kind == "worker" and bool(record.worker_continuation.retained)
-    # The other declared input (secretary-1543): a done report this dispatcher bounced back to
-    # rework and the head has not answered. Only the worker owes reports, so the review head
-    # always passes 0.0 and its ladder is untouched.
-    answer_owed_since = float(record.worker_answer_owed_since or 0.0) if kind == "worker" else 0.0
+    # The other declared input (secretary-1543, widened by secretary-1739): the instant the
+    # dispatcher put the question this head has not answered. The wait tick passes it for both
+    # roles; any other caller gets the bounced-report stamp alone, which the gate phase has
+    # cleared, so its ladder is untouched.
+    if answer_owed_since is None:
+        answer_owed_since = float(record.worker_answer_owed_since or 0.0) if kind == "worker" else 0.0
     try:
         episode = _reduce_vitality(
             previous,

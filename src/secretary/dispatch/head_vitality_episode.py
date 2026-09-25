@@ -57,6 +57,10 @@ The invariants encoded here (each pinned by a named test):
     while it is itself silent (secretary-1692), but only for ``thresholds.child_activity_ceiling``
     measured from the head's own last progress; a child with frozen counters, a child past the
     ceiling and no child at all leave the ordinary quiet rules exactly as they were;
+  * a head whose supervisor journal shows its turn ENDED, while the caller declares it still owes
+    its answer, is judged by one rule, ``_idle_turn_stall`` (secretary-1739): suspected
+    ``idle_turn_suspect_after`` and confirmed ``idle_turn_confirm_after`` after the idle turn
+    began, and child processes do not hold it healthy; an open journal turn keeps every rule above;
   * quiet accumulates from ``last_progress_at`` (or episode start), not from the last tick, so
     irregular ticks cannot stretch or shrink a stall;
   * confirmation is sticky: only real progress, suspension, death or an identity change ends it.
@@ -104,6 +108,13 @@ DARK_CEILING_DEFAULT = 2.0 * float(IDLE_STALL_DEFAULT)
 # How long advancement seen ONLY in the head's child processes may hold off a stall
 # (secretary-1692). See ``VitalityThresholds.child_activity_ceiling`` for why this number.
 CHILD_ACTIVITY_CEILING_DEFAULT = 45.0 * 60.0
+
+# The idle-turn stall (secretary-1739): how long a head whose supervisor journal shows its turn
+# ENDED may sit at its prompt, while it still owes the dispatcher its answer, before it is
+# suspected and then confirmed stalled. Both are measured from the same instant, the start of the
+# idle turn. See ``VitalityThresholds.idle_turn_suspect_after`` for why these numbers.
+IDLE_TURN_SUSPECT_DEFAULT = float(IDLE_STALL_DEFAULT)
+IDLE_TURN_CONFIRM_DEFAULT = 2.0 * float(IDLE_STALL_DEFAULT)
 
 
 class VitalityVerdict(StrEnum):
@@ -157,15 +168,40 @@ class VitalityThresholds:
     hour, far below the six-hour report ceiling. Forty-five minutes sits between them; past it
     the child's movement is ignored and the ordinary ladder runs from the last child advancement
     it accepted, so such a head is suspected at about 50 and confirmed at about 60 minutes.
+
+    ``idle_turn_suspect_after`` and ``idle_turn_confirm_after`` (secretary-1739) are the idle-turn
+    stall, and unlike the pair above both are measured from ONE instant: when the head's journal
+    turn became idle. The shape they judge is not "quiet while working" but "finished and
+    silent": the supervisor closed the turn after two seconds with no terminal output at all --
+    a working provider's TUI redraws its spinner or timer many times a second, and across the
+    sixty most recent local-pty journals on the production host (2026-09) the only output outside
+    a delivered turn is the bring-up banner and what a head prints after its last turn, so no turn
+    was seen to close mid-work -- and the head still owes the dispatcher its report or verdict.
+    Nothing is running to wait for, so the quiet ladder's fifteen minutes protect nothing here.
+    Lower bound: the dispatcher's own latency in accepting an answer the head just wrote (one
+    tick, about a minute) plus room for a delivery that is about to land. Upper bound: the card
+    asks that a stall be confirmed in minutes, at most ten. Suspicion at five minutes spends the
+    one report nudge (whose delivery opens a turn and restarts this clock); confirmation at ten
+    reaches the recovery path. A head whose journal turn is open keeps the quiet ladder and the
+    child-process hold exactly as before.
     """
 
     suspect_after: float
     confirm_after: float
     dark_ceiling: float = float(DARK_CEILING_DEFAULT)
     child_activity_ceiling: float = float(CHILD_ACTIVITY_CEILING_DEFAULT)
+    idle_turn_suspect_after: float = float(IDLE_TURN_SUSPECT_DEFAULT)
+    idle_turn_confirm_after: float = float(IDLE_TURN_CONFIRM_DEFAULT)
 
     def __post_init__(self) -> None:
-        for name in ("suspect_after", "confirm_after", "dark_ceiling", "child_activity_ceiling"):
+        for name in (
+            "suspect_after",
+            "confirm_after",
+            "dark_ceiling",
+            "child_activity_ceiling",
+            "idle_turn_suspect_after",
+            "idle_turn_confirm_after",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise HeadVitalityError(f"vitality threshold {name} is a number")
@@ -175,6 +211,10 @@ class VitalityThresholds:
         object.__setattr__(self, "confirm_after", float(self.confirm_after))
         object.__setattr__(self, "dark_ceiling", float(self.dark_ceiling))
         object.__setattr__(self, "child_activity_ceiling", float(self.child_activity_ceiling))
+        object.__setattr__(self, "idle_turn_suspect_after", float(self.idle_turn_suspect_after))
+        object.__setattr__(self, "idle_turn_confirm_after", float(self.idle_turn_confirm_after))
+        if self.idle_turn_confirm_after < self.idle_turn_suspect_after:
+            raise HeadVitalityError("the idle-turn confirmation does not come before its suspicion")
 
 
 DEFAULT_VITALITY_THRESHOLDS = VitalityThresholds(
@@ -182,6 +222,8 @@ DEFAULT_VITALITY_THRESHOLDS = VitalityThresholds(
     confirm_after=2.0 * float(IDLE_STALL_DEFAULT),
     dark_ceiling=float(DARK_CEILING_DEFAULT),
     child_activity_ceiling=float(CHILD_ACTIVITY_CEILING_DEFAULT),
+    idle_turn_suspect_after=float(IDLE_TURN_SUSPECT_DEFAULT),
+    idle_turn_confirm_after=float(IDLE_TURN_CONFIRM_DEFAULT),
 )
 
 
@@ -273,6 +315,11 @@ class VitalityEpisode:
     last_child_command: str = ""
     last_child_output: str = ""
     last_child_at: float = 0.0
+    # The idle-turn stall (secretary-1739): the instant the head's idle turn is charged from --
+    # the later of the journal's idle start, the owed answer and a nudge's restart -- when the
+    # idle-turn rule decided this reduction, else 0.0. ``recovery_outlook`` reads it for the next
+    # deadline, and an operator reads it as "at its prompt since".
+    idle_turn_since: float = 0.0
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
@@ -291,6 +338,7 @@ class VitalityEpisode:
             "child_progress_at",
             "child_activity_since",
             "last_child_at",
+            "idle_turn_since",
         ):
             object.__setattr__(self, name, _finite_timestamp(getattr(self, name), name))
         object.__setattr__(self, "last_child_key", str(self.last_child_key or "")[:80])
@@ -365,6 +413,7 @@ class VitalityEpisode:
             "last_child_command": self.last_child_command,
             "last_child_output": self.last_child_output,
             "last_child_at": self.last_child_at,
+            "idle_turn_since": self.idle_turn_since,
         }
 
     @classmethod
@@ -446,6 +495,8 @@ class VitalityEpisode:
             last_child_command=str(payload.get("last_child_command") or ""),
             last_child_output=str(payload.get("last_child_output") or ""),
             last_child_at=_finite_timestamp(payload.get("last_child_at", 0.0), "last_child_at"),
+            # Written before secretary-1739: absent means the idle-turn rule never decided.
+            idle_turn_since=_finite_timestamp(payload.get("idle_turn_since", 0.0), "idle_turn_since"),
         )
 
 
@@ -474,9 +525,14 @@ def reduce_vitality(
     instead of ``Suspended`` -- and nothing else about the fold.
 
     ``answer_owed_since`` is the other caller-declared fact (secretary-1543): the instant the
-    dispatcher put a question to this head that it has not answered -- today, a rejected done
-    report that sent the head back to rework. Like ``retained`` it is an INPUT: the reducer cannot
-    see a board rejection. It changes exactly one thing too. When the head owes an answer that no
+    dispatcher put a question to this head that it has not answered. The wait tick declares it
+    for a worker before its report is accepted and a reviewer before its verdict -- the bring-up
+    or delivery that opened the phase, or a rejected done report, whichever is later
+    (``wait_vitality.answer_owed_since_for_wait``) -- and every other caller passes 0.0. Like
+    ``retained`` it is an INPUT: the reducer cannot see the board. It feeds two rules. The
+    idle-turn stall (``_idle_turn_stall``, secretary-1739) judges a head whose supervisor journal
+    shows its turn ended, never charging it with idleness from before the question. And when the
+    head owes an answer that no
     progress has followed AND the advisory Turn axis has been seen to END a turn since the
     question was put (``active`` then ``idle``), a ``HealthyQuiet`` verdict is raised to
     ``SuspectedStall`` at once instead of waiting out the quiet thresholds: a head that took its
@@ -639,6 +695,20 @@ def reduce_vitality(
             else:
                 basis.append(f"child-ceiling:{int(held)}s@{child.source.value}")
 
+    # The idle-turn stall is decided by ``_idle_turn_stall`` alone; every other arm leaves its stamp
+    # clear, so the stamp always describes the reduction that wrote it.
+    episode = replace(episode, idle_turn_since=0.0)
+    idle_turn = _idle_turn_stall(
+        episode,
+        owned.get(SnapshotSource.SUPERVISOR_JOURNAL),
+        now,
+        thresholds,
+        answer_owed_since=answer_owed_since,
+        child_advancing=child is not None
+        and child.availability is SourceAvailability.AVAILABLE
+        and child.progress is ProgressState.ADVANCING,
+    )
+
     verdict = VitalityVerdict.UNVERIFIABLE
     if any(snapshot.process is ProcessState.DEAD for snapshot in strong):
         # Death outranks everything: a gone process cannot also be quietly working.
@@ -683,6 +753,11 @@ def reduce_vitality(
             child_activity_since=0.0,
             reason="",
         )
+    elif idle_turn is not None:
+        # The head's own supervisor says its turn is over and the dispatcher is still owed an
+        # answer: the one rule for that shape, ranked above the child hold on purpose.
+        verdict, episode, tokens = idle_turn
+        basis.extend(tokens)
     elif child_hold:
         # The head is silent but a child it is waiting on works: not a stall, inside the ceiling.
         # It does not touch ``last_progress_at`` or the activity epoch -- those are the head's
@@ -921,6 +996,94 @@ def reduce_vitality(
     )
 
 
+def _idle_turn_stall(
+    episode: VitalityEpisode,
+    journal: VitalitySnapshot | None,
+    now: float,
+    thresholds: VitalityThresholds,
+    *,
+    answer_owed_since: float,
+    child_advancing: bool,
+) -> tuple[VitalityVerdict, VitalityEpisode, list[str]] | None:
+    """THE IDLE-TURN STALL RULE (secretary-1739): the one place a finished, silent head is judged.
+
+    It decides only when all three hold: the ``supervisor_journal`` snapshot answered, it says the
+    head's turn is ``Idle``, and the caller declares an owed answer (``answer_owed_since`` > 0: a
+    worker before its report is accepted, a reviewer before its verdict). Otherwise it returns
+    ``None`` and the ordinary arms decide exactly as before -- an open turn keeps the quiet
+    ladder and the child hold, and a head that owes nothing (the gate phase) is not judged here.
+
+    The idle turn is charged from ``reference``, the latest of: the journal's own idle start (the
+    last ``turn.finished``, or a later ``input.accepted``/``turn.started``, so the delivery that
+    resumes a continued worker restarts the clock), the instant the answer became owed (a head is
+    never charged with idleness from before it was asked), and a nudge's ``quiet_since``. From
+    there it climbs to ``SuspectedStall`` at ``idle_turn_suspect_after`` and ``ConfirmedStall`` at
+    ``idle_turn_confirm_after``, both measured from that one instant.
+
+    Child processes do NOT hold it: a head at its prompt is not running the command its children
+    are, and a child that keeps moving there is a helper, not the head's work
+    (``child-not-holding-idle-turn`` in ``basis``). Nor does a turn ending launder a stall the
+    episode already holds (an open turn that went quiet long enough to be suspected, then closed):
+    that verdict stands (``stall-stands``) unless the dispatcher has restarted the head since it
+    began -- a new owed answer or a nudge's ``quiet_since`` -- which is what a restart means
+    everywhere else in this module. Advancement, death and suspension are decided by the arms
+    above this one and never reach it.
+    """
+    if (
+        journal is None
+        or journal.availability is not SourceAvailability.AVAILABLE
+        or journal.turn is not TurnState.IDLE
+        or not journal.turn_since
+        or answer_owed_since <= 0.0
+    ):
+        return None
+    reference = max(journal.turn_since, answer_owed_since, episode.quiet_since)
+    idle_seconds = max(0.0, now - reference)
+    ladder = (VitalityVerdict.HEALTHY_QUIET, VitalityVerdict.SUSPECTED_STALL, VitalityVerdict.CONFIRMED_STALL)
+    level = (
+        2
+        if idle_seconds >= thresholds.idle_turn_confirm_after
+        else 1
+        if idle_seconds >= thresholds.idle_turn_suspect_after
+        else 0
+    )
+    suspect_at = reference + thresholds.idle_turn_suspect_after
+    confirm_at = reference + thresholds.idle_turn_confirm_after
+    tokens = [f"idle-turn:{int(idle_seconds)}s@{SnapshotSource.SUPERVISOR_JOURNAL.value}"]
+    reason = (
+        f"the head's turn ended and it has sat at its prompt for {int(idle_seconds)}s "
+        "without answering the dispatcher"
+    )
+    held = ladder.index(episode.verdict) if episode.verdict in ladder else 0
+    onset = episode.suspected_since or episode.confirmed_since or episode.updated_at
+    if held > level and max(answer_owed_since, episode.quiet_since) <= onset:
+        level = held
+        tokens.append("stall-stands")
+        reason = f"{episode.verdict.value} stands and the head's turn has ended: {reason}"
+    if child_advancing:
+        tokens.append("child-not-holding-idle-turn")
+    verdict = ladder[level]
+    if verdict is VitalityVerdict.CONFIRMED_STALL:
+        tokens.append("confirmed-stall")
+        stamps = {
+            "suspected_since": episode.suspected_since or suspect_at,
+            "confirmed_since": episode.confirmed_since or confirm_at,
+        }
+    elif verdict is VitalityVerdict.SUSPECTED_STALL:
+        tokens.append("suspected-stall")
+        stamps = {"suspected_since": episode.suspected_since or suspect_at, "confirmed_since": 0.0}
+    else:
+        stamps = {"suspected_since": 0.0, "confirmed_since": 0.0}
+    episode = replace(
+        episode,
+        **stamps,
+        idle_turn_since=reference,
+        stall_frozen_since=0.0,
+        reason=reason,
+    )
+    return verdict, episode, tokens
+
+
 def recovery_outlook(
     episode: Any,
     now: float,
@@ -957,7 +1120,19 @@ def recovery_outlook(
     note = ""
     at: float | None = None
     becomes = ""
-    if episode.verdict is VitalityVerdict.HEALTHY_QUIET:
+    if episode.idle_turn_since and episode.verdict in (
+        VitalityVerdict.HEALTHY_QUIET,
+        VitalityVerdict.SUSPECTED_STALL,
+    ):
+        # The idle-turn rule decided: its deadlines run from the idle turn's own start, and no
+        # dark source freezes them.
+        if episode.verdict is VitalityVerdict.HEALTHY_QUIET:
+            becomes = VitalityVerdict.SUSPECTED_STALL.value
+            at = episode.idle_turn_since + thresholds.idle_turn_suspect_after
+        else:
+            becomes = VitalityVerdict.CONFIRMED_STALL.value
+            at = episode.idle_turn_since + thresholds.idle_turn_confirm_after
+    elif episode.verdict is VitalityVerdict.HEALTHY_QUIET:
         becomes = VitalityVerdict.SUSPECTED_STALL.value
         at = max(reference + thresholds.suspect_after, frozen_until)
     elif episode.verdict is VitalityVerdict.SUSPECTED_STALL:

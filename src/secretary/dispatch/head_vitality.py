@@ -30,7 +30,9 @@ Invariants every consumer may rely on, and every builder below enforces:
   * **Pane and terminal readings are advisory.** They fill the ``Turn`` axis alone, are stamped
     with the ``pane_advisory`` source, and can never by themselves grant a stop capability --
     readiness answers whether a pane will accept input, not whether the head behind it may be
-    killed.
+    killed. The local-pty supervisor journal (``supervisor_journal``, secretary-1739) is not a
+    pane reading: the supervisor that owns the head's pty opened and closed the turn it reports,
+    so its ``Turn`` is strong evidence. It never speaks to the ``Process`` axis.
 
 Adapters here are pure functions over plain values: the caller reads ``/proc``, the pid file, the
 provider journal or the pane inventory and passes the result in. The module performs no I/O and
@@ -137,6 +139,9 @@ class SnapshotSource(StrEnum):
     # The head's own child processes, read from /proc (secretary-1692): a head blocked on a long
     # foreground command is silent everywhere else while its child works.
     EXECUTION_CHILD = "execution_child"
+    # The head's own local-pty supervisor journal (secretary-1739): the Turn axis, and Progress
+    # from `provider.progressed`, which since secretary-1738 is written only for new screen content.
+    SUPERVISOR_JOURNAL = "supervisor_journal"
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,10 @@ class VitalitySnapshot:
     child_key: str = ""
     command: str = ""
     output_path: str = ""
+    # Only the ``supervisor_journal`` source fills it: when the reported Turn state began, in the
+    # journal's own epoch seconds (the open turn's ``turn.started``, or for an idle head the later
+    # of its last ``turn.finished`` and ``input.accepted``/``turn.started``). 0.0 everywhere else.
+    turn_since: float = 0.0
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
@@ -187,6 +196,11 @@ class VitalitySnapshot:
         object.__setattr__(self, "child_key", str(self.child_key or "")[:80])
         object.__setattr__(self, "command", str(self.command or "")[:COMMAND_LIMIT])
         object.__setattr__(self, "output_path", str(self.output_path or "")[:COMMAND_LIMIT])
+        if isinstance(self.turn_since, bool) or not isinstance(self.turn_since, (int, float)):
+            raise HeadVitalityError("a vitality snapshot turn_since is epoch seconds")
+        if not math.isfinite(float(self.turn_since)) or float(self.turn_since) < 0:
+            raise HeadVitalityError("a vitality snapshot turn_since is finite and not negative")
+        object.__setattr__(self, "turn_since", float(self.turn_since))
 
     @property
     def advisory(self) -> bool:
@@ -209,6 +223,7 @@ class VitalitySnapshot:
             "child_key": self.child_key,
             "command": self.command,
             "output_path": self.output_path,
+            "turn_since": self.turn_since,
         }
 
     @classmethod
@@ -258,6 +273,8 @@ class VitalitySnapshot:
             child_key=str(payload.get("child_key") or ""),
             command=str(payload.get("command") or ""),
             output_path=str(payload.get("output_path") or ""),
+            # Optional since secretary-1739, on the same terms: absent means no journal Turn time.
+            turn_since=_payload_time(payload.get("turn_since", 0.0)),
         )
 
     @classmethod
@@ -526,6 +543,67 @@ class VitalitySnapshot:
         return reading(ProgressState.ADVANCING, "", mover, "m")
 
     @classmethod
+    def from_supervisor_journal(
+        cls,
+        evidence: Any,
+        *,
+        run_id: str,
+        previous_cursor: str = "",
+        observed_at: float,
+    ) -> VitalitySnapshot:
+        """Wrap one ``local_pty_head.head_run_turn_reading`` answer against the earlier cursor.
+
+        Not advisory: the supervisor that owns the head's pty wrote this journal, and a turn it
+        opened on delivery and closed on quiet is the Turn axis a local-pty head had no other
+        source for. ``Turn`` is ``Active`` for an open turn and ``Idle`` for a closed one, with
+        ``turn_since`` saying since when. ``Progress`` compares the last ``provider.progressed``
+        sequence with this run's previous reading: a new one is ``Advancing``, the same one
+        ``Quiet``, and the first reading records it without an opinion.
+
+        Every value is normalised once, here (``_journal_reading``): a reading that is not
+        ``observed``, names another run, or carries a value its producer could not have written
+        is ``Unknown``/``Unavailable`` with a bounded reason. None of them is stall evidence, and
+        none of them is ``Dead`` -- this source never speaks to the Process axis.
+        """
+        reading, refusal = _journal_reading(evidence, run_id=run_id, observed_at=observed_at)
+        if reading is None:
+            return cls._unavailable(
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.SUPERVISOR_JOURNAL,
+                reason=refusal,
+            )
+        turn, since, progress_seq = reading
+        cursor = f"{_JOURNAL_CURSOR_PREFIX}{progress_seq}"
+        previous = _parse_journal_cursor(previous_cursor)
+        if previous is not None and progress_seq < previous:
+            return cls._unavailable(
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.SUPERVISOR_JOURNAL,
+                reason="supervisor journal progress went backwards since the previous reading",
+            )
+        if previous is None:
+            progress = ProgressState.UNKNOWN
+            reason = "first observation of this source: no earlier cursor to compare against"
+        elif progress_seq > previous:
+            progress, reason = ProgressState.ADVANCING, ""
+        else:
+            progress = ProgressState.QUIET
+            reason = "no new provider.progressed since the previous reading"
+        return cls(
+            run_id=run_id,
+            source=SnapshotSource.SUPERVISOR_JOURNAL,
+            observed_at=observed_at,
+            availability=SourceAvailability.AVAILABLE,
+            turn=turn,
+            progress=progress,
+            cursor=cursor,
+            reason=reason,
+            turn_since=since,
+        )
+
+    @classmethod
     def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
         """Wrap one pane readiness answer (a status carrying `{"idle": bool}`).
 
@@ -576,6 +654,79 @@ class VitalitySnapshot:
         )
 
 
+def _payload_time(value: Any) -> float:
+    """An optional stored timestamp: the value when it is one, refused like any damaged field."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HeadVitalityError("vitality snapshot turn_since is not a number")
+    try:
+        stamp = float(value)
+    except OverflowError:
+        raise HeadVitalityError("vitality snapshot turn_since is not finite") from None
+    if not math.isfinite(stamp) or stamp < 0:
+        raise HeadVitalityError("vitality snapshot turn_since is not finite")
+    return stamp
+
+
+# ``j1`` names this source's cursor format: the sequence of the last ``provider.progressed``.
+_JOURNAL_CURSOR_PREFIX = "j1:"
+# How far ahead of the observer's clock a journal time may be and still be believed. The journal
+# and the dispatcher share one host clock, so this only absorbs the read landing between two
+# ``time.time()`` calls; a record from further in the future is damaged, not early.
+JOURNAL_CLOCK_SKEW = 60.0
+# The largest sequence a reading may carry (the writer counts from 1 in steps of one).
+_JOURNAL_SEQ_LIMIT = 2**53
+
+
+def _journal_reading(
+    evidence: Any, *, run_id: str, observed_at: float
+) -> tuple[tuple[TurnState, float, int] | None, str]:
+    """The one normaliser for a supervisor journal reading: ``(turn, since, progress_seq)``.
+
+    Returns ``(None, reason)`` for anything a caller must not act on: not an object, not
+    observed, another run, an unknown turn word, a time that is not a finite positive number no
+    later than the observation (plus ``JOURNAL_CLOCK_SKEW``), and a sequence that is not an int in
+    ``[0, 2**53]``. ``bool`` is refused wherever a number is expected, because ``True == 1``.
+    """
+    if not isinstance(evidence, dict):
+        return None, "supervisor journal reading is not an object"
+    state = evidence.get("state")
+    if state != "observed":
+        detail = evidence.get("reason")
+        detail = detail if isinstance(detail, str) else ""
+        return None, f"supervisor journal did not answer: {detail}".strip(": ")[:REASON_LIMIT]
+    if not isinstance(evidence.get("run_id"), str) or evidence.get("run_id") != str(run_id):
+        return None, "supervisor journal reading names a HeadRun other than the snapshot's run"
+    words = {"active": TurnState.ACTIVE, "idle": TurnState.IDLE}
+    raw_turn = evidence.get("turn")
+    turn = words.get(raw_turn) if isinstance(raw_turn, str) else None
+    if turn is None:
+        return None, "supervisor journal reading names no turn state"
+    since = evidence.get("turn_since")
+    if isinstance(since, bool) or not isinstance(since, (int, float)):
+        return None, "supervisor journal turn time is not a number"
+    try:
+        since = float(since)
+    except OverflowError:
+        return None, "supervisor journal turn time is not finite"
+    if not math.isfinite(since) or since <= 0 or since > float(observed_at) + JOURNAL_CLOCK_SKEW:
+        return None, "supervisor journal turn time is outside the observation's clock"
+    progress_seq = evidence.get("progress_seq")
+    if type(progress_seq) is not int or not 0 <= progress_seq <= _JOURNAL_SEQ_LIMIT:
+        return None, "supervisor journal progress sequence is not a count"
+    return (turn, since, progress_seq), ""
+
+
+def _parse_journal_cursor(cursor: str) -> int | None:
+    """Read back a cursor this source wrote; anything else is no previous reading."""
+    text = str(cursor or "")
+    if not text.startswith(_JOURNAL_CURSOR_PREFIX):
+        return None
+    digits = text[len(_JOURNAL_CURSOR_PREFIX) :]
+    if not digits.isascii() or not digits.isdigit() or len(digits) > 20:
+        return None
+    return int(digits)
+
+
 def _non_negative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -622,6 +773,7 @@ def snapshots_from_status(
     previous_cursor: str = "",
     previous_child_cursor: str = "",
     previous_child_key: str = "",
+    previous_journal_cursor: str = "",
     observed_at: float,
 ) -> list[VitalitySnapshot]:
     """Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``.
@@ -664,6 +816,17 @@ def snapshots_from_status(
                 run_id=run_id,
                 previous_cursor=previous_child_cursor,
                 previous_key=previous_child_key,
+                observed_at=observed_at,
+            )
+        )
+    if "supervisor_journal" in status:
+        # Present means the producer asked the journal; any shape it carries answers for itself,
+        # a broken one as an unavailable channel.
+        snapshots.append(
+            VitalitySnapshot.from_supervisor_journal(
+                status.get("supervisor_journal"),
+                run_id=run_id,
+                previous_cursor=previous_journal_cursor,
                 observed_at=observed_at,
             )
         )
