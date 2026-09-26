@@ -270,6 +270,49 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(events[-1]["transition"], {"source": "open", "target": "closed"})
         self.assertEqual(events[-1]["data"]["close_reason"], "resolved")
 
+    def test_an_observer_s_issue_records_its_actor_role_and_sprint(self) -> None:
+        """The bound observer files for its sprint's product; the event says who, as what, from where."""
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po"
+        )
+        sprint = {"ref": "sprint:1465", "product": "secretary"}
+        with (
+            as_observer("sprint:1465"),
+            mock.patch("secretary.sprints.SprintReader.show", return_value=sprint),
+        ):
+            issue = self.store.create_issue(
+                product="",
+                issue_kind="improvement",
+                priority="P3",
+                title="Deferred finding",
+                description="outside the sprint's DoD, with evidence",
+                actor="observer",
+                role="observer",
+                request_id="observer-finding",
+            )
+        self.assertEqual(issue["product"], "secretary")
+        created = [
+            event
+            for event in self.audit_events()
+            if event.get("kind") == "entity.created" and event.get("ref") == issue["ref"]
+        ]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["actor"], {"role": "observer", "id": "observer"})
+        self.assertEqual(created[0]["related_refs"], ["sprint:1465", "product:secretary"])
+        # The PO's issue keeps its own role, and a PO write in the observer's name files nothing.
+        po_issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="PO", description="", actor="po"
+        )
+        po_created = [e for e in self.audit_events() if e.get("ref") == po_issue["ref"]]
+        self.assertEqual(po_created[0]["actor"], {"role": "po", "id": "po"})
+        before = self.audit_events()
+        with self.assertRaises(TaskError) as raised:
+            self.store.create_issue(
+                product="secretary", issue_kind="bug", priority="P2", title="x", description="", actor="observer"
+            )
+        self.assertEqual(raised.exception.code, "role_masquerade")
+        self.assertEqual(self.audit_events(), before)
+
     def test_product_and_issue_lists_use_complete_set_and_show_audit_history(self) -> None:
         product = self.store.create_product(
             product_id="secretary",
@@ -410,7 +453,10 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
                 for target in ("ready", "in_progress", "validate", "blocked", "done"):
                     with self.subTest(role=role, target=target), self.assertRaises(TaskError) as raised:
                         writer.move(role=role, actor=role, reference=issue["ref"], target=target, reason="")
-                    self.assertEqual(raised.exception.code, "transition_forbidden")
+                    # The observer files issues and moves none (secretary-1765): its refusal is
+                    # about the role, before the column guard every other role meets.
+                    expected = "role_forbidden" if role == "observer" else "transition_forbidden"
+                    self.assertEqual(raised.exception.code, expected)
         # A role outside the proposal roles cannot create in Issues. The steward was that role
         # here until secretary-1709 made it a proposal role; the PO takes its place.
         with self.assertRaises(TaskError) as raised:

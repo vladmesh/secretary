@@ -935,6 +935,7 @@ board export, checkpoint and restore carry their metadata and comments.
 ```bash
 python3 -P -m secretary product create --role po --id secretary --project secretary --title Secretary
 python3 -P -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
+python3 -P -m secretary issue create --role observer --kind improvement --priority P3 --title TITLE
 python3 -P -m secretary issue list --product secretary
 python3 -P -m secretary issue show --ref issue:123
 python3 -P -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
@@ -942,13 +943,35 @@ python3 -P -m secretary issue append --role po --ref issue:123 --reason REASON -
 python3 -P -m secretary issue close --role po --ref issue:123 --reason resolved
 ```
 
+Who writes what:
+
+| Verb | `po` | `observer` |
+| --- | --- | --- |
+| `product create` | yes | not offered |
+| `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
+| `issue update-priority`, `issue append` | yes | `role_forbidden` |
+| `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
+| `task move`/`task edit` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
+
+An observer's `issue create` needs a head bound to a sprint: an unbound head is refused as
+`observer_identity_unbound`, audited as `sprint_guard_denied`, and nothing is written. The issue takes
+the product of that sprint (`--product` may be left out; another product is `validation`), and its
+`entity.created` event carries `actor: {role: observer, id: <actor>}` and the sprint ref in
+`related_refs` beside the product. Every write records the role and actor it was made with.
+
+`--actor` defaults to `$BOARD_ACTOR` and never to the role. Every role head's environment names it:
+`role_env` exports `BOARD_ACTOR` for each board role (the observer, steward and retro heads are their
+role, a worker or reviewer head the profile the dispatcher launched), and a PO service turn writes as
+`po`. A Product or Issue write with neither `--actor` nor `BOARD_ACTOR` is refused as `actor_required`,
+exit 2, before anything is read.
+
 A Product id is stable and unique; its non-empty project set may contain only ids registered under
 the instance `projects/` directory. Every new issue requires its Product, one kind (`bug`, `feature`,
 `question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
-reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO may close an
-issue, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure archives the
-backend record and keeps comments and audit available through `issue show --ref` and checkpoint
-recovery. `sprint close` closes an issue through this same lifecycle when its decisions file gives
+reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO closes an
+issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure
+archives the backend record and keeps comments and audit available through `issue show --ref` and
+checkpoint recovery. `sprint close` closes an issue through this same lifecycle when its decisions file gives
 one of those verdicts; it never closes an issue merely because a sprint that declared it ended, and
 never records somebody else's close as its own verdict. `issue list --closed` includes open and
 closed issues; without it only open issues are listed.
@@ -1032,6 +1055,32 @@ python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
 ```
+
+The roles each sprint write admits:
+
+| Verb | Roles |
+| --- | --- |
+| `sprint create` | `po`, `steward` |
+| `sprint comment` | `po`, `dispatcher`, `worker`, `reviewer`, `observer`, `steward`, `retro` |
+| `sprint current-task`, `sprint resume` | `po`, `dispatcher`, `observer`, `steward` |
+| `sprint budget` | `po`, `dispatcher`, `steward` |
+| `sprint reopen` | `po` |
+| `sprint close` | `po` (any sprint), `observer` (its own sprint) |
+
+A write of role `observer` passes the [identity guard](#the-sprint-guard) first: it must name the sprint
+the head was launched for. A comment is stored under its role's marker, `[observer]` for the observer's;
+it does not wake the observer ([Resume and observer wakes](#resume-and-observer-wakes)). An observer's
+close takes the same `--reason`, `--decisions-file` and `--closeout-file` as the PO's, and every step it
+takes (archive, issue close, card disposition) is written with role `observer` and the observer's actor;
+the observer's disposition moves need no sprint override, and a card in Assessment cannot be disposed by
+it.
+
+A write whose role is `po` and whose actor is `observer` is refused as `role_masquerade` (exit 3), with a
+message naming `--role observer`, before anything is read or written. It is one check,
+`secretary.tasks.admit_role`, the role admission every role-taking sprint, task and issue write makes
+first, so it covers every verb: `sprint` comment, close and the other sprint writes, every `task` write,
+`product create` and every `issue` write. The operation layer carries the code through unchanged, as
+it does `observer_identity_unbound` and `observer_sprint_mismatch`. No other role or actor is affected.
 
 Stored fields: goal, Definition of Done text, repositories, owning product, its issues, reserved
 projects, `open`/`closed`/`stopped` status, declared observer, optional worker and reviewer pins, the PO
@@ -1511,10 +1560,11 @@ A write with role `observer` is authenticated against the sprint it names first.
 binding is refused as `observer_identity_unbound`. Both are audited as `sprint_guard_denied` with that
 code.
 
-The check keys off the declared role. `sprint close`, `sprint reopen` and the budget write take role
-`po` with no binding and a sprint reference argument, so a head declaring `--role po` reaches any open
-sprint. An observer closing its own sprint makes that call, audited as `role=po` with the observer's
-actor id.
+The check keys off the declared role. `sprint comment` and `sprint close` of role `observer` are guarded
+the same way, and an observer's `issue create` must be bound to a sprint. `sprint reopen` and the budget
+write take role `po` with no binding. A head that declares `--role po` in the observer's name is refused
+as `role_masquerade` (see [Sprints](#sprints)); the observer closes its own sprint as `--role observer`,
+audited with that role.
 
 The index of projects held by open sprints is kept next to the audit log, keyed by project id; an index
 in an older key space is rebuilt from the sprints board before it answers. A project outside any open

@@ -135,6 +135,35 @@ class TaskError(Exception):
         super().__init__(message)
 
 
+#: The one role/actor pair no write may carry: the observer's actor under the PO's role. The observer
+#: speaks in its own name (`--role observer`), under the identity guard that binds it to its sprint;
+#: a PO write naming it would be that head stepping around the guard.
+MASQUERADE = (Role.PO, "observer")
+
+
+def admit_role(role: Role | str, actor: str, allowed: Collection[Role | str]) -> Role:
+    """The role check every role-taking sprint, task and issue write makes before anything else.
+
+    Two refusals, in this order. A PO write whose actor is the observer is `role_masquerade`, whatever
+    the operation would otherwise admit: that check lives here and nowhere else, so a writer entry
+    point that admits its role through this function cannot skip it. Then a role outside `allowed` is
+    `role_forbidden`. Neither reads or writes anything.
+    """
+    if str(role) == MASQUERADE[0].value and str(actor or "").strip() == MASQUERADE[1]:
+        raise TaskError(
+            "role_masquerade",
+            "the observer writes in its own name: use --role observer --actor observer, not --role po",
+            3,
+        )
+    try:
+        normalized_role = Role(role)
+    except (TypeError, ValueError):
+        raise TaskError("role_forbidden", "role is not permitted for this operation", 3) from None
+    if normalized_role not in {Role(value) for value in allowed}:
+        raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+    return normalized_role
+
+
 class ArtifactOwnershipTaskError(TaskError):
     """The task-protocol form of a registry-backed ownership violation."""
 
@@ -1119,7 +1148,7 @@ class TaskWriter:
         steward_report: bool,
     ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply.
-        role = self._role(role, CREATE_ROLES)
+        role = self._role(role, CREATE_ROLES, actor=actor)
         project = project.strip()
         task_type = task_type.strip()
         title = title.strip() if restoring else self._redact_for_board(title.strip())
@@ -1604,7 +1633,7 @@ class TaskWriter:
         if str(role) == OWNER_ROLE:
             role, actor = OWNER_ROLE, OWNER_ROLE
         else:
-            role = self._role(role, COMMENT_ROLES)
+            role = self._role(role, COMMENT_ROLES, actor=actor)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
         return self._write(
@@ -1634,7 +1663,7 @@ class TaskWriter:
         The comment carries the fact in its event payload, which is what the observer wake predicate
         reads (`post_merge_ci_fact`); the body is the same fact for a human reading the card.
         """
-        role = self._role("dispatcher", COMMENT_ROLES)
+        role = self._role("dispatcher", COMMENT_ROLES, actor=actor)
         if str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
             raise TaskError("validation", "post-merge CI result must be one of " + ", ".join(POST_MERGE_CI_RESULTS), 2)
         body = self._redact_for_board(body)
@@ -1703,7 +1732,7 @@ class TaskWriter:
         are countable. Its payload is staged as one typed Card occurrence which renders the
         `classification:` line, deliberately not card metadata that could disagree with the event.
         """
-        role = self._role(role, {Role.WORKER})
+        role = self._role(role, {Role.WORKER}, actor=actor)
         body = self._redact_for_board(body)
         if kind not in {"done", "blocked"} or not body.strip():
             raise TaskError("validation", "reports require a non-empty body", 2)
@@ -1805,7 +1834,7 @@ class TaskWriter:
         The sprint guard is not asked: this is the PO executing the card its sprint's dispatcher
         submitted to it, not the PO's escape-hatch move of a sprint's card.
         """
-        role = self._role(role, {Role.PO})
+        role = self._role(role, {Role.PO}, actor=actor)
         if kind not in PO_COMPLETION_MARKERS:
             known = ", ".join(sorted(PO_COMPLETION_MARKERS))
             raise TaskError("validation", f"task complete takes --kind {known}, not {kind!r}", 2)
@@ -1895,7 +1924,7 @@ class TaskWriter:
         mark already there) is decided before anything is written; the card ones are decided on the
         card as read inside that transaction.
         """
-        role = self._role(role, {Role.PO})
+        role = self._role(role, {Role.PO}, actor=actor)
         if to != OWNER:
             raise TaskError("validation", f"a card is handed to the {OWNER}, not to {to!r}", 2)
         reason = self._redact_for_board(reason).strip()
@@ -1954,7 +1983,7 @@ class TaskWriter:
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        role = self._role(role, {Role.REVIEWER})
+        role = self._role(role, {Role.REVIEWER}, actor=actor)
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
@@ -2000,7 +2029,7 @@ class TaskWriter:
         launched its head for, carried in the head's environment, so the binding rather than the actor
         id distinguishes one sprint's observer from another's.
         """
-        role = self._role(role, {Role.OBSERVER})
+        role = self._role(role, {Role.OBSERVER}, actor=actor)
         body = self._redact_for_board(body)
         if kind not in DECISION_VALUES:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
@@ -2150,7 +2179,7 @@ class TaskWriter:
         mutation. The event still goes through the normal pending/commit path, which makes it idempotent
         per request id and carries it into the recovery checkpoint.
         """
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
         phase = _text(payload.get("phase"))
         if phase not in ROUTING_PHASE_VALUES:
             known = ", ".join(sorted(ROUTING_PHASE_VALUES))
@@ -2188,7 +2217,7 @@ class TaskWriter:
         Raw mappings remain accepted for released callers and are normalized
         once through the same model.
         """
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
         try:
             context = (
                 data
@@ -2239,7 +2268,7 @@ class TaskWriter:
         ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
         moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
         """
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
         if not request_id.strip():
             raise TaskError("validation", "an attempt usage event needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2305,7 +2334,7 @@ class TaskWriter:
         nowhere the tick would otherwise look. A record that cannot be published is left exactly
         where it is and stays owed.
         """
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor="")
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2337,7 +2366,7 @@ class TaskWriter:
         to call it only after the lifecycle owner has confirmed the terminal
         move; a retry can only append the exact staged object.
         """
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
         if not request_id.strip():
             raise TaskError("validation", "an attempt outcome needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2401,7 +2430,7 @@ class TaskWriter:
 
     def finish_attempt_outcomes(self, *, role: str, reference: str = "") -> int:
         """Append staged outcomes only; it never derives or changes lifecycle facts."""
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor="")
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2430,7 +2459,7 @@ class TaskWriter:
         cap: int = 3,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        role = self._role(role, {Role.DISPATCHER})
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
         worker = worker.strip()
         if not worker:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
@@ -2544,7 +2573,7 @@ class TaskWriter:
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        role = self._role(role, BOARD_ROLES)
+        role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
@@ -2557,6 +2586,9 @@ class TaskWriter:
         ):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
         task = self.reader.show(reference)
+        if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
+            # The observer files issues and never promotes, moves or closes one.
+            raise TaskError("role_forbidden", "the observer may file an issue but not move one", 3)
         if (
             role == "steward"
             and (task["state"], target) == ("in_progress", "done")
@@ -2964,7 +2996,7 @@ class TaskWriter:
         Validate) are not editable: the running head works from a TASK.md snapshot, so a mid-flight
         revision must go through preempt/requeue, not a silent spec swap.
         """
-        role = self._role(role, EDIT_ROLES)
+        role = self._role(role, EDIT_ROLES, actor=actor)
         title = self._redact_for_board(title) if title is not None else None
         description = self._redact_for_board(description) if description is not None else None
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
@@ -2974,6 +3006,8 @@ class TaskWriter:
         if title is None and description is None and head is None and review_head is None:
             raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
         current = self.reader.show(reference)
+        if role == "observer" and current.get("record_type") in _TYPED_RECORD_TYPES:
+            raise TaskError("role_forbidden", "the observer may file an issue but not edit one", 3)
         # The bounds are what makes a live-impact card admissible; an edit cannot remove them.
         if (
             description is not None
@@ -3516,12 +3550,35 @@ class TaskWriter:
         raise ArtifactOwnershipTaskError(violation)
 
     def archive(
-        self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        reason: str,
+        request_id: str | None = None,
+        sprint_close: str = "",
     ) -> dict[str, Any]:
-        role = self._role(role, {Role.PO})
+        """Archive one card: the PO's write, and a step of a sprint close in the closer's name.
+
+        `sprint_close` names the sprint whose close this archive is a step of. Only there is the
+        observer admitted, and only as the observer that sprint's close was admitted for: the card
+        guard checks that binding again against the sprint the close names.
+        """
+        role = self._role(role, {Role.PO, Role.OBSERVER} if sprint_close else {Role.PO}, actor=actor)
         reason = self._redact_for_board(reason)
         if not reason.strip():
             raise TaskError("validation", "archive requires a non-empty reason", 2)
+        request_id = request_id or str(uuid.uuid4())
+        if role == "observer":
+            self._guard_observer_identity(
+                role=role,
+                actor=actor,
+                project="",
+                card_sprint=sprint_close,
+                request_id=request_id,
+                reference=reference,
+            )
 
         def mutation(task: dict[str, Any]) -> Any:
             if task.get("record_type") in {"issue", "product"}:
@@ -4431,14 +4488,9 @@ class TaskWriter:
         )
 
     @staticmethod
-    def _role(role: Role | str, allowed: Collection[Role]) -> Role:
-        try:
-            normalized_role = Role(role)
-        except (TypeError, ValueError):
-            raise TaskError("role_forbidden", "role is not permitted for this operation", 3) from None
-        if normalized_role not in allowed:
-            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-        return normalized_role
+    def _role(role: Role | str, allowed: Collection[Role], *, actor: str = "") -> Role:
+        """`admit_role`, the one role check; every write entry point passes the actor it writes as."""
+        return admit_role(role, actor, allowed)
 
     @staticmethod
     def _check_archivable(task: dict[str, Any]) -> None:

@@ -133,6 +133,24 @@ class OperationPending(ReadError):
     code = "backend_unavailable"
 
 
+class IdentityRefused(ReadError):
+    """A write refused on who is asking, carried under the writer's own code rather than folded.
+
+    Not `validation`: the request is well formed, and the answer is about the caller. A caller that
+    reads `role_masquerade` is told to write as the observer; one that reads
+    `observer_identity_unbound` or `observer_sprint_mismatch` is a head writing outside the sprint it
+    was launched for. Folding either into `validation` would leave a sentence the only place saying so.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+#: The writer codes :class:`IdentityRefused` carries unchanged.
+IDENTITY_REFUSAL_CODES = ("role_masquerade", "observer_identity_unbound", "observer_sprint_mismatch")
+
+
 # -- the PO head half (secretary-1631) ----------------------------------------------------------
 
 

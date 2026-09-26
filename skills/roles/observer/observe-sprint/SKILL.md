@@ -37,9 +37,10 @@ python3 -P -m secretary task list --sprint <sprint-ref>
 python3 -P -m secretary task show --ref <card-ref>
 ```
 
-Roles in calls: do your own work on the sprint and its linked cards as the observer,
-`--role observer --actor observer`. Leave the PO role for task create, move and edit to a person, for
-an explicit `--sprint-override` with a reason.
+Roles in calls: everything you write is in your own name, `--role observer --actor observer`: your
+work on the sprint and its linked cards, your comments on the sprint, the issues you file and the
+close. Never write as `--role po`. A PO write whose actor is the observer is refused on every verb
+(`role_masquerade`) and writes nothing; the PO role is the PO's.
 
 ## Boundaries
 
@@ -69,6 +70,38 @@ head is not a way to change the work.
 
 You write to nobody directly and expect no direct messages. Do not answer status requests: status is
 served from data (`sprint status`, `task list --sprint`) without you.
+
+A note of your own on the sprint (the runbook of an external action, the reason for a stop) is a
+comment in your name. It asks nobody anything and wakes nobody, you included:
+
+```bash
+python3 -P -m secretary sprint comment --ref <sprint-ref> --role observer --actor observer --body-file <note.md>
+```
+
+## Asking the PO: a decision or an operation card
+
+When you need the PO, do not ask in a sprint comment or in prose in the resume: nobody owns a question
+left there, and nothing brings its answer back to you. Cut a card on your sprint instead:
+
+- a `decision` card for a question: a product fork, a missing fact, a choice that is not yours;
+- an `operation` card for a short action you cannot take: an access, a key, a step on a production.
+  It names the production it touches, a project of the registry or `none`.
+
+```bash
+python3 -P -m secretary task create --role observer --actor observer \
+  --project <repo> --type decision --title "<the question>" \
+  --state ready --sprint <sprint-ref> --body-file <question.md>
+python3 -P -m secretary task create --role observer --actor observer \
+  --project <repo> --type operation --title "<the action>" \
+  --state ready --sprint <sprint-ref> --touches-production <project>|none --body-file <action.md>
+```
+
+No head flags: the card takes no `--head`, `--review-head`, `--review required`, `--live-impact`,
+`--seed-ref` or `--base-branch`, and is refused with any of them. The body says what you need, why, and
+what you will do with each answer. Record it as the current card and end the turn. The dispatcher
+submits it to the sprint's PO session; the PO completes it (`## Decision` or `## What was done`, with
+`## How to verify`) or hands it to the owner, and the card waits for the answer. You are woken when it
+reaches Done, or Blocked when the PO service could not take it; read the completion record on the card.
 
 ## The resume entry
 
@@ -390,8 +423,27 @@ A quick fix is acceptable only when the problem is confirmed and local, does not
 contract, needs no architectural decision, and is checked by an existing test or one small new one.
 
 A defect of the current card in the same code goes into its rework. A separate bug goes into a separate
-hotfix card, executed first (`--budget-event hotfix`). Record other findings as deferred rather than
+hotfix card, executed first (`--budget-event hotfix`). File other findings as issues (below) rather than
 widening the sprint.
+
+## Filing an issue
+
+A finding that is outside this sprint's Definition of Done is filed as an issue, so it outlives the
+sprint instead of living in a resume entry: a deferred finding with its evidence. It is not a place for
+a defect of the current card, which goes into that card's rework, nor for anything the sprint must do
+to reach its goal.
+
+```bash
+python3 -P -m secretary issue create --role observer --actor observer \
+  --kind bug|feature|question|improvement --priority P0|P1|P2|P3 --title "<the problem>" \
+  --description "<what is observed, the evidence (refs, files, commands), why it is outside this sprint>" \
+  --request-id <stable-id>
+```
+
+The issue belongs to your sprint's product (`--product` may be left out) and its audit names you and
+your sprint. The priority is your proposal; the PO triages it. You never promote an issue to Ready,
+reprioritize, append to, or close one: each is refused (`role_forbidden`). Name the issue ref in the
+resume entry that deferred the finding.
 
 ## 10. Budget
 
@@ -427,13 +479,15 @@ When the Definition of Done is confirmed by a check against the default branch a
    observer delivery, not as reviewer bring-up, and do not retry delivery yourself.
 5. Close the sprint. The close decides every issue the sprint declared and every card it still
    holds outside Done, so write those verdicts first (the format is in `docs/PROTOCOLS.md`) and pass
-   them as one file:
+   them as one file, with the reason and the closeout the close writes into knowledge:
    ```bash
-   python3 -P -m secretary sprint close --ref <sprint-ref> --role po --actor observer \
-     --decisions-file <decisions>.yaml
+   python3 -P -m secretary sprint close --ref <sprint-ref> --role observer --actor observer \
+     --reason "<why the sprint closes>" --decisions-file <decisions>.yaml --closeout-file <closeout>.md
    ```
-   Closing a sprint is separately authorised for the PO role only; this is neither a task write nor an
-   override. A close short of a decision is refused and names what is missing; it writes nothing.
+   You close your own sprint only: any other is refused (`observer_sprint_mismatch`). Every step of the
+   close (the Done cards archived, the declared issues closed on your verdicts, the remaining cards
+   disposed) is written in your name. A close short of a decision is refused and names what is
+   missing; it writes nothing.
 6. Do not start the next sprint: sprints are opened by a person.
 
 ## Permitted stops
@@ -447,4 +501,6 @@ You may stop only if:
 - an external action is needed that would cut off your session or control channel.
 
 In every case, durable state first: a resume entry with the evidence, the exact question or runbook, the
-current refs and a safe next step. Do not present an intermediate stop as a goal reached.
+current refs and a safe next step. A question the PO can answer is a `decision` card, not a stop (see
+[Asking the PO](#asking-the-po-a-decision-or-an-operation-card)). Do not present an intermediate stop as
+a goal reached.

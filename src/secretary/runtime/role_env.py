@@ -122,23 +122,28 @@ NONSECRET_ENV = (
 OBSERVER_SPRINT_ENV = "SECRETARY_OBSERVER_SPRINT"
 OBSERVER_GENERATION_ENV = "SECRETARY_OBSERVER_GENERATION"
 MEMORY_ACCESS_TOKEN_ENV = "SECRETARY_MEMORY_ACCESS_TOKEN"
+# Who a role head writes the board as: the `--actor` every board command defaults to. The dispatcher
+# names a worker or reviewer head by its profile in the launch command; every other role head is its
+# role (`observer`, `steward`, `retro`).
+BOARD_ACTOR_ENV = "BOARD_ACTOR"
 UNIT_BOUND_ENV = (
     "SECRETARY_INSTANCE",
     "TA_SECRETARY_REPO",
     OBSERVER_SPRINT_ENV,
     OBSERVER_GENERATION_ENV,
     MEMORY_ACCESS_TOKEN_ENV,
+    BOARD_ACTOR_ENV,
 )
 # An observer's identity is supplied only by its launcher. A runtime.env entry must never let a
-# head claim another sprint.
-LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV)
+# head claim another sprint, or write under another head's name.
+LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": NONSECRET_ENV,
-    "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
-    "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV),
+    "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV),
     "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "steward": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "retro": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
@@ -287,9 +292,26 @@ def runtime_env(
 
     if role in BOARD_ROLES:
         env["BOARD_ROLE"] = role
+        env[BOARD_ACTOR_ENV] = board_actor(role, env)
     else:
         env.pop("BOARD_ROLE", None)
+        env.pop(BOARD_ACTOR_ENV, None)
     return env
+
+
+def board_actor(role: str, env: dict[str, str]) -> str:
+    """The actor a role head writes the board as.
+
+    A role whose allowlist carries `BOARD_ACTOR` (worker, reviewer) takes the name its launcher bound,
+    the head profile it runs; `runtime_env` has already dropped any value that came from elsewhere.
+    Every other role, the observer included, is its role: nothing a launch or a runtime.env carries
+    can make an observer write as anyone else.
+    """
+    if BOARD_ACTOR_ENV in ROLE_ALLOWLIST.get(role, ()):
+        named = str(env.get(BOARD_ACTOR_ENV) or "").strip()
+        if named:
+            return named
+    return role
 
 
 def role_shell_command(

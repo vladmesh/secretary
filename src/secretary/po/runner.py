@@ -121,9 +121,12 @@ def turn_environment(
     that is the system Python, which lacks the product's dependencies. The directory of the
     interpreter running this process (the production runtime) goes first, so ``python3`` and the
     ``secretary`` console script resolve there, and the source this process imports goes first on
-    ``PYTHONPATH``, as the control-plane commands keep it importable. Everything else is kept.
+    ``PYTHONPATH``, as the control-plane commands keep it importable. The turn writes the board as
+    the PO (`BOARD_ACTOR`, the actor every board command defaults to) unless the service was given
+    another name for it. Everything else is kept.
     """
     env = dict(os.environ if environ is None else environ)
+    env["BOARD_ACTOR"] = str(env.get("BOARD_ACTOR") or "").strip() or "po"
     bin_dir = str(Path(interpreter or sys.executable).parent)
     path = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != bin_dir]
     env["PATH"] = os.pathsep.join([bin_dir, *path])
