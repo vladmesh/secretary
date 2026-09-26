@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary.po import PO_SESSION_ENV
 from secretary.po.store import (
     CLIS,
     COMPLETED,
@@ -46,6 +47,7 @@ from secretary.po.store import (
     INTERRUPTED,
     OWNER,
     RUNNING,
+    SESSION_CREATE,
     PoStore,
     PoStoreError,
     Session,
@@ -285,12 +287,32 @@ class PoRunner:
         return self._create(cli, model, effort, None)[0]
 
     def create_session_request(
-        self, cli: str, model: str, request_id: str, effort: str = DEFAULT_EFFORT
+        self,
+        cli: str,
+        model: str,
+        request_id: str,
+        effort: str = DEFAULT_EFFORT,
+        *,
+        operation: str = SESSION_CREATE,
+        fingerprint: str | None = None,
     ) -> tuple[Session, bool]:
-        """`create_session` under a form's request id; the flag says whether this call created it."""
-        return self._create(cli, model, effort, request_id)
+        """`create_session` under a form's request id; the flag says whether this call created it.
 
-    def _create(self, cli: str, model: str, effort: str, request_id: str | None) -> tuple[Session, bool]:
+        `operation` and `fingerprint` bind the id to another operation that opens a session
+        (`PoStore.claim_session`).
+        """
+        return self._create(cli, model, effort, request_id, operation=operation, fingerprint=fingerprint)
+
+    def _create(
+        self,
+        cli: str,
+        model: str,
+        effort: str,
+        request_id: str | None,
+        *,
+        operation: str = SESSION_CREATE,
+        fingerprint: str | None = None,
+    ) -> tuple[Session, bool]:
         if cli not in CLIS:
             raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
         if not model.strip():
@@ -305,6 +327,8 @@ class PoRunner:
             cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
             request_id=request_id,
             effort=effort.strip(),
+            operation=operation,
+            fingerprint=fingerprint,
         )
 
     def files(self, session_id: str, seq: int) -> TurnFiles:
@@ -452,7 +476,7 @@ class PoRunner:
                     stdin=stdin,
                     stdout=stdout,
                     stderr=stderr,
-                    env=self.env,
+                    env=self.session_environment(session),
                     start_new_session=True,
                 )
         except OSError as exc:
@@ -475,6 +499,14 @@ class PoRunner:
             )
             raise
         return process
+
+    def session_environment(self, session: Session) -> dict[str, str]:
+        """The environment of one of `session`'s turns: the runner's, naming the session (`PO_SESSION_ENV`).
+
+        Every launch goes through here: a new turn, a re-run at start, and a relaunch over a fresh
+        conversation.
+        """
+        return {**self.env, PO_SESSION_ENV: session.session_id}
 
     def _abandon(
         self, session_id: str, seq: int, process: subprocess.Popen[bytes] | None, reason: str
@@ -777,6 +809,7 @@ class PoRunner:
 
 
 __all__ = [
+    "PO_SESSION_ENV",
     "RECOVERED_REASON",
     "RERUN_INTERRUPTED_REASON",
     "RERUN_REASON",

@@ -810,7 +810,8 @@ created lazily and idempotently. References have the form `sprint:ID`, separate 
 python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID \
-  [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE]
+  [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE] \
+  [--po-session SESSION_ID] [--allow-production PROJECT_ID ...]
 python3 -P -m secretary sprint list --status open
 python3 -P -m secretary sprint show --ref sprint:ID
 python3 -P -m secretary sprint status --ref sprint:ID
@@ -825,8 +826,10 @@ python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
 ```
 
 Stored fields: goal, Definition of Done text, repositories, owning product, its issues, reserved
-projects, `open`/`closed`/`stopped` status, declared observer, optional worker and reviewer pins, a
-budget counter by event type, current card and a structured resume entry.
+projects, `open`/`closed`/`stopped` status, declared observer, optional worker and reviewer pins, the PO
+session and allowed productions
+([The sprint's PO session and productions](#the-sprints-po-session-and-productions)), a budget counter by
+event type, current card and a structured resume entry.
 
 The six charged budget event types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task`
 and `hotfix`. Production derives them from durable card audit events: a red review, a move to Blocked,
@@ -1184,6 +1187,55 @@ card declares. A sprint that pins nothing adds no check.
 Pins travel the recovery path: the normalized export carries a key per role only where pinned, absence
 survives the round trip, both fields are compared by sprint parity, and an exported key that is not a
 profile name stops restore in preflight before the first backend write.
+
+### The sprint's PO session and productions
+
+Two fields a sprint records at `sprint create` (board-store revision `0016`, columns
+`sprints.po_session` and `sprints.allowed_productions`):
+
+| field | set by | meaning |
+| --- | --- | --- |
+| `po_session` | `--po-session SESSION_ID`, default `$SECRETARY_PO_SESSION` | the PO session that opened the sprint; `null` when neither is given (a `--role steward` create outside a PO turn) |
+| `allowed_productions` | `--allow-production PROJECT_ID`, repeatable | registered projects whose production the sprint's operations may touch; empty by default |
+
+The PO service gives every PO turn `SECRETARY_PO_SESSION=<session_id>` (new turns, re-runs and
+relaunches alike), so a `sprint create` inside a PO turn records its session with no flag. A session id
+that is not an existing, open PO session is refused (`validation`), and so is an `--allow-production`
+that is not a project of the instance registry. Nothing is inferred: no production is allowed that was
+not named, the sprint's own reserved projects included. Both checks are reads made with the ownership
+checks, for a fresh request only, so a refused create writes nothing. Both fields are inputs of the
+request: the staged intent carries each only when set, so a repeat with a different value is
+`validation` and an intent staged before them replays unchanged.
+
+`sprint show`, `sprint status`, `sprint list` and the sprint protocol documents carry `po_session` (a
+session id or `null`) and `allowed_productions` (a list); a sprint opened before `0016` reads `null` and
+`[]`. The observer launch document prints both, as `## PO session` and `## Allowed productions`. The
+checkpoint export carries each only where set, restore writes it back, and sprint parity compares both.
+Neither is changed after create except `po_session` by the PO service's resolver below; the audit kind of
+that write is `po_session_set`, role `po`, actor `po-service`.
+
+**The resolver.** `sprint_session(sprint_ref, request_id)` is an operation of the PO service
+(`secretary.po.client.PoServiceClient.sprint_session`, [Operations](OPERATIONS.md#the-po-service)). It
+answers `{session_id, created, repeated}`:
+
+- the recorded `po_session` exists and is open: that session, `created: false`, nothing written;
+- it is `null`, missing from the store or closed: a fresh session, `created: true`. It takes the recorded
+  session's CLI, model and effort when that row exists, else the new-session form's preselection (the
+  first CLI offering a model in `po.models`, its first model, effort `default`). Its first input is a
+  seeding message naming the sprint and why the session was opened, quoting the sprint's why-document —
+  the one `state/knowledge/decisions/*.md` of the instance repository that names the sprint ref as a whole
+  word; with none or several it says so and lists the paths — and telling the head to read `NOTES.md`
+  in its workspace. The sprint gets a comment (role `po`, actor `po-service`): `the PO session <old or
+  none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
+  and then records the new session as its `po_session`.
+
+The request id is bound to the sprint (`po_sprint_session` in `po_requests`, reserved by
+`PoService._reserve` like every other id). A repeat of a resolve that created a session answers the same
+session (`repeated: true`) and creates nothing; one that failed after the session was claimed answered
+`outcome_unknown`, and its repeat finishes the seed, comment and record, each under its own id derived
+from the request id. Resolves are serialized under the service lock and read the sprint's session inside
+it, so two resolves of one sprint with different ids open one session. An unknown sprint and a sprint
+that is not open are refused (`validation`, nothing written).
 
 ### The observer fence
 

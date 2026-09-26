@@ -26,6 +26,7 @@ from pathlib import Path
 
 from secretary.board.backend import SPRINT, board_client
 from secretary.config import ConfigError, load_config
+from secretary.po import PO_SESSION_ENV
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
@@ -88,6 +89,7 @@ def add_sprint_subcommands(subparsers) -> None:
     created.add_argument("--ref", default="")
     _add_observer_argument(created)
     _add_executor_arguments(created)
+    _add_po_channel_arguments(created)
     created.set_defaults(handler=run_create)
     delivery = commands.add_parser(
         "comment-delivery",
@@ -190,6 +192,27 @@ def _add_executor_arguments(command: argparse.ArgumentParser) -> None:
             help=f"head profile every card of this sprint runs its {role} on; "
             "omit it to pin no profile and leave the choice to the observer",
         )
+
+
+def _add_po_channel_arguments(command: argparse.ArgumentParser) -> None:
+    """The PO session that opens the sprint, and the productions its operations may touch.
+
+    Inside a PO turn the session needs no flag: the PO service gives every turn
+    `SECRETARY_PO_SESSION`, and that is the default here. Outside one (a steward create) there is
+    none, and the sprint records none. Productions are never defaulted: each is named explicitly.
+    """
+    command.add_argument(
+        "--po-session",
+        default=os.environ.get(PO_SESSION_ENV) or None,
+        help=f"the open PO session creating this sprint; defaults to ${PO_SESSION_ENV}, set in every PO turn",
+    )
+    command.add_argument(
+        "--allow-production",
+        action="append",
+        default=[],
+        help="registered project whose production this sprint's operations may touch; repeat for "
+        "more. The default is none",
+    )
 
 
 def not_implemented(args: argparse.Namespace) -> int:
@@ -348,6 +371,8 @@ def run_create(args: argparse.Namespace) -> int:
             observer=observer_choice(args.observer),
             worker=args.worker,
             reviewer=args.reviewer,
+            po_session=args.po_session,
+            allowed_productions=args.allow_production,
         ),
     )
 

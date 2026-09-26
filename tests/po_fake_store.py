@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from secretary.po.sprints import SprintRecord, WhyDocument
 from secretary.po.store import (
     AGENT,
     COMPLETED,
@@ -98,11 +99,13 @@ class FakePoStore:
         cli_session_id: str | None,
         request_id: str | None = None,
         effort: str = DEFAULT_EFFORT,
+        operation: str = SESSION_CREATE,
+        fingerprint: str | None = None,
     ) -> tuple[Session, bool]:
         board = self._open()
-        fingerprint = session_fingerprint(cli, model, effort)
+        fingerprint = fingerprint or session_fingerprint(cli, model, effort)
         with board.lock:
-            known = self._known(board, request_id, SESSION_CREATE, fingerprint)
+            known = self._known(board, request_id, operation, fingerprint)
             if known is not None:
                 return board.sessions[known.session_id], False
             session = Session(
@@ -111,7 +114,7 @@ class FakePoStore:
             board.sessions[session_id] = session
             if request_id is not None:
                 board.requests[request_id] = PoRequest(
-                    request_id, SESSION_CREATE, fingerprint, session_id, None, board.now()
+                    request_id, operation, fingerprint, session_id, None, board.now()
                 )
             return session, True
 
@@ -266,3 +269,53 @@ class FakePoStore:
         with board.lock:
             return [entry for entry in board.feed if entry.session_id == session_id]
 
+
+class FakeSprints:
+    """The resolver's view of the sprints (`secretary.po.sprints.SprintSessions`), in memory.
+
+    Every sprint is open unless `status` says otherwise. A comment and a session record are kept by
+    their request id and a repeat of one changes nothing, as the sprint audit does. `fail` makes the
+    next call of a method raise, as a board that dropped the connection would.
+    """
+
+    def __init__(
+        self,
+        sessions: dict[str, str | None],
+        *,
+        status: dict[str, str] | None = None,
+        documents: dict[str, list[WhyDocument]] | None = None,
+    ) -> None:
+        self.records = {
+            ref: SprintRecord(ref, (status or {}).get(ref, "open"), session)
+            for ref, session in sessions.items()
+        }
+        self.documents = dict(documents or {})
+        self.comments: dict[str, tuple[str, str]] = {}
+        self.recorded: dict[str, tuple[str, str]] = {}
+        self.fail: dict[str, int] = {}
+        self.lock = threading.Lock()
+
+    def _maybe_fail(self, method: str) -> None:
+        if self.fail.get(method):
+            self.fail[method] -= 1
+            raise RuntimeError(f"the board dropped the connection during {method}")
+
+    def sprint(self, sprint_ref: str) -> SprintRecord | None:
+        with self.lock:
+            return self.records.get(sprint_ref)
+
+    def why_documents(self, sprint_ref: str) -> list[WhyDocument]:
+        return list(self.documents.get(sprint_ref, []))
+
+    def comment(self, sprint_ref: str, body: str, *, request_id: str) -> None:
+        with self.lock:
+            self._maybe_fail("comment")
+            self.comments.setdefault(request_id, (sprint_ref, body))
+
+    def record_po_session(self, sprint_ref: str, session_id: str, *, request_id: str) -> None:
+        with self.lock:
+            self._maybe_fail("record_po_session")
+            if request_id in self.recorded:
+                return
+            self.recorded[request_id] = (sprint_ref, session_id)
+            self.records[sprint_ref] = replace(self.records[sprint_ref], po_session=session_id)

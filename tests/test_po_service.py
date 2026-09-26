@@ -38,6 +38,7 @@ from secretary.host import (
     render_systemd_unit,
 )
 from secretary.po import client as po_client
+from secretary.po import runner as po_runner
 from secretary.po import store as po_store
 from secretary.po import token as po_token
 from secretary.po.client import PoServiceClient, ServiceUnavailable
@@ -51,6 +52,7 @@ from secretary.po.runner import (
     still_running,
 )
 from secretary.po.service import PoService, ServiceStartError, listening
+from secretary.po.sprints import SprintRecord, WhyDocument, find_why_documents, why_document_label
 from secretary.web.app import WebApp
 from secretary.webproto.errors import (
     NOTHING_WRITTEN,
@@ -64,7 +66,7 @@ from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually
-from tests.po_fake_store import FakeBoard, FakePoStore
+from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 from tests.web_fakes import Recording
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,8 +103,11 @@ class ServiceFixture(unittest.TestCase):
 
     # --- one "process" of the service ------------------------------------------------------
 
-    def service(self, *, run: bool = True) -> PoService:
-        """A fresh service process over the shared board and data dir, started (and its loop running)."""
+    def service(self, *, run: bool = True, **options) -> PoService:
+        """A fresh service process over the shared board and data dir, started (and its loop running).
+
+        `options` go to `PoService` (its sprints and models, for the sprint-session resolver).
+        """
         codex_home = str(self.root / "codex-home")
         runner = PoRunner(
             FakePoStore(self.board),
@@ -115,7 +120,7 @@ class ServiceFixture(unittest.TestCase):
                 "FAKE_CODEX_HOME": codex_home,
             },
         )
-        service = PoService(runner, data_dir=self.data)
+        service = PoService(runner, data_dir=self.data, **options)
         self.services.append(service)
         self.start_lines = service.start()
         if run:
@@ -624,14 +629,16 @@ class RequestIdReservationTests(ServiceFixture):
             for name in service_module._OPERATIONS.values()
             if "request_id" in inspect.signature(getattr(PoService, name)).parameters
         )
-        self.assertEqual(takers, ["create_session", "submit"])
-        service = self.service()
+        self.assertEqual(takers, ["create_session", "sprint_session", "submit"])
+        self.assertEqual(set(takers), service_module.ID_OPERATIONS)
+        service = self.service(sprints=FakeSprints({"sprint:1": None}), models=MODELS)
         with mock.patch.object(service, "_reserve", wraps=service._reserve) as reserve:
             session_id = self.session(service, request_id="c-9")
             service.submit(session_id=session_id, text="hello", request_id="m-9")
+            service.sprint_session(sprint_ref="sprint:1", request_id="s-9")
         self.assertEqual(
             [call.args[:2] for call in reserve.call_args_list],
-            [("c-9", po_store.SESSION_CREATE), ("m-9", po_store.SEND)],
+            [("c-9", po_store.SESSION_CREATE), ("m-9", po_store.SEND), ("s-9", po_store.SPRINT_SESSION)],
         )
 
 
@@ -1153,6 +1160,255 @@ class UpgradeStepTests(ServiceFixture):
         self.assertIn("would ask", dry.detail)
         self.assertIn("the PO unit file changed", dry.detail)
         self.assertFalse(po_client.restart_marker_path(self.data).exists())
+
+
+class TurnEnvironmentTests(ServiceFixture):
+    """Every turn names its own PO session, so `sprint create` inside it records that session."""
+
+    def test_a_new_turn_and_its_rerun_both_carry_their_session(self) -> None:
+        first = self.service()
+        session_id = self.session(first)
+        other = self.session(first, "codex", "gpt-5.6-sol")
+        first.submit(session_id=other, text="elsewhere", request_id="m-other")
+        first.submit(session_id=session_id, text="GATE remember 42", request_id="m-1")
+        self.reached_gate(session_id, 1)
+        self.settled(other, 1)
+        self.crash(first)
+
+        second = self.service()
+        self.gate.touch()
+        self.assertEqual(self.settled(session_id, 1).reason, RERUN_REASON)
+
+        launches = [call for call in self.calls() if call["prompt"] == "GATE remember 42"]
+        # The first launch, its re-run, and the re-run's relaunch over `--resume`.
+        self.assertGreaterEqual(len(launches), 2)
+        self.assertEqual({call["po_session"] for call in launches}, {session_id})
+        [elsewhere] = [call for call in self.calls() if call["prompt"] == "elsewhere"]
+        self.assertEqual(elsewhere["po_session"], other)
+        self.assertNotIn(po_runner.PO_SESSION_ENV, second.runner.env)
+
+
+def why(path: str, text: str) -> WhyDocument:
+    return WhyDocument(path, text)
+
+
+class SprintSessionTests(ServiceFixture):
+    """`PoService.sprint_session`: the sprint's live PO session, re-seeded once when it is gone."""
+
+    DOC = "state/knowledge/decisions/2026-09-26-sprint-1-why.md"
+
+    def resolver(self, sprints: FakeSprints, **options) -> PoService:
+        return self.service(sprints=sprints, models=MODELS, **options)
+
+    def first_prompt(self, session_id: str) -> str:
+        return self.feed(session_id)[0][2]
+
+    def test_an_open_recorded_session_is_the_answer_and_nothing_is_written(self) -> None:
+        sprints = FakeSprints({})
+        service = self.resolver(sprints)
+        session_id = self.session(service)
+        sprints.records["sprint:1"] = SprintRecord("sprint:1", "open", session_id)
+
+        answer = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+
+        self.assertEqual(answer, {"session_id": session_id, "created": False, "repeated": False})
+        self.assertEqual(list(self.board.sessions), [session_id])
+        self.assertIsNone(self.store().request("r-1"))
+        self.assertEqual((sprints.comments, sprints.recorded, self.queued()), ({}, {}, []))
+
+    def test_a_sprint_with_no_session_gets_one_seeded_with_its_why_document_and_notes(self) -> None:
+        sprints = FakeSprints(
+            {"sprint:1": None},
+            documents={"sprint:1": [why(self.DOC, "# Why\n\nBecause the owner said so.\n")]},
+        )
+        service = self.resolver(sprints)
+
+        answer = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+
+        self.assertEqual((answer["created"], answer["repeated"]), (True, False))
+        session = self.store().session(answer["session_id"])
+        # No recorded session: the new-session form's preselection, first CLI and first model.
+        self.assertEqual((session.cli, session.model, session.effort), ("claude", "opus", "default"))
+        self.assertEqual(sprints.records["sprint:1"].po_session, session.session_id)
+        self.assertEqual(
+            list(sprints.comments.values()),
+            [
+                (
+                    "sprint:1",
+                    (
+                        f"the PO session none no longer exists; opened {session.session_id} seeded with "
+                        f"{self.DOC} and NOTES.md"
+                    ),
+                )
+            ],
+        )
+        self.assertEqual(self.settled(session.session_id, 1).state, po_store.COMPLETED)
+        seed = self.first_prompt(session.session_id)
+        for expected in (
+            "sprint:1",
+            "recorded no PO session",
+            "NOTES.md",
+            self.DOC,
+            "Because the owner said so.",
+        ):
+            self.assertIn(expected, seed)
+        [launch] = self.calls()
+        self.assertEqual((launch["prompt"], launch["po_session"]), (seed, session.session_id))
+
+    def test_a_session_missing_from_the_store_is_replaced_and_no_why_document_is_said(self) -> None:
+        sprints = FakeSprints({"sprint:1": "gone-session"})
+        service = self.resolver(sprints)
+
+        answer = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+
+        new = answer["session_id"]
+        self.assertTrue(answer["created"])
+        self.assertEqual(self.store().session(new).cli, "claude")
+        self.assertEqual(
+            list(sprints.comments.values()),
+            [
+                (
+                    "sprint:1",
+                    (
+                        f"the PO session gone-session no longer exists; opened {new} seeded with "
+                        "no why-document found and NOTES.md"
+                    ),
+                )
+            ],
+        )
+        self.settled(new, 1)
+        seed = self.first_prompt(new)
+        self.assertIn("gone-session no longer exists", seed)
+        self.assertIn("No why-document under state/knowledge/decisions/ names sprint:1", seed)
+
+    def test_a_closed_session_is_replaced_with_its_own_cli_model_and_effort(self) -> None:
+        sprints = FakeSprints({})
+        service = self.resolver(sprints)
+        old = service.create_session(cli="codex", model="gpt-5.6-sol", effort="high", request_id="c-old")
+        service.close_session(session_id=old["session_id"], actor="owner")
+        sprints.records["sprint:1"] = SprintRecord("sprint:1", "open", old["session_id"])
+
+        answer = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+
+        session = self.store().session(answer["session_id"])
+        self.assertNotEqual(session.session_id, old["session_id"])
+        self.assertEqual((session.cli, session.model, session.effort), ("codex", "gpt-5.6-sol", "high"))
+        self.settled(session.session_id, 1)
+        self.assertIn(f"{old['session_id']} is closed", self.first_prompt(session.session_id))
+        self.assertEqual(sprints.records["sprint:1"].po_session, session.session_id)
+
+    def test_several_why_documents_are_listed_and_none_is_quoted(self) -> None:
+        documents = [
+            why("state/knowledge/decisions/a.md", "sprint:1 first TEXT-A"),
+            why("state/knowledge/decisions/b.md", "sprint:1 second TEXT-B"),
+        ]
+        sprints = FakeSprints({"sprint:1": None}, documents={"sprint:1": documents})
+        service = self.resolver(sprints)
+
+        new = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")["session_id"]
+
+        self.settled(new, 1)
+        seed = self.first_prompt(new)
+        self.assertIn("- state/knowledge/decisions/a.md", seed)
+        self.assertIn("- state/knowledge/decisions/b.md", seed)
+        self.assertNotIn("TEXT-A", seed)
+        [(_, comment)] = sprints.comments.values()
+        self.assertIn(
+            "no single why-document (state/knowledge/decisions/a.md, state/knowledge/decisions/b.md)", comment
+        )
+
+    def test_a_repeat_replays_and_finishes_a_resolve_that_failed_part_way(self) -> None:
+        sprints = FakeSprints({"sprint:1": None})
+        service = self.resolver(sprints)
+        sprints.fail["record_po_session"] = 1
+        request = {"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "r-1"}
+
+        failed = service.handle(request)
+
+        self.assertEqual(failed["error"]["code"], "outcome_unknown")
+        [opened] = self.board.sessions
+        self.assertIsNone(sprints.records["sprint:1"].po_session)
+
+        again = service.handle(request)
+        once_more = service.handle(request)
+
+        self.assertEqual(again["result"], {"session_id": opened, "created": True, "repeated": True})
+        self.assertEqual(once_more["result"], again["result"])
+        self.assertEqual(list(self.board.sessions), [opened])
+        self.assertEqual(sprints.records["sprint:1"].po_session, opened)
+        self.assertEqual(len(sprints.comments), 1)
+        self.settled(opened, 1)
+        self.assertEqual([role for _seq, role, _text in self.feed(opened)], ["owner", "agent"])
+        self.assertEqual(self.queued(), [])
+        # A later resolve under another id finds the recorded session open.
+        later = service.sprint_session(sprint_ref="sprint:1", request_id="r-2")
+        self.assertEqual((later["session_id"], later["created"]), (opened, False))
+        with self.assertRaises(po_store.RequestConflict):
+            service.sprint_session(sprint_ref="sprint:2", request_id="r-1")
+
+    def test_two_resolves_of_one_sprint_open_one_session(self) -> None:
+        sprints = FakeSprints({"sprint:1": "gone-session"})
+        service = self.resolver(sprints)
+        start = threading.Barrier(4)
+        answers: list[dict] = []
+
+        def resolve(request_id: str) -> None:
+            start.wait(5)
+            answers.append(service.sprint_session(sprint_ref="sprint:1", request_id=request_id))
+
+        threads = [threading.Thread(target=resolve, args=(f"r-{index}",)) for index in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+
+        self.assertEqual(len(answers), 4)
+        self.assertEqual(len({answer["session_id"] for answer in answers}), 1)
+        self.assertEqual(sorted(answer["created"] for answer in answers), [False, False, False, True])
+        self.assertEqual(len(self.board.sessions), 1)
+        self.assertEqual(len(sprints.comments), 1)
+
+    def test_an_unknown_or_closed_sprint_is_refused_with_nothing_written(self) -> None:
+        sprints = FakeSprints({"sprint:done": None}, status={"sprint:done": "closed"})
+        service = self.resolver(sprints)
+        for ref in ("sprint:none", "sprint:done"):
+            with self.subTest(ref=ref):
+                answer = service.handle({"op": "sprint_session", "sprint_ref": ref, "request_id": f"r-{ref}"})
+                self.assertEqual(answer["error"]["code"], "validation")
+                self.assertTrue(answer["error"]["nothing_written"])
+        self.assertEqual((self.board.sessions, sprints.comments), ({}, {}))
+
+    def test_the_client_resolves_through_the_socket(self) -> None:
+        sprints = FakeSprints({"sprint:1": None})
+        service = self.resolver(sprints, run=False)
+        with listening(service):
+            client = PoServiceClient(self.data)
+            first = client.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+            second = client.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+        self.assertTrue(first["created"])
+        self.assertEqual((second["session_id"], second["repeated"]), (first["session_id"], True))
+
+
+class WhyDocumentTests(unittest.TestCase):
+    def test_only_a_decision_that_names_the_whole_reference_is_found(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(find_why_documents(root, "sprint:14"), [])
+        decisions = root / "state" / "knowledge" / "decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "a.md").write_text("Why sprint:14 exists.\n", encoding="utf-8")
+        (decisions / "b.md").write_text("About sprint:1465 and xsprint:14.\n", encoding="utf-8")
+        (decisions / "c.md").write_text("(sprint:14)\n", encoding="utf-8")
+        (decisions / "notes.txt").write_text("sprint:14\n", encoding="utf-8")
+
+        found = find_why_documents(root, "sprint:14")
+
+        self.assertEqual(
+            [document.path for document in found],
+            ["state/knowledge/decisions/a.md", "state/knowledge/decisions/c.md"],
+        )
+        self.assertEqual(found[0].text, "Why sprint:14 exists.\n")
+        self.assertEqual(why_document_label(found[:1]), "state/knowledge/decisions/a.md")
+        self.assertEqual(why_document_label([]), "no why-document found")
 
 
 class UnitTemplateTests(unittest.TestCase):

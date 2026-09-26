@@ -50,4 +50,23 @@ def _lists(
     return found
 
 
-__all__ = ["DEFAULT_EFFORTS", "DEFAULT_MODELS", "efforts_from_instance", "models_from_instance"]
+def default_session_choice(models: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The CLI and model a new session is opened with when nobody chose: the web form's preselection.
+
+    The first CLI that offers any model, and the first model it lists; None when no CLI offers one.
+    The effort of such a session is `default`.
+    """
+    for cli, values in models.items():
+        listed = [str(value) for value in values or () if str(value).strip()]
+        if listed:
+            return str(cli), listed[0]
+    return None
+
+
+__all__ = [
+    "DEFAULT_EFFORTS",
+    "DEFAULT_MODELS",
+    "default_session_choice",
+    "efforts_from_instance",
+    "models_from_instance",
+]

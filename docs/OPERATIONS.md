@@ -353,7 +353,7 @@ service takes an exclusive lock, `DATA_DIR/po-service/service.lock`; a second `p
 dir refuses to start.
 
 **Queue.** A message is one file in `DATA_DIR/po-queue/` (`<time_ns>-<pid>-<n>.json`: `session_id`,
-`text`, `request_id`, `source` — `web` today — and `queued_at`), written to a temporary name, fsynced and
+`text`, `request_id`, `source` — `web` or `po-service` — and `queued_at`), written to a temporary name, fsynced and
 renamed before the submitter gets an answer. The service takes inputs oldest first per session and runs
 one turn per session at a time; a message for a busy session waits in the queue, neither refused nor lost,
 and sessions run in parallel. An input leaves the queue only after its turn row exists (`claim_turn`
@@ -370,9 +370,10 @@ same operation with the same inputs is a replay; anything else is 409 `request_c
 create can never take the id of a message still waiting in the queue.
 
 **Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
-request line, one JSON answer line, ops `submit`, `create_session`, `stop_turn`, `close_session`,
-`status` and `restart` (`secretary.po.client`). The web is only a client: it reads the store and the queue
-directory and sends every write here. The service runs a request only once its whole line arrived.
+request line, one JSON answer line, ops `submit`, `create_session`, `sprint_session`, `stop_turn`,
+`close_session`, `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the
+store and the queue directory and sends every write here. The service runs a request only once its
+whole line arrived.
 
 **Accepted is accepted.** A message is accepted when its queue file is written, a session when its
 `claim_session` commits. From then on the service answers "accepted" from what it knew at that moment —
@@ -396,6 +397,27 @@ Everything else keeps the id: a lost or late answer (`the PO service may have ac
 sending again with the same form is safe`, `data.reason = outcome_unknown`), a store that failed, any
 unexpected error. A lost answer to a stop or a close says repeating it is safe (both are idempotent).
 The web never starts a turn itself.
+
+**Turn environment.** Every turn process gets `SECRETARY_PO_SESSION=<session_id>` beside the product
+runtime's `PATH`/`PYTHONPATH`, on its first launch, a re-run and a relaunch alike. `sprint create` inside
+a turn takes it as the default of `--po-session`, so the sprint records the session that opened it.
+
+**A sprint's session (the resolver).** `sprint_session(sprint_ref, request_id)` answers the live PO
+session of a sprint ([Protocols](PROTOCOLS.md#the-sprints-po-session-and-productions)). The session the
+sprint recorded, while it exists and is open, is the answer and nothing is written. Otherwise the service
+**re-seeds**, once: it opens a fresh session (the old one's CLI, model and effort, or the new-session
+form's defaults when the old row is gone), queues as its first input a seeding message (the sprint, why
+the session was opened, the text of the sprint's why-document from `state/knowledge/decisions/`, and the
+instruction to read `NOTES.md` in the workspace), comments on the sprint as `po-service` (`the PO session
+<old or none> no longer exists; opened <new> seeded with ... and NOTES.md`) and records the new id as the
+sprint's `po_session`, in that order. The seed input is queued with `source: po-service`. Resolves run
+under the service lock, so concurrent resolves of one sprint open one session; a repeat of the same
+request id opens nothing and finishes whatever a failed attempt left. Check:
+
+```bash
+secretary sprint show --ref sprint:ID | jq '{po_session, allowed_productions}'
+secretary sprint show --ref sprint:ID | jq '.comments[] | select(.body | contains("no longer exists"))'
+```
 
 **Service start.** Every turn left `running` is looked at once:
 

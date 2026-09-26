@@ -193,6 +193,10 @@ class Sprint(Base):
     observer = sa.Column(JSONB)  # (J1)
     worker_pin = sa.Column(sa.Text)
     reviewer_pin = sa.Column(sa.Text)
+    # The PO session that opened the sprint, and the productions its operations may touch (0016).
+    # Null and empty for every sprint opened before them; both are set at create and never inferred.
+    po_session = sa.Column(sa.Text)
+    allowed_productions = sa.Column(ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'::text[]"))
     # Both cursors are scoped to this sprint by composite foreign key, not by a bare
     # existence check.  See "Scoped relations" in §3.3.
     current_task_ref = sa.Column(sa.Text)

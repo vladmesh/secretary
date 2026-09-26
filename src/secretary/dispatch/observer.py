@@ -3359,6 +3359,14 @@ def render_observer_prompt(
         "",
         *_executor_lines(sprint),
         "",
+        "## PO session",
+        "",
+        str(sprint.get("po_session") or "(none recorded)"),
+        "",
+        "## Allowed productions",
+        "",
+        *_production_lines(sprint),
+        "",
         "## Current card",
         "",
         current or "(none)",
@@ -3484,6 +3492,14 @@ def render_observer_wake_context(
         "taking the next semantic step, then record resume."
     )
     return lead + "\n\n" + render_observer_prompt(sprint, delivery=delivery)
+
+
+def _production_lines(sprint: dict[str, Any]) -> list[str]:
+    """The registered projects whose production this sprint's operations may touch, as created."""
+    productions = [str(project) for project in sprint.get("allowed_productions") or []]
+    return [f"- {project}" for project in productions] or [
+        "- (none: this sprint's operations may touch no production)"
+    ]
 
 
 def _executor_lines(sprint: dict[str, Any]) -> list[str]:

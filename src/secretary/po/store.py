@@ -43,6 +43,8 @@ AGENT = "agent"
 
 SESSION_CREATE = "po_session_create"
 SEND = "po_send"
+# The PO service's resolver opening a fresh session for a sprint (`PoService.sprint_session`).
+SPRINT_SESSION = "po_sprint_session"
 
 # The partial unique index that holds "at most one running turn per session".
 ONE_RUNNING_INDEX = "po_turns_one_running_per_session"
@@ -147,6 +149,11 @@ def session_fingerprint(cli: str, model: str, effort: str = DEFAULT_EFFORT) -> s
     return _digest([SESSION_CREATE, cli, model] + ([] if effort == DEFAULT_EFFORT else [effort]))
 
 
+def sprint_session_fingerprint(sprint_ref: str) -> str:
+    """What a sprint-session request id is bound to: the operation and the sprint."""
+    return _digest([SPRINT_SESSION, sprint_ref])
+
+
 def send_fingerprint(session_id: str, text: str) -> str:
     """What a send request id is bound to: the operation, the session and the exact text."""
     return _digest([SEND, session_id, hashlib.sha256(text.encode("utf-8")).hexdigest()])
@@ -244,12 +251,18 @@ class PoStore:
         cli_session_id: str | None,
         request_id: str | None = None,
         effort: str = DEFAULT_EFFORT,
+        operation: str = SESSION_CREATE,
+        fingerprint: str | None = None,
     ) -> tuple[Session, bool]:
-        """The new session, or the one `request_id` already created; the flag is True when this call did."""
-        fingerprint = session_fingerprint(cli, model, effort)
+        """The new session, or the one `request_id` already created; the flag is True when this call did.
+
+        `operation` and `fingerprint` bind the request id to something other than a plain create
+        (the resolver's `SPRINT_SESSION`); by default they are a create of this CLI, model and effort.
+        """
+        fingerprint = fingerprint or session_fingerprint(cli, model, effort)
         with self._transaction() as connection:
             if request_id is not None:
-                known = self._known_request(connection, request_id, SESSION_CREATE, fingerprint)
+                known = self._known_request(connection, request_id, operation, fingerprint)
                 if known is not None:
                     row = connection.execute(
                         f"SELECT {_SESSION_COLUMNS} FROM po_sessions WHERE session_id = %s", (known[0],)
@@ -261,7 +274,7 @@ class PoStore:
                 (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id, effort),
             ).fetchone()
             if request_id is not None:
-                self._record_request(connection, request_id, SESSION_CREATE, fingerprint, session_id, None)
+                self._record_request(connection, request_id, operation, fingerprint, session_id, None)
         return Session(*row), True
 
     def session(self, session_id: str) -> Session:

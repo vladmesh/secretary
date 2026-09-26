@@ -91,6 +91,12 @@ if TYPE_CHECKING:
 
 SPRINT_BOARD_NAME = "Secretary sprints"
 SPRINT_REFERENCE_PREFIX = "sprint:"
+#: The two fields a sprint records at create for the PO channel (0016): the PO session that opened
+#: it, and the registered projects whose production its operations may touch.
+PO_SESSION_FIELD = "sprint_po_session"
+ALLOWED_PRODUCTIONS_FIELD = "sprint_allowed_productions"
+#: The audit kind of the PO service recording a fresh session on a sprint (`SprintWriter.set_po_session`).
+PO_SESSION_SET = "po_session_set"
 SPRINT_METADATA = {
     "sprint_goal",
     "sprint_definition_of_done",
@@ -106,6 +112,8 @@ SPRINT_METADATA = {
     "sprint_source_audit",
     "sprint_observer",
     *EXECUTOR_FIELDS.values(),
+    PO_SESSION_FIELD,
+    ALLOWED_PRODUCTIONS_FIELD,
 }
 DEFAULT_OPEN_SPRINT_LIMIT = 1
 MAX_OPEN_SPRINT_LIMIT = 2
@@ -649,6 +657,9 @@ class SprintReader:
             # Always both roles, always a state: "the owner pinned nobody" is an answer this
             # reader gives, never a key it leaves out for the caller to interpret.
             "executors": stored_executors(meta),
+            # Null and empty for a sprint opened before either was recorded, never inferred.
+            "po_session": meta.get(PO_SESSION_FIELD) or None,
+            "allowed_productions": _json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)),
             "status": read.state.value,
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -779,6 +790,9 @@ class SprintReader:
             # The declared executor context, beside the live observer state: which profiles this
             # sprint's cards are pinned to, and where the observer is free to choose.
             "executors": sprint.get("executors") or stored_executors({}),
+            # The PO session this sprint answers to and the productions it may touch.
+            "po_session": sprint.get("po_session"),
+            "allowed_productions": list(sprint.get("allowed_productions") or []),
             # This sprint's own cards that owe a worker no dispatcher record can name
             # (secretary-1544). Any column of this sprint, not only In progress: the column is what
             # cannot say it, and a sprint whose only visible signal is "3 in progress" reads as
@@ -888,11 +902,15 @@ class SprintWriter:
         data_dir: str | Path,
         thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
+        po_session_state: Callable[[str], str | None] | None = None,
     ) -> None:
         self.client = client
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
+        # The state of a PO session by id, None when the store has none: the board store's own
+        # `po_sessions` unless a caller supplies the answer.
+        self._po_session_state = po_session_state or self._stored_po_session_state
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         from secretary.board.sql_sprints import SqlSprintTransaction
 
@@ -984,6 +1002,8 @@ class SprintWriter:
         observer: dict[str, Any] | None = None,
         worker: str | None = None,
         reviewer: str | None = None,
+        po_session: str | None = None,
+        allowed_productions: list[str] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
         request_id = request_id or str(uuid.uuid4())
@@ -1000,6 +1020,8 @@ class SprintWriter:
             observer=observer,
             worker=worker,
             reviewer=reviewer,
+            po_session=po_session,
+            allowed_productions=allowed_productions or [],
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -1027,6 +1049,7 @@ class SprintWriter:
             return self._committed_result(SPRINT_CREATED, committed)
         if document is None:
             self._check_ownership(intent.product, list(intent.issues), list(intent.reservations))
+            self._check_po_channel(intent)
             self._check_conflicts(intent.admission(), excluding="")
             document, committed = self._begin_create(request_id, intent)
             if committed is not None:
@@ -1102,6 +1125,8 @@ class SprintWriter:
         status: str = "open",
         require_executable_observer: bool = True,
         canonical_repositories: bool = True,
+        po_session: str | None = None,
+        allowed_productions: list[str] | None = None,
     ) -> SprintCreateIntent:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -1147,7 +1172,57 @@ class SprintWriter:
             observer=self._observer_intent(observer, executable=require_executable_observer),
             worker=pins["worker"],
             reviewer=pins["reviewer"],
+            po_session=str(po_session or "").strip() or None,
+            allowed_productions=self._productions_intent(allowed_productions or []),
         )
+
+    @staticmethod
+    def _productions_intent(projects: list[str]) -> tuple[str, ...]:
+        """The `--allow-production` values as the intent keeps them: each once, in the order given."""
+        cleaned = [str(project).strip() for project in projects]
+        if any(not project for project in cleaned):
+            raise TaskError("validation", "--allow-production names a registered project; it is empty", 2)
+        return tuple(_unique_strings(cleaned))
+
+    def _check_po_channel(self, intent: SprintCreateIntent) -> None:
+        """Refuse a PO session that is not open and a production that is not a registered project.
+
+        Both are reads before anything is written, beside `_check_ownership`. Nothing is inferred
+        here: no session is guessed and no production is added that the caller did not name.
+        """
+        if intent.po_session:
+            state = self._po_session_state(intent.po_session)
+            if state is None:
+                raise TaskError(
+                    "validation",
+                    f"there is no PO session {intent.po_session}; a sprint records the open PO "
+                    "session that creates it (--po-session, or $SECRETARY_PO_SESSION inside a PO turn)",
+                    2,
+                )
+            if state != "open":
+                raise TaskError(
+                    "validation",
+                    f"PO session {intent.po_session} is {state}; a sprint records an open PO session",
+                    2,
+                )
+        if intent.allowed_productions:
+            if self.instance is None:
+                raise TaskError(
+                    "validation", "--allow-production needs the instance directory; pass --instance", 2
+                )
+            from secretary.product_issues import registered_projects
+
+            unknown = sorted(set(intent.allowed_productions) - registered_projects(self.instance))
+            if unknown:
+                raise TaskError(
+                    "validation",
+                    "--allow-production names unknown registered project(s): " + ", ".join(unknown),
+                    2,
+                )
+
+    def _stored_po_session_state(self, session_id: str) -> str | None:
+        rows = self.client._query("SELECT state FROM po_sessions WHERE session_id = %s", (session_id,))
+        return str(rows[0][0]) if rows else None
 
     def _observer_intent(
         self,
@@ -1498,6 +1573,13 @@ class SprintWriter:
             executor = {"worker": intent.worker, "reviewer": intent.reviewer}[role]
             if executor:
                 values[field] = encode_executor(executor)
+        # Only what the caller named: a sprint without either reads as null and empty.
+        if intent.po_session:
+            values[PO_SESSION_FIELD] = intent.po_session
+        if intent.allowed_productions:
+            values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(
+                list(intent.allowed_productions), separators=(",", ":")
+            )
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:
@@ -1711,6 +1793,30 @@ class SprintWriter:
 
         return self._write(
             "current_task_set", role, actor, reference, request_id, {"task": task_reference}, mutation
+        )
+
+    @_sql_atomic
+    def set_po_session(
+        self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Record the PO session a sprint answers to now; the PO service's resolver is the one caller.
+
+        Not an edit of the sprint's contract: the resolver writes it only when the recorded session
+        no longer exists or is closed and it opened a fresh one. The request id makes a repeat the
+        same write.
+        """
+        self._role(role, {"po"})
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise TaskError("validation", "a PO session id is required", 2)
+
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata", task_id=_sprint_number(sprint), values={PO_SESSION_FIELD: session_id}
+            )
+
+        return self._write(
+            PO_SESSION_SET, role, actor, reference, request_id, {"po_session": session_id}, mutation
         )
 
     @_sql_atomic

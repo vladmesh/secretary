@@ -154,7 +154,8 @@ class SqlSprintRecords:
         stored: dict[int, list[tuple[Any, ...]]] = {}
         for values in self.client._query(
             "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
-            "worker_pin, reviewer_pin, current_task_ref, source_audit FROM sprints "
+            "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions "
+            "FROM sprints "
             "WHERE board_key = ANY(%s::bigint[])",
             (keys,),
         ):
@@ -212,7 +213,10 @@ class SqlSprintRecords:
         ):
             budgets.setdefault((str(reference), bool(charged)), {})[str(kind)] = int(count)
         for key in keys:
-            reference, goal, dod, product, status, observer, worker, reviewer, current, source = rows[key]
+            (
+                reference, goal, dod, product, status, observer, worker, reviewer, current, source,
+                po_session, productions,
+            ) = rows[key]
             reference = str(reference)
             values: dict[str, str] = {
                 "sprint_goal": str(goal), "sprint_definition_of_done": str(dod),
@@ -240,6 +244,13 @@ class SqlSprintRecords:
                 values["sprint_worker"] = str(worker)
             if reviewer is not None:
                 values["sprint_reviewer"] = str(reviewer)
+            # Both only where the sprint has one (0016): a sprint opened before them reads as it did.
+            if po_session is not None:
+                values["sprint_po_session"] = str(po_session)
+            if productions:
+                values["sprint_allowed_productions"] = json.dumps(
+                    [str(project) for project in productions], separators=(",", ":")
+                )
             if source is not None:
                 values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
             resume = resumes.get(reference)
@@ -284,15 +295,23 @@ class SqlSprintRecords:
         status = meta.get("sprint_status", "open")
         self.client._execute(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
-            "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s,%s)",
+            "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, "
+            "allowed_productions, created_at, updated_at, closed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s)",
             (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
-             meta.get("sprint_source_audit") or None, now, now, None if status == "open" else now),
+             meta.get("sprint_source_audit") or None, meta.get("sprint_po_session") or None,
+             self._productions(meta.get("sprint_allowed_productions")),
+             now, now, None if status == "open" else now),
         )
         self._replace_relations(reference, meta)
         del self.staged[key]
+
+    @staticmethod
+    def _productions(value: Any) -> list[str]:
+        """The stored form of `sprint_allowed_productions`: a JSON list, or nothing for the empty set."""
+        return [str(project) for project in json.loads(str(value or "") or "[]")]
 
     @staticmethod
     def _pin(value: Any) -> str | None:
@@ -405,6 +424,12 @@ class SqlSprintRecords:
             if key in values:
                 assignments.append(f"{column} = %s")
                 params.append(self._pin(values[key]))
+        if "sprint_po_session" in values:
+            assignments.append("po_session = %s")
+            params.append(str(values["sprint_po_session"]) or None)
+        if "sprint_allowed_productions" in values:
+            assignments.append("allowed_productions = %s::text[]")
+            params.append(self._productions(values["sprint_allowed_productions"]))
         if "sprint_source_audit" in values:
             assignments.append("source_audit = %s::jsonb")
             params.append(str(values["sprint_source_audit"]) or None)

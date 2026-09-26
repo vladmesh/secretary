@@ -513,6 +513,8 @@ SPRINT_PARITY_FIELDS = (
     "observer",
     "worker",
     "reviewer",
+    "po_session",
+    "allowed_productions",
 )
 
 
@@ -667,6 +669,17 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             for role in EXECUTOR_FIELDS
             if sprint.get(role)
         },
+        # Only what the record carries: a sprint exported without them restores without them.
+        **({"sprint_po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
+        **(
+            {
+                "sprint_allowed_productions": json.dumps(
+                    list(sprint["allowed_productions"]), separators=(",", ":")
+                )
+            }
+            if sprint.get("allowed_productions")
+            else {}
+        ),
     }
 
 
@@ -868,7 +881,9 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
         # Pre-ownership exports retain absent ownership.
         if not isinstance(sprint.get("product", ""), str):
             raise RestoreError("normalized sprint export has an invalid product")
-        for field in ("issues", "reservations"):
+        if not isinstance(sprint.get("po_session", ""), str):
+            raise RestoreError("normalized sprint export has an invalid po_session")
+        for field in ("issues", "reservations", "allowed_productions"):
             value = sprint.get(field, [])
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise RestoreError(f"normalized sprint export has invalid {field}")

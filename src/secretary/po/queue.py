@@ -27,8 +27,10 @@ from typing import Any
 QUEUE_DIR_NAME = "po-queue"
 REFUSED_DIR_NAME = "refused"
 SUFFIX = ".json"
-# Who put an input in the queue. The dispatcher (decision and operation cards) comes later.
+# Who may submit an input (`PoService.submit`). The dispatcher (decision and operation cards) comes later.
 SOURCES = ("web",)
+# The service itself: the seeding message of a session its resolver opened (`PoService.sprint_session`).
+SERVICE_SOURCE = "po-service"
 
 
 class QueueError(RuntimeError):
@@ -103,7 +105,7 @@ class PoQueue:
 
     def put(self, *, session_id: str, text: str, request_id: str, source: str) -> QueuedInput:
         """Write one input durably and return it; the caller acknowledges only after this returns."""
-        if source not in SOURCES:
+        if source not in (*SOURCES, SERVICE_SOURCE):
             raise ValueError(f"a PO input comes from {' or '.join(SOURCES)}, not {source!r}")
         self.ensure()
         with self._lock:
@@ -213,6 +215,7 @@ class PoQueue:
 __all__ = [
     "QUEUE_DIR_NAME",
     "REFUSED_DIR_NAME",
+    "SERVICE_SOURCE",
     "SOURCES",
     "PoQueue",
     "QueueError",

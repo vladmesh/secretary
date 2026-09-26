@@ -33,6 +33,7 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from secretary.po.models import default_session_choice
 from secretary.web import markdown
 from secretary.web.doctor import DOCTOR_NOT_BUILT
 from secretary.web.doctor import unreadable as doctor_unreadable
@@ -3671,9 +3672,10 @@ def _po_new_session_form(
     submitted: dict[str, Any],
 ) -> str:
     offered = [(cli, list(values or [])) for cli, values in models.items() if values]
-    if not offered:
+    preselected = default_session_choice(models)
+    if not offered or preselected is None:
         return '<p class="empty">this installation offers no model for a PO session</p>'
-    chosen_cli = str(submitted.get("cli") or offered[0][0])
+    chosen_cli = str(submitted.get("cli") or preselected[0])
     chosen_model = str(submitted.get("model") or "")
     chosen_effort = str(submitted.get("effort") or "default")
     listed = dict(offered).get(chosen_cli) or []

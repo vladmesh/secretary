@@ -22,6 +22,11 @@ Queued inputs are taken after that.
 (`secretary.po.client.request_restart`); :meth:`PoService.request_restart` is the rule. Idle, the
 service exits at once and `Restart=always` starts the new code. Busy, it starts no new turn (inputs
 keep queueing) and exits as soon as its last running turn settles.
+
+**A sprint's session.** `sprint_session` answers the live PO session of a sprint: the one the sprint
+recorded (`sprint create --po-session`) while it is open, else a fresh one, opened once, seeded with the
+sprint's why-document and the workspace's `NOTES.md`, recorded on the sprint and announced in its
+comments (:meth:`PoService.sprint_session`).
 """
 
 from __future__ import annotations
@@ -48,22 +53,34 @@ from secretary.po.client import (
     service_dir,
     socket_path,
 )
-from secretary.po.queue import SOURCES, PoQueue, QueuedInput, QueueError
+from secretary.po.models import default_session_choice, models_from_instance
+from secretary.po.queue import SERVICE_SOURCE, SOURCES, PoQueue, QueuedInput, QueueError
 from secretary.po.runner import PoRunner, RunnerError
+from secretary.po.sprints import (
+    BoardSprintSessions,
+    SprintRecord,
+    SprintSessions,
+    reseed_comment,
+    seed_message,
+)
 from secretary.po.store import (
     CLIS,
     DEFAULT_EFFORT,
     SEND,
     SESSION_CLOSED,
     SESSION_CREATE,
+    SESSION_OPEN,
+    SPRINT_SESSION,
     PoRequest,
     PoStoreError,
     RequestConflict,
+    Session,
     SessionClosed,
     SessionNotFound,
     TurnInProgress,
     send_fingerprint,
     session_fingerprint,
+    sprint_session_fingerprint,
 )
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
@@ -92,11 +109,23 @@ class PoService:
     """Turns, the queue and the endpoint's operations of one installation. No socket here: see `listening`."""
 
     def __init__(
-        self, runner: PoRunner, queue: PoQueue | None = None, *, data_dir: Path | str | None = None
+        self,
+        runner: PoRunner,
+        queue: PoQueue | None = None,
+        *,
+        data_dir: Path | str | None = None,
+        instance: Path | str | None = None,
+        sprints: SprintSessions | None = None,
+        models: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.runner = runner
         self.store = runner.store
         self.data_dir = Path(data_dir) if data_dir is not None else runner.data_dir
+        # What `sprint_session` needs: the installation's sprints, and the models a session opened
+        # without a previous one takes its default from (read from instance.yaml when not given).
+        self.instance = Path(instance) if instance is not None else None
+        self.sprints = sprints
+        self.models = models
         self.queue = queue or PoQueue(self.data_dir)
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
@@ -347,6 +376,126 @@ class PoService:
             )
         return None
 
+    def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
+        """The live PO session of a sprint: `{session_id, created}`.
+
+        The sprint's recorded `po_session`, open, is the answer (`created: false`, nothing written).
+        Null, missing from the store or closed, a fresh session is opened under `request_id` with the
+        recorded session's CLI, model and effort (or the new-session form's defaults when there is no
+        row), and then, in this order: its seeding message is queued as its first input, the sprint
+        gets a comment saying so, and the sprint records the new session. The request id binds the
+        sprint (`_reserve`), and each later step has its own id derived from it, so a repeat of a
+        request that failed part-way finishes it and opens nothing, and a repeat of a finished one
+        answers the same session. Resolves of one installation are serialized under the service lock
+        and read the sprint's session inside it, so two resolves for one sprint open one session.
+
+        Accepted from the session's claim on; it is answered only once the sprint records the session,
+        so a failure in between is `outcome_unknown` and its repeat completes it.
+        """
+        request_id = _required(request_id, "request_id")
+        sprint_ref = _required(sprint_ref, "sprint_ref")
+        fingerprint = sprint_session_fingerprint(sprint_ref)
+        with self._lock:
+            known = self._reserve(request_id, SPRINT_SESSION, fingerprint)
+            sprints = self._sprint_sessions()
+            sprint = sprints.sprint(sprint_ref)
+            if sprint is None:
+                raise Refused("validation", f"there is no sprint {sprint_ref}")
+            if isinstance(known, PoRequest):
+                self._accepting()
+                self._reseed(sprints, sprint, known.session_id, request_id)
+                answer = {"session_id": known.session_id, "created": True, "repeated": True}
+                self._accepted(answer)
+                return answer
+            if sprint.status != "open":
+                raise Refused(
+                    "validation", f"sprint {sprint_ref} is {sprint.status}; its PO session is not resolved"
+                )
+            previous = self._session_or_none(sprint.po_session)
+            if previous is not None and previous.state == SESSION_OPEN:
+                return {"session_id": previous.session_id, "created": False, "repeated": False}
+            if previous is not None:
+                cli, model, effort = previous.cli, previous.model, previous.effort
+            else:
+                cli, model = self._default_choice()
+                effort = DEFAULT_EFFORT
+            self._accepting()
+            session, _created = self.runner.create_session_request(
+                cli, model, request_id, effort, operation=SPRINT_SESSION, fingerprint=fingerprint
+            )
+            self._reseed(sprints, sprint, session.session_id, request_id)
+            answer = {"session_id": session.session_id, "created": True, "repeated": False}
+            self._accepted(answer)
+            # Best effort from here: the seed is queued and the answer above stands.
+            self.pump()
+            return answer
+
+    def _reseed(
+        self, sprints: SprintSessions, sprint: SprintRecord, session_id: str, request_id: str
+    ) -> None:
+        """The steps after a resolver's session exists; each is skipped when done, the record last.
+
+        The sprint still naming its previous session is what says the steps are not finished yet,
+        and that previous session is what the seed and the comment talk about. A sprint that names
+        another open session already was re-seeded by another resolve: it is left as it is.
+        """
+        if sprint.po_session == session_id:
+            return
+        current = self._session_or_none(sprint.po_session)
+        if current is not None and current.state == SESSION_OPEN:
+            return
+        why = "is closed" if current is not None else "no longer exists"
+        documents = sprints.why_documents(sprint.ref)
+        seed_id = f"{request_id}:seed"
+        seeded = self.store.request(seed_id) or self.queue.find(seed_id) or self.queue.find_refused(seed_id)
+        if seeded is None:
+            self.queue.put(
+                session_id=session_id,
+                text=seed_message(sprint.ref, sprint.po_session, why, documents),
+                request_id=seed_id,
+                source=SERVICE_SOURCE,
+            )
+        sprints.comment(
+            sprint.ref,
+            reseed_comment(sprint.po_session, session_id, documents),
+            request_id=f"{request_id}:comment",
+        )
+        sprints.record_po_session(sprint.ref, session_id, request_id=f"{request_id}:record")
+
+    def _session_or_none(self, session_id: str | None) -> Session | None:
+        if not session_id:
+            return None
+        try:
+            return self.store.session(session_id)
+        except SessionNotFound:
+            return None
+
+    def _sprint_sessions(self) -> SprintSessions:
+        if self.sprints is None:
+            raise Refused(
+                "validation", "this PO service was started without an instance; it resolves no sprint"
+            )
+        return self.sprints
+
+    def _default_choice(self) -> tuple[str, str]:
+        """The new-session form's preselected CLI and model (`default_session_choice`)."""
+        models = self.models
+        if models is None:
+            from secretary.config import ConfigError, load_config
+
+            config = None
+            if self.instance is not None:
+                path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
+                try:
+                    config = load_config(path)
+                except ConfigError as exc:
+                    raise Refused("unavailable", f"the instance config cannot be read: {exc}") from None
+            models = models_from_instance(config)
+        choice = default_session_choice(models)
+        if choice is None:
+            raise Refused("validation", "this installation offers no model for a PO session")
+        return choice
+
     def _sent(self, session_id: str, request_id: str) -> dict[str, Any]:
         """Where an acknowledged message is now: its turn, or still in the queue."""
         known = self.store.request(request_id)
@@ -510,7 +659,7 @@ _ACCEPTANCE: contextvars.ContextVar[_Acceptance | None] = contextvars.ContextVar
     "po_acceptance", default=None
 )
 # The endpoint operations that take a request id; `handle` answers them through `_answer_id_operation`.
-ID_OPERATIONS = frozenset({"create_session", "submit"})
+ID_OPERATIONS = frozenset({"create_session", "submit", "sprint_session"})
 
 
 # Refusals raised before acceptance that are known to have written nothing (`nothing_written`).
@@ -550,6 +699,7 @@ _OPERATIONS = {
     "submit": "submit",
     "stop_turn": "stop_turn",
     "close_session": "close_session",
+    "sprint_session": "sprint_session",
     "status": "status",
     "restart": "request_restart",
 }
@@ -667,7 +817,12 @@ def run_po_serve(args: argparse.Namespace) -> int:
     except DataDirError as exc:
         _say(f"secretary po-serve: {exc}")
         return 2
-    service = PoService(PoRunner.for_instance(args.instance, data_dir), data_dir=data_dir)
+    service = PoService(
+        PoRunner.for_instance(args.instance, data_dir),
+        data_dir=data_dir,
+        instance=args.instance,
+        sprints=BoardSprintSessions(args.instance, data_dir),
+    )
     try:
         with listening(service) as path:
             _say(f"secretary po: serving {path}; queue {service.queue.directory}")
