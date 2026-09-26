@@ -3496,6 +3496,70 @@ class SprintCloseDecisionTests(SprintFixture):
             "\n".join(self.record_comments(landed)),
         )
 
+    def test_the_observer_closes_its_own_sprint_end_to_end_in_its_own_name(self) -> None:
+        """secretary-1765: the observer bound to its sprint closes it on a decisions file, on SQL.
+
+        Nothing of the close is mocked: the Done card is archived, the Ready card is dropped and
+        archived, the declared issue is closed as resolved, and the sprint reaches `closed`, each
+        written with role `observer`.
+        """
+        from secretary.sprint_close import parse_close_decisions
+
+        ref = self._open(issues=["issue:open"])
+        landed = self._card(ref, "landed", "observer-close-landed")
+        self.tasks.claim(
+            role="dispatcher", actor="dispatcher", reference=landed, worker="worker", request_id="landed-claim"
+        )
+        for target in ("validate", "done"):
+            self.tasks.move(
+                role="dispatcher",
+                actor="dispatcher",
+                reference=landed,
+                target=target,
+                reason="",
+                request_id=f"landed-{target}",
+            )
+        dropped = self._card(ref, "not in this sprint", "observer-close-dropped")
+        decisions = parse_close_decisions(
+            "issues:\n"
+            "  - {ref: 'issue:open', verdict: resolved, reason: 'the fix landed'}\n"
+            "cards:\n"
+            f"  - {{ref: '{dropped}', verdict: drop, reason: 'the next sprint cuts it again'}}\n"
+        )
+        before = {event["event_id"] for event in self._events()}
+
+        with as_observer(ref):
+            result = self.writer.close(
+                role="observer",
+                actor="observer",
+                reference=ref,
+                request_id="observer-close",
+                reason="the goal is reached",
+                decisions=decisions,
+            )
+
+        self.assertEqual(self.sprint(ref)["status"], "closed")
+        self.assertEqual(result["closed_issues"], ["issue:open"])
+        self.assertIn(landed, result["archived_tasks"])
+        self.assertEqual(result["disposed_tasks"], [dropped])
+        for reference in (landed, dropped):
+            self.assertFalse(self.record_is_active(reference))
+        issue = self._store().show_issue("issue:open")
+        self.assertEqual((issue["closed"], issue["close_reason"]), (True, "resolved"))
+        written = [event for event in self._events() if event["event_id"] not in before]
+        # Every record this close wrote, the close itself, each step and the typed transitions,
+        # names the observer: none of it is the PO's.
+        self.assertTrue(written)
+        self.assertEqual({event["actor"]["role"] for event in written}, {"observer"})
+        self.assertEqual({event["actor"]["id"] for event in written}, {"observer"})
+        kinds = {(event["kind"], event["ref"]) for event in written}
+        self.assertIn(("closed", ref), kinds)
+        self.assertIn(("sprint.closed", ref), kinds)
+        self.assertIn(("issue.closed", "issue:open"), kinds)
+        self.assertIn(("archived", landed), kinds)
+        self.assertIn(("archived", dropped), kinds)
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+
     def test_a_disposition_for_a_card_that_is_not_open_work_is_refused(self) -> None:
         ref = self._open(issues=["issue:open"])
         before = self._contract_state(ref)

@@ -168,6 +168,9 @@ _CODES: dict[str, Any] = {
     # still running, or an object somebody else moved while this close ran. Both are answered by
     # settling that thing and repeating the close, which is what `owner_conflict` means here.
     "live_work": OwnerConflict,
+    # A close whose role may not make one of its disposition moves: settled by deciding or moving
+    # that card first and repeating the close, like `live_work`.
+    "close_plan_forbidden": OwnerConflict,
     "close_conflict": OwnerConflict,
     "backend_error": RuntimeUnavailable,
 }

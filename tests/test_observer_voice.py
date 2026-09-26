@@ -16,7 +16,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from secretary import product_issue_commands, sprint_commands, task_commands
@@ -414,6 +414,74 @@ class ObserverSprintCloseTests(SprintWriterFixture):
         self.assertEqual((move["role"], move["actor"], move["sprint_override"]), ("observer", "observer", False))
         archive = writer_class.return_value.archive.call_args.kwargs
         self.assertEqual((archive["role"], archive["sprint_close"]), ("observer", SPRINT))
+
+
+class CloseDispositionPlanTests(SprintWriterFixture):
+    """A close is refused whole, before staging, when its role may not make one of its moves."""
+
+    DECISIONS: ClassVar[dict[str, list[dict[str, str]]]] = {
+        "issues": [{"ref": "issue:1", "verdict": "resolved", "reason": "landed"}],
+        "cards": [{"ref": "secretary-3", "verdict": "done", "reason": "reviewed green"}],
+    }
+
+    def close(self, role: str, actor: str) -> tuple[Any, mock.MagicMock, mock.MagicMock, mock.MagicMock]:
+        """One un-mocked close down to staging, over a sprint with a Done card and one in Assessment."""
+        store = mock.MagicMock(name="issues")
+        store.show_issue.return_value = {"closed": False, "close_reason": ""}
+        cards = [
+            {"ref": "secretary-2", "state": "done", "sprint": SPRINT},
+            {"ref": "secretary-3", "state": "assessment", "sprint": SPRINT},
+        ]
+        sprint = {"id": "sprint_postgres_1465", "ref": SPRINT, "goal": "g", "issues": ["issue:1"], "reservations": ["secretary"]}
+        committed = {"kind": "closed", "ref": SPRINT, "payload": {}}
+        with (
+            mock.patch.object(self.writer.reader, "show", return_value=sprint),
+            mock.patch("secretary.sprints.TaskReader") as reader_class,
+            mock.patch("secretary.sprints.TaskWriter") as writer_class,
+            mock.patch.object(self.writer, "_issue_store", return_value=store),
+            mock.patch.object(self.writer.transactions, "existing", return_value=(None, None)),
+            mock.patch.object(self.writer.transactions, "begin", return_value=(None, committed)) as begin,
+            mock.patch.object(self.writer, "_close_result", return_value={"closed": True}),
+            # A refused close drops its request id's staging, of which there is none.
+            mock.patch.object(self.writer.transactions, "drop"),
+        ):
+            reader_class.return_value.list.return_value = cards
+            try:
+                answer: Any = self.writer.close(
+                    role=role, actor=actor, reference=SPRINT, decisions=self.DECISIONS, request_id="close-1"
+                )
+            except TaskError as exc:
+                answer = exc
+        return answer, begin, store, writer_class.return_value
+
+    def test_an_observer_close_disposing_an_assessment_card_is_refused_with_nothing_written(self) -> None:
+        with as_observer(SPRINT):
+            refused, begin, store, writer = self.close("observer", "observer")
+        self.assertIsInstance(refused, TaskError)
+        self.assertEqual(refused.code, "close_plan_forbidden")
+        self.assertIn("secretary-3 (in assessment, done)", refused.message)
+        self.assertIn("task decide", refused.message)
+        begin.assert_not_called()
+        self.client.sprints.save_close.assert_not_called()
+        store.close_issue.assert_not_called()
+        writer.archive.assert_not_called()
+        writer.move.assert_not_called()
+        self.audit.stage.assert_not_called()
+
+    def test_the_same_plan_as_a_po_close_under_the_override_is_staged(self) -> None:
+        answer, begin, _store, _writer = self.close("po", "vladmesh-secretary")
+        self.assertEqual(answer, {"closed": True})
+        begin.assert_called_once()
+
+    def test_the_refusal_comes_from_the_transition_table_not_from_a_named_column(self) -> None:
+        from secretary.board import card_transitions
+
+        allowed = card_transitions.CARD_TRANSITIONS
+        widened = {**allowed, Role.OBSERVER: allowed[Role.PO]}
+        with as_observer(SPRINT), mock.patch.dict(card_transitions.CARD_TRANSITIONS, widened):
+            answer, begin, _store, _writer = self.close("observer", "observer")
+        self.assertEqual(answer, {"closed": True})
+        begin.assert_called_once()
 
 
 class ObserverIssueTests(unittest.TestCase):

@@ -462,7 +462,10 @@ it in `sprint show` and `sprint status`.
 
 When the Definition of Done is confirmed by a check against the default branch and the live system:
 
-1. Make sure the sprint has no active cards and that all of them have been analysed.
+1. Make sure the sprint has no active cards and that all of them have been analysed. Settle every
+   card in Assessment first: record `release`, `rework` or `reslice` with `task decide` and wait for
+   the dispatcher to carry it out. You cannot move a card out of Assessment, and the close cannot
+   either in your name.
 2. Check that every non-blocking review remark is either taken into account or explicitly rejected with a
    reason.
 3. Check that the affected checkouts are clean and that every pull request reached a merge.
@@ -487,7 +490,8 @@ When the Definition of Done is confirmed by a check against the default branch a
    You close your own sprint only: any other is refused (`observer_sprint_mismatch`). Every step of the
    close (the Done cards archived, the declared issues closed on your verdicts, the remaining cards
    disposed) is written in your name. A close short of a decision is refused and names what is
-   missing; it writes nothing.
+   missing; it writes nothing. So is a close that would dispose of a card you may not move (one still
+   in Assessment): `close_plan_forbidden` names each such card and its column, and nothing is written.
 6. Do not start the next sprint: sprints are opened by a person.
 
 ## Permitted stops

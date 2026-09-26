@@ -302,8 +302,9 @@ def runtime_env(
 def board_actor(role: str, env: dict[str, str]) -> str:
     """The actor a role head writes the board as.
 
-    A role whose allowlist carries `BOARD_ACTOR` (worker, reviewer) takes the name its launcher bound,
-    the head profile it runs; `runtime_env` has already dropped any value that came from elsewhere.
+    A role whose allowlist carries `BOARD_ACTOR` (worker, reviewer) takes the value in the exec
+    process's own environment, which the dispatcher's launch command binds to the head profile;
+    runtime.env cannot supply it, but a value the process already carried passes through.
     Every other role, the observer included, is its role: nothing a launch or a runtime.env carries
     can make an observer write as anyone else.
     """

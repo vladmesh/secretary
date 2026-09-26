@@ -19,6 +19,7 @@ from secretary.board.backend import (
     entity_number,
     sprint_reference_number,
 )
+from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
@@ -2204,7 +2205,9 @@ class SprintWriter:
                         states=targets.remaining_state_map,
                         issue_states=self._declared_issue_states(list(sprint.issues)),
                     )
-                    self._check_close_decisions_are_writable(plan)
+                    self._check_close_decisions_are_writable(
+                        plan, role=role, states=targets.remaining_state_map
+                    )
                     closeout_plan = self._plan_closeout(
                         sprint, plan, actor=actor, reason=reason, closeout=closeout
                     )
@@ -2525,9 +2528,18 @@ class SprintWriter:
             2,
         )
 
-    def _check_close_decisions_are_writable(self, plan: SprintCloseDecisions) -> None:
-        """Refuse a plan this installation cannot perform, before the transaction opens."""
-        from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
+    def _check_close_decisions_are_writable(
+        self, plan: SprintCloseDecisions, *, role: str, states: Mapping[str, str]
+    ) -> None:
+        """Refuse a plan this installation cannot perform, before the transaction opens.
+
+        Every disposition move the plan would make is asked of `card_transition` for the closing
+        role, the table the dispose step's own move is checked against, so a close whose role may not
+        make one of its moves is refused whole, with nothing staged, instead of failing half-written
+        (`close_plan_forbidden`). A PO close moves under the sprint override and its every edge is
+        allowed; an observer's cannot take a card out of Assessment, which it decides instead.
+        """
+        from secretary.sprint_close import ALREADY_CLOSED, ALREADY_MOVED, DISPOSITION_TARGETS, KEEP_OPEN
 
         closing = [entry for entry in plan.issues if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED}]
         if closing and self.instance is None:
@@ -2538,6 +2550,23 @@ class SprintWriter:
             )
         if not plan.cards:
             return
+        forbidden = []
+        for entry in plan.cards:
+            target = "" if entry.verdict == ALREADY_MOVED else DISPOSITION_TARGETS[entry.verdict]
+            source = str(states.get(entry.ref) or "")
+            if not target or source == target:
+                continue
+            try:
+                card_transition(role, source, target)
+            except (CardTransitionForbidden, ValueError):
+                forbidden.append(f"{entry.ref} (in {source or 'an unknown column'}, {entry.verdict})")
+        if forbidden:
+            raise TaskError(
+                "close_plan_forbidden",
+                f"a {role} close cannot move " + ", ".join(forbidden)
+                + "; decide it with `task decide` (or move it) before closing",
+                3,
+            )
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         live = []
         for entry in plan.cards:

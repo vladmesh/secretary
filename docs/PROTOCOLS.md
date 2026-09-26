@@ -1072,8 +1072,11 @@ the head was launched for. A comment is stored under its role's marker, `[observ
 it does not wake the observer ([Resume and observer wakes](#resume-and-observer-wakes)). An observer's
 close takes the same `--reason`, `--decisions-file` and `--closeout-file` as the PO's, and every step it
 takes (archive, issue close, card disposition) is written with role `observer` and the observer's actor;
-the observer's disposition moves need no sprint override, and a card in Assessment cannot be disposed by
-it.
+the observer's disposition moves need no sprint override. Before anything is staged, every disposition
+move the plan would make is checked against the Card transition table for the closing role; a close with
+a move its role may not make (for the observer, any card still in Assessment) is refused whole as
+`close_plan_forbidden` (exit 3, `owner_conflict` in the operation layer), naming each card and its
+column, and writes nothing. The observer decides such a card with `task decide` before it closes.
 
 A write whose role is `po` and whose actor is `observer` is refused as `role_masquerade` (exit 3), with a
 message naming `--role observer`, before anything is read or written. It is one check,
