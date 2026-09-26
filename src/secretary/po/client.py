@@ -5,8 +5,11 @@ The service (`secretary.po.service`, unit `secretary-po.service`) listens on the
 reach it). One connection carries one request, a JSON object on one line with an ``op``, and one
 answer line: ``{"ok": true, "result": {...}}`` or ``{"ok": false, "error": {"code", "message"}}``.
 The codes are the store's outcomes (`session_not_found`, `session_closed`, `request_conflict`,
-`turn_in_progress`) plus `validation` and `unavailable`; :class:`PoServiceClient` raises the store's
-own exception for the first four, so a caller keeps the vocabulary it had when the runner was local.
+`turn_in_progress`) plus `validation`, `unavailable` and `outcome_unknown`; :class:`PoServiceClient`
+raises the store's own exception for the first four, so a caller keeps the vocabulary it had when the
+runner was local. A refusal the service knows wrote nothing carries ``"nothing_written": true``, and the
+raised exception an attribute of the same name; every other refusal may follow an accepted request, and
+its safe repeat is the same request id.
 
 Two failures are told apart, because a submitter acts on them differently. Before the request line is
 written — no socket, the connection refused, the send failing — nothing reached the service: the
@@ -42,7 +45,9 @@ class PoServiceError(RuntimeError):
 
 
 class ServiceUnavailable(PoServiceError):
-    """Nothing answers on the PO service's socket, or it answered something unreadable."""
+    """Nothing reached the PO service: no socket, the connection refused, or the send failed."""
+
+    nothing_written = True
 
 
 class OutcomeUnknown(PoServiceError):
@@ -131,10 +136,13 @@ class PoServiceClient:
         error = document.get("error") if isinstance(document.get("error"), dict) else {}
         code = str(error.get("code") or "unavailable")
         message = str(error.get("message") or "the PO service refused the request")
+        if code == "outcome_unknown":
+            raise OutcomeUnknown(message)
         outcome = _STORE_OUTCOMES.get(code)
-        if outcome is not None:
-            raise outcome(message)
-        raise ServiceRefused(code, message)
+        refusal = outcome(message) if outcome is not None else ServiceRefused(code, message)
+        # Only the service says a refusal wrote nothing; the exception carries that on.
+        refusal.nothing_written = error.get("nothing_written") is True  # type: ignore[attr-defined]
+        raise refusal
 
 
 def _read_line(connection: socket.socket) -> bytes:

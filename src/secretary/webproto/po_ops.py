@@ -39,6 +39,7 @@ from secretary.po.store import (
 )
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
+    NOTHING_WRITTEN,
     InstallationUnavailable,
     PoOutcomeUnknown,
     PoRequestConflict,
@@ -164,10 +165,11 @@ class PoLayer(ProtocolBoundary):
         models = self._model_list()
         if cli not in models or not models[cli]:
             offered = ", ".join(name for name, values in models.items() if values)
-            raise ValidationRefused(f"a PO session runs one of: {offered}; not {cli!r}")
+            raise ValidationRefused(f"a PO session runs one of: {offered}; not {cli!r}", data=NOTHING_WRITTEN)
         if model not in models[cli]:
             raise ValidationRefused(
-                f"{model!r} is not a model this installation offers for {cli}: {', '.join(models[cli])}"
+                f"{model!r} is not a model this installation offers for {cli}: {', '.join(models[cli])}",
+                data=NOTHING_WRITTEN,
             )
         effort = str(effort or "").strip() or DEFAULT_EFFORT
         if effort != DEFAULT_EFFORT:
@@ -175,7 +177,8 @@ class PoLayer(ProtocolBoundary):
             if effort not in efforts:
                 offered = ", ".join(dict.fromkeys((DEFAULT_EFFORT, *efforts)))
                 raise ValidationRefused(
-                    f"{effort!r} is not an effort this installation offers for {cli}: {offered}"
+                    f"{effort!r} is not an effort this installation offers for {cli}: {offered}",
+                    data=NOTHING_WRITTEN,
                 )
         client = self._client_or_refuse()
         created = self._store(
@@ -200,7 +203,7 @@ class PoLayer(ProtocolBoundary):
         """
         request_id = _required(request_id, "request_id")
         if not str(text or "").strip():
-            raise ValidationRefused("an empty message starts no turn")
+            raise ValidationRefused("an empty message starts no turn", data=NOTHING_WRITTEN)
         client = self._client_or_refuse()
         sent = self._store(
             lambda: client.submit(session_id=session_id, text=text, request_id=request_id),
@@ -303,22 +306,22 @@ class PoLayer(ProtocolBoundary):
         try:
             return call()
         except SessionNotFound as exc:
-            raise PoSessionNotFound(str(exc)) from None
+            raise PoSessionNotFound(str(exc), data=_definite(exc)) from None
         except TurnInProgress as exc:
             raise PoTurnInProgress(str(exc)) from None
         except RequestConflict as exc:
-            raise PoRequestConflict(str(exc)) from None
+            raise PoRequestConflict(str(exc), data=_definite(exc)) from None
         except SessionClosed as exc:
-            raise PoSessionClosed(str(exc)) from None
+            raise PoSessionClosed(str(exc), data=_definite(exc)) from None
         except ServiceUnavailable as exc:
-            raise RuntimeUnavailable(f"{exc}; nothing was sent or written") from None
+            raise RuntimeUnavailable(f"{exc}; nothing was sent or written", data=NOTHING_WRITTEN) from None
         except OutcomeUnknown as exc:
             raise PoOutcomeUnknown(
                 f"{unknown or 'the PO service may have carried this out'} ({exc})"
             ) from None
         except ServiceRefused as exc:
             if exc.code == "validation":
-                raise ValidationRefused(str(exc)) from None
+                raise ValidationRefused(str(exc), data=_definite(exc)) from None
             raise RuntimeUnavailable(str(exc)) from None
         except PoStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
@@ -329,8 +332,13 @@ class PoLayer(ProtocolBoundary):
 def _required(value: str, name: str) -> str:
     text = str(value or "").strip()
     if not text:
-        raise ValidationRefused(f"{name} is required")
+        raise ValidationRefused(f"{name} is required", data=NOTHING_WRITTEN)
     return text
+
+
+def _definite(exc: Exception) -> dict[str, Any] | None:
+    """The `nothing_written` marker when the PO service said this refusal wrote nothing, else none."""
+    return NOTHING_WRITTEN if getattr(exc, "nothing_written", False) is True else None
 
 
 def _time(value: Any) -> str | None:

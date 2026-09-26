@@ -3085,9 +3085,12 @@ session, the turn, or the message still queued, and does nothing else; reused ot
 service over its socket (`secretary.po.client`), and with the service stopped it is refused as 503
 `backend_unavailable` whose message starts `the PO service is not running`; the web never runs a turn. A
 write that reached the service but lost its answer is 503 `backend_unavailable` with `data: {reason:
-"outcome_unknown", action: "repeat_same_request"}` (`PoOutcomeUnknown`): it may have been done, so the
-re-rendered create or send form keeps its request id and repeating it is a replay; a stop or close may
-simply be repeated.
+"outcome_unknown", action: "repeat_same_request"}` (`PoOutcomeUnknown`): it may have been done; a stop or
+close may simply be repeated. A create or send that the service accepted (queue file written, session
+committed) is answered as accepted even when a later lookup fails. A refused create or send form keeps its
+request id, so a resend is a replay; it gets a fresh one only after a refusal whose `data` carries
+`nothing_written: true` — service not reached, validation before the id was reserved, `request_conflict`,
+unknown or closed session.
 
 **PO documents.** `po.po_create_session(request_id, cli, model, effort="default")` answers
 `{kind: "po_session_created", request_id, session_id, effort, repeated}`; an `effort` outside

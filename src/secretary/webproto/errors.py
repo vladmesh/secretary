@@ -158,6 +158,12 @@ class PoRequestConflict(ReadError):
     code = "request_conflict"
 
 
+#: The `data` of a /po refusal known to have written nothing, set where the refusal is raised. A web
+#: form that took a request id gets a fresh one only after such a refusal; every other refusal of it
+#: keeps its id, so a resend is a replay (`secretary.web.app._keeps_request_id`).
+NOTHING_WRITTEN: dict[str, Any] = {"nothing_written": True}
+
+
 class PoOutcomeUnknown(ReadError):
     """A /po write reached the PO service and no answer came back, so it may have been carried out.
 

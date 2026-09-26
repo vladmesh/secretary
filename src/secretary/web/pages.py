@@ -3519,7 +3519,10 @@ def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
             "Open a new session to continue; nothing was written. "
             f'<span class="reason">{escape(message)}</span></p>'
         )
-    return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}</p>'
+    # A form refused without the `nothing_written` marker kept its request id (`web.app._keeps_request_id`).
+    kept = refused != "close" and (refusal.get("data") or {}).get("nothing_written") is not True
+    hint = " Sending the same form again is safe: it keeps its request id." if kept else ""
+    return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}{hint}</p>'
 
 
 def po_page(

@@ -372,18 +372,29 @@ create can never take the id of a message still waiting in the queue.
 **Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
 request line, one JSON answer line, ops `submit`, `create_session`, `stop_turn`, `close_session`,
 `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the store and the queue
-directory and sends every write here. The service runs a request only once its whole line arrived. Two
-failures are told apart:
+directory and sends every write here. The service runs a request only once its whole line arrived.
+
+**Accepted is accepted.** A message is accepted when its queue file is written, a session when its
+`claim_session` commits. From then on the service answers "accepted" from what it knew at that moment —
+the message queued under its id, or the session — even if a later step (the hand-over to a turn, the
+lookup of the turn it became) fails; that lookup only adds detail. A failure *during* the accepting write,
+which may have landed, is `outcome_unknown`. One wrapper in the service (`PoService._answer_id_operation`)
+applies this to every operation that takes a request id.
+
+**A refused form keeps its request id**, so sending it again is a replay of whatever the first attempt
+did, never a second message or session. Only refusals marked, where they are raised, as having written
+nothing (`data.nothing_written`) get a fresh id:
 
 - nothing reached the service (no socket, connection refused, the send failed before the line ended):
-  refused on the page (503, `the PO service is not running ... nothing was sent or written`), with a new
-  request id for the next try;
-- the request was delivered and its answer was lost or late: `the PO service may have accepted this
-  message; sending again with the same form is safe` (503, `data.reason = outcome_unknown`). The page keeps
-  the form's **same request id** and text, so a resend is a replay, never a second message. A lost answer to
-  a session create says the same and keeps its id; to a stop or a close it says repeating it is safe (both
-  are idempotent).
+  503, `the PO service is not running ... nothing was sent or written`;
+- the input was refused before its id was reserved (empty text, a model or effort not offered, an unknown
+  CLI): 400;
+- the id already belongs to another request: 409 `request_conflict`;
+- the session is unknown or closed: 404, 409 `session_closed`.
 
+Everything else keeps the id: a lost or late answer (`the PO service may have accepted this message;
+sending again with the same form is safe`, `data.reason = outcome_unknown`), a store that failed, any
+unexpected error. A lost answer to a stop or a close says repeating it is safe (both are idempotent).
 The web never starts a turn itself.
 
 **Service start.** Every turn left `running` is looked at once:

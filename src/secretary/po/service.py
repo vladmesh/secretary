@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import inspect
 import json
@@ -50,6 +51,7 @@ from secretary.po.client import (
 from secretary.po.queue import SOURCES, PoQueue, QueuedInput, QueueError
 from secretary.po.runner import PoRunner, RunnerError
 from secretary.po.store import (
+    CLIS,
     DEFAULT_EFFORT,
     SEND,
     SESSION_CLOSED,
@@ -245,17 +247,30 @@ class PoService:
     def create_session(
         self, *, cli: str, model: str, effort: str = DEFAULT_EFFORT, request_id: str
     ) -> dict[str, Any]:
-        """One session per request id, reserved through :meth:`_reserve` like a message."""
+        """One session per request id, reserved through :meth:`_reserve` like a message.
+
+        Accepted at the `claim_session` commit, or earlier when `_reserve` finds the id already made
+        this session; from then on the answer is the session (`handle`'s acceptance rule).
+        """
         request_id = _required(request_id, "request_id")
+        model = str(model or "").strip()
         effort = str(effort or "").strip() or DEFAULT_EFFORT
-        fingerprint = session_fingerprint(str(cli), str(model or "").strip(), effort)
+        if cli not in CLIS:
+            raise Refused("validation", f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
+        if not model:
+            raise Refused("validation", "a PO session needs a model")
+        fingerprint = session_fingerprint(cli, model, effort)
         with self._lock:
             known = self._reserve(request_id, SESSION_CREATE, fingerprint)
             if isinstance(known, PoRequest):
+                self._accepted({"session_id": known.session_id, "effort": effort, "repeated": True})
                 session = self.store.session(known.session_id)
                 return {"session_id": session.session_id, "effort": session.effort, "repeated": True}
+            self._accepting()
             session, created = self.runner.create_session_request(cli, model, request_id, effort)
-        return {"session_id": session.session_id, "effort": session.effort, "repeated": not created}
+            answer = {"session_id": session.session_id, "effort": session.effort, "repeated": not created}
+            self._accepted(answer)
+        return answer
 
     def submit(self, *, session_id: str, text: str, request_id: str, source: str = "web") -> dict[str, Any]:
         """Queue one message durably, then answer; a request id answers what it already made.
@@ -276,11 +291,17 @@ class PoService:
                 request_id, SEND, send_fingerprint(session_id, text), session_id=session_id, text=text
             )
             if known is not None:
+                self._accepted(_known_answer(session_id, known))
                 return {**self._sent(session_id, request_id), "repeated": True}
             session = self.store.session(session_id)
             if session.state == SESSION_CLOSED:
                 raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
+            self._accepting()
             self.queue.put(session_id=session_id, text=text, request_id=request_id, source=source)
+            self._accepted(
+                {"session_id": session_id, "queued": True, "seq": None, "state": None, "repeated": False}
+            )
+            # Best effort from here: the answer above stands if the hand-over or the lookup fails.
             self.pump()
             return {**self._sent(session_id, request_id), "repeated": False}
 
@@ -396,7 +417,11 @@ class PoService:
     # --- the wire ---------------------------------------------------------------------------
 
     def handle(self, request: Any) -> dict[str, Any]:
-        """One decoded request to one answer document; never raises."""
+        """One decoded request to one answer document; never raises.
+
+        An operation that takes a request id runs inside :meth:`_answer_id_operation`, the one place
+        that decides what such a request is answered once it may have been accepted.
+        """
         try:
             if not isinstance(request, dict) or not isinstance(request.get("op"), str):
                 raise Refused("validation", "a PO service request is a JSON object with an op")
@@ -409,23 +434,115 @@ class PoService:
                 inspect.signature(method).bind(**fields)
             except TypeError as exc:
                 raise Refused("validation", f"{request['op']}: {exc}") from None
-            return {"ok": True, "result": method(**fields)}
         except Refused as exc:
-            return _error(exc.code, str(exc))
-        except SessionNotFound as exc:
-            return _error("session_not_found", str(exc))
-        except SessionClosed as exc:
-            return _error("session_closed", str(exc))
-        except RequestConflict as exc:
-            return _error("request_conflict", str(exc))
-        except TurnInProgress as exc:
-            return _error("turn_in_progress", str(exc))
-        except RunnerError as exc:
-            return _error("validation", str(exc))
-        except (PoStoreError, QueueError) as exc:
-            return _error("unavailable", str(exc))
+            return _error(exc.code, str(exc), nothing_written=True)
+        if operation in ID_OPERATIONS:
+            return self._answer_id_operation(method, fields)
+        try:
+            return {"ok": True, "result": method(**fields)}
         except Exception as exc:  # noqa: BLE001 - an answer, not a dead connection
-            return _error("unavailable", f"the PO service failed: {type(exc).__name__}: {exc}")
+            return _refusal(exc, nothing_written=False)
+
+    def _answer_id_operation(
+        self, method: Callable[..., dict[str, Any]], fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The one wrapper around every operation that takes a request id.
+
+        The operation reports its progress on an :class:`_Acceptance` (`_accepting` right before the
+        write that accepts the request, `_accepted` with the answer it already knows right after). The
+        answer then follows one rule, whatever failed:
+
+        - nothing failed: the operation's own answer;
+        - a failure after acceptance (an enrichment read, the queue pump): the answer known at
+          acceptance — the message queued under its id, or the session — never a refusal;
+        - a failure during the accepting write itself, which may have committed: `outcome_unknown`,
+          whose client-side meaning is "repeat the same request";
+        - a failure before it: a refusal, marked `nothing_written` only for the refusals known to
+          have written nothing (validation, a request-id conflict, an unknown or closed session).
+        """
+        acceptance = _Acceptance()
+        token = _ACCEPTANCE.set(acceptance)
+        try:
+            return {"ok": True, "result": method(**fields)}
+        except Exception as exc:  # noqa: BLE001 - an answer, not a dead connection
+            if acceptance.answer is not None:
+                _say(
+                    f"secretary po: request accepted, answered from acceptance after "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return {"ok": True, "result": acceptance.answer}
+            if acceptance.accepting:
+                return _error(
+                    "outcome_unknown",
+                    f"the PO service may have accepted this request ({type(exc).__name__}: {exc}); "
+                    "repeat it with the same request id",
+                )
+            definite = (
+                isinstance(exc, _DEFINITE_REFUSALS) and getattr(exc, "code", "validation") == "validation"
+            )
+            return _refusal(exc, nothing_written=definite)
+        finally:
+            _ACCEPTANCE.reset(token)
+
+    @staticmethod
+    def _accepting() -> None:
+        acceptance = _ACCEPTANCE.get()
+        if acceptance is not None:
+            acceptance.accepting = True
+
+    @staticmethod
+    def _accepted(answer: dict[str, Any]) -> None:
+        acceptance = _ACCEPTANCE.get()
+        if acceptance is not None:
+            acceptance.accepting = True
+            acceptance.answer = dict(answer)
+
+
+class _Acceptance:
+    """How far one id-taking request got: into its accepting write, and the answer known right after it."""
+
+    def __init__(self) -> None:
+        self.accepting = False
+        self.answer: dict[str, Any] | None = None
+
+
+_ACCEPTANCE: contextvars.ContextVar[_Acceptance | None] = contextvars.ContextVar(
+    "po_acceptance", default=None
+)
+# The endpoint operations that take a request id; `handle` answers them through `_answer_id_operation`.
+ID_OPERATIONS = frozenset({"create_session", "submit"})
+
+
+# Refusals raised before acceptance that are known to have written nothing (`nothing_written`).
+_DEFINITE_REFUSALS = (Refused, RequestConflict, SessionClosed, SessionNotFound, RunnerError)
+
+
+def _known_answer(session_id: str, known: PoRequest | QueuedInput) -> dict[str, Any]:
+    """What a replayed message is known to be without another read: its turn's seq, or still queued."""
+    if isinstance(known, PoRequest):
+        return {"session_id": session_id, "queued": False, "seq": known.seq, "state": None, "repeated": True}
+    return {"session_id": session_id, "queued": True, "seq": None, "state": None, "repeated": True}
+
+
+def _refusal(exc: Exception, *, nothing_written: bool) -> dict[str, Any]:
+    """One exception to one error answer; `nothing_written` marks a refusal that wrote nothing."""
+    if isinstance(exc, Refused):
+        code = exc.code
+    elif isinstance(exc, SessionNotFound):
+        code = "session_not_found"
+    elif isinstance(exc, SessionClosed):
+        code = "session_closed"
+    elif isinstance(exc, RequestConflict):
+        code = "request_conflict"
+    elif isinstance(exc, TurnInProgress):
+        code = "turn_in_progress"
+    elif isinstance(exc, RunnerError):
+        code = "validation"
+    elif isinstance(exc, (PoStoreError, QueueError)):
+        return _error("unavailable", str(exc))
+    else:
+        return _error("unavailable", f"the PO service failed: {type(exc).__name__}: {exc}")
+    return _error(code, str(exc), nothing_written=nothing_written)
 
 
 _OPERATIONS = {
@@ -438,8 +555,11 @@ _OPERATIONS = {
 }
 
 
-def _error(code: str, message: str) -> dict[str, Any]:
-    return {"ok": False, "error": {"code": code, "message": message}}
+def _error(code: str, message: str, *, nothing_written: bool = False) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if nothing_written:
+        error["nothing_written"] = True
+    return {"ok": False, "error": error}
 
 
 def _required(value: Any, name: str) -> str:
@@ -466,7 +586,11 @@ class _Handler(socketserver.StreamRequestHandler):
                 raise ValueError("incomplete request line")
             request = json.loads(raw)
         except ValueError:
-            answer = _error("validation", "a PO service request is one complete JSON object on one line")
+            answer = _error(
+                "validation",
+                "a PO service request is one complete JSON object on one line",
+                nothing_written=True,
+            )
         else:
             answer = self.server.service.handle(request)  # type: ignore[attr-defined]
         self.wfile.write(json.dumps(answer, ensure_ascii=False, default=str).encode("utf-8") + b"\n")

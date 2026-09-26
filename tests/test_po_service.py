@@ -24,6 +24,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 from urllib.parse import urlencode
 
@@ -40,7 +41,7 @@ from secretary.po import client as po_client
 from secretary.po import store as po_store
 from secretary.po import token as po_token
 from secretary.po.client import PoServiceClient, ServiceUnavailable
-from secretary.po.queue import PoQueue, queue_dir
+from secretary.po.queue import PoQueue, QueueError, queue_dir
 from secretary.po.runner import (
     RERUN_INTERRUPTED_REASON,
     RERUN_REASON,
@@ -52,6 +53,7 @@ from secretary.po.runner import (
 from secretary.po.service import PoService, ServiceStartError, listening
 from secretary.web.app import WebApp
 from secretary.webproto.errors import (
+    NOTHING_WRITTEN,
     PoOutcomeUnknown,
     PoRequestConflict,
     PoSessionClosed,
@@ -724,6 +726,237 @@ class OutcomeUnknownTests(EndpointTests):
         self.assertEqual(answer["error"]["code"], "validation")
         self.assertEqual(self.queued(), [])
         self.assertIsNone(self.store().request("half"))
+
+
+def form_request_ids(body: str, action: str) -> list[str]:
+    form = re.search(r'<form[^>]+action="' + re.escape(action) + r'"[^>]*>(.*?)</form>', body, re.DOTALL)
+    assert form is not None, f"no form posting to {action}"
+    return re.findall(r'name="request_id" value="([^"]+)"', form.group(1))
+
+
+def fail_once(target, name: str, when):
+    """Patch `target.name` so the first call for which `when(*args)` holds raises `PoStoreError`."""
+    real = getattr(target, name)
+    failed: list[tuple] = []
+
+    def wrapper(*args, **kwargs):
+        if not failed and when(*args, **kwargs):
+            failed.append(args)
+            raise po_store.PoStoreError(f"injected failure in {name}")
+        return real(*args, **kwargs)
+
+    return mock.patch.object(target, name, wrapper), failed
+
+
+class AcceptanceAnswerTests(EndpointTests):
+    """Review 17: after acceptance a request is answered as accepted, and a refused form keeps its id."""
+
+    def post(self, app, headers, route: str, fields: dict[str, str]):
+        return app.handle("POST", route, body=urlencode(fields).encode(), headers=headers)
+
+    def test_a_failed_lookup_after_the_queue_write_answers_accepted_and_a_resend_is_the_same_message(
+        self,
+    ) -> None:
+        service = self.service(run=False)
+        session_id = self.session(service)
+        service.submit(session_id=session_id, text="GATE hold", request_id="hold")
+        app, headers = self.app(self.layer())
+        route = f"/po/sessions/{session_id}/messages"
+        lookups: list[str] = []
+
+        def second_lookup(_store, request_id):
+            lookups.append(request_id)
+            return request_id == "original" and lookups.count("original") == 2
+
+        patch, failed = fail_once(FakePoStore, "request", second_lookup)
+        with listening(service):
+            with patch:
+                first = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+            self.assertEqual(failed, [(mock.ANY, "original")], "the post-enqueue lookup failed once")
+            self.assertEqual(first.status, 303, first.body.decode())
+            again = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+
+        self.assertEqual(again.status, 303)
+        self.assertEqual(self.queued(), ["do this once"])
+
+    def test_a_queue_write_that_failed_after_landing_is_outcome_unknown_and_keeps_the_id(self) -> None:
+        service = self.service(run=False)
+        session_id = self.session(service)
+        service.submit(session_id=session_id, text="GATE hold", request_id="hold")
+        app, headers = self.app(self.layer())
+        route = f"/po/sessions/{session_id}/messages"
+        real_put = service.queue.put
+
+        def put_then_fail(**kwargs):
+            real_put(**kwargs)
+            raise QueueError("the directory fsync failed after the rename")
+
+        with listening(service):
+            with mock.patch.object(service.queue, "put", side_effect=put_then_fail):
+                first = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+            body = first.body.decode()
+            self.assertEqual(first.status, 503)
+            self.assertIn("may have accepted this message", body)
+            self.assertEqual(form_request_ids(body, route), ["original"])
+            self.assertEqual(
+                self.post(app, headers, route, {"request_id": "original", "text": "do this once"}).status, 303
+            )
+
+        self.assertEqual(self.queued(), ["do this once"])
+
+    def test_every_post_acceptance_failure_of_a_session_create_ends_with_one_session(self) -> None:
+        service = self.service(run=False)
+        app, headers = self.app(self.layer())
+        form = {"request_id": "create-once", "cli": "claude", "model": "opus"}
+        real_claim = FakePoStore.claim_session
+
+        def commit_then_fail(store, **kwargs):
+            real_claim(store, **kwargs)
+            raise po_store.PoStoreError("the connection dropped after the commit")
+
+        with listening(service):
+            with mock.patch.object(FakePoStore, "claim_session", commit_then_fail):
+                first = self.post(app, headers, "/po/sessions", form)
+            body = first.body.decode()
+            self.assertEqual(first.status, 503)
+            self.assertIn("may have opened this session", body)
+            self.assertEqual(form_request_ids(body, "/po/sessions"), ["create-once"])
+            self.assertEqual(len(self.board.sessions), 1)
+            [session_id] = self.board.sessions
+
+            # The resend is the replay; its one enrichment read fails, and it is still the session.
+            patch, failed = fail_once(FakePoStore, "session", lambda _store, sid: sid == session_id)
+            with patch:
+                again = self.post(app, headers, "/po/sessions", form)
+            self.assertEqual(len(failed), 1)
+            self.assertEqual((again.status, again.headers["Location"]), (303, f"/po/sessions/{session_id}"))
+            third = self.post(app, headers, "/po/sessions", form)
+
+        self.assertEqual(third.headers["Location"], f"/po/sessions/{session_id}")
+        self.assertEqual(len(self.board.sessions), 1)
+
+    def test_each_exit_of_submit_and_create_says_whether_it_wrote_nothing(self) -> None:
+        service = self.service(run=False)
+        session_id = self.session(service, request_id="made")
+        closed = self.session(service, request_id="made-closed")
+        service.close_session(session_id=closed, actor="owner")
+        service.submit(session_id=session_id, text="GATE hold", request_id="hold")
+        service.submit(session_id=session_id, text="waiting", request_id="waiting")
+
+        def error(**request):
+            answer = service.handle(request)
+            self.assertFalse(answer["ok"], answer)
+            return answer["error"]["code"], answer["error"].get("nothing_written", False)
+
+        definite = [
+            ({"op": "submit", "session_id": session_id, "text": " ", "request_id": "e"}, "validation"),
+            ({"op": "submit", "session_id": session_id, "text": "x"}, "validation"),
+            (
+                {"op": "submit", "session_id": session_id, "text": "x", "request_id": "made"},
+                "request_conflict",
+            ),
+            (
+                {"op": "submit", "session_id": session_id, "text": "other", "request_id": "waiting"},
+                "request_conflict",
+            ),
+            ({"op": "submit", "session_id": "nope", "text": "x", "request_id": "n"}, "session_not_found"),
+            ({"op": "submit", "session_id": closed, "text": "x", "request_id": "c"}, "session_closed"),
+            ({"op": "create_session", "cli": "gemini", "model": "m", "request_id": "g"}, "validation"),
+            ({"op": "create_session", "cli": "claude", "model": " ", "request_id": "g"}, "validation"),
+            (
+                {"op": "create_session", "cli": "claude", "model": "opus", "request_id": "waiting"},
+                "request_conflict",
+            ),
+            (
+                {"op": "create_session", "cli": "codex", "model": "m", "request_id": "made"},
+                "request_conflict",
+            ),
+        ]
+        for request, code in definite:
+            with self.subTest(request=request):
+                self.assertEqual(error(**request), (code, True))
+
+        # A store that fails before acceptance wrote nothing either, but nobody marked it: the id is kept.
+        with mock.patch.object(FakePoStore, "request", side_effect=po_store.PoStoreError("away")):
+            self.assertEqual(
+                error(op="submit", session_id=session_id, text="x", request_id="k"), ("unavailable", False)
+            )
+            self.assertEqual(
+                error(op="create_session", cli="claude", model="opus", request_id="k"), ("unavailable", False)
+            )
+        self.assertEqual(self.queued(), ["waiting"])
+
+
+class KeptRequestIdTests(ServiceFixture):
+    """The web keeps a refused form's request id unless the refusal is marked as having written nothing."""
+
+    SESSION: ClassVar[dict] = {
+        "kind": "po_session",
+        "session": {"session_id": "s-1", "state": "open", "cli": "claude", "model": "opus"},
+        "turns": [],
+        "feed": [],
+        "running": False,
+        "queued": [],
+    }
+    OVERVIEW: ClassVar[dict] = {
+        "kind": "po_overview",
+        "closed": False,
+        "closed_count": 0,
+        "sessions": [],
+        "running": 0,
+        "models": {"claude": ["opus"]},
+        "efforts": {"claude": ["default"]},
+    }
+
+    def forms(self, failure: Exception) -> tuple[list[str], list[str]]:
+        po_token.ensure_token(self.data)
+        cookie = po_token.cookie_value(po_token.read_token(self.data))
+        po = Recording(
+            po_send=failure, po_create_session=failure, po_session=self.SESSION, po_overview=self.OVERVIEW
+        )
+        app = WebApp(
+            *(Recording() for _ in range(8)), po_auth=PoTokenLayer(self.root, data_dir=self.data), po=po
+        )
+        headers = {"Cookie": f"{po_token.COOKIE_NAME}={cookie}"}
+        sent = app.handle(
+            "POST",
+            "/po/sessions/s-1/messages",
+            body=urlencode({"request_id": "form-1", "text": "hello"}).encode(),
+            headers=headers,
+        )
+        created = app.handle(
+            "POST",
+            "/po/sessions",
+            body=urlencode({"request_id": "form-2", "cli": "claude", "model": "opus"}).encode(),
+            headers=headers,
+        )
+        return (
+            form_request_ids(sent.body.decode(), "/po/sessions/s-1/messages"),
+            form_request_ids(created.body.decode(), "/po/sessions"),
+        )
+
+    def test_an_unexpected_exception_from_the_layer_keeps_the_id(self) -> None:
+        self.assertEqual(self.forms(RuntimeError("boom")), (["form-1"], ["form-2"]))
+
+    def test_an_unmarked_refusal_keeps_the_id_and_only_a_marked_one_gets_a_fresh_one(self) -> None:
+        for failure in (
+            RuntimeUnavailable("the store answered badly"),
+            PoOutcomeUnknown("no answer"),
+            PoRequestConflict("taken"),
+            PoTurnInProgress("busy"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                self.assertEqual(self.forms(failure), (["form-1"], ["form-2"]))
+        for failure in (
+            RuntimeUnavailable("the PO service is not running", data=NOTHING_WRITTEN),
+            PoRequestConflict("taken", data=NOTHING_WRITTEN),
+            PoSessionClosed("closed", data=NOTHING_WRITTEN),
+        ):
+            with self.subTest(failure=type(failure).__name__, marked=True):
+                sent, created = self.forms(failure)
+                self.assertNotEqual(sent, ["form-1"])
+                self.assertNotEqual(created, ["form-2"])
+                self.assertTrue(sent[0].startswith("web-po-") and created[0].startswith("web-po-"))
 
 
 class RecoveryProgressTests(ServiceFixture):
