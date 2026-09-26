@@ -21,6 +21,7 @@ from secretary.tasks import (
     _task_is_active,
     _task_metadata,
     _text,
+    admit_role,
     all_project_cards,
 )
 
@@ -231,7 +232,9 @@ def apply_reference_repair(
     reason: str,
     request_id: str,
     actor: str = "operator",
+    role: str = "po",
 ) -> dict[str, Any]:
+    admit_role(role, actor, {"po"})
     if not plan_id or not request_id or not reason.strip():
         raise TaskError("validation", "apply requires plan id, request id and non-empty reason", 2)
     safe_reason = writer._redact_for_board(reason.strip())
@@ -273,7 +276,7 @@ def apply_reference_repair(
                     .replace(microsecond=0)
                     .isoformat()
                     .replace("+00:00", "Z"),
-                    "actor": {"role": "po", "id": actor},
+                    "actor": {"role": role, "id": actor},
                     "kind": REPAIR_KIND,
                     "outcome": "success",
                     "task_id": entity_id("task", task_id),

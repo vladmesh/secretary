@@ -22,6 +22,7 @@ from secretary.tasks import (
     _digest,
     _now,
     _positive_int,
+    admit_role,
     all_project_cards,
     task_audit_for,
 )
@@ -46,6 +47,9 @@ _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Failure codes a repeat of the same request cannot turn into a success.
 _TERMINAL_CODES = {"validation", "closed", "backend_rejected"}
 _TRANSACTION_KINDS = {"product_created", "issue_created", "issue_priority_changed", "issue_closed"}
+#: The roles an Issue write command offers. The PO makes every Issue write; the observer only files
+#: one, from the sprint it was launched for, and each other write refuses it (`role_forbidden`).
+ISSUE_WRITE_ROLES = ("po", "observer")
 
 
 class ProductIssueValidationError(ValueError):
@@ -1129,6 +1133,23 @@ class ProductIssueStore:
                 "backend_error", f"PostgreSQL Product/Issue transaction rolled back: {detail}", 1
             ) from None
 
+    def _observer_sprint(
+        self, *, role: str, actor: str, request_id: str, reference: str = ""
+    ) -> dict[str, Any]:
+        """The sprint an observer's Issue write belongs to, proven by the sprint writer's own guard.
+
+        `reference` defaults to the sprint the head was launched for; a head bound to none is refused
+        as `observer_identity_unbound`, and one bound to another sprint as `observer_sprint_mismatch`,
+        both audited as `sprint_guard_denied` exactly as a sprint write of the observer is.
+        """
+        from secretary.runtime.role_env import declared_observer_sprint
+        from secretary.sprints import SprintWriter
+
+        writer = SprintWriter(self.client, data_dir=self.data_dir, instance=self.instance)
+        reference = reference or declared_observer_sprint()
+        writer._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
+        return writer.reader.show(reference, include_cards=False, include_resume_freshness=False)
+
     def create_product(
         self,
         *,
@@ -1138,7 +1159,9 @@ class ProductIssueStore:
         description: str,
         actor: str,
         request_id: str | None = None,
+        role: str = "po",
     ) -> dict[str, Any]:
+        admit_role(role, actor, {"po"})
         if (
             not _ID.fullmatch(product_id)
             or not title.strip()
@@ -1176,7 +1199,7 @@ class ProductIssueStore:
                             projects=tuple(sorted(projects)),
                             description=description,
                         ),
-                        Actor("po", actor),
+                        Actor(role, actor),
                         "Product created",
                         request_id=request_id,
                     )
@@ -1197,7 +1220,30 @@ class ProductIssueStore:
         description: str,
         actor: str,
         request_id: str | None = None,
+        role: str = "po",
     ) -> dict[str, Any]:
+        """File one Issue: the PO for any product, the observer for the product of its own sprint.
+
+        An observer's Issue carries the product of the sprint the head was launched for, proven by
+        the sprint writer's identity guard, and names that sprint among its related refs, so the
+        `entity.created` event says which sprint filed it as well as who and in what role.
+        """
+        admit_role(role, actor, {"po", "observer"})
+        request_id = request_id or str(uuid.uuid4())
+        related: tuple[str, ...] = ()
+        if role == "observer":
+            sprint = self._observer_sprint(role=role, actor=actor, request_id=request_id)
+            sprint_product = str(sprint.get("product") or "").removeprefix("product:")
+            if not sprint_product:
+                raise TaskError("validation", f"sprint {sprint['ref']} belongs to no product", 2)
+            if product.strip() and product.strip().removeprefix("product:") != sprint_product:
+                raise TaskError(
+                    "validation",
+                    f"the observer files issues for the product of its sprint, {sprint_product}",
+                    2,
+                )
+            product = sprint_product
+            related = (str(sprint["ref"]),)
         if (
             not product.strip()
             or issue_kind not in ISSUE_KINDS
@@ -1209,7 +1255,6 @@ class ProductIssueStore:
                 "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)",
                 2,
             )
-        request_id = request_id or str(uuid.uuid4())
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
         with self.transactions.reference_lock(reference) as lock:
@@ -1217,7 +1262,7 @@ class ProductIssueStore:
             try:
                 self._reject_other_pending_reference_operation(reference, request_id)
                 self._reject_other_pending_typed_operation(reference, request_id)
-                from secretary.board import Actor, Create, Issue
+                from secretary.board import Actor, Create, Issue, RelatedRefs
 
                 try:
                     host = self._host()
@@ -1230,8 +1275,9 @@ class ProductIssueStore:
                             issue_kind=issue_kind,
                             description=description,
                         ),
-                        Actor("po", actor),
+                        Actor(role, actor),
                         "Issue created",
+                        RelatedRefs(related),
                         request_id=request_id,
                     )
                     self._host_mutation(lambda: host.create(operation))
@@ -1242,8 +1288,16 @@ class ProductIssueStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def update_priority(
-        self, *, reference: str, priority: str, reason: str, actor: str, request_id: str | None = None
+        self,
+        *,
+        reference: str,
+        priority: str,
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
     ) -> dict[str, Any]:
+        admit_role(role, actor, {"po"})
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
@@ -1264,7 +1318,7 @@ class ProductIssueStore:
                         known.kind.value != "entity.updated"
                         or known.entity_kind is not EntityKind.ISSUE
                         or known.ref != reference
-                        or known.actor != Actor("po", actor)
+                        or known.actor != Actor(role, actor)
                         or known.reason != reason
                         or known.data.get("priority") != priority
                         or "append" in known.data
@@ -1291,7 +1345,7 @@ class ProductIssueStore:
                     current.close_reason,
                 )
                 try:
-                    operation = Replace(desired, Actor("po", actor), reason, request_id=request_id)
+                    operation = Replace(desired, Actor(role, actor), reason, request_id=request_id)
                     self._host_mutation(lambda: host.replace(operation))
                 except Exception as exc:
                     raise self._host_error(exc) from None
@@ -1300,9 +1354,17 @@ class ProductIssueStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def append_description(
-        self, *, reference: str, body: str, reason: str, actor: str, request_id: str | None = None
+        self,
+        *,
+        reference: str,
+        body: str,
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
     ) -> dict[str, Any]:
         """Add one dated block after an open Issue's description; the old text is never rewritten."""
+        admit_role(role, actor, {"po"})
         if not body.strip() or not reason.strip():
             raise TaskError("validation", "description append requires a non-empty block and reason", 2)
         request_id = request_id or str(uuid.uuid4())
@@ -1327,7 +1389,7 @@ class ProductIssueStore:
                         known.kind.value != "entity.updated"
                         or known.entity_kind is not EntityKind.ISSUE
                         or known.ref != reference
-                        or known.actor != Actor("po", actor)
+                        or known.actor != Actor(role, actor)
                         or known.reason != reason
                         or not isinstance(evidence, dict)
                         or evidence.get("body_sha256") != body_sha256
@@ -1357,7 +1419,7 @@ class ProductIssueStore:
                 try:
                     operation = Replace(
                         desired,
-                        Actor("po", actor),
+                        Actor(role, actor),
                         reason,
                         request_id=request_id,
                         description_append=DescriptionAppend(
@@ -1372,13 +1434,28 @@ class ProductIssueStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def close_issue(
-        self, *, reference: str, reason: str, actor: str, request_id: str | None = None
+        self,
+        *,
+        reference: str,
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
+        sprint_close: str = "",
     ) -> dict[str, Any]:
+        """Close one Issue: the PO's write, and a verdict of a sprint close in the closer's name.
+
+        `sprint_close` names the sprint whose close carries this verdict. Only there is the observer
+        admitted, and only as the observer of that sprint, which the identity guard proves again.
+        """
+        admit_role(role, actor, {"po", "observer"} if sprint_close else {"po"})
+        request_id = request_id or str(uuid.uuid4())
+        if role == "observer":
+            self._observer_sprint(role=role, actor=actor, request_id=request_id, reference=sprint_close)
         if reason not in ISSUE_CLOSE_REASONS:
             raise TaskError(
                 "validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2
             )
-        request_id = request_id or str(uuid.uuid4())
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1408,7 +1485,7 @@ class ProductIssueStore:
                         EntityKind.ISSUE,
                         reference,
                         IssueState.CLOSED,
-                        Actor("po", actor),
+                        Actor(role, actor),
                         reason,
                         request_id=request_id,
                     )

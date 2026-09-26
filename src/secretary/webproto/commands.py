@@ -261,6 +261,10 @@ _RUN_EXIT_BY_CODE = {
     "validation": 2,
     "backend_unavailable": 1,
     "owner_conflict": EXIT_CONFLICT,
+    # A refusal about the caller, with the status the task protocol gives the same refusal.
+    "role_masquerade": EXIT_CONFLICT,
+    "observer_identity_unbound": EXIT_CONFLICT,
+    "observer_sprint_mismatch": EXIT_CONFLICT,
 }
 
 

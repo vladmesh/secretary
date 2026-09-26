@@ -22,7 +22,7 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 109,
+    "tests.test_sprints": 110,
     "tests.test_sprint_executors": 21,
     "tests.test_sprint_restore": 22,
     "tests.test_sprint_listing_budget": 4,
@@ -52,7 +52,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprints.SprintAuditTraversalTests": 7,
     "tests.test_sprints.SprintSingleWriterGuardTests": 13,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
-    "tests.test_sprints.SprintCloseDecisionTests": 10,
+    "tests.test_sprints.SprintCloseDecisionTests": 11,
     "tests.test_sprints.CloseDecisionFileTests": 3,
     "tests.test_sprint_executors.ExecutorValueTests": 2,
     "tests.test_sprint_executors.SprintExecutorPinTests": 5,
@@ -217,11 +217,13 @@ class SprintFixtureGuards(unittest.TestCase):
         rewrote the four listing-budget cases in store statements: 180 - 33 + 3 + 4 = 154.
 
         secretary-1712 added two single-writer guard cases for the steward's own report card: 156.
+
+        secretary-1765 added the observer's end-to-end close of its own sprint: 157.
         """
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 156)
+        self.assertEqual(len(methods), 157)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]

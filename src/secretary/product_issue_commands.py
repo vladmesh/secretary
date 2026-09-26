@@ -8,16 +8,21 @@ import os
 
 from secretary.board.backend import PRODUCT_ISSUE, board_client
 from secretary.onboarding import DEFAULT_INSTANCE
-from secretary.product_issues import ProductIssueStore
+from secretary.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
 from secretary.task_commands import _read_body, resolve_data_dir, run_task_command
+from secretary.tasks import TaskError
 
 
-def _common(parser: argparse.ArgumentParser, *, write: bool = False) -> None:
+def _common(
+    parser: argparse.ArgumentParser, *, write: bool = False, roles: tuple[str, ...] = ISSUE_WRITE_ROLES
+) -> None:
     parser.add_argument("--instance", default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE))
     parser.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
     if write:
-        parser.add_argument("--role", required=True, choices=("po",))
-        parser.add_argument("--actor", default=os.environ.get("BOARD_ACTOR", "po"))
+        parser.add_argument("--role", required=True, choices=roles)
+        # Who wrote it, never inferred from the role: every role head's environment names its actor
+        # (`BOARD_ACTOR`), and a write that names none is refused as `actor_required`.
+        parser.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         parser.add_argument("--request-id")
 
 
@@ -25,7 +30,7 @@ def add_product_issue_subcommands(subparsers) -> None:
     product = subparsers.add_parser("product", help="manage durable Product records")
     product_sub = product.add_subparsers(dest="product_command")
     create = product_sub.add_parser("create")
-    _common(create, write=True)
+    _common(create, write=True, roles=("po",))
     create.add_argument("--id", required=True)
     create.add_argument("--project", action="append", required=True)
     create.add_argument("--title", required=True)
@@ -75,7 +80,9 @@ def add_product_issue_subcommands(subparsers) -> None:
     issue_sub = issue.add_subparsers(dest="issue_command")
     create = issue_sub.add_parser("create")
     _common(create, write=True)
-    create.add_argument("--product", required=True)
+    create.add_argument(
+        "--product", default="", help="required for the PO; the observer files for its sprint's product"
+    )
     create.add_argument("--kind", required=True, choices=("bug", "feature", "question", "improvement"))
     create.add_argument("--priority", required=True, choices=("P0", "P1", "P2", "P3"))
     create.add_argument("--title", required=True)
@@ -130,16 +137,33 @@ def _run(args: argparse.Namespace, callback) -> int:
     return run_task_command(lambda: callback(_store(args)))
 
 
+def _actor(args: argparse.Namespace) -> str:
+    actor = str(args.actor or "").strip()
+    if not actor:
+        raise TaskError("actor_required", "name the writer: pass --actor or set BOARD_ACTOR", 2)
+    return actor
+
+
+def _write(args: argparse.Namespace, callback) -> int:
+    """A Product or Issue write, refused before the store is built when it names no actor."""
+    def command() -> object:
+        actor = _actor(args)
+        return callback(_store(args), actor)
+
+    return run_task_command(command)
+
+
 def run_product_create(args):
-    return _run(
+    return _write(
         args,
-        lambda store: store.create_product(
+        lambda store, actor: store.create_product(
             product_id=args.id,
             projects=args.project,
             title=args.title,
             description=args.description,
-            actor=args.actor,
+            actor=actor,
             request_id=args.request_id,
+            role=args.role,
         ),
     )
 
@@ -157,16 +181,17 @@ def run_product_reconcile_lanes(args):
 
 
 def run_issue_create(args):
-    return _run(
+    return _write(
         args,
-        lambda store: store.create_issue(
+        lambda store, actor: store.create_issue(
             product=args.product,
             issue_kind=args.kind,
             priority=args.priority,
             title=args.title,
             description=args.description,
-            actor=args.actor,
+            actor=actor,
             request_id=args.request_id,
+            role=args.role,
         ),
     )
 
@@ -180,36 +205,38 @@ def run_issue_show(args):
 
 
 def run_issue_priority(args):
-    return _run(
+    return _write(
         args,
-        lambda store: store.update_priority(
+        lambda store, actor: store.update_priority(
             reference=args.ref,
             priority=args.priority,
             reason=args.reason,
-            actor=args.actor,
+            actor=actor,
             request_id=args.request_id,
+            role=args.role,
         ),
     )
 
 
 def run_issue_append(args):
-    return _run(
+    return _write(
         args,
-        lambda store: store.append_description(
+        lambda store, actor: store.append_description(
             reference=args.ref,
             body=_read_body(args.body_file),
             reason=args.reason,
-            actor=args.actor,
+            actor=actor,
             request_id=args.request_id,
+            role=args.role,
         ),
     )
 
 
 def run_issue_close(args):
-    return _run(
+    return _write(
         args,
-        lambda store: store.close_issue(
-            reference=args.ref, reason=args.reason, actor=args.actor, request_id=args.request_id
+        lambda store, actor: store.close_issue(
+            reference=args.ref, reason=args.reason, actor=actor, request_id=args.request_id, role=args.role
         ),
     )
 

@@ -19,6 +19,7 @@ from secretary.board.backend import (
     entity_number,
     sprint_reference_number,
 )
+from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
@@ -81,6 +82,7 @@ from secretary.tasks import (
     _positive_int,
     _rfc3339,
     _text,
+    admit_role,
     is_significant_observer_event,
     reference_allocation_lock,
     task_audit_for,
@@ -1003,7 +1005,7 @@ class SprintWriter:
         po_session: str | None = None,
         allowed_productions: list[str] | None = None,
     ) -> dict[str, Any]:
-        self._role(role, {"po", "steward"})
+        self._role(role, {"po", "steward"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
         intent = self._create_intent(
             role=role,
@@ -1732,13 +1734,26 @@ class SprintWriter:
             limit=self._open_sprint_limit(),
         )
 
-    @_sql_atomic
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "worker", "reviewer", "steward", "retro"})
+        self._role(
+            role, {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}, actor=actor
+        )
         if not body.strip():
             raise TaskError("validation", "comment requires a non-empty body", 2)
+        # The observer comments on its own sprint only. Guarded outside the transaction, as `resume`
+        # is, so a refusal's audit record is not rolled back with the write it refused.
+        request_id = request_id or str(uuid.uuid4())
+        self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
+        return self._comment_atomic(
+            role=role, actor=actor, reference=reference, body=body, request_id=request_id
+        )
+
+    @_sql_atomic
+    def _comment_atomic(
+        self, *, role: str, actor: str, reference: str, body: str, request_id: str
+    ) -> dict[str, Any]:
         return self._write(
             "commented",
             role,
@@ -1754,7 +1769,7 @@ class SprintWriter:
     def set_current_task(
         self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "observer", "steward"})
+        self._role(role, {"po", "dispatcher", "observer", "steward"}, actor=actor)
         task_reference = task_reference.strip()
         if not task_reference:
             raise TaskError("validation", "current task requires a task reference", 2)
@@ -1803,7 +1818,7 @@ class SprintWriter:
         no longer exists or is closed and it opened a fresh one. The request id makes a repeat the
         same write.
         """
-        self._role(role, {"po"})
+        self._role(role, {"po"}, actor=actor)
         session_id = str(session_id or "").strip()
         if not session_id:
             raise TaskError("validation", "a PO session id is required", 2)
@@ -1830,7 +1845,7 @@ class SprintWriter:
         request_id: str | None = None,
         source_event_id: str = "",
     ) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "steward"})
+        self._role(role, {"po", "dispatcher", "steward"}, actor=actor)
         if event_type not in BUDGET_RECORDED_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
         # One recording path for both families; only the charge is conditional. An uncharged type
@@ -2048,7 +2063,7 @@ class SprintWriter:
         delivery_id: str = "",
         through_event: str = "",
     ) -> dict[str, Any]:
-        self._role(role, {"po", "dispatcher", "observer", "steward"})
+        self._role(role, {"po", "dispatcher", "observer", "steward"}, actor=actor)
         try:
             normalized = SprintResume.from_legacy(entry, required=True, now=_now)
         except ValueError as exc:
@@ -2116,7 +2131,6 @@ class SprintWriter:
             payload.update({"delivery_id": delivery_id, "through_event": through_event})
         return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
-    @_sql_atomic
     def close(
         self,
         *,
@@ -2128,9 +2142,36 @@ class SprintWriter:
         reason: str = "",
         closeout: str = "",
     ) -> dict[str, Any]:
-        """Close a sprint on explicit typed decisions while preserving the durable JSON contract."""
-        self._role(role, {"po"})
+        """Close a sprint on explicit typed decisions while preserving the durable JSON contract.
+
+        The PO closes any sprint; the observer closes the one it was launched for, and is refused
+        any other by the identity guard, outside the transaction so the refusal stays audited.
+        """
+        self._role(role, {"po", "observer"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
+        self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
+        return self._close_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            decisions=decisions,
+            request_id=request_id,
+            reason=reason,
+            closeout=closeout,
+        )
+
+    @_sql_atomic
+    def _close_atomic(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        decisions: SprintCloseDecisions | Mapping[str, Any] | None,
+        request_id: str,
+        reason: str,
+        closeout: str,
+    ) -> dict[str, Any]:
         try:
             offered = SprintCloseDecisions.from_document(decisions) if decisions is not None else None
         except ValueError as exc:
@@ -2164,7 +2205,9 @@ class SprintWriter:
                         states=targets.remaining_state_map,
                         issue_states=self._declared_issue_states(list(sprint.issues)),
                     )
-                    self._check_close_decisions_are_writable(plan)
+                    self._check_close_decisions_are_writable(
+                        plan, role=role, states=targets.remaining_state_map
+                    )
                     closeout_plan = self._plan_closeout(
                         sprint, plan, actor=actor, reason=reason, closeout=closeout
                     )
@@ -2485,9 +2528,18 @@ class SprintWriter:
             2,
         )
 
-    def _check_close_decisions_are_writable(self, plan: SprintCloseDecisions) -> None:
-        """Refuse a plan this installation cannot perform, before the transaction opens."""
-        from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
+    def _check_close_decisions_are_writable(
+        self, plan: SprintCloseDecisions, *, role: str, states: Mapping[str, str]
+    ) -> None:
+        """Refuse a plan this installation cannot perform, before the transaction opens.
+
+        Every disposition move the plan would make is asked of `card_transition` for the closing
+        role, the table the dispose step's own move is checked against, so a close whose role may not
+        make one of its moves is refused whole, with nothing staged, instead of failing half-written
+        (`close_plan_forbidden`). A PO close moves under the sprint override and its every edge is
+        allowed; an observer's cannot take a card out of Assessment, which it decides instead.
+        """
+        from secretary.sprint_close import ALREADY_CLOSED, ALREADY_MOVED, DISPOSITION_TARGETS, KEEP_OPEN
 
         closing = [entry for entry in plan.issues if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED}]
         if closing and self.instance is None:
@@ -2498,6 +2550,23 @@ class SprintWriter:
             )
         if not plan.cards:
             return
+        forbidden = []
+        for entry in plan.cards:
+            target = "" if entry.verdict == ALREADY_MOVED else DISPOSITION_TARGETS[entry.verdict]
+            source = str(states.get(entry.ref) or "")
+            if not target or source == target:
+                continue
+            try:
+                card_transition(role, source, target)
+            except (CardTransitionForbidden, ValueError):
+                forbidden.append(f"{entry.ref} (in {source or 'an unknown column'}, {entry.verdict})")
+        if forbidden:
+            raise TaskError(
+                "close_plan_forbidden",
+                f"a {role} close cannot move " + ", ".join(forbidden)
+                + "; decide it with `task decide` (or move it) before closing",
+                3,
+            )
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         live = []
         for entry in plan.cards:
@@ -2539,11 +2608,12 @@ class SprintWriter:
                 if self._close_step_status(step_request_id) != "done":
                     assert writer is not None
                     writer.archive(
-                        role="po",
+                        role=str(document["intent"]["role"]),
                         actor=str(document["intent"]["actor"]),
                         reference=task_ref,
                         reason=f"archived when sprint {event['ref']} closed",
                         request_id=step_request_id,
+                        sprint_close=str(event["ref"]),
                     )
                     self._require_close_step_settled(step_request_id)
                 if task_ref not in archived:
@@ -2634,6 +2704,8 @@ class SprintWriter:
                     reason=entry.verdict,
                     actor=str(document["intent"]["actor"]),
                     request_id=step_request_id,
+                    role=str(document["intent"]["role"]),
+                    sprint_close=str(event["ref"]),
                 )
                 self._require_close_step_settled(step_request_id)
             closed.append(reference)
@@ -2659,6 +2731,9 @@ class SprintWriter:
         planned = targets.remaining_state_map
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         reader = TaskReader(self.client)
+        # Every step of a close is written in the closing caller's own name. A PO close disposes a
+        # card through the sprint override; an observer's close needs none, the card is its sprint's.
+        role = str(document["intent"]["role"])
         actor = str(document["intent"]["actor"])
         for entry in decisions.cards:
             reference = entry.ref
@@ -2686,13 +2761,15 @@ class SprintWriter:
                             ),
                         )
                     writer.move(
-                        role="po",
+                        role=role,
                         actor=actor,
                         reference=reference,
                         target=target,
                         reason=f"{verdict} when sprint {event['ref']} closed: {reason}",
-                        sprint_override=True,
-                        sprint_override_reason=f"disposed by the close of {event['ref']}: {reason}",
+                        sprint_override=role == "po",
+                        sprint_override_reason=(
+                            f"disposed by the close of {event['ref']}: {reason}" if role == "po" else ""
+                        ),
                         request_id=move_request_id,
                     )
                     self._require_close_step_settled(move_request_id)
@@ -2704,11 +2781,12 @@ class SprintWriter:
             )
             if self._close_step_status(archive_request_id) != "done":
                 writer.archive(
-                    role="po",
+                    role=role,
                     actor=actor,
                     reference=reference,
                     reason=f"archived when sprint {event['ref']} closed: {reason}",
                     request_id=archive_request_id,
+                    sprint_close=str(event["ref"]),
                 )
                 self._require_close_step_settled(archive_request_id)
             if reference not in disposed:
@@ -2798,7 +2876,7 @@ class SprintWriter:
         decision about the run being opened now. It is written while the sprint is still closed, so the
         row is never readable open under a value the reopening caller did not choose.
         """
-        self._role(role, {"po"})
+        self._role(role, {"po"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
         intent = SprintReopenIntent(
             role=Role(role),
@@ -2949,7 +3027,7 @@ class SprintWriter:
         from secretary.tasks import _sprint_guard_denial_request_id
 
         declared = declared_observer_sprint()
-        if declared == reference:
+        if declared and declared == reference:
             return
         code, message = (
             (
@@ -3091,9 +3169,9 @@ class SprintWriter:
         }
 
     @staticmethod
-    def _role(role: str, allowed: set[str]) -> None:
-        if role not in allowed:
-            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+    def _role(role: str, allowed: set[str], *, actor: str) -> None:
+        """`admit_role`, the one role check every task, sprint and issue write makes."""
+        admit_role(role, actor, allowed)
 
 
 def _sprint_number(sprint: SprintWriteSnapshot | dict[str, Any] | None) -> int:

@@ -133,6 +133,42 @@ class OperationPending(ReadError):
     code = "backend_unavailable"
 
 
+class IdentityRefused(ReadError):
+    """A write refused on who is asking, under the writer's own code rather than folded.
+
+    Not `validation`: the request is well formed, and the answer is about the caller. Each subclass
+    carries one of the writer's codes unchanged, so a caller that reads `role_masquerade` is told to
+    write as the observer, and one that reads `observer_identity_unbound` or
+    `observer_sprint_mismatch` is a head writing outside the sprint it was launched for.
+    """
+
+    code = "forbidden"
+
+
+class RoleMasquerade(IdentityRefused):
+    """A PO write in the observer's name; the observer writes as `--role observer`."""
+
+    code = "role_masquerade"
+
+
+class ObserverIdentityUnbound(IdentityRefused):
+    """A write of role `observer` from a head no launcher bound to a sprint."""
+
+    code = "observer_identity_unbound"
+
+
+class ObserverSprintMismatch(IdentityRefused):
+    """A write of role `observer` about a sprint other than the one its head was launched for."""
+
+    code = "observer_sprint_mismatch"
+
+
+#: The writer codes an :class:`IdentityRefused` carries, each by its own class.
+IDENTITY_REFUSALS: dict[str, type[IdentityRefused]] = {
+    cls.code: cls for cls in (RoleMasquerade, ObserverIdentityUnbound, ObserverSprintMismatch)
+}
+
+
 # -- the PO head half (secretary-1631) ----------------------------------------------------------
 
 

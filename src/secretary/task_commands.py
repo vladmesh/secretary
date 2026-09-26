@@ -353,6 +353,7 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
             reason=_read_body(args.reason_file),
             request_id=args.request_id,
             actor=args.actor or args.role,
+            role=args.role,
         )
     )
 

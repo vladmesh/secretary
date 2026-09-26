@@ -95,6 +95,7 @@ from secretary.tasks import TaskError, _digest
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
+    IDENTITY_REFUSALS,
     InstallationUnavailable,
     OperationPending,
     OwnerConflict,
@@ -132,12 +133,13 @@ SPRINT_COMMENT_OPERATION = "sprint_comment"
 SPRINT_CLOSE_OPERATION = "sprint_close"
 CLOSE_PENDING_REASON = "sprint_close_pending_repair"
 
-#: The one role that may close a sprint, as `SprintWriter.close` already restricts it.
-SPRINT_CLOSE_ROLES = ("po",)
+#: The roles that may close a sprint, as `SprintWriter.close` already restricts them: the PO any
+#: sprint, the observer only the sprint it was launched for (the writer's identity guard).
+SPRINT_CLOSE_ROLES = ("po", "observer")
 
 #: The roles `SprintWriter.comment` admits, named here so a client can offer the choice. The refusal
 #: for anything else is still the writer's own, and the operation restates none of it.
-SPRINT_COMMENT_ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
+SPRINT_COMMENT_ROLES = ("po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro")
 
 #: The kind of audit event a sprint comment is, as `SprintWriter.comment` writes it. Read here only
 #: to tell a repeat of *this* request from a request id that already owns some other sprint write.
@@ -166,6 +168,9 @@ _CODES: dict[str, Any] = {
     # still running, or an object somebody else moved while this close ran. Both are answered by
     # settling that thing and repeating the close, which is what `owner_conflict` means here.
     "live_work": OwnerConflict,
+    # A close whose role may not make one of its disposition moves: settled by deciding or moving
+    # that card first and repeating the close, like `live_work`.
+    "close_plan_forbidden": OwnerConflict,
     "close_conflict": OwnerConflict,
     "backend_error": RuntimeUnavailable,
 }
@@ -651,7 +656,7 @@ class SprintOperationLayer(ProtocolBoundary):
                 exc.message,
                 data=self._pending_action(request_id, operation=operation, reason=reason),
             )
-        return _CODES.get(exc.code, RuntimeUnavailable)(exc.message)
+        return {**_CODES, **IDENTITY_REFUSALS}.get(exc.code, RuntimeUnavailable)(exc.message)
 
     def _pending_action(
         self,

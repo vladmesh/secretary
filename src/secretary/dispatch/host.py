@@ -287,7 +287,7 @@ from secretary.runtime.prompt_document import (
 from secretary.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
-from secretary.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
+from secretary.runtime.role_env import BOARD_ACTOR_ENV, WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
 from secretary.tasks import (
     durability_dirt,
     specification_revision,
@@ -3139,6 +3139,10 @@ class CommandHostRuntime:
             except memory_access.MemoryAccessError as exc:
                 raise HostError(f"memory access binding could not be issued: {exc}") from None
             memory_identity = grant.launch_identity
+        # A worker or reviewer head writes the board as the profile it runs (`BOARD_ACTOR`).
+        launch_identity = dict(memory_identity or {})
+        if role in {"worker", "reviewer"}:
+            launch_identity[BOARD_ACTOR_ENV] = head
         # The backend is the profile's, whatever adapter the command turns out to run.
         heartbeat_owner = self.head_runtime_for(self._head_spec(head, ""))
         if pid_file and not _runtime_writes_launch_identity(heartbeat_owner):
@@ -3160,7 +3164,7 @@ class CommandHostRuntime:
                 workspace=workspace,
                 role=role,
                 launch_prompt=launch_prompt,
-                identity=memory_identity,
+                identity=launch_identity or None,
             )
             command = launch.command
             if pid_file:
