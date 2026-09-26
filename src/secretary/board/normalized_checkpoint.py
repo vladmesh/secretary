@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from secretary._fsutil import ndjson_lines
 from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
 
 
@@ -32,7 +33,7 @@ def validated_normalized_cards(
         try:
             ndjson = [
                 json.loads(line)
-                for line in ndjson_path.read_text(encoding="utf-8").splitlines()
+                for line in ndjson_lines(ndjson_path.read_text(encoding="utf-8"))
                 if line.strip()
             ]
         except (OSError, ValueError, TypeError):

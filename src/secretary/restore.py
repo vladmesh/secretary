@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from secretary import _proc, state_repo
-from secretary._fsutil import file_lock, write_text_atomic
+from secretary._fsutil import file_lock, ndjson_lines, write_text_atomic
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
@@ -235,7 +235,7 @@ def _restore_board_history(data_dir: Path, audit: Any) -> None:
             ndjson = data_dir / "board" / "audit.ndjson"
             if not ndjson.is_file():
                 return
-            events = [json.loads(line) for line in ndjson.read_text(encoding="utf-8").splitlines() if line]
+            events = [json.loads(line) for line in ndjson_lines(ndjson.read_text(encoding="utf-8")) if line]
     except (OSError, ValueError) as exc:
         raise RestoreError(f"normalized board audit export is invalid: {exc}") from None
     if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
@@ -966,7 +966,7 @@ def _namespace_is_exported(data_dir: Path, token: str) -> bool:
             if not ndjson.is_file():
                 return False
             events = [
-                json.loads(line) for line in ndjson.read_text(encoding="utf-8").splitlines() if line
+                json.loads(line) for line in ndjson_lines(ndjson.read_text(encoding="utf-8")) if line
             ]
     except (OSError, ValueError):
         return False

@@ -17,8 +17,24 @@ def write_json(path: Path, payload: Any) -> None:
     write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
+def ndjson_line(row: Any) -> str:
+    """Serialize one UTF-8 record without raw Unicode line separators."""
+    text = json.dumps(row, ensure_ascii=False, sort_keys=True)
+    for character in ("\u2028", "\u2029", "\u0085"):
+        text = text.replace(character, f"\\u{ord(character):04x}")
+    return text + "\n"
+
+
+def ndjson_lines(text: str) -> list[str]:
+    """Split LF/CRLF records, preserving Unicode separators inside old JSON strings."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
+
+
 def write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
-    body = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    body = "".join(ndjson_line(row) for row in rows)
     write_text_atomic(path, body)
 
 

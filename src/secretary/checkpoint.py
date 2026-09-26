@@ -35,6 +35,7 @@ from secretary._fsutil import (
 from secretary._fsutil import (
     ensure_dir as _ensure_dir,
 )
+from secretary._fsutil import ndjson_lines
 from secretary._fsutil import (
     publish_component_entries as _publish_component_entries,
 )
@@ -312,7 +313,7 @@ def _read_analytics_json(path: Path) -> dict[str, Any]:
 
 def _analytics_line_count(payload: bytes, path: Path | None = None) -> int:
     try:
-        return sum(1 for line in payload.decode("utf-8").splitlines() if line.strip())
+        return sum(1 for line in ndjson_lines(payload.decode("utf-8")) if line.strip())
     except UnicodeDecodeError as exc:
         if path is not None:
             _analytics_failure(path, f"could not decode analytics NDJSON as UTF-8: {exc}")
@@ -362,7 +363,7 @@ def _canonical_run_journals(path: Path, label: str) -> dict[str, list[str]]:
     """Compare each source journal by JSON value, never incidental spelling."""
     try:
         journals: dict[str, list[str]] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in ndjson_lines(path.read_text(encoding="utf-8")):
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -1460,12 +1461,12 @@ def _validate_runs(staging: Path) -> None:
 
 
 def _count_lines(path: Path, label: str) -> int:
-    return sum(1 for line in _read_text(path, label).splitlines() if line.strip())
+    return sum(1 for line in ndjson_lines(_read_text(path, label)) if line.strip())
 
 
 def _read_ndjson(path: Path, label: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for number, line in enumerate(_read_text(path, label).splitlines(), start=1):
+    for number, line in enumerate(ndjson_lines(_read_text(path, label)), start=1):
         if not line.strip():
             continue
         try:

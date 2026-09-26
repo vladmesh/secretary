@@ -21,6 +21,7 @@ from secretary._fsutil import (
 from secretary._fsutil import (
     ensure_dir as _ensure_dir,
 )
+from secretary._fsutil import ndjson_lines
 from secretary._fsutil import (
     publish_component_entries as _publish_component_entries,
 )
@@ -399,7 +400,8 @@ def export_runs(
                 continue
             relative = path.relative_to(snapshot).as_posix()
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                text = path.read_text(encoding="utf-8")
+                lines = ndjson_lines(text) if path.suffix == ".jsonl" else text.splitlines()
             except OSError as exc:
                 raise RuntimeError(f"could not read state file {relative}: {exc}") from None
             except UnicodeError as exc:

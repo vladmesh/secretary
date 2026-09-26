@@ -36,6 +36,8 @@ from typing import Any
 
 from secretary import _proc, state_repo
 from secretary._fsutil import (
+    ndjson_line,
+    ndjson_lines,
     publish_component_entries,
     publish_state_atomic,
     write_json,
@@ -882,10 +884,10 @@ def materialize_checkpoint(
             raise InstallError(f"private checkpoint is missing state/runs/{name}")
 
     try:
-        card_lines = [line for line in board.read_text("cards.ndjson").splitlines() if line.strip()]
+        card_lines = [line for line in ndjson_lines(board.read_text("cards.ndjson")) if line.strip()]
         run_lines = [
             line
-            for line in (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
+            for line in ndjson_lines((runs_source / "runs.ndjson").read_text(encoding="utf-8"))
             if line.strip()
         ]
         # A checkpoint written before sprints joined the board export carries no
@@ -893,9 +895,9 @@ def materialize_checkpoint(
         # next tick writes both.
         sprint_lines = [
             line
-            for line in (
+            for line in ndjson_lines(
                 board.read_text("sprints.ndjson") if board.has("sprints.ndjson") else ""
-            ).splitlines()
+            )
             if line.strip()
         ]
         cards = [json.loads(line) for line in card_lines]
@@ -977,7 +979,7 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, list[tuple[int, str]
     """Rebuild the JSONL files whose records the checkpoint normalizes."""
     grouped: dict[Path, list[tuple[int, object]]] = {}
     try:
-        lines = (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
+        lines = ndjson_lines((runs_source / "runs.ndjson").read_text(encoding="utf-8"))
         for raw in lines:
             if not raw.strip():
                 continue
@@ -1003,7 +1005,7 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, list[tuple[int, str]
             )
         try:
             journals[relative] = [
-                (number, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                (number, ndjson_line(record))
                 for number, record in ordered
             ]
         except (TypeError, ValueError):
@@ -1035,8 +1037,8 @@ def _live_run_journals(state_dir: Path) -> dict[Path, list[str]]:
                 continue
             relative = path.relative_to(state_dir)
             journals[relative] = [
-                json.dumps(json.loads(line), ensure_ascii=False, sort_keys=True) + "\n"
-                for line in path.read_text(encoding="utf-8").splitlines()
+                ndjson_line(json.loads(line))
+                for line in ndjson_lines(path.read_text(encoding="utf-8"))
                 if line.strip()
             ]
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
