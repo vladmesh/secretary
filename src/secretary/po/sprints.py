@@ -6,6 +6,10 @@ outlives a session: the sprint's why-document in the instance knowledge and the 
 `NOTES.md`. This module is what the resolver needs of the sprint and nothing else: read its recorded
 session, find its why-document, record the fresh session, and say so in the sprint's comments.
 
+The same port serves the production rule of a dispatcher's submit (secretary-1764): the sprint's
+`allowed_productions`, and the handover of a card the rule refuses to the owner (`task handover`, as
+role `po` and actor `po-service`).
+
 The service holds a :class:`SprintSessions`; :class:`BoardSprintSessions` is the installation's
 board, and a unit test gives the service a fake one.
 """
@@ -17,9 +21,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-# The role and actor of what the resolver writes on a sprint: its comment and its session record.
+# The role and actor of what the resolver writes on a sprint: its comment and its session record,
+# and of the handover of a card the production rule refuses.
 RESOLVER_ROLE = "po"
 RESOLVER_ACTOR = "po-service"
+# `task handover` refusals decided before anything was written: the card cannot be handed over.
+_DEFINITE_HANDOVER_REFUSALS = frozenset(
+    {"validation", "transition_forbidden", "already_handed_over", "not_found", "role_forbidden"}
+)
 # Where an open-sprint skill writes a sprint's why-document, under the instance repository.
 WHY_DOCUMENTS_RELATIVE = Path("state") / "knowledge" / "decisions"
 
@@ -29,6 +38,16 @@ class SprintRecord:
     ref: str
     status: str
     po_session: str | None
+    # The productions its operation cards may touch (`sprint create --allow-production`).
+    allowed_productions: tuple[str, ...] = ()
+
+
+class HandoverRefused(Exception):
+    """`task handover` refused the card before writing anything; `code` is the board's."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -47,6 +66,10 @@ class SprintSessions(Protocol):
     def comment(self, sprint_ref: str, body: str, *, request_id: str) -> None: ...
 
     def record_po_session(self, sprint_ref: str, session_id: str, *, request_id: str) -> None: ...
+
+    def hand_over(self, card_ref: str, reason: str, *, request_id: str) -> bool:
+        """Hand the card to the owner; True when `request_id` already did. `HandoverRefused` when it cannot be."""
+        ...
 
 
 def find_why_documents(instance_dir: Path | str, sprint_ref: str) -> list[WhyDocument]:
@@ -144,6 +167,7 @@ class BoardSprintSessions:
             str(document.get("ref") or sprint_ref),
             str(document.get("status") or ""),
             document.get("po_session") or None,
+            tuple(str(project) for project in document.get("allowed_productions") or ()),
         )
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:
@@ -163,11 +187,33 @@ class BoardSprintSessions:
             request_id=request_id,
         )
 
+    def hand_over(self, card_ref: str, reason: str, *, request_id: str) -> bool:
+        from secretary.board.backend import card_client
+        from secretary.board.owner_handover import OWNER
+        from secretary.tasks import TaskError, TaskWriter
+
+        writer = TaskWriter(card_client(self.instance), data_dir=self.data_dir)
+        try:
+            result = writer.handover(
+                role=RESOLVER_ROLE,
+                actor=RESOLVER_ACTOR,
+                reference=card_ref,
+                to=OWNER,
+                reason=reason,
+                request_id=request_id,
+            )
+        except TaskError as exc:
+            if exc.code in _DEFINITE_HANDOVER_REFUSALS:
+                raise HandoverRefused(exc.code, str(exc)) from None
+            raise
+        return bool(result.get("replayed"))
+
 
 __all__ = [
     "RESOLVER_ACTOR",
     "RESOLVER_ROLE",
     "BoardSprintSessions",
+    "HandoverRefused",
     "SprintRecord",
     "SprintSessions",
     "WhyDocument",

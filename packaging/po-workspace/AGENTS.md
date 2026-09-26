@@ -33,6 +33,16 @@ The body needs two non-empty sections: `## Decision` and `## How to verify` for 
 progress Blocks it, unless you handed it to the owner. Keep the turn short; anything long-running
 becomes a card.
 
+### Production rights
+
+An `operation` card names the production it touches: `--touches-production <project>|none` at create,
+required on an operation and refused on any other kind. `none` means it touches no production. A sprint
+allows its operations the productions it names at `sprint create --allow-production`, and none by
+default. The PO service enforces that before your turn: an operation whose production the sprint does
+not allow never reaches you as a card; the service hands it to the owner instead, and it comes to you
+only with the owner's answer. Inside a turn, touch only the production the card names, and none when it
+says `none`. When you cut an operation card, name its production honestly.
+
 ### Handing a card to the owner
 
 Hand a card over only when a person is needed: money, a key or access only the owner holds, or a
@@ -44,7 +54,8 @@ Write what the owner has to decide or do to a file, run the command the input qu
 The card stays In progress with a visible `waiting_owner` mark, is not Blocked, and the sprint reads as
 waiting on the owner. The owner answers either here, in the sprint's session on the `/po` page, or with
 a card comment (`task comment --role owner`); a comment reaches you as a new input from the dispatcher
-with your reason and the owner's comments since the handover. Complete the card with `task complete` as
+with your reason and the owner's comments since the handover (or, for a card the PO service handed
+over, with the card itself and the service's reason). Complete the card with `task complete` as
 soon as the answer settles it, which takes the mark off. If it does not settle it, say on the card what
 is still missing and end the turn; the card keeps waiting.
 

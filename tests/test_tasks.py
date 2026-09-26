@@ -2336,7 +2336,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         ):
             with self.subTest(kind=kind, role=role):
                 reference = f"secretary-{number}"
-                self.assertEqual(self.create_in(self.pinned_sprint(), reference, kind, role=role), ("skipped", None, None))
+                # An operation card names its production (secretary-1764).
+                production = {"touches_production": "none"} if kind == "operation" else {}
+                self.assertEqual(
+                    self.create_in(self.pinned_sprint(), reference, kind, role=role, **production),
+                    ("skipped", None, None),
+                )
                 card = self.card(reference)
                 self.assertEqual((card["type"], card["sprint"], card["state"]), (kind, "sprint:test", "ready"))
                 self.assertEqual(self.writer.audit.events(reference)[0]["payload"]["review"], "skipped")
@@ -2352,6 +2357,54 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         with self.assertRaisesRegex(TaskError, "needs --sprint"):
             self.writer.create(role="po", actor="po", project="secretary", task_type="operation", title="T")
         self.assertBoardUnchanged(before)
+
+    def register_projects(self, *projects: str) -> None:
+        """The instance's project registry, which `--touches-production` is checked against."""
+        registry = Path(self.tmpdir.name) / "projects"
+        registry.mkdir(exist_ok=True)
+        for project in projects:
+            (registry / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+
+    def test_an_operation_create_requires_a_registered_production_or_none_and_writes_nothing_otherwise(self) -> None:
+        """secretary-1764: required on operation, refused on every other kind, an unknown project refused."""
+        self.register_projects("secretary", "relay")
+        before = self.board_snapshot()
+        for number, (kind, fields, message) in enumerate(
+            (
+                ("operation", {}, "needs --touches-production <project>|none"),
+                ("operation", {"touches_production": "ghost"}, "unknown registered project: ghost"),
+                ("decision", {"touches_production": "none"}, "a decision card takes none"),
+                ("research", {"touches_production": "relay"}, "a research card takes none"),
+            ),
+            start=596,
+        ):
+            with self.subTest(kind=kind, fields=fields), self.assertRaisesRegex(TaskError, message) as raised:
+                self.create_kind(f"secretary-{number}", kind, **fields)
+            self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+    def test_an_operation_stores_its_production_and_show_and_list_carry_it(self) -> None:
+        self.register_projects("secretary", "relay")
+        created = self.create_kind("secretary-594", "operation", touches_production="relay")
+        self.create_kind("secretary-595", "operation", touches_production="none")
+        self.create_kind("secretary-593", "decision")
+
+        self.assertEqual(created["task"]["touches_production"], "relay")
+        card = self.card("secretary-594")
+        self.assertEqual(card["touches_production"], "relay")
+        self.assertEqual(card["extensions"]["extra"]["touches_production"], "relay")
+        self.assertEqual(self.card("secretary-595")["touches_production"], "none")
+        self.assertNotIn("touches_production", self.card("secretary-593"))
+        listed = {row["ref"]: row.get("touches_production") for row in self.writer.reader.list(states={"ready"})}
+        self.assertEqual(
+            (listed["secretary-594"], listed["secretary-595"], listed["secretary-593"]), ("relay", "none", None)
+        )
+        # The production is part of the create's identity: the same request id with another one is refused.
+        self.assertEqual(self.writer.audit.events("secretary-594")[0]["payload"]["touches_production"], "relay")
+        after = self.board_snapshot()
+        with self.assertRaises(TaskError):
+            self.create_kind("secretary-594", "operation", touches_production="secretary")
+        self.assertBoardUnchanged(after)
 
     def in_progress_decision(self, reference: str = "secretary-590") -> str:
         self.create_kind(reference, "decision")

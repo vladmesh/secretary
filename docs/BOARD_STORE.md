@@ -1099,6 +1099,11 @@ Three typed keys live here on purpose, with no column: the owner-handover mark o
 In progress drops them, and they are read only through `waiting_owner`, which treats a partial or
 malformed set as no mark. A store without them reads exactly as before.
 
+One more typed key, with no column either: `touches_production` of an `operation` card, a registered
+project id or `none` (`board/production_rights.py`, [Protocols](PROTOCOLS.md#production-rights)). Only
+`task create` writes it, and it is read only through `touches_production`, which treats a malformed value
+as none at all. No other kind carries it.
+
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that
 revision moved current rows onto `extra`. History (`board_events`, committed `requests`) and

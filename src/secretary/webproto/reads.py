@@ -29,6 +29,7 @@ from typing import Any
 
 from secretary.board.backend import CARD, board_client
 from secretary.board.owner_handover import waiting_owner
+from secretary.board.production_rights import touches_production
 from secretary.checkpoint import rpo_problem
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.state import DispatcherRecord
@@ -674,6 +675,8 @@ def _card_value(card: dict[str, Any] | None) -> dict[str, Any] | None:
     value["routing"] = card.get("routing")
     # A decision/operation card the PO handed to the owner: `{since, reason, by}`, else null.
     value["waiting_owner"] = waiting_owner(card)
+    # The production an operation card touches (`none` included), else null.
+    value["touches_production"] = touches_production(card)
     return value
 
 

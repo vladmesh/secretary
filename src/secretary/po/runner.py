@@ -389,21 +389,30 @@ class PoRunner:
         """Start one turn, or refuse with nothing written when one is already running."""
         return self._send(session_id, text, None)[0]
 
-    def send_request(self, session_id: str, text: str, request_id: str) -> tuple[Turn, bool]:
+    def send_request(
+        self, session_id: str, text: str, request_id: str, *, card: dict[str, Any] | None = None
+    ) -> tuple[Turn, bool]:
         """`send` under a form's request id; the flag says whether this call started the turn.
 
         A request id that already started this send gets that turn back and no process, and one that
         belongs to anything else is `RequestConflict` (`PoStore.claim_turn`): a CLI is launched only for
-        a turn this call created, after its transaction committed.
+        a turn this call created, after its transaction committed. `card` is the facts a dispatcher
+        input carries beside its text; they are part of what the id is bound to.
         """
-        return self._send(session_id, text, request_id)
+        return self._send(session_id, text, request_id, card)
 
-    def _send(self, session_id: str, text: str, request_id: str | None) -> tuple[Turn, bool]:
+    def _send(
+        self, session_id: str, text: str, request_id: str | None, card: dict[str, Any] | None = None
+    ) -> tuple[Turn, bool]:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
         with self._lock:
             turn, created = self.store.claim_turn(
-                session_id, text, lambda seq: self.files(session_id, seq).stdout, request_id=request_id
+                session_id,
+                text,
+                lambda seq: self.files(session_id, seq).stdout,
+                request_id=request_id,
+                card=card,
             )
             if not created:
                 return turn, False

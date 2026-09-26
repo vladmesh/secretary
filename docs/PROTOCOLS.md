@@ -188,6 +188,15 @@ role). It must carry `--sprint`, and it refuses, each with its reason, `--head`,
 a sprint's executor pins do not apply to it. The PO needs no `--sprint-override` to create one in its
 sprint.
 
+An `operation` card names the production it touches: `--touches-production <project>|none` is
+required on it, where `<project>` is a project of the instance registry (the check `sprint create
+--allow-production` makes) and `none` means it touches no production. The flag is refused on every other
+kind, and a missing flag or an unknown project is refused (`validation`) with nothing written. The value
+is one typed field of the card's extension bag (`extensions.extra.touches_production`; no column, no
+migration), written only at create and part of the create's request identity. `task show` and `task
+list` carry it as a top-level `touches_production`, and the card page shows it. See
+[Production rights](#production-rights).
+
 **Submit.** When the dispatcher claims a Ready one it launches no head and cuts no workspace. The
 claim moves the card In progress; such a card neither takes nor counts against the claim capacity,
 which counts heads. The dispatcher then:
@@ -195,7 +204,8 @@ which counts heads. The dispatcher then:
 1. resolves the sprint's PO session, `sprint_session(sprint_ref, request_id)` (see
    [The sprint's PO session and productions](#the-sprints-po-session-and-productions));
 2. submits one input to that session, `source: dispatcher`, carrying the card ref, kind and title, the
-   card body, the sprint's comments in board order, and the exact completion command:
+   card body, the sprint's comments in board order, and the exact completion command, and beside the
+   text the card's structured facts (`card`, below):
 
    ```text
    python3 -P -m secretary task complete --ref <card> --role po --kind <kind> --body-file <file> --request-id <id>
@@ -208,10 +218,17 @@ The input also quotes the handover command, for a card only the owner can answer
 python3 -P -m secretary task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
 ```
 
+The facts are `{card_ref, kind, touches_production, sprint_ref, input}`: `touches_production` is the
+operation card's value (`null` on a decision card), and `input` is `card` for this submit and
+`owner_answer` for a follow-up carrying the owner's answer (below). They are part of the submit's
+fingerprint (`send_fingerprint(session, text, card)`, in `po_requests` and on the queued input), so a
+replay is the same session, text and facts, and anything else under the same id is `request_conflict`
+as before. A web input carries none, and a send without facts binds exactly what it bound before them.
+
 The four request ids (resolve, submit, completion, handover) are `dispatcher-<claim attempt>-po-session-<card>`,
 `...-po-submit-<card>`, `...-po-complete-<card>` and `...-po-handover-<card>`, derived at claim and kept on
 the card's dispatcher record with the resolve's answer (the session, `created` or `recorded`), the frozen
-input text and the submit's answer. A resolve or submit the service did not answer (`outcome_unknown`, the service not
+input text and facts, and the submit's answer. A resolve or submit the service did not answer (`outcome_unknown`, the service not
 running, or a refusal coded `unavailable`) is repeated on the next tick under the same id, never a
 fresh one, since a fresh id could open a second PO session. The card stays In progress and the tick
 reports `po-service-unanswered` (degraded); a service that stays down is not a failure of the card. A
@@ -275,6 +292,36 @@ The PO's Done and the dispatcher's Blocked are card transitions of a card linked
 wakes the observer ([Resume and observer wakes](#resume-and-observer-wakes)); the claim and the submit
 do not.
 
+#### Production rights
+
+By default an operation touches no production; a sprint allows its operations the productions it names
+at create ([`allowed_productions`](#the-sprints-po-session-and-productions)). The rule is enforced in one
+place: the PO service's handling of a dispatcher submit (`PoService.submit`), after the request id is
+reserved and the session found open, and before anything is queued. Neither the dispatcher nor the web
+decides it. On a submit whose facts say `kind: operation`, `input: card`:
+
+- `touches_production` is `none`, or is in the sprint's `allowed_productions` (read through the
+  service's sprint port): the input is queued as any other;
+- otherwise nothing is queued. The service hands the card to the owner through the existing handover
+  ([below](#handover-to-the-owner)): role `po`, actor `po-service`, request id `<submit id>:handover`,
+  reason `operation touches production <p>; sprint <ref> allows [<list>]` (the list comma-separated, `[]`
+  when empty). It answers the submit `{queued: false, seq: null, handed_over: true, reason}`, and the
+  dispatcher records `handed_over` on its record (tick action `po-card-handed-over`) and from then on
+  waits for the owner like any marked card (`_await_owner`). A repeat of the same submit id answers the
+  same handover (`repeated: true`) and writes nothing. A handover the board refuses before writing (the
+  card not In progress, already handed over) refuses the submit as `validation`, which Blocks the card;
+  a handover that may have committed is `outcome_unknown`, repeated under the same id;
+- facts that are missing or malformed (an operation with no `touches_production`, a dispatcher input
+  with no facts at all) and a sprint that cannot be read are refused as `unavailable`, with nothing
+  queued and nothing handed over. The input is never executed; the dispatcher repeats it each tick
+  (`po-service-unanswered`) and the card stays In progress.
+
+A decision card is not checked. Neither is the owner's answer on a handed-over card (`input:
+owner_answer`): the owner decided, so the follow-up is queued as today and the PO executes the card
+within the owner's answer. Inside a turn the PO touches only the production the card names. The
+sprint's `allowed_productions` is not changed after create, so an operation outside it always reaches
+the owner.
+
 #### Handover to the owner
 
 The PO hands a card to the owner when a person is needed: money, a key or access only the owner holds,
@@ -314,7 +361,10 @@ latest handover, it submits one follow-up input to the same PO session, `source:
 the card ref, the handover reason, the owner's comments since the handover in board order and the
 completion command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
 comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
-rebuilt record never makes a second input for the same comment; a later owner comment makes one more
+rebuilt record never makes a second input for the same comment. It carries the card's facts with
+`input: owner_answer`, which the service does not check against the sprint's productions. When the PO
+service handed the card over ([Production rights](#production-rights)), the PO has not seen the card
+yet, so the follow-up also carries the card body and says the service handed it over; a later owner comment makes one more
 follow-up, carrying every comment since the handover. A follow-up the service does not answer is
 repeated next tick under the same id; one it refuses outright (its session closed, say) Blocks the card
 with `the PO service refused the owner answer of this card: <reason>`, and one it set aside in
