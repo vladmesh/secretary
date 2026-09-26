@@ -797,7 +797,7 @@ class WebApp:
                 status_for(exc.code),
                 pages.po_page(
                     self.po.po_overview(),
-                    request_id=_po_request_id(),
+                    request_id=_first(body, "request_id") if _repeat_same(exc) else _po_request_id(),
                     refusal=exc.to_json(),
                     submitted={"cli": cli, "model": model, "effort": effort},
                 ),
@@ -815,8 +815,9 @@ class WebApp:
         """One message into the PO service's queue. A refusal renders the session again with the text kept.
 
         A message for a session whose turn is running is queued, not refused. A refused submission
-        (the service not running, a closed session) wrote nothing; an `owner_conflict` keeps the form's
-        request id, so the same form may be sent again.
+        (the service not running, a closed session) wrote nothing and gets a fresh request id. A lost
+        answer (`PoOutcomeUnknown`) may have queued the message, so the form keeps its request id and a
+        resend is a replay; an `owner_conflict` keeps it too.
         """
         _fields(body, PO_SEND_FIELDS, "PO message")
         session_id = params["session"]
@@ -830,7 +831,9 @@ class WebApp:
                 status_for(exc.code),
                 pages.po_session(
                     self.po.po_session(session_id),
-                    request_id=request_id if exc.code == "owner_conflict" else _po_request_id(),
+                    request_id=request_id
+                    if exc.code == "owner_conflict" or _repeat_same(exc)
+                    else _po_request_id(),
                     draft=text,
                     refusal=exc.to_json(),
                 ),
@@ -1192,6 +1195,11 @@ def _html(status: int, markup: str) -> Response:
 def _po_request_id() -> str:
     """The id one PO form carries for its whole life, as the sprint form's does."""
     return f"web-po-{uuid.uuid4()}"
+
+
+def _repeat_same(exc: ReadError) -> bool:
+    """Whether a refusal says the request may have been done and only the same request may repeat it."""
+    return exc.data.get("action") == "repeat_same_request"
 
 
 def _presented_cookie(headers: Any) -> str:

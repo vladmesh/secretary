@@ -3495,6 +3495,12 @@ def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
         return ""
     code = str(refusal.get("code") or "")
     message = str(refusal.get("message") or "")
+    if (refusal.get("data") or {}).get("reason") == "outcome_unknown":
+        return (
+            '<p class="refused"><b>no answer from the PO service: it may have done this.</b> '
+            "Sending the same form again is safe; it carries the same request id. "
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
     if code == "owner_conflict" and refused == "close":
         return (
             '<p class="refused"><b>not closed: a turn is still running in this session.</b> '

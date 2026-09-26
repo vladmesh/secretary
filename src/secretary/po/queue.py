@@ -155,6 +155,21 @@ class PoQueue:
     def find(self, request_id: str) -> QueuedInput | None:
         return next((item for item in self.pending() if item.request_id == request_id), None)
 
+    def find_refused(self, request_id: str) -> dict[str, Any] | None:
+        """The set-aside input (with its `reason`) that carried `request_id`, if any."""
+        try:
+            entries = sorted((self.directory / REFUSED_DIR_NAME).glob(f"*{SUFFIX}"))
+        except OSError as exc:
+            raise QueueError(f"could not read the set-aside PO inputs: {exc}") from None
+        for entry in entries:
+            try:
+                document = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(document, dict) and document.get("request_id") == request_id:
+                return document
+        return None
+
     def remove(self, item: QueuedInput) -> None:
         """Drop an input whose turn exists in the store. Removing one already gone is not an error."""
         try:

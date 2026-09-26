@@ -362,11 +362,29 @@ on the next hand-over and creates nothing. An input that can never become a turn
 request id taken by something else) moves to `DATA_DIR/po-queue/refused/` with its `reason`. A session
 with queued messages refuses a close (409). Queued messages survive any restart of either service.
 
+**Request ids.** One check, `PoService._reserve`, decides every request id, for `submit` and
+`create_session` alike (and any later operation that takes one), under the lock that serializes them. An
+id belongs to one operation with fixed inputs from the moment it is acknowledged, wherever it is recorded:
+a `po_requests` row, a message pending in `po-queue/`, or a message set aside in `po-queue/refused/`. The
+same operation with the same inputs is a replay; anything else is 409 `request_conflict`. So a session
+create can never take the id of a message still waiting in the queue.
+
 **Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
 request line, one JSON answer line, ops `submit`, `create_session`, `stop_turn`, `close_session`,
 `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the store and the queue
-directory and sends every write here. With the service stopped every `/po` write is refused on the page
-(503, `the PO service is not running`) and nothing is written; the web never starts a turn itself.
+directory and sends every write here. The service runs a request only once its whole line arrived. Two
+failures are told apart:
+
+- nothing reached the service (no socket, connection refused, the send failed before the line ended):
+  refused on the page (503, `the PO service is not running ... nothing was sent or written`), with a new
+  request id for the next try;
+- the request was delivered and its answer was lost or late: `the PO service may have accepted this
+  message; sending again with the same form is safe` (503, `data.reason = outcome_unknown`). The page keeps
+  the form's **same request id** and text, so a resend is a replay, never a second message. A lost answer to
+  a session create says the same and keeps its id; to a stop or a close it says repeating it is safe (both
+  are idempotent).
+
+The web never starts a turn itself.
 
 **Service start.** Every turn left `running` is looked at once:
 
@@ -380,8 +398,15 @@ directory and sends every write here. With the service stopped every `/po` write
   this turn's re-run; not re-run a second time (it was re-run because: ...)`.
 
 A turn the owner stopped was settled `interrupted`/`stopped by the owner` by the stop and is never re-run.
-Queued inputs are taken after this, and a store that does not answer at start is retried every second
-before any input is taken. So a restart of the PO service costs at most the turn it interrupted, re-run.
+The re-run allowance is spent (`mark_rerun`) only after everything the re-run needs is loaded — the
+owner's message from the feed, the session, the prompt file; a store that fails before that leaves the row
+untouched for the next pass. A re-run that cannot be prepared for good (no owner message) is settled
+`failed` with the reason; one whose launch fails after the allowance is settled `failed` (`the re-run did
+not start: ...`), by the next pass if the store did not answer the first time. Recovery counts as done
+only when every `running` row has a process under this service or is settled; until then it is retried,
+first after a second and then doubling up to 30 s (journal: `still running without a process; recovery
+retries in Ns`), and the sessions of those rows take no queued input while every other session goes on.
+So a restart of the PO service costs at most the turn it interrupted, re-run.
 
 **Upgrades never kill a running turn.** The PO itself runs `secretary upgrade` inside a turn. The `po`
 step of `secretary upgrade` asks for a restart when the service's process inputs moved (product code or

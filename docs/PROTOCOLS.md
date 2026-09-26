@@ -3083,7 +3083,11 @@ and its inputs installation-wide (`po_requests`): repeated with the same inputs 
 session, the turn, or the message still queued, and does nothing else; reused otherwise it is 409
 `request_conflict`. Reads come from the board store and the queue directory; every write goes to the PO
 service over its socket (`secretary.po.client`), and with the service stopped it is refused as 503
-`backend_unavailable` whose message starts `the PO service is not running`; the web never runs a turn.
+`backend_unavailable` whose message starts `the PO service is not running`; the web never runs a turn. A
+write that reached the service but lost its answer is 503 `backend_unavailable` with `data: {reason:
+"outcome_unknown", action: "repeat_same_request"}` (`PoOutcomeUnknown`): it may have been done, so the
+re-rendered create or send form keeps its request id and repeating it is a replay; a stop or close may
+simply be repeated.
 
 **PO documents.** `po.po_create_session(request_id, cli, model, effort="default")` answers
 `{kind: "po_session_created", request_id, session_id, effort, repeated}`; an `effort` outside

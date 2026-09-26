@@ -158,6 +158,21 @@ class PoRequestConflict(ReadError):
     code = "request_conflict"
 
 
+class PoOutcomeUnknown(ReadError):
+    """A /po write reached the PO service and no answer came back, so it may have been carried out.
+
+    Not "nothing was written": the request was delivered. The safe move is the same request again —
+    the same form with the same request id, which the service answers as a replay, or the same stop or
+    close, which are idempotent — and never a new request id. `data` says so for a client:
+    ``{"reason": "outcome_unknown", "action": "repeat_same_request"}``.
+    """
+
+    code = "backend_unavailable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, data={"reason": "outcome_unknown", "action": "repeat_same_request"})
+
+
 class PoSessionClosed(ReadError):
     """The owner closed this PO session; a message into it starts no turn and nothing was written.
 

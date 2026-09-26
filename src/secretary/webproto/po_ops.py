@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
-from secretary.po.client import PoServiceClient, ServiceRefused, ServiceUnavailable
+from secretary.po.client import OutcomeUnknown, PoServiceClient, ServiceRefused, ServiceUnavailable
 from secretary.po.models import DEFAULT_EFFORTS, efforts_from_instance, models_from_instance
 from secretary.po.queue import PoQueue, QueueError
 from secretary.po.store import (
@@ -40,6 +40,7 @@ from secretary.po.store import (
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
     InstallationUnavailable,
+    PoOutcomeUnknown,
     PoRequestConflict,
     PoSessionClosed,
     PoSessionNotFound,
@@ -178,7 +179,8 @@ class PoLayer(ProtocolBoundary):
                 )
         client = self._client_or_refuse()
         created = self._store(
-            lambda: client.create_session(cli=cli, model=model, effort=effort, request_id=request_id)
+            lambda: client.create_session(cli=cli, model=model, effort=effort, request_id=request_id),
+            unknown="the PO service may have opened this session; sending the same form again is safe",
         )
         return {
             "kind": "po_session_created",
@@ -200,7 +202,10 @@ class PoLayer(ProtocolBoundary):
         if not str(text or "").strip():
             raise ValidationRefused("an empty message starts no turn")
         client = self._client_or_refuse()
-        sent = self._store(lambda: client.submit(session_id=session_id, text=text, request_id=request_id))
+        sent = self._store(
+            lambda: client.submit(session_id=session_id, text=text, request_id=request_id),
+            unknown="the PO service may have accepted this message; sending again with the same form is safe",
+        )
         return {
             "kind": "po_turn_queued" if sent.get("queued") else "po_turn_started",
             "request_id": request_id,
@@ -214,7 +219,12 @@ class PoLayer(ProtocolBoundary):
     def po_stop(self, *, session_id: str, seq: int) -> dict[str, Any]:
         """Stop turn `seq` if it is the one running; a stale stop form stops nothing newer."""
         client = self._client_or_refuse()
-        stopped = bool(self._store(lambda: client.stop_turn(session_id=session_id, seq=seq)).get("stopped"))
+        stopped = bool(
+            self._store(
+                lambda: client.stop_turn(session_id=session_id, seq=seq),
+                unknown="the PO service may have stopped this turn; stopping it again is safe",
+            ).get("stopped")
+        )
         store = self._store_or_refuse()
         turn = self._store(lambda: store.turn(session_id, seq)) if stopped else None
         return {
@@ -232,7 +242,10 @@ class PoLayer(ProtocolBoundary):
         written. No request id: a close repeated is the same close.
         """
         client = self._client_or_refuse()
-        self._store(lambda: client.close_session(session_id=session_id, actor=OWNER))
+        self._store(
+            lambda: client.close_session(session_id=session_id, actor=OWNER),
+            unknown="the PO service may have closed this session; closing it again is safe",
+        )
         store = self._store_or_refuse()
         session = self._store(lambda: store.session(session_id))
         return {"kind": "po_session_closed", "session": _session(session, running=False)}
@@ -285,7 +298,8 @@ class PoLayer(ProtocolBoundary):
             raise InstallationUnavailable(str(exc)) from None
 
     @staticmethod
-    def _store(call: Callable[[], Any]) -> Any:
+    def _store(call: Callable[[], Any], *, unknown: str = "") -> Any:
+        """Run one store read or service call, its failure translated; `unknown` words a lost answer."""
         try:
             return call()
         except SessionNotFound as exc:
@@ -298,6 +312,10 @@ class PoLayer(ProtocolBoundary):
             raise PoSessionClosed(str(exc)) from None
         except ServiceUnavailable as exc:
             raise RuntimeUnavailable(f"{exc}; nothing was sent or written") from None
+        except OutcomeUnknown as exc:
+            raise PoOutcomeUnknown(
+                f"{unknown or 'the PO service may have carried this out'} ({exc})"
+            ) from None
         except ServiceRefused as exc:
             if exc.code == "validation":
                 raise ValidationRefused(str(exc)) from None

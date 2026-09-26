@@ -8,8 +8,12 @@ The codes are the store's outcomes (`session_not_found`, `session_closed`, `requ
 `turn_in_progress`) plus `validation` and `unavailable`; :class:`PoServiceClient` raises the store's
 own exception for the first four, so a caller keeps the vocabulary it had when the runner was local.
 
-When nothing answers on the socket the service is not running, and :class:`ServiceUnavailable` says
-so. Nothing here falls back to running a turn: this module imports no runner.
+Two failures are told apart, because a submitter acts on them differently. Before the request line is
+written — no socket, the connection refused, the send failing — nothing reached the service: the
+service executes only a complete line, so :class:`ServiceUnavailable` means "not running, nothing
+written". After the line was written a lost or late answer is :class:`OutcomeUnknown`: the service may
+have carried the request out, and the safe repeat is the same request (the same request id), which the
+service answers as a replay. Nothing here falls back to running a turn: this module imports no runner.
 """
 
 from __future__ import annotations
@@ -39,6 +43,10 @@ class PoServiceError(RuntimeError):
 
 class ServiceUnavailable(PoServiceError):
     """Nothing answers on the PO service's socket, or it answered something unreadable."""
+
+
+class OutcomeUnknown(PoServiceError):
+    """The request was written to the service and no readable answer came back: it may have been done."""
 
 
 class ServiceRefused(PoServiceError):
@@ -96,21 +104,28 @@ class PoServiceClient:
 
     def call(self, op: str, **fields: Any) -> dict[str, Any]:
         line = json.dumps({"op": op, **fields}, ensure_ascii=False).encode("utf-8") + b"\n"
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(self.timeout)
+            try:
                 connection.connect(str(self.path))
+                # A failed sendall did not deliver the final newline, and the service runs no
+                # request without it: still nothing written.
                 connection.sendall(line)
+            except OSError as exc:
+                raise ServiceUnavailable(f"{NOT_RUNNING}: {self.path}: {exc.strerror or exc}") from None
+            try:
                 connection.shutdown(socket.SHUT_WR)
                 answer = _read_line(connection)
-        except OSError as exc:
-            raise ServiceUnavailable(f"{NOT_RUNNING}: {self.path}: {exc.strerror or exc}") from None
+            except OSError as exc:
+                raise OutcomeUnknown(
+                    f"no answer from the PO service on {self.path}: {exc.strerror or exc}"
+                ) from None
         try:
             document = json.loads(answer)
         except ValueError:
-            raise ServiceUnavailable(f"{NOT_RUNNING}: it gave no readable answer on {self.path}") from None
+            raise OutcomeUnknown(f"no readable answer from the PO service on {self.path}") from None
         if not isinstance(document, dict):
-            raise ServiceUnavailable(f"{NOT_RUNNING}: it gave no readable answer on {self.path}")
+            raise OutcomeUnknown(f"no readable answer from the PO service on {self.path}")
         if document.get("ok") is True and isinstance(document.get("result"), dict):
             return document["result"]
         error = document.get("error") if isinstance(document.get("error"), dict) else {}
@@ -180,6 +195,7 @@ def request_restart(
 
 __all__ = [
     "NOT_RUNNING",
+    "OutcomeUnknown",
     "PoServiceClient",
     "PoServiceError",
     "RestartAnswer",

@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import ast
 import getpass
+import inspect
 import json
 import os
+import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
@@ -43,11 +46,18 @@ from secretary.po.runner import (
     RERUN_REASON,
     STOPPED_REASON,
     PoRunner,
+    RunnerError,
     still_running,
 )
 from secretary.po.service import PoService, ServiceStartError, listening
 from secretary.web.app import WebApp
-from secretary.webproto.errors import PoRequestConflict, PoSessionClosed, PoTurnInProgress, RuntimeUnavailable
+from secretary.webproto.errors import (
+    PoOutcomeUnknown,
+    PoRequestConflict,
+    PoSessionClosed,
+    PoTurnInProgress,
+    RuntimeUnavailable,
+)
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
 from tests.fakes.upgrade import FakeUnitInstaller
@@ -568,6 +578,247 @@ class EndpointTests(ServiceFixture):
         self.assertEqual(len(store.sessions()), 1)
         self.assertFalse(queue_dir(self.data).exists() and any(queue_dir(self.data).glob("*.json")))
         self.assertEqual(layer.po_session("s-1")["session"]["session_id"], session.session_id)
+
+
+class RequestIdReservationTests(ServiceFixture):
+    """Review 5: one reservation check (`PoService._reserve`) owns every request id from its acknowledgement."""
+
+    def test_a_queued_message_keeps_its_id_against_a_session_create_and_later_becomes_its_turn(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        service.submit(session_id=session_id, text="GATE hold", request_id="hold")
+        queued = service.submit(session_id=session_id, text="accepted message", request_id="reserved")
+        self.assertTrue(queued["queued"])
+
+        with self.assertRaisesRegex(po_store.RequestConflict, "queued for PO session"):
+            service.create_session(cli="claude", model="opus", effort="default", request_id="reserved")
+
+        self.assertEqual(len(self.board.sessions), 1)
+        self.gate.touch()
+        self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+        self.assertEqual(self.store().request("reserved").seq, 2)
+        self.assertEqual(self.feed(session_id)[2], (2, "owner", "accepted message"))
+        self.assertEqual(list((queue_dir(self.data) / "refused").glob("*.json")), [])
+
+    def test_a_set_aside_message_keeps_its_id_too(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        item = service.queue.put(session_id="gone", text="lost", request_id="aside", source="web")
+        service.queue.refuse(item, "there is no PO session gone")
+
+        for call in (
+            lambda: service.create_session(cli="claude", model="opus", effort="default", request_id="aside"),
+            lambda: service.submit(session_id=session_id, text="lost", request_id="aside"),
+        ):
+            with self.subTest(), self.assertRaisesRegex(po_store.RequestConflict, "set aside"):
+                call()
+        self.assertIsNone(self.store().request("aside"))
+
+    def test_every_operation_that_takes_a_request_id_goes_through_the_one_reservation(self) -> None:
+        from secretary.po import service as service_module
+
+        takers = sorted(
+            name
+            for name in service_module._OPERATIONS.values()
+            if "request_id" in inspect.signature(getattr(PoService, name)).parameters
+        )
+        self.assertEqual(takers, ["create_session", "submit"])
+        service = self.service()
+        with mock.patch.object(service, "_reserve", wraps=service._reserve) as reserve:
+            session_id = self.session(service, request_id="c-9")
+            service.submit(session_id=session_id, text="hello", request_id="m-9")
+        self.assertEqual(
+            [call.args[:2] for call in reserve.call_args_list],
+            [("c-9", po_store.SESSION_CREATE), ("m-9", po_store.SEND)],
+        )
+
+
+class OutcomeUnknownTests(EndpointTests):
+    """Review 5: a request written to the service whose answer is lost is not "nothing was written"."""
+
+    def lose_the_reply(self):
+        """The service does the operation, then the connection drops before any answer."""
+        from secretary.po import service as service_module
+
+        def no_reply(handler) -> None:
+            request = json.loads(handler.rfile.readline())
+            self.assertTrue(handler.server.service.handle(request)["ok"])
+            handler.connection.shutdown(socket.SHUT_RDWR)
+
+        return mock.patch.object(service_module._Handler, "handle", no_reply)
+
+    def test_a_lost_reply_keeps_the_request_id_and_the_resend_is_the_same_message(self) -> None:
+        service = self.service(run=False)
+        session_id = self.session(service)
+        service.submit(session_id=session_id, text="GATE hold", request_id="hold")
+        app, headers = self.app(self.layer())
+        route = f"/po/sessions/{session_id}/messages"
+        with listening(service):
+            with self.lose_the_reply():
+                response = app.handle(
+                    "POST",
+                    route,
+                    body=urlencode({"request_id": "original", "text": "do this once"}).encode(),
+                    headers=headers,
+                )
+            body = response.body.decode()
+            self.assertEqual(response.status, 503)
+            self.assertIn(
+                "the PO service may have accepted this message; sending again with the same form is safe",
+                body,
+            )
+            self.assertNotIn("nothing was sent or written", body)
+            form = re.search(
+                r'<form[^>]+action="' + re.escape(route) + r'"[^>]*>(.*?)</form>', body, re.DOTALL
+            ).group(1)
+            self.assertEqual(re.findall(r'name="request_id" value="([^"]+)"', form), ["original"])
+            self.assertIn("do this once", form)
+
+            retry = app.handle(
+                "POST",
+                route,
+                body=urlencode({"request_id": "original", "text": "do this once"}).encode(),
+                headers=headers,
+            )
+
+        self.assertEqual(retry.status, 303)
+        self.assertEqual(self.queued(), ["do this once"])
+
+    def test_create_stop_and_close_say_the_same_and_repeating_them_is_safe(self) -> None:
+        service = self.service()
+        layer = self.layer()
+        with listening(service):
+            with (
+                self.lose_the_reply(),
+                self.assertRaisesRegex(PoOutcomeUnknown, "may have opened this session"),
+            ):
+                layer.po_create_session(request_id="c-1", cli="claude", model="opus")
+            again = layer.po_create_session(request_id="c-1", cli="claude", model="opus")
+            self.assertTrue(again["repeated"])
+            self.assertEqual(len(self.board.sessions), 1)
+            session_id = again["session_id"]
+            layer.po_send(request_id="m-1", session_id=session_id, text="GATE hold")
+            self.reached_gate(session_id, 1)
+            with (
+                self.lose_the_reply(),
+                self.assertRaisesRegex(PoOutcomeUnknown, "stopping it again is safe") as stop,
+            ):
+                layer.po_stop(session_id=session_id, seq=1)
+            self.assertEqual(stop.exception.data["action"], "repeat_same_request")
+            self.assertFalse(layer.po_stop(session_id=session_id, seq=1)["stopped"])
+            with self.lose_the_reply(), self.assertRaisesRegex(PoOutcomeUnknown, "closing it again is safe"):
+                layer.po_close(session_id=session_id)
+            self.assertEqual(
+                layer.po_close(session_id=session_id)["session"]["state"], po_store.SESSION_CLOSED
+            )
+
+    def test_the_service_runs_no_request_whose_line_never_ended(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        with listening(service) as path, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(path))
+            line = {"op": "submit", "session_id": session_id, "text": "half", "request_id": "half"}
+            connection.sendall(json.dumps(line).encode())
+            connection.shutdown(socket.SHUT_WR)
+            answer = json.loads(connection.makefile("rb").readline())
+        self.assertEqual(answer["error"]["code"], "validation")
+        self.assertEqual(self.queued(), [])
+        self.assertIsNone(self.store().request("half"))
+
+
+class RecoveryProgressTests(ServiceFixture):
+    """Review 5: recovery is complete only when no `running` row is left without a process."""
+
+    def interrupted(self, *, queued: str = "waiting") -> str:
+        first = self.service(run=False)
+        session_id = self.session(first)
+        first.submit(session_id=session_id, text="GATE interrupted", request_id="original")
+        first.submit(session_id=session_id, text=queued, request_id="waiting")
+        self.reached_gate(session_id, 1)
+        self.crash(first)
+        return session_id
+
+    def test_one_failed_feed_read_spends_no_rerun_and_recovery_retries_until_the_queue_moves(self) -> None:
+        session_id = self.interrupted()
+        real_feed = FakePoStore.feed
+        failures = []
+
+        def feed(store, sid):
+            if not failures:
+                failures.append(sid)
+                raise po_store.PoStoreError("temporary feed read failure")
+            return real_feed(store, sid)
+
+        with mock.patch.object(FakePoStore, "feed", feed):
+            second = self.service(run=False)
+            turn = self.turns(session_id)[0]
+            self.assertFalse(second._recovered)
+            self.assertEqual(
+                (turn.state, turn.reason), (po_store.RUNNING, None), "the re-run allowance is unspent"
+            )
+            second.pump()
+            self.assertEqual(self.queued(), ["waiting"], "the session of an unrecovered row takes nothing")
+            thread = threading.Thread(target=second.run, kwargs={"tick": 0.05, "say": lambda _line: None})
+            thread.start()
+            self.addCleanup(thread.join, 10)
+            self.addCleanup(second.stop)
+            eventually(lambda: second._recovered, "recovery never completed")
+
+        self.assertEqual(failures, [session_id])
+        self.assertEqual(self.turns(session_id)[0].reason, RERUN_REASON)
+        self.gate.touch()
+        self.assertEqual(self.settled(session_id, 1).state, po_store.COMPLETED)
+        self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+        self.assertEqual(self.queued(), [])
+
+    def test_a_rerun_that_cannot_launch_is_settled_failed_and_the_queue_goes_on(self) -> None:
+        session_id = self.interrupted(queued="GATE waiting")
+        self.executables = {**self.executables, "claude": str(self.root / "no-such-claude")}
+
+        second = self.service()
+
+        turn = self.turns(session_id)[0]
+        self.assertEqual(turn.state, po_store.FAILED)
+        self.assertIn("could not start", turn.reason)
+        self.assertTrue(second._recovered)
+        self.assertEqual(self.settled(session_id, 2).state, po_store.FAILED, "the queued input was taken")
+
+    def test_a_rerun_that_can_never_be_prepared_is_settled_failed_without_spending_it(self) -> None:
+        session_id = self.interrupted()
+        with mock.patch.object(PoRunner, "_owner_text", side_effect=RunnerError("no owner message")):
+            second = self.service()
+
+        turn = self.turns(session_id)[0]
+        self.assertEqual(turn.state, po_store.FAILED)
+        self.assertIn("could not be prepared", turn.reason)
+        self.assertTrue(second._recovered)
+        self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+
+    def test_a_launch_failure_the_store_could_not_record_is_settled_by_the_next_pass(self) -> None:
+        session_id = self.interrupted()
+        runner = PoRunner(
+            FakePoStore(self.board), self.data, executables={"claude": str(self.root / "missing")}
+        )
+        real_finish = FakePoStore.finish_turn
+        calls = []
+
+        def finish(store, *args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise po_store.PoStoreError("the store is away")
+            return real_finish(store, *args, **kwargs)
+
+        with mock.patch.object(FakePoStore, "finish_turn", finish):
+            runner.recover(rerun=True)
+            self.assertEqual(
+                [t.seq for t in runner.orphaned_turns()], [1], "left running, reported as orphaned"
+            )
+            runner.recover(rerun=True)
+
+        turn = self.turns(session_id)[0]
+        self.assertEqual(turn.state, po_store.FAILED)
+        self.assertIn("the re-run did not start", turn.reason)
+        self.assertEqual(runner.orphaned_turns(), [])
 
 
 PO_UNIT = "secretary-po.service"

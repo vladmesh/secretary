@@ -35,6 +35,7 @@ import os
 import socketserver
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -52,17 +53,22 @@ from secretary.po.store import (
     DEFAULT_EFFORT,
     SEND,
     SESSION_CLOSED,
+    SESSION_CREATE,
+    PoRequest,
     PoStoreError,
     RequestConflict,
     SessionClosed,
     SessionNotFound,
     TurnInProgress,
     send_fingerprint,
+    session_fingerprint,
 )
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
 # besides being woken by a submit or a settled turn.
 TICK_SECONDS = 1.0
+# The longest wait between two recovery passes while a `running` row has no process here.
+RECOVERY_MAX_DELAY_SECONDS = 30.0
 # The longest `sun_path` Linux takes, with its terminating NUL.
 MAX_SOCKET_PATH_BYTES = 107
 STOP_ACTOR = "owner"
@@ -95,7 +101,10 @@ class PoService:
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._exit = threading.Event()
+        # True only once every `running` row is live under this service or settled.
         self._recovered = False
+        self._recovery_delay = 0.0
+        self._next_recovery = 0.0
 
     # --- lifecycle --------------------------------------------------------------------------
 
@@ -116,17 +125,39 @@ class PoService:
         self.pump()
         return lines
 
-    def _recover(self) -> list[str]:
+    def _recover(self, *, tick: float = TICK_SECONDS) -> list[str]:
+        """One recovery pass; complete only when no `running` row is left without a waiter here.
+
+        An incomplete pass (a store that did not answer, a row that could not be prepared yet) is
+        retried with a doubling delay from `tick` up to `RECOVERY_MAX_DELAY_SECONDS`. Meanwhile the
+        sessions of the rows still `running` take no queued input — `pump` skips every session with a
+        running row — and every other session goes on.
+        """
+        lines: list[str] = []
         with self._lock:
             try:
                 recovered = self.runner.recover(rerun=True)
-            except Exception as exc:  # noqa: BLE001 - retried every tick until the store answers
-                return [f"secretary po: turn recovery did not run: {type(exc).__name__}: {exc}"]
-            self._recovered = True
-        return [
-            f"secretary po: turn {turn.session_id}/{turn.seq} {turn.state}: {turn.reason}"
-            for turn in recovered
-        ]
+                orphaned = self.runner.orphaned_turns()
+            except Exception as exc:  # noqa: BLE001 - retried with backoff until the store answers
+                orphaned = None
+                lines.append(f"secretary po: turn recovery did not complete: {type(exc).__name__}: {exc}")
+            else:
+                lines.extend(
+                    f"secretary po: turn {turn.session_id}/{turn.seq} {turn.state}: {turn.reason}"
+                    for turn in recovered
+                )
+            self._recovered = orphaned == []
+            if self._recovered:
+                self._recovery_delay = 0.0
+            else:
+                self._recovery_delay = min(max(self._recovery_delay * 2, tick), RECOVERY_MAX_DELAY_SECONDS)
+                self._next_recovery = time.monotonic() + self._recovery_delay
+                for turn in orphaned or []:
+                    lines.append(
+                        f"secretary po: turn {turn.session_id}/{turn.seq} still running without a process; "
+                        f"recovery retries in {self._recovery_delay:g}s"
+                    )
+        return lines
 
     def run(self, *, tick: float = TICK_SECONDS, say: Callable[[str], None] | None = None) -> int:
         """Serve until a restart is due at idle (exit 0, `Restart=always` starts the new code)."""
@@ -134,8 +165,8 @@ class PoService:
         while not self._exit.is_set():
             self._wake.wait(tick)
             self._wake.clear()
-            if not self._recovered:
-                for line in self._recover():
+            if not self._recovered and time.monotonic() >= self._next_recovery:
+                for line in self._recover(tick=tick):
                     say(line)
             self.pump()
             if self.restart_due():
@@ -159,7 +190,9 @@ class PoService:
     def pump(self) -> None:
         """Hand the oldest input of every idle session to the runner; hold everything while a restart is pending."""
         with self._lock:
-            if not self._recovered or self._exit.is_set() or self.marker.exists():
+            # Not gated on `_recovered`: a row recovery has not settled is `running`, so its session
+            # is busy below and takes nothing until it is.
+            if self._exit.is_set() or self.marker.exists():
                 return
             try:
                 heads = self.queue.heads()
@@ -212,19 +245,25 @@ class PoService:
     def create_session(
         self, *, cli: str, model: str, effort: str = DEFAULT_EFFORT, request_id: str
     ) -> dict[str, Any]:
+        """One session per request id, reserved through :meth:`_reserve` like a message."""
         request_id = _required(request_id, "request_id")
-        session, created = self.runner.create_session_request(
-            cli, model, request_id, effort or DEFAULT_EFFORT
-        )
+        effort = str(effort or "").strip() or DEFAULT_EFFORT
+        fingerprint = session_fingerprint(str(cli), str(model or "").strip(), effort)
+        with self._lock:
+            known = self._reserve(request_id, SESSION_CREATE, fingerprint)
+            if isinstance(known, PoRequest):
+                session = self.store.session(known.session_id)
+                return {"session_id": session.session_id, "effort": session.effort, "repeated": True}
+            session, created = self.runner.create_session_request(cli, model, request_id, effort)
         return {"session_id": session.session_id, "effort": session.effort, "repeated": not created}
 
     def submit(self, *, session_id: str, text: str, request_id: str, source: str = "web") -> dict[str, Any]:
         """Queue one message durably, then answer; a request id answers what it already made.
 
         The same id with the same session and text is a replay: the turn it became, or the input still
-        queued. The id bound to anything else is `RequestConflict`. A message into an unknown or closed
-        session is refused with nothing queued. Otherwise it is queued and handed over at once when its
-        session is idle, and the answer says which.
+        queued. The id bound to anything else is `RequestConflict` (:meth:`_reserve`). A message into an
+        unknown or closed session is refused with nothing queued. Otherwise it is queued and handed over
+        at once when its session is idle, and the answer says which.
         """
         request_id = _required(request_id, "request_id")
         session_id = _required(session_id, "session_id")
@@ -233,46 +272,71 @@ class PoService:
         if source not in SOURCES:
             raise Refused("validation", f"a PO input comes from {' or '.join(SOURCES)}, not {source!r}")
         with self._lock:
-            replay = self._replay(session_id, text, request_id)
-            if replay is not None:
-                return replay
+            known = self._reserve(
+                request_id, SEND, send_fingerprint(session_id, text), session_id=session_id, text=text
+            )
+            if known is not None:
+                return {**self._sent(session_id, request_id), "repeated": True}
             session = self.store.session(session_id)
             if session.state == SESSION_CLOSED:
                 raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
             self.queue.put(session_id=session_id, text=text, request_id=request_id, source=source)
             self.pump()
-            answer = self._replay(session_id, text, request_id)
-        if answer is None:
-            raise Refused(
-                "unavailable", "the message was queued and then set aside; the service journal says why"
-            )
-        return {**answer, "repeated": False}
+            return {**self._sent(session_id, request_id), "repeated": False}
 
-    def _replay(self, session_id: str, text: str, request_id: str) -> dict[str, Any] | None:
+    def _reserve(
+        self,
+        request_id: str,
+        operation: str,
+        fingerprint: str,
+        *,
+        session_id: str | None = None,
+        text: str | None = None,
+    ) -> PoRequest | QueuedInput | None:
+        """The one request-id check of the service: what already owns `request_id`, or None when nothing does.
+
+        A request id belongs to exactly one operation with fixed inputs, installation-wide, from the
+        moment it is acknowledged. Acknowledged means one of three places: a `po_requests` row (a
+        session or a turn exists), a message still pending in the queue, or a message the service set
+        aside in `refused/`. The same operation with the same inputs gets its record back (a replay);
+        anything else is `RequestConflict`. Every operation that takes a request id calls this while
+        holding the service lock, so nothing can take an id between this check and its own write.
+        """
         known = self.store.request(request_id)
         if known is not None:
-            if (known.operation, known.fingerprint) != (SEND, send_fingerprint(session_id, text)):
+            if (known.operation, known.fingerprint) != (operation, fingerprint):
                 raise RequestConflict(
                     f"request id {request_id!r} already belongs to another {known.operation} request; "
                     "a request id is repeated only with the same operation and inputs"
                 )
-            turn = self.store.turn(known.session_id, int(known.seq))
-            return {
-                "session_id": session_id,
-                "queued": False,
-                "seq": turn.seq,
-                "state": turn.state,
-                "repeated": True,
-            }
+            return known
         queued = self.queue.find(request_id)
         if queued is not None:
-            if (queued.session_id, queued.text) != (session_id, text):
+            if operation != SEND or (queued.session_id, queued.text) != (session_id, text):
                 raise RequestConflict(
-                    f"request id {request_id!r} is already queued for another message; "
-                    "a request id is repeated only with the same operation and inputs"
+                    f"request id {request_id!r} already belongs to a message queued for PO session "
+                    f"{queued.session_id}; a request id is repeated only with the same operation and inputs"
                 )
-            return {"session_id": session_id, "queued": True, "seq": None, "state": None, "repeated": True}
+            return queued
+        refused = self.queue.find_refused(request_id)
+        if refused is not None:
+            raise RequestConflict(
+                f"request id {request_id!r} belongs to a message the PO service set aside "
+                f"({refused.get('reason') or 'no reason recorded'}); send it again with a new form"
+            )
         return None
+
+    def _sent(self, session_id: str, request_id: str) -> dict[str, Any]:
+        """Where an acknowledged message is now: its turn, or still in the queue."""
+        known = self.store.request(request_id)
+        if known is not None and known.seq is not None:
+            turn = self.store.turn(known.session_id, int(known.seq))
+            return {"session_id": session_id, "queued": False, "seq": turn.seq, "state": turn.state}
+        if self.queue.find(request_id) is not None:
+            return {"session_id": session_id, "queued": True, "seq": None, "state": None}
+        raise Refused(
+            "unavailable", "the message was queued and then set aside; the service journal says why"
+        )
 
     def stop_turn(self, *, session_id: str, seq: int) -> dict[str, Any]:
         """Stop turn `seq` only if it is the one running; queued inputs of the session then go on."""
@@ -396,9 +460,13 @@ class _Handler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         raw = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
         try:
+            # Only a complete line runs: a sender whose write failed before its newline was
+            # told "nothing written" (`secretary.po.client`), and that has to stay true.
+            if not raw.endswith(b"\n"):
+                raise ValueError("incomplete request line")
             request = json.loads(raw)
         except ValueError:
-            answer = _error("validation", "a PO service request is one JSON object on one line")
+            answer = _error("validation", "a PO service request is one complete JSON object on one line")
         else:
             answer = self.server.service.handle(request)  # type: ignore[attr-defined]
         self.wfile.write(json.dumps(answer, ensure_ascii=False, default=str).encode("utf-8") + b"\n")
