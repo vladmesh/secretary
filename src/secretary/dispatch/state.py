@@ -881,6 +881,11 @@ class DispatcherRecord:
     # before the watchdog stops or replaces it. Durable and keyed on the report generation, so the
     # bound survives a restart and belongs to the round rather than to a tick.
     worker_report_nudge: WorkerReportNudge = field(default_factory=WorkerReportNudge)
+    # The PO, owner and observer comments this card's live worker was pointed at mid-round
+    # (secretary-1768), by the key `worker_comments.comment_key` gives each: its audit event id.
+    # Written before the pointer is sent, so a tick repeat or a restarted dispatcher never sends the
+    # same comment twice. Only grows; a new round's TASK.md carries every comment anyway.
+    worker_comment_deliveries: tuple[str, ...] = ()
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
@@ -1059,6 +1064,7 @@ class DispatcherRecord:
             "worker_idle_since": self.worker_idle_since,
             "worker_idle_confirmations": self.worker_idle_confirmations,
             "worker_report_nudge": self.worker_report_nudge.to_json(),
+            "worker_comment_deliveries": list(self.worker_comment_deliveries),
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_continuation_liveness": self.worker_continuation_liveness.to_json(),
@@ -1190,6 +1196,11 @@ class DispatcherRecord:
             # Absent on every record written before the prompt existed, which is exactly a round
             # that has not spent one: the empty value opens the same single prompt for it.
             worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
+            worker_comment_deliveries=tuple(
+                item
+                for item in payload.get("worker_comment_deliveries") or ()
+                if isinstance(item, str) and item
+            ),
             worker_continuation=WorkerContinuation.from_json(payload.get("worker_continuation")),
             worker_continuation_liveness=WorkerContinuationLiveness.from_json(
                 payload.get("worker_continuation_liveness")

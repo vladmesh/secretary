@@ -196,6 +196,14 @@ from secretary.dispatch.watchdog import (
 from secretary.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
+from secretary.dispatch.worker_comments import (
+    WORKER_COMMENT_ROLES,
+    WorkerComment,
+    select_worker_comments,
+    worker_comments_note,
+    worker_comments_record_line,
+    worker_comments_section,
+)
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.infra import git_worktree
 from secretary.infra.github_credential import (
@@ -3593,6 +3601,54 @@ class CommandHostRuntime:
             subject="worker-report",
         )
 
+    def worker_takes_comments(self, record: DispatcherRecord) -> bool:
+        """Whether this card's worker is live, running and addressable, so a comment pointer can
+        reach it now. A suspended, exited or unaddressable worker is sent nothing: the next round's
+        TASK.md carries the comment instead (secretary-1768)."""
+        if self.mode == "noop" or not self._continuation_addressable(record):
+            return False
+        if not record.workspace or not Path(record.workspace).is_dir():
+            return False
+        status = self._head_status(
+            record.worker_pid_file,
+            run=record.worker_head_run,
+            role="worker",
+            leaf=record.worker_leaf,
+        )
+        return _heartbeat_is_live_match(status) and not status.get("stopped")
+
+    def deliver_worker_comments(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Rewrite the live worker's TASK.md with the card's comments, then point it there.
+
+        The document is the round's own, re-rendered with the generation, decision and
+        prerequisites the record froze for it, so the only thing that changes under the worker is
+        the comments section. Its report bodies are not cleared: the round is not over.
+        """
+        self._refuse_legacy_record(record, "deliver to the worker of")
+        workspace = Path(record.workspace)
+        if not workspace.is_dir():
+            raise HostError("worker workspace is missing")
+        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
+        self._write_prompt(
+            workspace / "TASK.md",
+            self._worker_task_doc(
+                task,
+                base,
+                record.attempt_id,
+                record.report_generation,
+                record.report_decision,
+                record.report_protocol_prerequisites,
+                record=record,
+            ),
+        )
+        try:
+            pointer = head_ops.NudgePointer.at_document(
+                str(workspace / "TASK.md"), worker_comments_note(record.report_generation)
+            )
+        except PromptDocumentError as exc:
+            raise HostError(f"the comment pointer could not be built: {exc}") from None
+        self._nudge_worker(record, pointer, "worker comment continuation", subject="worker-comments")
+
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task."""
         self._refuse_legacy_record(record, "resume the worker of")
@@ -3903,11 +3959,15 @@ class CommandHostRuntime:
                 for classification in ("external_fact", "wrong_task_definition")
             },
         }
+        # Read from the board on every document, like the description above it: a comment that
+        # arrived since the previous round is in this one (secretary-1768).
+        comments = self.worker_comments(task)
         sections = [
             f"# Task {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
             "",
+            *worker_comments_section(comments),
             "## No subagents",
             "",
             "Perform this task in this head only. Do not spawn, create, delegate to, or manage",
@@ -4138,9 +4198,25 @@ class CommandHostRuntime:
             # And the round's own ids, on the same terms: the report commands above are prose in a
             # document that also renders the card description, so they cannot be the authority.
             _round_record_line(generation, [request, *blocked_requests.values()]),
+            # Which comments this document carries, so the mid-round arm points the live worker
+            # only at the ones it has not been handed.
+            worker_comments_record_line(comments),
             "",
         ]
         return "\n".join(sections)
+
+    def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
+        """The PO, owner and observer comments this card's worker is handed, oldest first.
+
+        The card audit is read only when the card has such a comment at all: the keys come from
+        it, and most cards on most ticks have nothing to key.
+        """
+        if not any(
+            isinstance(comment, dict) and comment.get("marker") in WORKER_COMMENT_ROLES
+            for comment in task.get("comments") or []
+        ):
+            return ()
+        return select_worker_comments(task, self._card_audit().events(str(task.get("ref") or "")))
 
     def _card_audit(self) -> Any:
         """The card audit this host was handed, or a refusal that names the missing wiring."""

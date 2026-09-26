@@ -184,6 +184,9 @@ from secretary.dispatch.worker_launch import (
     resolve_headless_worker as _resolve_headless_worker,
 )
 from secretary.dispatch.worker_report import (
+    deliver_worker_comments as _deliver_worker_comments,
+)
+from secretary.dispatch.worker_report import (
     handle_worker_report as _handle_worker_report,
 )
 from secretary.dispatch.worker_report import (
@@ -624,6 +627,10 @@ class DispatcherRuntime:
         headless = _resolve_headless_worker(self, task, record, records, payload, attempt_id)
         if headless is not None:
             return headless
+        # A comment that landed mid-round reaches the live worker now, not at the next round.
+        commented = _deliver_worker_comments(self, task, record, records, payload, attempt_id)
+        if commented is not None:
+            return commented
         watchdog = _wait_watchdog(self, task, record, records, payload, attempt_id, kind="worker")
         if watchdog is not None:
             return watchdog

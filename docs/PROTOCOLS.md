@@ -2053,6 +2053,35 @@ that opened the round even when no red review exists or the red review predates 
 followed by a description edit therefore starts a fresh worker without the prior reviewer's
 instructions. Missing, malformed or ambiguous binding omits historical feedback.
 
+### Card comments the worker is handed
+
+Comments from the PO, the owner and the observer (markers `po`, `owner`, `observer`) refine the spec,
+and when one contradicts the description the comment wins. Every worker `TASK.md`, first launch and
+every rework or continuation alike, renders all of them in one section, *Comments from the PO, the
+owner and the observer*, right after the description and before the observer decision and the red
+review and gate bodies. They are listed in board order (creation time), each under its role and
+timestamp with its full text. A card with none has no such section. Comments of every other role
+(dispatcher, worker, reviewer, steward, retro) are left out: the review and gate bodies have their own
+sections, and the observer's Assessment decision reaches the worker as the dispatcher's own prose. Unlike
+the revision-bound feedback above, these are not filtered by specification revision: a comment written
+before the description's last edit is still shown.
+
+Each comment is keyed by the `commented` audit event that wrote it, paired by marker and body digest.
+A comment no such event accounts for (a move reason, a restored comment) is keyed by marker, digest and
+occurrence. The keys a document renders are recorded on its last lines as
+`<!-- worker-comments keys=... -->`, base64-encoded.
+
+**Mid-round continuation.** While the worker is running a round (record `claimed`, not paused, no
+continuation retained or pending, heartbeat a live match and not suspended, the conversation
+addressable), a tick that finds a key neither in the checkout's `TASK.md` record line nor in the
+record's `worker_comment_deliveries` points the worker at it once: the keys are added to the record and
+saved, `TASK.md` is re-rendered for the same generation and decision, and only then the pointer, "re-read
+its comments section", goes out through the same worker delivery as the report prompt. A tick repeat or
+a restarted dispatcher sends nothing again; a failed send is recorded as delivery evidence and not
+retried, and the next round's `TASK.md` carries the comment either way. A worker that is parked in Assessment,
+held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
+`TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
+
 ### Head heartbeat identity
 
 Every dispatcher-launched worker, reviewer and observer writes one atomically replaced version-1 JSON
