@@ -29,6 +29,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 from secretary import upgrade
+from secretary.backup_policy import FULL_POLICY, should_skip_data_entry
 from secretary.host import (
     SHIPPED_PACKAGING_ROOT,
     SystemdLayout,
@@ -37,8 +38,10 @@ from secretary.host import (
     load_packaged_units,
     render_systemd_unit,
 )
+from secretary.host_apply import UnitProcessIdentity
 from secretary.po import client as po_client
 from secretary.po import runner as po_runner
+from secretary.po import service as po_service
 from secretary.po import store as po_store
 from secretary.po import token as po_token
 from secretary.po.client import PoServiceClient, ServiceUnavailable
@@ -1064,8 +1067,52 @@ class RecoveryProgressTests(ServiceFixture):
 PO_UNIT = "secretary-po.service"
 
 
-class UpgradeStepTests(ServiceFixture):
-    """`step_po`: an upgrade restarts the PO service now only while it is idle, else defers it."""
+class PoUpgradeFixture(ServiceFixture):
+    """A Git product checkout, a data dir and a fake PO unit, for `step_po` and `step_verify`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.product = self.root / "product"
+        for relative, text in (
+            ("pyproject.toml", '[project]\nname = "secretary"\n'),
+            ("src/secretary/__init__.py", ""),
+            ("src/secretary/app.py", "VERSION = 'A'\n"),
+            ("src/secretary/schemas/card.json", "{}\n"),
+        ):
+            path = self.product / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.git("init", "--quiet", "--initial-branch=main")
+        self.commit("A")
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.product), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def commit(self, message: str) -> None:
+        self.git("add", "-A")
+        self.git(
+            "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", message
+        )
+
+    def move_checkout(self) -> None:
+        """A commit this upgrade did not pull: the dispatcher's release fast-forwarded the checkout."""
+        (self.product / "src/secretary/app.py").write_text("VERSION = 'B'\n", encoding="utf-8")
+        self.commit("B")
+
+    def bind(self, identity: UnitProcessIdentity) -> str:
+        """What the PO service process `identity` writes when it starts on the checkout as it is now."""
+        with (
+            mock.patch.object(upgrade.os, "getpid", return_value=identity.pid),
+            mock.patch.object(upgrade, "_process_start_ticks", return_value=identity.start_ticks),
+        ):
+            return upgrade.write_po_process_receipt(
+                self.data, self.product, environ={"INVOCATION_ID": identity.invocation_id}
+            )
+
+    def receipt(self) -> Path:
+        return po_client.process_receipt_path(self.data)
 
     def context(self, units: FakeUnitInstaller, **flags) -> upgrade.UpgradeContext:
         report = SimpleNamespace(
@@ -1076,7 +1123,7 @@ class UpgradeStepTests(ServiceFixture):
         )
         return upgrade.UpgradeContext(
             instance_path=self.root / "instance",
-            product_root=self.root / "product",
+            product_root=self.product,
             base_branch="main",
             dry_run=flags.pop("dry_run", False),
             units=units,
@@ -1087,6 +1134,10 @@ class UpgradeStepTests(ServiceFixture):
 
     def units(self) -> FakeUnitInstaller:
         return FakeUnitInstaller(present={PO_UNIT: b"[Service]\n"}, active={PO_UNIT})
+
+
+class UpgradeStepTests(PoUpgradeFixture):
+    """`step_po`: an upgrade restarts the PO service now only while it is idle, else defers it."""
 
     def test_the_step_sits_before_the_web_restart(self) -> None:
         names = [step.__name__ for step in upgrade.STEPS]
@@ -1152,7 +1203,9 @@ class UpgradeStepTests(ServiceFixture):
         started = upgrade.step_po(self.context(stopped))
         self.assertEqual((started.status, stopped.calls), ("changed", [("restart", PO_UNIT)]))
 
-        current = upgrade.step_po(self.context(self.units(), code_changed=False))
+        bound = self.units()
+        self.bind(bound.identities[PO_UNIT])
+        current = upgrade.step_po(self.context(bound, code_changed=False))
         self.assertEqual(current.status, "unchanged", current.detail)
 
         dry = upgrade.step_po(self.context(self.units(), dry_run=True, po_unit_changed=True))
@@ -1160,6 +1213,253 @@ class UpgradeStepTests(ServiceFixture):
         self.assertIn("would ask", dry.detail)
         self.assertIn("the PO unit file changed", dry.detail)
         self.assertFalse(po_client.restart_marker_path(self.data).exists())
+
+
+class ProcessReceiptTests(PoUpgradeFixture):
+    """The PO process receipt: `step_po` compares the running process with the checkout (secretary-1759)."""
+
+    def test_a_checkout_moved_before_an_empty_pull_restarts_the_service_on_the_stale_receipt(self) -> None:
+        # The live defect: the dispatcher's release fast-forwarded the checkout, so this upgrade's pull
+        # saw nothing and `code_changed` is False, while the service still runs the old revision.
+        service = self.service()
+        units = self.units()
+        self.bind(units.identities[PO_UNIT])
+        old_revision = self.git("rev-parse", "HEAD")
+        self.move_checkout()
+        new_revision = self.git("rev-parse", "HEAD")
+
+        def systemd_brings_it_back(_seconds: float) -> None:
+            units.identities[PO_UNIT] = units._new_identity()
+
+        with listening(service), mock.patch.object(upgrade, "_sleep", side_effect=systemd_brings_it_back):
+            result = upgrade.step_po(self.context(units, code_changed=False))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn(f"restarted {PO_UNIT} while idle", result.detail)
+        self.assertIn(
+            f"the PO process receipt is stale: product revision {old_revision[:12]} -> {new_revision[:12]}",
+            result.detail,
+        )
+        self.assertIn("product sha256", result.detail)
+        self.assertNotIn("product code or dependencies changed", result.detail)
+        service.thread.join(5)  # type: ignore[attr-defined]
+        self.assertFalse(service.thread.is_alive(), "the service did not exit for the restart")  # type: ignore[attr-defined]
+
+    def test_no_receipt_is_a_restart_reason(self) -> None:
+        result = upgrade.step_po(self.context(self.units(), code_changed=False))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn("the PO process receipt is missing", result.detail)
+        self.assertTrue(po_client.restart_marker_path(self.data).exists())
+
+    def test_a_matching_receipt_answers_unchanged(self) -> None:
+        units = self.units()
+        identity = units.identities[PO_UNIT]
+        self.bind(identity)
+
+        result = upgrade.step_po(self.context(units, code_changed=False))
+
+        self.assertEqual(result.status, "unchanged", result.detail)
+        revision = self.git("rev-parse", "HEAD")
+        self.assertTrue(
+            result.detail.startswith(
+                f"PO process receipt verified: pid {identity.pid}, revision {revision[:12]}"
+            ),
+            result.detail,
+        )
+        self.assertFalse(po_client.restart_marker_path(self.data).exists())
+
+    def test_a_receipt_of_another_process_generation_is_a_restart_reason(self) -> None:
+        units = self.units()
+        self.bind(units._new_identity())
+
+        result = upgrade.step_po(self.context(units, code_changed=False))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn("the PO process receipt belongs to a different process generation", result.detail)
+
+    def test_the_existing_change_flags_are_still_reasons_over_a_matching_receipt(self) -> None:
+        units = self.units()
+        self.bind(units.identities[PO_UNIT])
+        for flag, reason in (
+            ("code_changed", "product code or dependencies changed"),
+            ("schemas_changed", "bundled schemas changed"),
+            ("po_unit_changed", "the PO unit file changed"),
+        ):
+            with self.subTest(flag):
+                flags = {"code_changed": False, flag: True}
+                result = upgrade.step_po(self.context(units, dry_run=True, **flags))
+                self.assertEqual(result.status, "changed", result.detail)
+                self.assertIn(reason, result.detail)
+                self.assertNotIn("receipt", result.detail)
+
+    def test_busy_a_stale_receipt_defers_the_restart(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        service.submit(session_id=session_id, text="GATE secretary upgrade", request_id="m-1")
+        self.reached_gate(session_id, 1)
+        units = self.units()
+        self.bind(units.identities[PO_UNIT])
+        self.move_checkout()
+
+        with listening(service), mock.patch.object(upgrade, "_sleep") as sleep:
+            result = upgrade.step_po(self.context(units, code_changed=False))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertTrue(
+            result.detail.startswith("PO service restart deferred: 1 turn(s) running"), result.detail
+        )
+        self.assertIn("the PO process receipt is stale", result.detail)
+        sleep.assert_not_called()
+        self.assertEqual(units.calls, [])
+        self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING, "the caller's turn is untouched")
+        self.gate.touch()
+        self.assertEqual(self.settled(session_id, 1).state, po_store.COMPLETED)
+        service.thread.join(5)  # type: ignore[attr-defined]
+        self.assertFalse(service.thread.is_alive(), "the deferred restart was not applied at idle")  # type: ignore[attr-defined]
+
+    def test_dry_run_names_the_stale_receipt_and_writes_nothing(self) -> None:
+        units = self.units()
+        self.bind(units.identities[PO_UNIT])
+        before = self.receipt().read_bytes()
+        self.move_checkout()
+
+        result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn("would ask", result.detail)
+        self.assertIn("the PO process receipt is stale", result.detail)
+        self.assertFalse(po_client.restart_marker_path(self.data).exists())
+        self.assertEqual(self.receipt().read_bytes(), before)
+        self.assertEqual(units.calls, [])
+
+    def test_hostile_receipts_are_restart_reasons_never_exceptions(self) -> None:
+        units = self.units()
+        self.bind(units.identities[PO_UNIT])
+        valid = json.loads(self.receipt().read_text(encoding="utf-8"))
+        cases = {
+            "not json": "{",
+            "a list": "[]",
+            "extra key": json.dumps({**valid, "unit": PO_UNIT}),
+            "another version": json.dumps({**valid, "version": 2}),
+            "boolean version": json.dumps({**valid, "version": True}),
+            "short revision": json.dumps({**valid, "inputs": {**valid["inputs"], "product_revision": "abc"}}),
+            "missing input": json.dumps(
+                {**valid, "inputs": {k: v for k, v in valid["inputs"].items() if k != "schemas_sha256"}}
+            ),
+            "negative pid": json.dumps({**valid, "process": {**valid["process"], "pid": -1}}),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.receipt().write_text(text, encoding="utf-8")
+                result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+                self.assertEqual(result.status, "changed", result.detail)
+                self.assertIn("the PO process receipt is malformed", result.detail)
+        self.receipt().unlink()
+        self.receipt().mkdir()
+        result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+        self.assertIn("the PO process receipt is malformed", result.detail)
+
+    # --- what the service writes ------------------------------------------------------------------
+
+    def test_the_receipt_is_private_and_a_new_generation_replaces_the_previous_one(self) -> None:
+        first = FakeUnitInstaller._new_identity()
+        line = self.bind(first)
+        self.assertIn(f"pid {first.pid}", line)
+        self.assertEqual(stat.S_IMODE(os.stat(self.receipt()).st_mode), 0o600)
+        written = json.loads(self.receipt().read_text(encoding="utf-8"))
+        self.assertEqual(
+            written["process"],
+            {"pid": first.pid, "start_ticks": first.start_ticks, "invocation_id": first.invocation_id},
+        )
+        self.assertEqual(written["inputs"]["product_revision"], self.git("rev-parse", "HEAD"))
+
+        second = FakeUnitInstaller._new_identity()
+        self.move_checkout()
+        self.bind(second)
+
+        rewritten = json.loads(self.receipt().read_text(encoding="utf-8"))
+        self.assertEqual(rewritten["process"]["pid"], second.pid)
+        self.assertEqual(rewritten["inputs"]["product_revision"], self.git("rev-parse", "HEAD"))
+        self.assertEqual(sorted(p.name for p in self.receipt().parent.iterdir()), ["process-receipt.json"])
+
+    def test_a_failed_write_leaves_the_previous_receipt_whole(self) -> None:
+        self.bind(FakeUnitInstaller._new_identity())
+        before = self.receipt().read_bytes()
+
+        with (
+            mock.patch.object(upgrade.os, "replace", side_effect=OSError("disk full")),
+            self.assertRaises(upgrade.ReceiptError),
+        ):
+            self.bind(FakeUnitInstaller._new_identity())
+
+        self.assertEqual(self.receipt().read_bytes(), before)
+        self.assertEqual(list(self.receipt().parent.glob("*.tmp")), [])
+
+    def test_a_process_systemd_did_not_start_writes_no_receipt(self) -> None:
+        with self.assertRaisesRegex(upgrade.ReceiptError, "INVOCATION_ID"):
+            upgrade.write_po_process_receipt(self.data, self.product, environ={})
+        self.assertFalse(self.receipt().exists())
+
+        with mock.patch.object(
+            upgrade, "write_po_process_receipt", side_effect=upgrade.ReceiptError("no INVOCATION_ID")
+        ):
+            line = po_service._write_process_receipt(self.data)
+        self.assertIn("no process receipt was written (no INVOCATION_ID)", line)
+
+    def test_the_service_writes_its_receipt_before_it_fulfils_a_pending_restart(self) -> None:
+        source = inspect.getsource(po_service.run_po_serve)
+        self.assertLess(source.index("_write_process_receipt(data_dir)"), source.index("service.start()"))
+        with mock.patch.object(upgrade, "write_po_process_receipt", return_value="wrote it") as write:
+            self.assertEqual(po_service._write_process_receipt(self.data), "secretary po: wrote it")
+        root = write.call_args.args[1]
+        self.assertTrue((root / "src" / "secretary" / "po" / "service.py").is_file(), root)
+
+    def test_the_receipt_is_excluded_from_backup(self) -> None:
+        relative = self.receipt().relative_to(self.data)
+        self.assertTrue(should_skip_data_entry(relative, policy=FULL_POLICY))
+
+    # --- verify -----------------------------------------------------------------------------------
+
+    def verify(self, units: FakeUnitInstaller) -> upgrade.StepResult:
+        with (
+            mock.patch.object(upgrade, "step_host", return_value=upgrade.StepResult("host", "unchanged")),
+            mock.patch.object(upgrade.role_skills, "audit", return_value={"ok": True}),
+            mock.patch.object(upgrade, "assert_snapshot_current"),
+            mock.patch.object(upgrade, "installed_heads"),
+            mock.patch.object(upgrade.state_repo, "status", return_value=""),
+        ):
+            return upgrade.step_verify(self.context(units, code_changed=False))
+
+    def test_verify_reports_the_po_receipt(self) -> None:
+        units = self.units()
+        identity = units.identities[PO_UNIT]
+        self.bind(identity)
+
+        verified = self.verify(units)
+        self.assertEqual(verified.status, "unchanged", verified.detail)
+        self.assertIn(f"PO process receipt verified: pid {identity.pid}", verified.detail)
+
+        self.move_checkout()
+        stale = self.verify(units)
+        self.assertEqual(stale.status, "failed", stale.detail)
+        self.assertIn(
+            "active PO process receipt is not current: the PO process receipt is stale", stale.detail
+        )
+
+        po_client.write_restart_marker(self.data, "deferred by step_po")
+        pending = self.verify(units)
+        self.assertEqual(pending.status, "unchanged", pending.detail)
+        self.assertIn("PO service restart pending: the PO process receipt is stale", pending.detail)
+
+    def test_verify_names_a_skipped_po_unit(self) -> None:
+        missing = self.verify(FakeUnitInstaller())
+        self.assertEqual(missing.status, "unchanged", missing.detail)
+        self.assertIn(f"PO process receipt not checked: {PO_UNIT} is not installed", missing.detail)
+
+        stopped = self.verify(FakeUnitInstaller(present={PO_UNIT: b"[Service]\n"}))
+        self.assertEqual(stopped.status, "unchanged", stopped.detail)
+        self.assertIn(f"PO process receipt not checked: {PO_UNIT} is not active", stopped.detail)
 
 
 class TurnEnvironmentTests(ServiceFixture):

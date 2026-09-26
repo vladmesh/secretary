@@ -34,6 +34,8 @@ SERVICE_DIR_NAME = "po-service"
 SOCKET_NAME = "po.sock"
 LOCK_NAME = "service.lock"
 RESTART_MARKER_NAME = "restart-pending"
+# Written by the service when it starts; `secretary upgrade` (`step_po`) compares it with the checkout.
+PROCESS_RECEIPT_NAME = "process-receipt.json"
 # A stop joins the turn's waiter for up to ten seconds; a submit may launch a turn.
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -80,6 +82,10 @@ def socket_path(data_dir: Path | str) -> Path:
 
 def restart_marker_path(data_dir: Path | str) -> Path:
     return service_dir(data_dir) / RESTART_MARKER_NAME
+
+
+def process_receipt_path(data_dir: Path | str) -> Path:
+    return service_dir(data_dir) / PROCESS_RECEIPT_NAME
 
 
 class PoServiceClient:
@@ -213,6 +219,7 @@ __all__ = [
     "RestartAnswer",
     "ServiceRefused",
     "ServiceUnavailable",
+    "process_receipt_path",
     "request_restart",
     "restart_marker_path",
     "service_dir",
