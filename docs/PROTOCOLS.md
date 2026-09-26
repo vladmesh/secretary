@@ -201,17 +201,29 @@ which counts heads. The dispatcher then:
    python3 -P -m secretary task complete --ref <card> --role po --kind <kind> --body-file <file> --request-id <id>
    ```
 
-The three request ids (resolve, submit, completion) are `dispatcher-<claim attempt>-po-session-<card>`,
-`...-po-submit-<card>` and `...-po-complete-<card>`, derived at claim and kept on the card's dispatcher
-record with the resolve's answer (the session, `created` or `recorded`), the frozen input text and the
-submit's answer. A resolve or submit the service did not answer (`outcome_unknown`, the service not
+The input also quotes the handover command, for a card only the owner can answer (see
+[Handover to the owner](#handover-to-the-owner)):
+
+```text
+python3 -P -m secretary task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
+```
+
+The four request ids (resolve, submit, completion, handover) are `dispatcher-<claim attempt>-po-session-<card>`,
+`...-po-submit-<card>`, `...-po-complete-<card>` and `...-po-handover-<card>`, derived at claim and kept on
+the card's dispatcher record with the resolve's answer (the session, `created` or `recorded`), the frozen
+input text and the submit's answer. A resolve or submit the service did not answer (`outcome_unknown`, the service not
 running, or a refusal coded `unavailable`) is repeated on the next tick under the same id, never a
 fresh one, since a fresh id could open a second PO session. The card stays In progress and the tick
 reports `po-service-unanswered` (degraded); a service that stays down is not a failure of the card. A
 refusal that is an answer (the sprint closed or missing, the session closed, the id bound to something
 else) Blocks the card with `the PO service refused the <resolve|submit> of this card: <reason>`. A
 dispatcher record lost with its state file is rebuilt from the dispatcher's own claim event, whose
-request id carries the claim attempt, so the same requests are repeated.
+request id carries the claim attempt, so the same requests are repeated. The frozen input text is lost
+with the record, so the rebuilt record composes the input again from the card and the sprint as they
+are now, and the service may answer its submit with `request_conflict` when the text changed. That
+conflict is taken as submitted, not as a refusal, when the submit id is already the service's: a turn in
+`po_requests`, or an input still pending in `po-queue/` for the same session. Any other conflict Blocks
+the card.
 
 **Complete.** The PO answers the card in that turn and completes it:
 
@@ -243,19 +255,81 @@ id repeated with the same body is a replay that writes nothing; with another bod
 `request_conflict`. `task complete` does not pass the sprint guard: it is the PO executing its
 sprint's card, not an override move.
 
-**Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and not
-the service: `po_requests` names the turn the input became once the service claimed it. Three outcomes:
+**Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and the
+service's queue directory, not the service: `po_requests` names the turn the input became once the
+service claimed it. The outcomes:
 
 - the card left In progress (Done with its completion record): the dispatcher record is closed;
+- the card carries the handover mark: it waits for the owner (below), whatever its turn did;
 - the turn that took the input settled `completed`, `failed` or `interrupted` and the card is still In
-  progress: the card goes to Blocked with `PO turn <session>/<seq> ended <state> without completing the
-  card`;
+  progress without the mark: the card goes to Blocked with `PO turn <session>/<seq> ended <state> without
+  completing the card`;
+- the input is in no turn and the service set it aside in `po-queue/refused/` (its session closed or
+  gone, its id bound to something else): it will never run, so the card goes to Blocked with `the PO
+  service set the card's input aside and will not run it: <the service's reason>` (`find_refused` of
+  the submit id);
 - otherwise it waits: the input may still be queued behind a seed or another turn (`po-card-queued`),
   or its turn is running (`po-card-turn-running`).
 
 The PO's Done and the dispatcher's Blocked are card transitions of a card linked to the sprint, so each
 wakes the observer ([Resume and observer wakes](#resume-and-observer-wakes)); the claim and the submit
 do not.
+
+#### Handover to the owner
+
+The PO hands a card to the owner when a person is needed: money, a key or access only the owner holds,
+or a product decision that is the owner's. An architecture fork is the PO's own to decide.
+
+```text
+task handover --ref <card> --to owner (--reason <text> | --reason-file <file>) [--request-id <id>]
+```
+
+Role `po` only, on an In progress `decision` or `operation` card that carries no mark yet; any other
+card, column or role is refused, as is an empty reason, and a card already handed over is refused with
+`already_handed_over` and its mark. One write, in one transaction:
+
+- **the mark**, three fields of the card's extension bag (`extensions.extra`; no column, no
+  migration): `waiting_owner` (the moment, RFC 3339 UTC), `waiting_owner_reason` and `waiting_owner_by`
+  (the PO actor). Only `task handover` writes them; a mark missing one of them, or with a moment that
+  does not parse, reads as no mark;
+- **a PO comment** `[handover:owner]` with the reason;
+- **the audit record** of kind `handed_to_owner` (payload: `to`, `reason_sha256`, the card's `kind` and
+  `sprint`, and the mark's moment). The owner-event card turns it into an owner event; nothing else
+  consumes it yet.
+
+The card stays In progress. The request id makes it idempotent: a repeat answers the recorded handover
+and writes nothing, and the same id with another card or reason is refused. `task show` and `task list`
+carry the mark as a top-level `waiting_owner: {since, reason, by}`, and the card page shows a
+`waiting for the owner` chip and the reason.
+
+**The owner's answer.** The owner answers in one of two ways:
+
+- a card comment, `task comment --ref <card> --role owner --body-file <file>`. `owner` is a comment role
+  only: allowed on any card, always written with actor `owner`, and refused for every other verb;
+- a message in the sprint's PO session on the `/po` page. The PO completes the card from there with
+  `task complete`; there is no other machinery.
+
+On a marked card the dispatcher reads the card's audit each tick. When an owner comment follows the
+latest handover, it submits one follow-up input to the same PO session, `source: dispatcher`, carrying
+the card ref, the handover reason, the owner's comments since the handover in board order and the
+completion command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
+comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
+rebuilt record never makes a second input for the same comment; a later owner comment makes one more
+follow-up, carrying every comment since the handover. A follow-up the service does not answer is
+repeated next tick under the same id; one it refuses outright (its session closed, say) Blocks the card
+with `the PO service refused the owner answer of this card: <reason>`, and one it set aside in
+`po-queue/refused/` Blocks it with `the PO service set the owner's answer aside and will not run it:
+<reason>`. The owner's comments are the only thing that re-submits: a settled turn on a marked card,
+the first one or a follow-up, means wait (`po-card-waiting-owner`, then `po-card-owner-answered`), never
+Blocked. The PO completes the card with `task complete`, which takes the mark off in the same
+transaction as the Done; any other move out of In progress takes it off too.
+
+**The sprint reads `waiting`.** While the sprint's current card is an In progress `decision` or
+`operation` card, `sprint status` (`work.waiting`) and the dashboard's sprint row read `state:
+waiting`, with `card` pointing at it and the reason `<card> (<kind>) is handed to the owner: <reason>`
+when it carries the mark, or `<card> (<kind>) is with the PO` otherwise. The Pipeline listing decides
+it, before the dispatcher's record, since no head runs such a card; every other answer of the section
+carries `card` as well (the sprint's current card, or null).
 
 ### Cards outside a sprint
 

@@ -15,14 +15,9 @@ import contextlib
 import copy
 import io
 import json
-import os
-import signal
-import stat
 import tempfile
-import threading
 import unittest
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -40,232 +35,30 @@ from secretary.board.models import Actor, CardState, EntityKind, Event
 from secretary.board.task_routing import TaskMetadata, TaskReview, TaskType, default_review
 from secretary.board.transitions import transition_for
 from secretary.cli import main
-from secretary.dispatch.claim import claim_ready_task
 from secretary.dispatch.po_cards import (
     PO_BLOCKED_ACTION,
     PO_SUBMITTED,
-    ServicePoChannel,
     _po_record,
-    advance_po_card,
     complete_command,
 )
 from secretary.dispatch.production import ProbeAbort, _probe_runtime
 from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import DispatcherRecord, attempt_request_id, new_attempt_id
+from secretary.dispatch.state import DispatcherRecord, attempt_request_id
 from secretary.po import store as po_store
 from secretary.po.client import OutcomeUnknown
-from secretary.po.runner import PoRunner
-from secretary.po.service import PoService, listening
+from secretary.po.service import listening
 from secretary.po.sprints import SprintRecord
 from secretary.tasks import TaskError, TaskWriter, is_significant_card_event, is_significant_observer_event
-from tests.po_cli_fakes import FAKE_CLAUDE, eventually
-from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
-
-REF = "secretary-1900"
-SPRINT = "sprint:1"
-DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`secretary sprint show --ref sprint:1`\n"
-OPERATION_BODY = "## What was done\nRotated the key.\n\n## How to verify\n`ssh relay true` exits 0\n"
-
-
-class Forbidden:
-    """A collaborator a decision/operation card must never reach: no head, no workspace, no registry."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __getattr__(self, attribute: str) -> Any:
-        raise AssertionError(f"a PO-executed card reached the {self._name}: {attribute}")
-
-
-class OneCardBoard:
-    """One card as the dispatcher reads and writes it, and the audit its writes leave behind."""
-
-    def __init__(self, card: dict[str, Any]) -> None:
-        self.card = card
-        self.log: list[dict[str, Any]] = []
-
-    # reader
-    def show(self, reference: str) -> dict[str, Any]:
-        assert reference == self.card["ref"], reference
-        return copy.deepcopy(self.card)
-
-    # writer
-    def claim(self, *, role: str, reference: str, worker: str, request_id: str, **_: Any) -> dict[str, Any]:
-        if self.committed_event(request_id) is None:
-            assert self.card["state"] == "ready", "claim requires a Ready task"
-            self.card["state"] = "in_progress"
-            self.card["claim"] = {"worker": worker}
-            self.log.append({"request_id": request_id, "ref": reference, "kind": "claim", "role": role})
-        return {"action": "claimed"}
-
-    def move(
-        self, *, role: str, reference: str, target: str, reason: str, request_id: str, **fields: Any
-    ) -> dict[str, Any]:
-        if self.committed_event(request_id) is None:
-            self.card["state"] = target
-            self.log.append(
-                {"request_id": request_id, "ref": reference, "kind": "move", "role": role, "to": target,
-                 "reason": reason, **fields}
-            )
-        return {"action": "moved"}
-
-    # audit
-    def committed_event(self, request_id: str) -> dict[str, Any] | None:
-        return next((event for event in self.log if event["request_id"] == request_id), None)
-
-    def events(self, reference: str = "", **_: Any) -> list[dict[str, Any]]:
-        return [event for event in self.log if not reference or event["ref"] == reference]
-
-    # the PO, completing the card inside its turn
-    def complete_as_po(self, kind: str, body: str) -> None:
-        fields, refusal = po_completion_fields(kind, body)
-        assert not refusal, refusal
-        self.card["comments"].append({"marker": "po", "body": "[po]\n" + render_po_completion_record(kind, fields)})
-        self.card["state"] = "done"
-
-
-class SprintView:
-    """The dispatcher's sprint reader: the one sprint, with its comments in board order."""
-
-    def __init__(self, comments: list[str]) -> None:
-        self.comments = comments
-
-    def show(self, reference: str, **_: Any) -> dict[str, Any]:
-        assert reference == SPRINT, reference
-        return {
-            "ref": SPRINT,
-            "status": "open",
-            "comments": [
-                {"created_at": f"2026-09-26T10:0{index}:00Z", "body": body}
-                for index, body in enumerate(self.comments)
-            ],
-        }
-
-
-def card(kind: str = "decision", *, state: str = "ready", description: str = "Which cut ships first?") -> dict:
-    return {
-        "ref": REF,
-        "id": 1900,
-        "title": f"The {kind} to take",
-        "description": description,
-        "type": kind,
-        "state": state,
-        "project": "secretary",
-        "sprint": SPRINT,
-        "review": "skipped",
-        "claim": {"worker": None},
-        "workspace": {"slug": None},
-        "comments": [],
-    }
-
-
-class DispatcherFixture(unittest.TestCase):
-    """A real PO service on its socket, and a dispatcher runtime around one card and one sprint.
-
-    The service is the one `tests/test_po_service.py` drives: the fake `claude` of `tests.po_cli_fakes`
-    runs every turn as a real process, and the board store is the in-memory `tests.po_fake_store`.
-    """
-
-    def setUp(self) -> None:
-        # A short root: the service's Unix socket lives under it.
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="po-")))
-        self.data = self.root / "data"
-        (self.data / "po").mkdir(parents=True)
-        claude = self.root / "bin" / "claude"
-        claude.parent.mkdir()
-        claude.write_text(FAKE_CLAUDE, encoding="utf-8")
-        claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
-        self.claude = str(claude)
-        self.log = self.root / "fake.log"
-        self.gate = self.log.with_name(self.log.name + ".gate")
-        self.board = FakeBoard()
-        self.po_sprints = FakeSprints({SPRINT: None})
-        self.services: list[PoService] = []
-        self.addCleanup(self.stop_everything)
-
-    def start(self, *, listen: bool = True) -> PoService:
-        runner = PoRunner(
-            FakePoStore(self.board),
-            self.data,
-            executables={"claude": self.claude},
-            env={**os.environ, "FAKE_LOG": str(self.log)},
-        )
-        service = PoService(runner, data_dir=self.data, sprints=self.po_sprints, models={"claude": ("opus",)})
-        self.services.append(service)
-        service.start()
-        thread = threading.Thread(target=service.run, kwargs={"tick": 0.05, "say": lambda _line: None})
-        thread.start()
-        self.addCleanup(thread.join, 10)
-        self.addCleanup(service.stop)
-        if listen:
-            self.enterContext(listening(service))
-        return service
-
-    def stop_everything(self) -> None:
-        self.gate.touch()
-        for service in self.services:
-            service.stop()
-            for live in list(service.runner._live.values()):
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(live.process.pid, signal.SIGKILL)
-
-    def session(self, service: PoService) -> str:
-        return service.create_session(cli="claude", model="opus", effort="default", request_id="c-owner")[
-            "session_id"
-        ]
-
-    def settled(self, session_id: str, seq: int) -> po_store.Turn:
-        store = FakePoStore(self.board)
-        eventually(
-            lambda: len(store.turns(session_id)) >= seq and store.turns(session_id)[seq - 1].state != po_store.RUNNING,
-            f"turn {seq} never settled",
-        )
-        return store.turns(session_id)[seq - 1]
-
-    def reached_gate(self, session_id: str, seq: int) -> None:
-        stdout = self.data / "po-runs" / session_id / f"turn-{seq:04d}.stdout"
-        eventually(
-            lambda: stdout.exists() and "TOOL-CALL-SECRET" in stdout.read_text(),
-            f"turn {seq} never reached its gate",
-        )
-
-    def calls(self) -> list[dict]:
-        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
-
-    def runtime(self, task: dict[str, Any], *, comments: list[str] | None = None, po: Any = None):
-        self.cards = OneCardBoard(task)
-        channel = ServicePoChannel(self.data, None)
-        channel._store = FakePoStore(self.board)
-        self.saved: list[dict[str, Any]] = []
-        return SimpleNamespace(
-            owner="secretary-dispatcher",
-            reader=self.cards,
-            writer=self.cards,
-            audit=self.cards,
-            sprints=SprintView(comments if comments is not None else ["Opened the sprint.", "Owner: keep it small."]),
-            po=po or channel,
-            host=Forbidden("host"),
-            catalog=Forbidden("catalog"),
-            head_health=Forbidden("head health"),
-            save_records=lambda payload, records: self.saved.append(
-                {ref: record.to_json() for ref, record in records.items()}
-            ),
-        )
-
-    def claim(self, runtime: Any, records: dict[str, DispatcherRecord] | None = None):
-        self.records = {} if records is None else records
-        self.payload: dict[str, Any] = {}
-        self.attempt = new_attempt_id()
-        return claim_ready_task(runtime, runtime.reader.show(REF), self.records, self.payload, self.attempt)
-
-    def tick(self, runtime: Any) -> dict[str, Any]:
-        return advance_po_card(runtime, runtime.reader.show(REF), self.records, self.payload, self.attempt)
-
-    def record(self) -> DispatcherRecord:
-        return self.records[REF]
-
-    def session_ids(self) -> list[str]:
-        return list(self.board.sessions)
+from tests.po_card_fakes import (
+    DECISION_BODY,
+    OPERATION_BODY,
+    REF,
+    SPRINT,
+    DispatcherFixture,
+    card,
+)
+from tests.po_cli_fakes import eventually
+from tests.po_fake_store import FakePoStore, FakeSprints
 
 
 class ClaimAndSubmitTests(DispatcherFixture):

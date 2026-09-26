@@ -42,6 +42,16 @@ from secretary.board.legacy_codec import (
     text as _text,
 )
 from secretary.board.outcome_round_context import OutcomeRoundContext
+from secretary.board.owner_handover import (
+    CLEAR_MARK,
+    HANDED_TO_OWNER,
+    OWNER,
+    OWNER_ROLE,
+    carries_mark_fields,
+    mark_values,
+    render_handover_comment,
+    waiting_owner,
+)
 from secretary.board.models import (
     Actor,
     CardState,
@@ -899,6 +909,9 @@ class TaskReader:
             extensions["swimlane"] = lane
         if extensions:
             result["extensions"] = {EXTENSION_BAG: extensions}
+            # A card handed to the owner says so where a reader looks first, not only in the bag.
+            if (mark := waiting_owner(result)) is not None:
+                result["waiting_owner"] = mark
         if comments is not None:
             result["comments"] = comments
         return result
@@ -1550,7 +1563,16 @@ class TaskWriter:
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        role = self._role(role, COMMENT_ROLES)
+        """One role comment on a card. `owner` comments too, on any card, always as actor `owner`.
+
+        The owner is not a board role (it moves nothing and creates nothing); its comment is how it
+        answers a card the PO handed to it (`handover`), and the dispatcher reads it back by its
+        `owner` marker.
+        """
+        if str(role) == OWNER_ROLE:
+            role, actor = OWNER_ROLE, OWNER_ROLE
+        else:
+            role = self._role(role, COMMENT_ROLES)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
         return self._write(
@@ -1820,6 +1842,82 @@ class TaskWriter:
             "event_id": result.event.event_id,
             "replayed": False,
         }
+
+    def handover(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        to: str,
+        reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """The PO hands an In progress `decision`/`operation` card to the owner (secretary-1761).
+
+        One write: the `waiting_owner` mark on the card (`board.owner_handover`) and a PO comment
+        `[handover:owner]` with the reason, in the transaction of one `handed_to_owner` audit record,
+        so the three land together or not at all. The card stays In progress. The request id makes it
+        idempotent: a repeat answers the recorded handover and writes nothing, and the same id with
+        another card or reason is refused. Every refusal (role, recipient, reason, kind, column, a
+        mark already there) is decided before anything is written; the card ones are decided on the
+        card as read inside that transaction.
+        """
+        role = self._role(role, {Role.PO})
+        if to != OWNER:
+            raise TaskError("validation", f"a card is handed to the {OWNER}, not to {to!r}", 2)
+        reason = self._redact_for_board(reason).strip()
+        if not reason:
+            raise TaskError("validation", "a handover needs a reason: what the owner has to decide or do", 2)
+        since = _now()
+        identity = {"to": OWNER, "reason_sha256": _digest(reason)}
+
+        def payload(task: dict[str, Any]) -> dict[str, Any]:
+            _check_execution_record(task)
+            kind = str(task.get("type") or "")
+            if not is_po_executed(task):
+                raise TaskError(
+                    "validation",
+                    f"{reference} is a {kind or 'typeless'} card; only a decision or operation card is "
+                    "handed to the owner",
+                    2,
+                )
+            if task["state"] != CardState.IN_PROGRESS.value:
+                raise TaskError(
+                    "transition_forbidden",
+                    f"task handover needs the card In progress, where the PO answers it; {reference} is "
+                    f"{task['state']}",
+                    3,
+                )
+            if carries_mark_fields(task):
+                held = waiting_owner(task) or {}
+                raise TaskError(
+                    "already_handed_over",
+                    f"{reference} is already handed to the owner"
+                    + (f" since {held['since']}: {held['reason']}" if held else ""),
+                    3,
+                )
+            return {
+                "marker": role.value,
+                **identity,
+                "kind": kind,
+                "sprint": task.get("sprint"),
+                "waiting_owner": since,
+            }
+
+        def mutation(task: dict[str, Any]) -> None:
+            number = _task_number(task)
+            self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
+            self.client.call(
+                "createComment",
+                task_id=number,
+                user_id=0,
+                content=f"[{role.value}]\n{render_handover_comment(reason)}",
+            )
+
+        return self._write(
+            HANDED_TO_OWNER, role, actor, reference, request_id, payload, mutation, identity=identity
+        )
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
@@ -2670,9 +2768,16 @@ class TaskWriter:
         Kept idempotent on purpose: a retry or :meth:`reconcile` may repeat it after the column effect
         and its typed event are durable.
         """
+        # A card handed to the owner waits for the owner only while it is In progress: whatever
+        # moves it on (`task complete` above all) takes the mark off in the same transaction.
+        clear_mark = CLEAR_MARK if source == "in_progress" and carries_mark_fields(task) else {}
         if target in {"ready", "done"}:
-            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
-        elif source == "validate":
+            self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
+            )
+        elif clear_mark:
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=clear_mark)
+        if source == "validate" and target not in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
             )

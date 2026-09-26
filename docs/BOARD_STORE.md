@@ -1093,6 +1093,12 @@ as `EXTENSION_BAG` in `board/extension_bag.py` and read and written by `board/sq
 `extensions.extra`. It also holds the card's observed swimlane, which never overrides the lane
 derived from the product. A key on many rows indicates a missing column.
 
+Three typed keys live here on purpose, with no column: the owner-handover mark of a `decision` or
+`operation` card (`waiting_owner`, `waiting_owner_reason`, `waiting_owner_by`; `board/owner_handover.py`,
+[Protocols](PROTOCOLS.md#handover-to-the-owner)). Only `task handover` writes them, a card that leaves
+In progress drops them, and they are read only through `waiting_owner`, which treats a partial or
+malformed set as no mark. A store without them reads exactly as before.
+
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that
 revision moved current rows onto `extra`. History (`board_events`, committed `requests`) and

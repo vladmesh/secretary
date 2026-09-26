@@ -630,6 +630,13 @@
                 "string",
                 "null"
               ]
+            },
+            "card": {
+              "description": "The card the answer is about: the sprint's current card, null when it has none. An In progress decision or operation card reads as waiting, on the PO or, when the PO handed it over, on the owner.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         },
