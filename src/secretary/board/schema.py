@@ -193,6 +193,10 @@ class Sprint(Base):
     observer = sa.Column(JSONB)  # (J1)
     worker_pin = sa.Column(sa.Text)
     reviewer_pin = sa.Column(sa.Text)
+    # The PO session that opened the sprint, and the productions its operations may touch (0016).
+    # Null and empty for every sprint opened before them; both are set at create and never inferred.
+    po_session = sa.Column(sa.Text)
+    allowed_productions = sa.Column(ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'::text[]"))
     # Both cursors are scoped to this sprint by composite foreign key, not by a bare
     # existence check.  See "Scoped relations" in §3.3.
     current_task_ref = sa.Column(sa.Text)
@@ -892,7 +896,9 @@ class PoRequest(Base):
 
     __table_args__ = (
         sa.CheckConstraint(
-            "operation IN ('po_session_create','po_send')", name="po_request_operation_in_vocabulary"
+            # `po_sprint_session` since 0016; `secretary.po.store.REQUEST_OPERATIONS` is the same list.
+            "operation IN ('po_session_create','po_send','po_sprint_session')",
+            name="po_request_operation_in_vocabulary",
         ),
         sa.CheckConstraint(
             "(operation = 'po_send') = (seq IS NOT NULL)", name="po_request_seq_only_for_a_send"

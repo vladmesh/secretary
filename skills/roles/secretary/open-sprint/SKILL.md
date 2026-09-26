@@ -100,7 +100,13 @@ Grilling is finished when these are fixed:
 - a Definition of Done as checkable items;
 - the list of repositories;
 - the boundaries: what is definitely outside the sprint;
-- the observer: `none`, or one head profile from `heads.yaml`.
+- the observer: `none`, or one head profile from `heads.yaml`;
+- the allowed productions: which registered projects' production the sprint's operations may touch,
+  possibly none.
+
+The allowed productions are chosen explicitly here, at planning, and have no default: a sprint may touch
+no production unless a project is named, and naming the sprint's own project is a decision like any
+other, not a given. Ask it plainly when the Definition of Done needs anything done on a live system.
 
 The observer is the owner's decision and has no default. Ask it plainly: does this sprint need a
 head watching it, and if so which one, matched to how hard the work is. A simple sprint does not
@@ -138,7 +144,8 @@ python3 -P -m secretary sprint create --role po --actor <you> \
   --dod-file /tmp/dod.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
   --observer <head-profile|none> \
-  --repository <repo> --repository <repo>
+  --repository <repo> --repository <repo> \
+  [--allow-production <project-id> ...]
 ```
 
 - `--role` accepts `po` and `steward`. Opening a sprint is `po`.
@@ -150,6 +157,13 @@ python3 -P -m secretary sprint create --role po --actor <you> \
   one is a pilot that opens only when the `open_sprint_limit` instance setting is deliberately raised to
   2, and what admission then checks is in "The open-sprint limit" in `docs/PROTOCOLS.md`.
 - `--repository` is repeated once per repository.
+- The sprint records the PO session that creates it. Inside a PO turn this is automatic: every turn
+  carries `SECRETARY_PO_SESSION`, which is the default of `--po-session`, so pass nothing. Outside a PO
+  turn (a `--role steward` create) the sprint records none unless `--po-session <id>` names an open one.
+  When that session later no longer exists, the PO service opens a fresh one for the sprint and seeds it
+  with the why-document of step 6 and `NOTES.md`.
+- `--allow-production` is repeated once per registered project whose production the sprint's operations
+  may touch, exactly as agreed in grilling; omit it for none. Nothing is inferred from `--project`.
 - `--observer` is required and has no fallback: pass the profile the owner chose, or `none`. The
   sprint stores exactly that value; the dispatcher launches from it and never from a role default.
   A profile the head registry does not have is refused here rather than at the first tick. Changing
@@ -165,9 +179,10 @@ python3 -P -m secretary sprint show --ref sprint:<ID>
 python3 -P -m secretary sprint status --ref sprint:<ID>
 ```
 
-`show` returns the goal, Definition of Done, repositories, status, budget, current task, resume entry and
-comments. `status` returns the summary: card states, budget, resume freshness and observer state. A newly
-created sprint normally reports a missing resume entry — the first one is written by the observer.
+`show` returns the goal, Definition of Done, repositories, `po_session`, `allowed_productions`, status,
+budget, current task, resume entry and comments. `status` returns the summary: card states, budget,
+resume freshness and observer state. A newly created sprint normally reports a missing resume entry — the
+first one is written by the observer.
 
 ## 6. Write the "why" document
 
@@ -180,7 +195,9 @@ python3 -P -m secretary knowledge write --instance <instance dir> --actor secret
 
 The document holds:
 
-- a pointer to the entity (`sprint:<ID>`), without retelling its fields;
+- a pointer to the entity (`sprint:<ID>`), without retelling its fields. Name it exactly: a fresh PO
+  session for the sprint is seeded with the one `decisions/*.md` that names `sprint:<ID>`, so write one
+  such document per sprint;
 - why the sprint is being opened now: what in the product demanded it;
 - which goals were considered and why this one was chosen;
 - the rejected alternatives and the reason for rejecting them;

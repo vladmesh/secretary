@@ -301,6 +301,14 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         # The two optional executor pins, carried only where the row declares one, so a record of
         # a sprint that pins nobody stays byte-identical to the record this export always wrote.
         **_sprint_executors(sprint),
+        # Carried only where the sprint has them (0016), so a record of a sprint opened before
+        # them stays byte-identical to the record this export always wrote.
+        **({"po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
+        **(
+            {"allowed_productions": [str(project) for project in sprint["allowed_productions"]]}
+            if sprint.get("allowed_productions")
+            else {}
+        ),
         "status": str(sprint.get("status") or ""),
         "budget": {
             "by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())},

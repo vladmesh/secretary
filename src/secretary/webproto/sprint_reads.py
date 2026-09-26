@@ -1951,6 +1951,8 @@ def _identity(row: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
         "reservations": view.get("reservations"),
         "repositories": row.get("repositories") or [],
         "executors": view.get("executors") or stored_executors({}),
+        "po_session": view.get("po_session"),
+        "allowed_productions": list(view.get("allowed_productions") or []),
         "budget": view.get("budget"),
     }
 
@@ -2442,6 +2444,10 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
         # Always both roles and always a state, exactly as the reader gives them: "the owner pinned
         # nobody" is an answer and never a missing key.
         "executors": executors if isinstance(executors, dict) else stored_executors({}),
+        # The PO session the sprint answers to and the productions it may touch; null and empty for
+        # a sprint opened before either was recorded.
+        "po_session": sprint.get("po_session"),
+        "allowed_productions": list(sprint.get("allowed_productions") or []),
         "resume": sprint.get("resume"),
         "budget": sprint.get("budget"),
         "audit": sprint.get("audit"),

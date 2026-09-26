@@ -799,6 +799,18 @@
         "executors": {
           "type": "object"
         },
+        "po_session": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allowed_productions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "budget": {
           "type": [
             "object",
@@ -1053,6 +1065,20 @@
                       }
                     }
                   }
+                },
+                "po_session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The PO session the sprint answers to: recorded at create, or by the PO service's resolver when it opened a fresh one. Null for a sprint opened before it was recorded."
+                },
+                "allowed_productions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Registered projects whose production this sprint's operations may touch, fixed at create. Empty unless named."
                 },
                 "resume": {
                   "type": [
@@ -1787,6 +1813,20 @@
                       }
                     }
                   }
+                },
+                "po_session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The PO session the sprint answers to: recorded at create, or by the PO service's resolver when it opened a fresh one. Null for a sprint opened before it was recorded."
+                },
+                "allowed_productions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Registered projects whose production this sprint's operations may touch, fixed at create. Empty unless named."
                 },
                 "resume": {
                   "type": [

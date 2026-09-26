@@ -105,6 +105,11 @@ class SprintCreateIntent:
     observer: dict[str, Any] | None
     worker: str | None
     reviewer: str | None
+    # The PO session that opens the sprint and the productions its operations may touch. Both are
+    # inputs of the request, and both are left off the document when unset, so an intent staged
+    # before they existed still replays as the same request.
+    po_session: str | None = None
+    allowed_productions: tuple[str, ...] = ()
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> SprintCreateIntent:
@@ -122,10 +127,12 @@ class SprintCreateIntent:
             observer=_observer(document.get("observer")),
             worker=str(document.get("worker")) if document.get("worker") is not None else None,
             reviewer=str(document.get("reviewer")) if document.get("reviewer") is not None else None,
+            po_session=str(document.get("po_session")) if document.get("po_session") else None,
+            allowed_productions=_strings(document.get("allowed_productions")),
         )
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "role": self.role.value,
             "actor": self.actor,
             "goal": self.goal,
@@ -140,6 +147,11 @@ class SprintCreateIntent:
             "worker": self.worker,
             "reviewer": self.reviewer,
         }
+        if self.po_session:
+            document["po_session"] = self.po_session
+        if self.allowed_productions:
+            document["allowed_productions"] = list(self.allowed_productions)
+        return document
 
     def admission(self, *, reference: str | None = None) -> SprintAdmission:
         return SprintAdmission(

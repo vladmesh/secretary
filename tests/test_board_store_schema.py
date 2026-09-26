@@ -90,6 +90,7 @@ REVISIONS = (
     "0013_budget_candidates",
     "0014_neutral_extension_bag",
     "0015_po_effort_resolved_model",
+    "0016_sprint_po_session",
 )
 
 
@@ -464,6 +465,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
                 "0014_neutral_extension_bag",
                 "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -715,6 +717,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
                 "0014_neutral_extension_bag",
                 "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
             ),
         )
 
@@ -1085,7 +1088,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection, dry_run=True),
-            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model"),
+            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
 
@@ -1115,7 +1118,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
 
         self.assertEqual(
-            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+            self.run_migrations(connection),
+            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
         )
 
         self.assertEqual(
@@ -1185,7 +1189,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
 
         self.assertEqual(
-            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+            self.run_migrations(connection),
+            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
         )
 
     def test_0014_has_no_downgrade(self) -> None:
@@ -1193,7 +1198,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         connection = self.at_0013()
         self.assertEqual(
-            self.run_migrations(connection), ("0014_neutral_extension_bag", "0015_po_effort_resolved_model")
+            self.run_migrations(connection),
+            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
         )
 
         with self.assertRaisesRegex(NotImplementedError, "forward-only"):
@@ -1202,7 +1208,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
             )
         connection.rollback()
-        self.assertEqual(migrate.current_revision(connection), "0015_po_effort_resolved_model")
+        self.assertEqual(migrate.current_revision(connection), "0016_sprint_po_session")
 
     # --- 0015: a PO session's effort and each turn's resolved model -----------------------------
 
@@ -1226,6 +1232,51 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(
             connection.exec_driver_sql("SELECT resolved_model FROM po_turns").fetchall(), [(None,)]
         )
+
+    # --- 0016: a sprint's PO session and the productions it may touch ---------------------------
+
+    def test_0016_loads_every_existing_sprint_with_no_po_session_and_no_production(self) -> None:
+        connection = self.at_0013()
+        connection.exec_driver_sql(
+            "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, "
+            "status, created_at, updated_at) "
+            "VALUES ('sprint:7', %s, 7, 'goal', 'done', 'secretary', 'open', now(), now())",
+            (record_key("sprint", "sprint:7"),),
+        )
+        connection.commit()
+
+        self.run_migrations(connection)
+
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT po_session, allowed_productions FROM sprints").fetchall(),
+            [(None, [])],
+        )
+
+    def test_0016_admits_the_sprint_session_operation_and_nothing_else_new(self) -> None:
+        connection = self.at_0013()
+        self.run_migrations(connection)
+        connection.exec_driver_sql(
+            "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state) "
+            "VALUES ('s-1', 'claude', 'opus', '/po', now(), 'open')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+            "VALUES ('r-1', 'po_sprint_session', 'f', 's-1', NULL, now())"
+        )
+        connection.commit()
+        with self.assertRaisesRegex(Exception, "po_request_operation_in_vocabulary"):
+            connection.exec_driver_sql(
+                "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+                "VALUES ('r-2', 'po_something_else', 'f', 's-1', NULL, now())"
+            )
+        connection.rollback()
+        # A sprint-session request records no turn: `po_request_seq_only_for_a_send` is unchanged.
+        with self.assertRaisesRegex(Exception, "po_request_seq_only_for_a_send"):
+            connection.exec_driver_sql(
+                "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+                "VALUES ('r-3', 'po_sprint_session', 'f', 's-1', 1, now())"
+            )
+        connection.rollback()
 
 
 if __name__ == "__main__":

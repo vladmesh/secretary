@@ -1,0 +1,366 @@
+"""A sprint's PO session and allowed productions (revision 0016): stored at create, printed, carried.
+
+Unit-level: the sprint writer and reader run over a mock board client and an in-memory PO store
+(`tests.po_fake_store`), and the SQL adapter over a client that answers its queries by hand. The
+PostgreSQL path of the same create is covered by the integration-board suite.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+from secretary import sprint_commands
+from secretary.board.sprint_write import SprintCreateIntent
+from secretary.board.sql_sprints import SqlSprintRecords
+from secretary.cli import main
+from secretary.data import normalize_sprint_entity
+from secretary.dispatch.observer import render_observer_prompt
+from secretary.po import PO_SESSION_ENV
+from secretary.po.store import SESSION_CLOSED, SessionNotFound
+from secretary.restore import _restore_sprint_metadata, _sprint_core
+from secretary.sprint_observer import observer_choice
+from secretary.sprints import (
+    ALLOWED_PRODUCTIONS_FIELD,
+    PO_SESSION_FIELD,
+    SprintReader,
+    SprintWriter,
+)
+from secretary.tasks import TaskError
+from secretary.webproto.sprint_reads import _identity, _sprint_value
+from tests.po_fake_store import FakePoStore
+
+# The metadata of a sprint row as the SQL adapter answers it for a sprint opened before 0016.
+PRE_0016_META = {
+    "sprint_goal": "ship it",
+    "sprint_definition_of_done": "green",
+    "sprint_status": "open",
+    "sprint_repositories": "[]",
+    "sprint_observer": '{"kind":"none"}',
+    "sprint_current_task": "",
+    "sprint_resume": "",
+    "sprint_budget": '{"by_type":{}}',
+}
+
+
+def po_session_state(store: FakePoStore):
+    def state(session_id: str) -> str | None:
+        try:
+            return store.session(session_id).state
+        except SessionNotFound:
+            return None
+
+    return state
+
+
+class CreateCommandTests(unittest.TestCase):
+    """`sprint create --po-session/--allow-production`, down to the writer's arguments."""
+
+    def create(self, *extra: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        class Writer:
+            def create(self, **kwargs: Any) -> dict[str, Any]:
+                captured.update(kwargs)
+                return {}
+
+        def write(_args, operation) -> int:
+            operation(Writer())
+            return 0
+
+        environ = {key: value for key, value in os.environ.items() if key != PO_SESSION_ENV}
+        environ.update(env or {})
+        with (
+            mock.patch.object(sprint_commands, "_write", write),
+            mock.patch.dict(os.environ, environ, clear=True),
+        ):
+            code = main(
+                [
+                    "sprint",
+                    "create",
+                    "--role",
+                    "po",
+                    "--instance",
+                    "/nowhere",
+                    "--goal",
+                    "g",
+                    "--product",
+                    "secretary",
+                    "--issue",
+                    "issue:open",
+                    "--project",
+                    "secretary",
+                    "--observer",
+                    "none",
+                    *extra,
+                ]
+            )
+        self.assertEqual(code, 0)
+        return captured
+
+    def test_the_flag_is_recorded(self) -> None:
+        self.assertEqual(self.create("--po-session", "s-flag")["po_session"], "s-flag")
+
+    def test_inside_a_po_turn_the_environment_is_the_default_and_the_flag_wins(self) -> None:
+        self.assertEqual(self.create(env={PO_SESSION_ENV: "s-turn"})["po_session"], "s-turn")
+        self.assertEqual(
+            self.create("--po-session", "s-flag", env={PO_SESSION_ENV: "s-turn"})["po_session"], "s-flag"
+        )
+
+    def test_with_neither_no_session_is_passed(self) -> None:
+        self.assertIsNone(self.create()["po_session"])
+        self.assertIsNone(self.create(env={PO_SESSION_ENV: ""})["po_session"])
+
+    def test_productions_default_to_none_and_repeat(self) -> None:
+        self.assertEqual(self.create()["allowed_productions"], [])
+        self.assertEqual(
+            self.create("--allow-production", "secretary", "--allow-production", "site")[
+                "allowed_productions"
+            ],
+            ["secretary", "site"],
+        )
+
+
+class WriterFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.instance = self.root / "instance"
+        (self.instance / "projects").mkdir(parents=True)
+        for project in ("secretary", "site"):
+            (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+        self.po = FakePoStore()
+        self.open_session = self.po.claim_session(
+            session_id="s-open", cli="claude", model="opus", cwd="/po", cli_session_id="c-1"
+        )[0].session_id
+        self.po.claim_session(
+            session_id="s-closed", cli="claude", model="opus", cwd="/po", cli_session_id="c-2"
+        )
+        self.po.close_session("s-closed", "owner")
+        self.client = mock.MagicMock()
+        self.writer = SprintWriter(
+            self.client,
+            data_dir=self.root / "data",
+            instance=self.instance,
+            po_session_state=po_session_state(self.po),
+        )
+
+    def intent(self, **options: Any) -> SprintCreateIntent:
+        return self.writer._create_intent(
+            role="po",
+            actor="po",
+            goal="g",
+            definition_of_done="",
+            repositories=[],
+            product="secretary",
+            issues=["issue:open"],
+            reservations=["secretary"],
+            reference="",
+            observer=observer_choice("none"),
+            **options,
+        )
+
+
+class CreateCheckTests(WriterFixture):
+    def test_an_open_session_and_registered_productions_pass(self) -> None:
+        intent = self.intent(po_session=" s-open ", allowed_productions=["site", "secretary", "site"])
+        self.writer._check_po_channel(intent)
+        self.assertEqual((intent.po_session, intent.allowed_productions), ("s-open", ("site", "secretary")))
+
+    def test_neither_is_nothing_to_check(self) -> None:
+        intent = self.intent()
+        self.writer._check_po_channel(intent)
+        self.assertEqual((intent.po_session, intent.allowed_productions), (None, ()))
+        self.assertEqual(
+            self.writer._create_values(intent).keys() & {PO_SESSION_FIELD, ALLOWED_PRODUCTIONS_FIELD}, set()
+        )
+
+    def test_an_unknown_or_closed_session_and_an_unknown_project_are_refused(self) -> None:
+        for options, message in (
+            ({"po_session": "s-nowhere"}, "there is no PO session s-nowhere"),
+            ({"po_session": "s-closed"}, f"PO session s-closed is {SESSION_CLOSED}"),
+            ({"allowed_productions": ["secretary", "elsewhere"]}, "unknown registered project(s): elsewhere"),
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises(TaskError) as raised:
+                    self.writer._check_po_channel(self.intent(**options))
+                self.assertEqual(raised.exception.code, "validation")
+                self.assertIn(message, raised.exception.message)
+        with self.assertRaises(TaskError):
+            self.intent(allowed_productions=[" "])
+
+    def test_a_refused_create_writes_nothing(self) -> None:
+        """The check sits with the ownership check: before the request is claimed or a row exists."""
+        self.writer.transactions = mock.Mock()
+        self.writer.transactions.existing.return_value = (None, None)
+        with (
+            mock.patch.object(self.writer, "_check_ownership"),
+            mock.patch.object(self.writer, "_check_conflicts"),
+            mock.patch.object(self.writer, "_begin_create") as begin,
+        ):
+            for options in ({"po_session": "s-closed"}, {"allowed_productions": ["elsewhere"]}):
+                with self.subTest(options=options), self.assertRaises(TaskError):
+                    self.writer._create_under_admission("r-1", self.intent(**options))
+        begin.assert_not_called()
+        self.assertEqual(self.client.call.call_args_list, [])
+
+    def test_both_are_inputs_of_the_request_and_an_older_intent_still_replays(self) -> None:
+        plain = self.intent()
+        chosen = self.intent(po_session="s-open", allowed_productions=["secretary"])
+        self.assertNotIn("po_session", plain.to_document())
+        self.assertNotIn("allowed_productions", plain.to_document())
+        self.assertEqual(chosen.to_document()["po_session"], "s-open")
+        self.assertEqual(chosen.to_document()["allowed_productions"], ["secretary"])
+        self.assertNotEqual(plain.to_document(), chosen.to_document())
+        self.assertEqual(SprintCreateIntent.from_document(chosen.to_document()), chosen)
+        self.assertEqual(self.writer._create_values(chosen)[ALLOWED_PRODUCTIONS_FIELD], '["secretary"]')
+        self.assertEqual(self.writer._create_values(chosen)[PO_SESSION_FIELD], "s-open")
+
+
+class ReadTests(unittest.TestCase):
+    def normalize(self, meta: dict[str, str]) -> dict[str, Any]:
+        return SprintReader(mock.MagicMock())._normalize(
+            {"id": 7, "reference": "sprint:7"}, meta, comments=[], include_resume_freshness=False
+        )
+
+    def test_a_sprint_opened_before_0016_reads_null_and_empty(self) -> None:
+        sprint = self.normalize(PRE_0016_META)
+        self.assertEqual((sprint["po_session"], sprint["allowed_productions"]), (None, []))
+        status = SprintReader(mock.MagicMock())._status({**sprint, "resume_freshness": {}}, None)
+        self.assertEqual((status["po_session"], status["allowed_productions"]), (None, []))
+
+    def test_show_status_and_the_protocol_documents_carry_both(self) -> None:
+        sprint = self.normalize(
+            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["secretary","site"]'}
+        )
+        self.assertEqual(
+            (sprint["po_session"], sprint["allowed_productions"]), ("s-1", ["secretary", "site"])
+        )
+        status = SprintReader(mock.MagicMock())._status({**sprint, "resume_freshness": {}}, None)
+        self.assertEqual(
+            (status["po_session"], status["allowed_productions"]), ("s-1", ["secretary", "site"])
+        )
+        value = _sprint_value(sprint)
+        self.assertEqual((value["po_session"], value["allowed_productions"]), ("s-1", ["secretary", "site"]))
+        identity = _identity(sprint, status)
+        self.assertEqual(
+            (identity["po_session"], identity["allowed_productions"]), ("s-1", ["secretary", "site"])
+        )
+
+    def test_the_observer_document_names_both(self) -> None:
+        sprint = self.normalize(
+            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["secretary"]'}
+        )
+        document = render_observer_prompt(sprint)
+        self.assertIn("## PO session\n\ns-1\n", document)
+        self.assertIn("## Allowed productions\n\n- secretary\n", document)
+        older = render_observer_prompt(self.normalize(PRE_0016_META))
+        self.assertIn("## PO session\n\n(none recorded)\n", older)
+        self.assertIn(
+            "## Allowed productions\n\n- (none: this sprint's operations may touch no production)\n", older
+        )
+
+
+class SqlAdapterTests(unittest.TestCase):
+    """The `sprints` columns behind the metadata: a pre-0016 row, and the two written at create."""
+
+    class Client:
+        def __init__(self, po_session: str | None, productions: list[str]) -> None:
+            self.row = (
+                7,
+                "sprint:7",
+                "g",
+                "d",
+                None,
+                "open",
+                {"kind": "none"},
+                None,
+                None,
+                None,
+                None,
+                po_session,
+                productions,
+            )
+            self.executed: list[tuple[str, tuple]] = []
+
+        def _staged(self, _kind: str) -> dict:
+            return {}
+
+        def _query(self, sql: str, params: tuple = ()) -> list:
+            if sql.startswith("SELECT board_key, ref, goal"):
+                return [self.row]
+            return []
+
+        def _execute(self, sql: str, params: tuple = ()) -> None:
+            self.executed.append((sql, params))
+
+    def test_a_pre_0016_row_loads_without_either_field(self) -> None:
+        # After 0016 an existing row holds NULL and the column default, '{}'.
+        meta = SqlSprintRecords(self.Client(None, [])).metadata(7)
+        self.assertNotIn(PO_SESSION_FIELD, meta)
+        self.assertNotIn(ALLOWED_PRODUCTIONS_FIELD, meta)
+        sprint = ReadTests.normalize(ReadTests(), {**meta, "sprint_budget": '{"by_type":{}}'})
+        self.assertEqual((sprint["po_session"], sprint["allowed_productions"]), (None, []))
+
+    def test_a_row_with_both_reads_them_back(self) -> None:
+        meta = SqlSprintRecords(self.Client("s-1", ["secretary"])).metadata(7)
+        self.assertEqual(meta[PO_SESSION_FIELD], "s-1")
+        self.assertEqual(json.loads(meta[ALLOWED_PRODUCTIONS_FIELD]), ["secretary"])
+
+    def test_create_inserts_both_and_an_update_writes_them(self) -> None:
+        client = self.Client(None, [])
+        records = SqlSprintRecords(client)
+        with mock.patch.object(SqlSprintRecords, "_replace_relations"):
+            records._apply("sprint:7", {PO_SESSION_FIELD: "s-2", ALLOWED_PRODUCTIONS_FIELD: '["site"]'})
+        [(sql, params)] = client.executed
+        self.assertIn("po_session = %s", sql)
+        self.assertIn("allowed_productions = %s::text[]", sql)
+        self.assertEqual(params[:2], ("s-2", ["site"]))
+
+        staged: dict = {
+            5: {
+                "reference": "sprint:5",
+                "title": "g",
+                "created_at": None,
+                "metadata": {
+                    "sprint_goal": "g",
+                    "sprint_definition_of_done": "",
+                    "sprint_status": "open",
+                    PO_SESSION_FIELD: "s-3",
+                    ALLOWED_PRODUCTIONS_FIELD: '["secretary"]',
+                },
+            }
+        }
+        client = self.Client(None, [])
+        client._staged = lambda _kind: staged  # type: ignore[method-assign]
+        with mock.patch.object(SqlSprintRecords, "_replace_relations"):
+            SqlSprintRecords(client)._finish_staged(5)
+        [(sql, params)] = client.executed
+        self.assertIn("po_session, allowed_productions", sql)
+        self.assertIn("s-3", params)
+        self.assertIn(["secretary"], params)
+
+
+class CheckpointTests(unittest.TestCase):
+    def test_export_and_restore_carry_both_only_where_set(self) -> None:
+        base = {"ref": "sprint:7", "goal": "g", "status": "open", "budget": {"by_type": {}}, "audit": {}}
+        older = normalize_sprint_entity({**base, "po_session": None, "allowed_productions": []})
+        self.assertNotIn("po_session", older)
+        self.assertNotIn("allowed_productions", older)
+        self.assertNotIn(PO_SESSION_FIELD, _restore_sprint_metadata(older))
+
+        record = normalize_sprint_entity({**base, "po_session": "s-1", "allowed_productions": ["secretary"]})
+        self.assertEqual((record["po_session"], record["allowed_productions"]), ("s-1", ["secretary"]))
+        values = _restore_sprint_metadata(record)
+        self.assertEqual(
+            (values[PO_SESSION_FIELD], values[ALLOWED_PRODUCTIONS_FIELD]), ("s-1", '["secretary"]')
+        )
+        self.assertNotEqual(_sprint_core(record), _sprint_core(older))
+
+
+if __name__ == "__main__":
+    unittest.main()
