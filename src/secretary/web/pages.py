@@ -36,6 +36,7 @@ from urllib.parse import quote
 from secretary.web import markdown
 from secretary.web.doctor import DOCTOR_NOT_BUILT
 from secretary.web.doctor import unreadable as doctor_unreadable
+from secretary.web.provider_usage import credit_count, credit_moment, credit_moment_iso
 
 TITLE = "secretary"
 
@@ -461,6 +462,8 @@ body { padding-bottom: var(--bar-height); }
 .statusbar .window > b.stale { color: var(--warn); font-weight: 500; }
 .statusbar .window .dot { color: var(--faint); }
 .resets { color: var(--muted); font-variant-numeric: tabular-nums; }
+.statusbar .credits { display: inline-flex; align-items: baseline; gap: .35rem; font-family: var(--mono); color: var(--ink); }
+.statusbar .credits .dot { color: var(--faint); }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
 .statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
 .statusbar .bar-refresh input { margin: 0; }
@@ -731,7 +734,8 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
             f"{_bar_no_reading('this reading carried no usage window')}{old}</span>"
         )
     drawn = "".join(_bar_window(window) for window in windows)
-    return f'<span class="provider"><b>{shown}</b>{drawn}{old}</span>'
+    credits = _bar_reset_credits(provider.get("reset_credits"))
+    return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{old}</span>'
 
 
 def _bar_window(window: dict[str, Any]) -> str:
@@ -749,6 +753,39 @@ def _bar_window(window: dict[str, Any]) -> str:
         f'<span class="window"><span class="win-name">{escape(str(window.get("name") or "window"))}</span>'
         f'{figure}<span class="dot">·</span>{countdown}</span>'
     )
+
+
+def _bar_reset_credits(credits: Any) -> str:
+    """The rate-limit reset credits a reading carries: how many, how many usable now, the nearest expiry.
+
+    Nothing at all when the reading carries no credits or none are available: a label saying zero
+    would be read as a limit, and there is no credit to spend. Every value is read through the same
+    normalisers the layer wrote it with, so a hand-made document cannot make the bar fail.
+    """
+    if not isinstance(credits, dict):
+        return ""
+    available = credit_count(credits.get("available"))
+    if not available:
+        return ""
+    applicable = credit_count(credits.get("applicable"))
+    text = f"{available} reset{'' if available == 1 else 's'}"
+    if applicable is not None:
+        text += f" ({applicable} usable)"
+    drawn = escape(text)
+    moment = credit_moment(credits.get("next_expires_at"))
+    if moment is not None:
+        try:
+            ahead = (moment - _render_now()) // timedelta(microseconds=1)
+        except (OverflowError, ValueError):
+            ahead = None
+        if ahead is not None:
+            expiry = f"expires in {_duration(ahead / 1_000_000)}" if ahead > 0 else "expired"
+            title = credit_moment_iso(credits.get("next_expires_at")) or ""
+            drawn += (
+                f'<span class="dot">·</span>'
+                f'<span class="expires" title="{escape(title)}">{escape(expiry)}</span>'
+            )
+    return f'<span class="credits">{drawn}</span>'
 
 
 def _bar_no_reading(reason: str) -> str:
@@ -960,24 +997,36 @@ LONGEST_WINDOW_MINUTES = 366 * 24 * 60
 
 
 def _time_left(seconds: float) -> str:
-    """A reset as the time left until it: the one spelling of that rule in this module.
+    """A reset as the time left until it: see :func:`_duration`."""
+    return f"{_duration(seconds)} left"
+
+
+def _duration(seconds: float) -> str:
+    """A span still ahead, in the one spelling this module uses for every countdown.
 
     It is only ever asked about a moment still ahead -- `_reset_reading` rolls a past one forward
     first -- so anything under a minute, a rounded-down zero included, is less than a minute.
     """
     total = int(seconds)
     if total < 60:
-        return "less than a minute left"
+        return "less than a minute"
     # A unit belongs to the number in front of it: `1h 6m`, never `1 h 6 m`, where the spaces make
     # four things out of two and the reader has to pair them up again.
     minutes = total // 60
     if minutes < 60:
-        return f"{minutes}m left"
+        return f"{minutes}m"
     hours, minutes = divmod(minutes, 60)
     if hours < 24:
-        return f"{hours}h {minutes}m left"
+        return f"{hours}h {minutes}m"
     days, hours = divmod(hours, 24)
-    return f"{days}d {hours}h left"
+    return f"{days}d {hours}h"
+
+
+def _render_now() -> datetime:
+    """The clock of this render, as an aware moment: every countdown is measured from it."""
+    clock = _RENDER_CLOCK.get()
+    now = clock() if clock is not None else datetime.now(UTC)
+    return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
 
 
 def _window_length(value: Any) -> int | None:
@@ -1014,12 +1063,8 @@ def _reset_reading(resets_at: Any, window_minutes: Any = None) -> tuple[str, boo
     moment = _reset_moment(resets_at)
     if moment is None:
         return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>', False
-    clock = _RENDER_CLOCK.get()
-    now = clock() if clock is not None else datetime.now(UTC)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
     try:
-        ahead = (moment - now) // timedelta(microseconds=1)
+        ahead = (moment - _render_now()) // timedelta(microseconds=1)
     except (OverflowError, ValueError):
         return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>', False
     if ahead > 0:
