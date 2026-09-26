@@ -37,8 +37,10 @@ from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import HostError
 from secretary.dispatch.watchdog import reset_idle as _reset_idle
 from secretary.dispatch.watchdog import reset_wait as _reset_wait
+from secretary.dispatch.worker_comments import task_doc_comment_keys as _task_doc_comment_keys
 from secretary.dispatch.worker_launch import bring_up_worker_head as _bring_up_worker_head
 from secretary.dispatch.worker_launch import write_worker_relaunch_intent as _write_worker_relaunch_intent
+from secretary.dispatch.worker_lifecycle import WorkerContinuationStage
 
 
 def worker_report_marker(
@@ -670,3 +672,69 @@ def prompt_worker_report(
         "action": "worker-report-prompted",
         "reason": trigger,
     }, trigger
+
+
+def deliver_worker_comments(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> dict[str, Any] | None:
+    """Point a live worker at PO, owner and observer comments that landed during its round.
+
+    A comment is pending when neither the worker's TASK.md was rendered with it nor the record says
+    it was already pointed at. Nothing is sent to a worker that is not running a round right now —
+    paused, suspended, retained for validation, between rounds or gone — and nothing is recorded
+    for it either: the next round's TASK.md carries every comment (secretary-1768).
+
+    The order is `prompt_worker_report`'s durability contract: the keys go on the record and to
+    disk before the send, so a tick that dies in the middle reads them as delivered rather than
+    typing the same comment twice. The TASK.md is rewritten before the pointer goes out, so the
+    section it points at already holds the new comment.
+    """
+    if (
+        record.state != "claimed"
+        or record.paused_worker_at
+        or record.worker_continuation.stage
+        not in (WorkerContinuationStage.NONE, WorkerContinuationStage.DELIVERY_CONFIRMED)
+    ):
+        return None
+    comments = runtime.host.worker_comments(task)
+    if not comments:
+        return None
+    handed = _task_doc_comment_keys(record.workspace) | set(record.worker_comment_deliveries)
+    pending = [comment.key for comment in comments if comment.key not in handed]
+    if not pending or not runtime.host.worker_takes_comments(record):
+        return None
+    ref = task["ref"]
+    record.worker_comment_deliveries = (*record.worker_comment_deliveries, *pending)
+    records[ref] = record
+    runtime.save_records(payload, records)
+    try:
+        runtime.bind_codex_provider_ingress(record, records, payload, role="worker", reference=ref)
+        runtime.host.deliver_worker_comments(task, record)
+    except HostError as exc:
+        _record_worker_delivery_evidence(record, exc, failure=True)
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return {
+            "status": "degraded",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "worker-comments-refused",
+            "comments": pending,
+            "reason": scrub_host_output(str(exc)),
+        }
+    records[ref] = record
+    runtime.save_records(payload, records)
+    return {
+        "status": "ok",
+        "step": "advance",
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "action": "worker-comments-delivered",
+        "comments": pending,
+    }

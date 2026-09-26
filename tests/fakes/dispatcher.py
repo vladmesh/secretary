@@ -32,6 +32,7 @@ from secretary.dispatch.types import (
 )
 from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status
 from secretary.dispatch.watchdog import pid_file_path
+from secretary.dispatch.worker_comments import worker_comments_note
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
@@ -707,6 +708,10 @@ class FakeHost:
         # send. Every prompt actually delivered is recorded, so a test can prove there was one.
         self.fail_report_prompt_reason = ""
         self.report_prompts: list[str] = []
+        # Mid-round comment pointers (secretary-1768): which live workers take one, and every
+        # pointer actually delivered, built the way the real host builds it.
+        self.fail_worker_comments_reason = ""
+        self.worker_comment_prompts: list[str] = []
         self.retained_workers: list[str] = []
         self.resumed_workers: list[str] = []
         # The prompt each wake carried, built the way the real host builds it.
@@ -729,6 +734,8 @@ class FakeHost:
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
     _control_plane_command = CommandHostRuntime._control_plane_command
+    # The document's comment selector, borrowed like the rest of the builder (secretary-1768).
+    worker_comments = CommandHostRuntime.worker_comments
 
     def _broad_check_invocation(self, project: str) -> tuple[str, str]:
         """Borrowed from the real host, like the document builder that calls it.
@@ -1552,6 +1559,31 @@ class FakeHost:
         # Unlike a continuation, this writes no document and clears no body file: the round the
         # head is being pointed back at is the one it already has.
         self.report_prompts.append(_report_nudge_prompt(record.report_generation, task["ref"]))
+
+    def worker_takes_comments(self, record) -> bool:
+        return self.worker_addressable(record) and bool(record.worker_pid_file or record.handle)
+
+    def deliver_worker_comments(self, task: dict, record) -> None:
+        self.calls.append("deliver_worker_comments")
+        if self.fail_worker_comments_reason:
+            raise HostError(self.fail_worker_comments_reason)
+        # Same order as the real host: the round's document, comments included, before the pointer.
+        document = CommandHostRuntime._worker_task_doc(
+            self,  # type: ignore[arg-type]
+            task,
+            task.get("workspace", {}).get("base_branch") or "main",
+            record.attempt_id,
+            record.report_generation,
+            record.report_decision,
+            record.report_protocol_prerequisites,
+            record=record,
+        )
+        (Path(record.workspace) / "TASK.md").write_text(document, encoding="utf-8")
+        self.worker_comment_prompts.append(
+            head_ops.NudgePointer.at_document(
+                str(Path(record.workspace) / "TASK.md"), worker_comments_note(record.report_generation)
+            ).text
+        )
 
     def resume_worker(self, task: dict, record) -> None:
         self.calls.append("resume_worker")

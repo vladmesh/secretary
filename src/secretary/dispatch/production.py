@@ -899,6 +899,8 @@ class _ProbeHost:
         # Typing into a live head is an effect even though it stops nothing: a probe that ran it
         # would interrupt a working worker with a prompt about a round the probe is only modelling.
         "prompt_worker_report",
+        # The same for a mid-round comment pointer, which also rewrites the worker's TASK.md.
+        "deliver_worker_comments",
         "verify_worker_result",
         "gate_check",
         "rerun_failed_ci",
