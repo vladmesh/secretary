@@ -17,6 +17,12 @@ progress Blocks the card; anything else waits, since the input may be queued beh
 another turn. An input the service set aside in `po-queue/refused/` will never become a turn, so it
 Blocks the card with the service's reason.
 
+Every input carries the card's facts beside its text (`card_ref`, `kind`, `touches_production`,
+`sprint_ref`; secretary-1764), frozen with the text since the service binds the submit id to both. The
+service, and only the service, enforces the sprint's production rights on them: an operation whose
+production the sprint does not allow is not queued but handed to the owner (`handed_over` in the
+answer), and the card then waits for the owner like any handed-over card.
+
 The PO may hand the card to the owner inside its turn (`task handover`, secretary-1761). A card that
 carries that mark is not Blocked when the turn settles: it waits for the owner. Each owner comment on
 it after the handover becomes one follow-up input to the same PO session, carrying the reason, the
@@ -36,6 +42,14 @@ from secretary.board.owner_handover import (
     owner_answer_event_ids,
     owner_comments_since_handover,
     waiting_owner,
+)
+from secretary.board.production_rights import (
+    CARD_INPUT,
+    NO_PRODUCTION,
+    OPERATION_KIND,
+    OWNER_ANSWER_INPUT,
+    card_facts,
+    touches_production,
 )
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatch.helpers import _worker_id
@@ -79,7 +93,9 @@ class PoChannel(Protocol):
 
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]: ...
 
-    def submit(self, *, session_id: str, text: str, request_id: str, source: str) -> dict[str, Any]: ...
+    def submit(
+        self, *, session_id: str, text: str, request_id: str, source: str, card: dict[str, Any]
+    ) -> dict[str, Any]: ...
 
     def request(self, request_id: str) -> PoRequest | None: ...
 
@@ -121,8 +137,12 @@ class ServicePoChannel:
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
         return self._service().sprint_session(sprint_ref=sprint_ref, request_id=request_id)
 
-    def submit(self, *, session_id: str, text: str, request_id: str, source: str) -> dict[str, Any]:
-        return self._service().submit(session_id=session_id, text=text, request_id=request_id, source=source)
+    def submit(
+        self, *, session_id: str, text: str, request_id: str, source: str, card: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._service().submit(
+            session_id=session_id, text=text, request_id=request_id, source=source, card=card
+        )
 
     def request(self, request_id: str) -> PoRequest | None:
         return self._po_store().request(request_id)
@@ -190,6 +210,7 @@ def render_po_card_input(task: dict[str, Any], sprint: dict[str, Any], submissio
         ),
         "",
         f"Card: {reference} ({kind}): {task.get('title') or ''}",
+        *_production_lines(submission),
         "",
         "## Card body",
         "",
@@ -235,6 +256,32 @@ def render_po_card_input(task: dict[str, Any], sprint: dict[str, Any], submissio
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _production_lines(submission: PoSubmission) -> list[str]:
+    """What an operation card's input says about the production it touches; nothing for a decision."""
+    production = submission.card.get("touches_production")
+    if submission.kind != OPERATION_KIND or not production:
+        return []
+    if production == NO_PRODUCTION:
+        return [f"Touches production: {NO_PRODUCTION}. Touch no production in this turn."]
+    return [
+        (
+            f"Touches production: {production}. The PO service checked the sprint allows it; touch no "
+            "other production in this turn."
+        )
+    ]
+
+
+def po_card_facts(task: dict[str, Any], submission: PoSubmission, *, input: str = CARD_INPUT) -> dict[str, Any]:
+    """The facts an input about this card carries beside its text (`PoService.submit`)."""
+    return card_facts(
+        card_ref=str(task.get("ref") or ""),
+        kind=submission.kind,
+        touches_production=touches_production(task),
+        sprint_ref=submission.sprint_ref,
+        input=input,
+    )
+
+
 def owner_answer_request_id(reference: str, event_id: str) -> str:
     """The follow-up input's request id: the card ref and the owner comment's event id, nothing else."""
     return "-".join(request_token(part) for part in ("dispatcher", PO_OWNER_ANSWER_ACTION, reference, event_id))
@@ -247,17 +294,39 @@ def render_owner_answer_input(
     reference = str(task.get("ref") or "")
     kind = submission.kind
     first, second = completion_sections(kind)
-    lines = [
-        (
+    if submission.handed_over:
+        # The PO service handed it over before the card reached this session: the card comes with it.
+        opening = (
+            f"The owner answered {kind} card {reference} of {submission.sprint_ref}. The PO service "
+            f"handed it to the owner on {mark['since']} instead of giving it to you, so this is the first "
+            "time you see it. Execute it within the owner's answer and complete the card in this turn if "
+            "the answer settles it. If it does not, say on the card what is still missing and end the "
+            "turn: the card keeps waiting for the owner and is not Blocked."
+        )
+        why = "## Why the PO service handed it to the owner"
+        card_lines = [
+            "## Card body",
+            "",
+            str(task.get("description") or "").strip() or "(empty)",
+            "",
+        ]
+    else:
+        opening = (
             f"The owner answered {kind} card {reference} of {submission.sprint_ref}, which you handed to "
             f"the owner on {mark['since']}. Complete the card in this turn if the answer settles it. If "
             "it does not, say on the card what is still missing and end the turn: the card keeps waiting "
             "for the owner and is not Blocked."
-        ),
+        )
+        why = "## Why you handed it to the owner"
+        card_lines = []
+    lines = [
+        opening,
         "",
         f"Card: {reference} ({kind}): {task.get('title') or ''}",
+        *_production_lines(submission),
         "",
-        "## Why you handed it to the owner",
+        *card_lines,
+        why,
         "",
         mark["reason"],
         "",
@@ -427,6 +496,9 @@ def _submit(
             submission.session_outcome = "created" if answer.get("created") else "recorded"
             runtime.save_records(payload, records)
         step = "submit"
+        if not submission.card:
+            submission.card = po_card_facts(task, submission)
+            runtime.save_records(payload, records)
         if not submission.text:
             sprint = runtime.sprints.show(submission.sprint_ref, include_resume_freshness=False)
             submission.text = render_po_card_input(task, sprint, submission)
@@ -436,6 +508,7 @@ def _submit(
             text=submission.text,
             request_id=submission.submit_request_id,
             source=DISPATCHER_SOURCE,
+            card=submission.card,
         )
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
@@ -459,10 +532,23 @@ def _submit(
     submission.submitted = True
     seq = answer.get("seq")
     submission.seq = seq if isinstance(seq, int) and not isinstance(seq, bool) else None
+    submission.handed_over = answer.get("handed_over") is True
     submission.unanswered = 0
     submission.last_error = ""
     record.state = PO_SUBMITTED
     runtime.save_records(payload, records)
+    if submission.handed_over:
+        # The production rule refused it: nothing is queued, and the card waits for the owner.
+        return {
+            "status": "ok",
+            "step": "po-card",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": "po-card-handed-over",
+            "po_session": submission.session_id,
+            "po_request_id": submission.submit_request_id,
+            "reason": str(answer.get("reason") or ""),
+        }
     return {
         "status": "ok",
         "step": "po-card",
@@ -503,6 +589,9 @@ def _settle(
 ) -> dict[str, Any]:
     ref = task["ref"]
     submission = record.po_submission
+    if submission.handed_over:
+        # No turn will ever come of this input; the card read here carries no mark (yet), so it waits.
+        return _waiting(record, ref, "po-card-waiting-owner", "the PO service handed the card to the owner")
     try:
         if submission.seq is None:
             known = runtime.po.request(submission.submit_request_id)
@@ -623,6 +712,7 @@ def _await_owner(
             text=submission.owner_text,
             request_id=request_id,
             source=DISPATCHER_SOURCE,
+            card=po_card_facts(task, submission, input=OWNER_ANSWER_INPUT),
         )
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
@@ -778,6 +868,7 @@ __all__ = [
     "completion_state",
     "handover_command",
     "owner_answer_request_id",
+    "po_card_facts",
     "render_owner_answer_input",
     "render_po_card_input",
 ]

@@ -148,6 +148,13 @@ def add_task_subcommands(subparsers) -> None:
         help="research only: the card touches live systems; its description must declare "
         "'## Impact bounds' with '### Allowed', '### Forbidden' and '### Cleanup'",
     )
+    task_create.add_argument(
+        "--touches-production",
+        default="",
+        metavar="PROJECT|none",
+        help="operation only, and required there: the registered project whose production the card "
+        "touches, or none; the PO service runs it only when the sprint allows that production",
+    )
     task_create.add_argument("--slug", default="")
     task_create.add_argument(
         "--base-branch",
@@ -424,6 +431,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
             review=args.review,
             live_impact=args.live_impact,
+            touches_production=args.touches_production,
             request_id=args.request_id,
         )
 

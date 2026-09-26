@@ -2190,6 +2190,8 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
     ]
     if card.get("blocked_by"):
         rows.append(["blocked by", _or_dash(card.get("blocked_by"))])
+    if card.get("touches_production"):
+        rows.append(["touches production", _or_dash(card.get("touches_production"))])
     handed = card.get("waiting_owner") if isinstance(card.get("waiting_owner"), dict) else None
     if handed:
         said = (

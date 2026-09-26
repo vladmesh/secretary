@@ -98,8 +98,22 @@ class PoServiceClient:
     def create_session(self, *, cli: str, model: str, effort: str, request_id: str) -> dict[str, Any]:
         return self.call("create_session", cli=cli, model=model, effort=effort, request_id=request_id)
 
-    def submit(self, *, session_id: str, text: str, request_id: str, source: str = "web") -> dict[str, Any]:
-        return self.call("submit", session_id=session_id, text=text, request_id=request_id, source=source)
+    def submit(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        request_id: str,
+        source: str = "web",
+        card: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One input; a dispatcher's carries its card's facts (`card`), which the service checks first.
+
+        The answer is the input queued or the turn it became, or `handed_over: true` when the service's
+        production rule handed the card to the owner instead of queueing anything.
+        """
+        fields = {"card": card} if card is not None else {}
+        return self.call("submit", session_id=session_id, text=text, request_id=request_id, source=source, **fields)
 
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
         """The live PO session of a sprint, `{session_id, created, repeated}` (`PoService.sprint_session`)."""

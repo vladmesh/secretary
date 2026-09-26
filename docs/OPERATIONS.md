@@ -353,7 +353,8 @@ service takes an exclusive lock, `DATA_DIR/po-service/service.lock`; a second `p
 dir refuses to start.
 
 **Queue.** A message is one file in `DATA_DIR/po-queue/` (`<time_ns>-<pid>-<n>.json`: `session_id`,
-`text`, `request_id`, `source` — `web`, `dispatcher` or `po-service` — and `queued_at`), written to a temporary name, fsynced and
+`text`, `request_id`, `source` — `web`, `dispatcher` or `po-service` — and `queued_at`, plus the
+`card` facts of a dispatcher input), written to a temporary name, fsynced and
 renamed before the submitter gets an answer. The service takes inputs oldest first per session and runs
 one turn per session at a time; a message for a busy session waits in the queue, neither refused nor lost,
 and sessions run in parallel. An input leaves the queue only after its turn row exists (`claim_turn`
@@ -432,6 +433,34 @@ waits behind the sprint session's seed or a running owner turn. A card the PO ha
 
 ```bash
 jq '.records["REF"].po_submission | del(.text, .owner_text)' DATA_DIR/dispatcher/production-state.json
+```
+
+**Production rights.** Each dispatcher `submit` carries the card's facts (`card`: `card_ref`, `kind`,
+`touches_production`, `sprint_ref`, `input`), and the service checks an operation card's own input
+against its sprint's `allowed_productions` before it queues anything
+([Protocols](PROTOCOLS.md#production-rights)). This is the only place the rule is enforced. An
+operation touching `none` or an allowed production is queued as usual. Any other production is not
+queued: the service hands the card to the owner (`task handover` as role `po`, actor `po-service`,
+request id `<submit id>:handover`) and answers `handed_over: true`. The journal says:
+
+```text
+secretary po: <card> not queued: operation touches production <p>; sprint <ref> allows [<list>]; handed to the owner (<submit id>:handover)
+```
+
+The card is In progress with the `waiting_owner` mark (`by: po-service`), a `[handover:owner]` comment
+with that reason and a `handed_to_owner` audit record; the dispatcher record carries `handed_over: true`
+and no turn. The owner answers with `task comment --role owner`. The dispatcher's follow-up for that
+answer (`input: owner_answer`) is queued without a second check, and the PO executes the card within the
+answer. Missing facts, an operation naming no production and a sprint the service cannot read are refused
+`unavailable`: nothing is queued or handed over, the dispatcher repeats the submit each tick
+(`po-service-unanswered`), and the journal says `secretary po: dispatcher input <id> not queued: <what is
+missing>` or `secretary po: <card> not queued: sprint <ref> cannot be read for its allowed productions
+(...)`. A sprint's `allowed_productions` is set only at `sprint create`, so an operation outside it keeps
+reaching the owner. Check a card:
+
+```bash
+secretary task show --ref REF | jq '{touches_production, waiting_owner}'
+journalctl -u secretary-po.service | grep 'not queued'
 ```
 
 **Service start.** Every turn left `running` is looked at once:

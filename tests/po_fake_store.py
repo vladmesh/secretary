@@ -181,11 +181,11 @@ class FakePoStore:
     # --- turns ------------------------------------------------------------------------------
 
     def claim_turn(
-        self, session_id: str, text: str, stdout_path, *, request_id: str | None = None
+        self, session_id: str, text: str, stdout_path, *, request_id: str | None = None, card: Any = None
     ) -> tuple[Turn, bool]:
         board = self._open()
         with board.lock:
-            known = self._known(board, request_id, SEND, send_fingerprint(session_id, text))
+            known = self._known(board, request_id, SEND, send_fingerprint(session_id, text, card))
             if known is not None:
                 return board.turns[(known.session_id, known.seq)], False
             self._check_operation(request_id, SEND)
@@ -201,7 +201,7 @@ class FakePoStore:
             board.feed.append(FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text, board.now()))
             if request_id is not None:
                 board.requests[request_id] = PoRequest(
-                    request_id, SEND, send_fingerprint(session_id, text), session_id, seq, board.now()
+                    request_id, SEND, send_fingerprint(session_id, text, card), session_id, seq, board.now()
                 )
             return turn, True
 
@@ -289,9 +289,11 @@ class FakePoStore:
 class FakeSprints:
     """The resolver's view of the sprints (`secretary.po.sprints.SprintSessions`), in memory.
 
-    Every sprint is open unless `status` says otherwise. A comment and a session record are kept by
-    their request id and a repeat of one changes nothing, as the sprint audit does. `fail` makes the
-    next call of a method raise, as a board that dropped the connection would.
+    Every sprint is open unless `status` says otherwise, and allows the productions `allowed` names
+    (none by default). A comment and a session record are kept by their request id and a repeat of one
+    changes nothing, as the sprint audit does. `fail` makes the next call of a method raise, as a board
+    that dropped the connection would. A handover lands on `cards` (an object with `handover`, the
+    dispatcher fixture's one card) when a test wires one, and is kept in `handovers` either way.
     """
 
     def __init__(
@@ -300,11 +302,14 @@ class FakeSprints:
         *,
         status: dict[str, str] | None = None,
         documents: dict[str, list[WhyDocument]] | None = None,
+        allowed: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.records = {
-            ref: SprintRecord(ref, (status or {}).get(ref, "open"), session)
+            ref: SprintRecord(ref, (status or {}).get(ref, "open"), session, (allowed or {}).get(ref, ()))
             for ref, session in sessions.items()
         }
+        self.cards: Any = None
+        self.handovers: dict[str, tuple[str, str]] = {}
         self.documents = dict(documents or {})
         self.comments: dict[str, tuple[str, str]] = {}
         self.recorded: dict[str, tuple[str, str]] = {}
@@ -318,7 +323,17 @@ class FakeSprints:
 
     def sprint(self, sprint_ref: str) -> SprintRecord | None:
         with self.lock:
+            self._maybe_fail("sprint")
             return self.records.get(sprint_ref)
+
+    def hand_over(self, card_ref: str, reason: str, *, request_id: str) -> bool:
+        with self.lock:
+            self._maybe_fail("hand_over")
+            replayed = request_id in self.handovers
+            if self.cards is not None:
+                replayed = self.cards.handover(card_ref, reason, actor="po-service", request_id=request_id)
+            self.handovers.setdefault(request_id, (card_ref, reason))
+            return replayed
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:
         return list(self.documents.get(sprint_ref, []))

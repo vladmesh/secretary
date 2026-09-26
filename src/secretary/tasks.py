@@ -92,6 +92,16 @@ from secretary.board.task_routing import (
     default_review,
     impact_bounds_refusal,
 )
+from secretary.board.production_rights import (
+    NO_PRODUCTION,
+    TOUCHES_PRODUCTION,
+)
+from secretary.board.production_rights import (
+    create_refusal as production_create_refusal,
+)
+from secretary.board.production_rights import (
+    touches_production as card_production,
+)
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
@@ -912,6 +922,9 @@ class TaskReader:
             # A card handed to the owner says so where a reader looks first, not only in the bag.
             if (mark := waiting_owner(result)) is not None:
                 result["waiting_owner"] = mark
+            # The production an operation card touches, beside the kind it belongs to.
+            if (production := card_production(result)) is not None:
+                result["touches_production"] = production
         if comments is not None:
             result["comments"] = comments
         return result
@@ -1035,6 +1048,7 @@ class TaskWriter:
         sprint_override_reason: str = "",
         review: str = "",
         live_impact: bool = False,
+        touches_production: str = "",
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
@@ -1065,6 +1079,7 @@ class TaskWriter:
             sprint_override_reason=sprint_override_reason,
             review=review,
             live_impact=live_impact,
+            touches_production=touches_production,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1098,6 +1113,7 @@ class TaskWriter:
         sprint_override_reason: str = "",
         review: str = "",
         live_impact: bool = False,
+        touches_production: str = "",
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
@@ -1123,6 +1139,7 @@ class TaskWriter:
         sprint = sprint.strip()
         priority = priority.strip()
         budget_event = budget_event.strip()
+        touches_production = touches_production.strip()
         sprint_override_reason = (
             sprint_override_reason.strip()
             if restoring
@@ -1164,6 +1181,15 @@ class TaskWriter:
             )
             if refusal:
                 raise TaskError("validation", refusal, 2)
+        # The production an operation card touches (secretary-1764), checked against the registry
+        # `sprint create --allow-production` reads, and refused on every other kind.
+        registered = None
+        if task_type_value is TaskType.OPERATION and touches_production not in ("", NO_PRODUCTION):
+            from secretary.product_issues import registered_projects
+
+            registered = registered_projects(self.instance_dir)
+        if refusal := production_create_refusal(task_type, touches_production, registered):
+            raise TaskError("validation", refusal, 2)
         if live_impact and task_type_value is not TaskType.RESEARCH:
             raise TaskError(
                 "validation", f"--live-impact is a research attribute; a {task_type} card cannot carry it", 2
@@ -1304,6 +1330,7 @@ class TaskWriter:
             "budget_event": budget_event or None,
             "review": review,
             **({"live_impact": True} if live_impact else {}),
+            **({"touches_production": touches_production} if touches_production else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -1390,6 +1417,7 @@ class TaskWriter:
                     sprint=sprint,
                     review=review,
                     live_impact=live_impact,
+                    touches_production=touches_production,
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -1465,6 +1493,7 @@ class TaskWriter:
         sprint: str,
         review: str,
         live_impact: bool,
+        touches_production: str,
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
@@ -1524,6 +1553,9 @@ class TaskWriter:
                 }
                 if live_impact:
                     values["live_impact"] = "1"
+                if touches_production:
+                    # Not a column: a typed field of the extension bag (board/production_rights.py).
+                    values[TOUCHES_PRODUCTION] = touches_production
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:

@@ -20,12 +20,20 @@ from types import SimpleNamespace
 from typing import Any
 
 from secretary.board.completion_evidence import po_completion_fields, render_po_completion_record
+from secretary.board.owner_handover import (
+    HANDED_TO_OWNER,
+    MARK_KEYS,
+    mark_values,
+    render_handover_comment,
+    waiting_owner,
+)
 from secretary.dispatch.claim import claim_ready_task
 from secretary.dispatch.po_cards import ServicePoChannel, advance_po_card
 from secretary.dispatch.state import DispatcherRecord, new_attempt_id
 from secretary.po import store as po_store
 from secretary.po.runner import PoRunner
 from secretary.po.service import PoService, listening
+from secretary.po.sprints import HandoverRefused
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 
@@ -84,12 +92,36 @@ class OneCardBoard:
     def events(self, reference: str = "", **_: Any) -> list[dict[str, Any]]:
         return [event for event in self.log if not reference or event["ref"] == reference]
 
+    # `task handover`, as the PO service's production rule runs it (`BoardSprintSessions.hand_over`)
+    def handover(self, reference: str, reason: str, *, actor: str, request_id: str) -> bool:
+        """What `TaskWriter.handover` leaves: the mark, the `[handover:owner]` comment, the audit fact."""
+        assert reference == self.card["ref"], reference
+        if self.committed_event(request_id) is not None:
+            return True
+        if self.card["state"] != "in_progress":
+            raise HandoverRefused("transition_forbidden", f"{reference} is {self.card['state']}")
+        if waiting_owner(self.card) is not None:
+            raise HandoverRefused("already_handed_over", f"{reference} is already handed to the owner")
+        since = f"2026-09-26T15:00:{len(self.log):02d}+00:00"
+        self.card.setdefault("extensions", {}).setdefault("extra", {}).update(mark_values(since, reason, actor))
+        self.card["comments"].append(
+            {"created_at": since, "marker": "po", "body": "[po]\n" + render_handover_comment(reason)}
+        )
+        self.log.append(
+            {"request_id": request_id, "ref": reference, "kind": HANDED_TO_OWNER, "event_id": f"evt-{request_id}",
+             "role": "po", "actor": actor, "reason": reason}
+        )
+        return False
+
     # the PO, completing the card inside its turn
     def complete_as_po(self, kind: str, body: str) -> None:
         fields, refusal = po_completion_fields(kind, body)
         assert not refusal, refusal
         self.card["comments"].append({"marker": "po", "body": "[po]\n" + render_po_completion_record(kind, fields)})
         self.card["state"] = "done"
+        # Leaving In progress takes the mark off, in the same transaction.
+        for key in MARK_KEYS:
+            self.card.get("extensions", {}).get("extra", {}).pop(key, None)
 
 
 class SprintView:
@@ -110,8 +142,21 @@ class SprintView:
         }
 
 
-def card(kind: str = "decision", *, state: str = "ready", description: str = "Which cut ships first?") -> dict:
+def card(
+    kind: str = "decision",
+    *,
+    state: str = "ready",
+    description: str = "Which cut ships first?",
+    production: str | None = "none",
+) -> dict:
+    """One card as `task show` reads it; an operation card names its production (`none` by default)."""
+    extensions = (
+        {"extensions": {"extra": {"touches_production": production}}}
+        if kind == "operation" and production is not None
+        else {}
+    )
     return {
+        **extensions,
         "ref": REF,
         "id": 1900,
         "title": f"The {kind} to take",
@@ -202,6 +247,8 @@ class DispatcherFixture(unittest.TestCase):
 
     def runtime(self, task: dict[str, Any], *, comments: list[str] | None = None, po: Any = None):
         self.cards = OneCardBoard(task)
+        # The service's handover of a card its production rule refuses lands on the same card.
+        self.po_sprints.cards = self.cards
         channel = ServicePoChannel(self.data, None)
         channel._store = FakePoStore(self.board)
         self.saved: list[dict[str, Any]] = []

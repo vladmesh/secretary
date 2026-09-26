@@ -21,7 +21,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -157,9 +157,16 @@ def sprint_session_fingerprint(sprint_ref: str) -> str:
     return _digest([SPRINT_SESSION, sprint_ref])
 
 
-def send_fingerprint(session_id: str, text: str) -> str:
-    """What a send request id is bound to: the operation, the session and the exact text."""
-    return _digest([SEND, session_id, hashlib.sha256(text.encode("utf-8")).hexdigest()])
+def send_fingerprint(session_id: str, text: str, card: Mapping[str, Any] | None = None) -> str:
+    """What a send request id is bound to: the operation, the session, the exact text and the card facts.
+
+    `card` is the structured facts a dispatcher input carries beside its text (`PoService.submit`,
+    secretary-1764). A send without them binds exactly what it bound before they existed.
+    """
+    parts = [SEND, session_id, hashlib.sha256(text.encode("utf-8")).hexdigest()]
+    if card is not None:
+        parts.append(json.dumps(dict(card), sort_keys=True, separators=(",", ":")))
+    return _digest(parts)
 
 
 def _digest(parts: list[str]) -> str:
@@ -378,6 +385,7 @@ class PoStore:
         stdout_path: Callable[[int], Path],
         *,
         request_id: str | None = None,
+        card: Mapping[str, Any] | None = None,
     ) -> tuple[Turn, bool]:
         """The new turn, or the one `request_id` already started; the flag is True when this call did.
 
@@ -386,7 +394,7 @@ class PoStore:
         and a replay of a send made before the session was closed is still its turn. Any other send
         into a closed session is :class:`SessionClosed` and writes nothing.
         """
-        fingerprint = send_fingerprint(session_id, text)
+        fingerprint = send_fingerprint(session_id, text, card)
         with self._transaction() as connection:
             if request_id is not None:
                 known = self._known_request(connection, request_id, SEND, fingerprint)
