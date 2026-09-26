@@ -3495,6 +3495,12 @@ def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
         return ""
     code = str(refusal.get("code") or "")
     message = str(refusal.get("message") or "")
+    if (refusal.get("data") or {}).get("reason") == "outcome_unknown":
+        return (
+            '<p class="refused"><b>no answer from the PO service: it may have done this.</b> '
+            "Sending the same form again is safe; it carries the same request id. "
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
     if code == "owner_conflict" and refused == "close":
         return (
             '<p class="refused"><b>not closed: a turn is still running in this session.</b> '
@@ -3513,7 +3519,10 @@ def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
             "Open a new session to continue; nothing was written. "
             f'<span class="reason">{escape(message)}</span></p>'
         )
-    return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}</p>'
+    # A form refused without the `nothing_written` marker kept its request id (`web.app._keeps_request_id`).
+    kept = refused != "close" and (refusal.get("data") or {}).get("nothing_written") is not True
+    hint = " Sending the same form again is safe: it keeps its request id." if kept else ""
+    return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}{hint}</p>'
 
 
 def po_page(
@@ -3737,7 +3746,9 @@ def po_session(
     by_turn: dict[Any, list[dict[str, Any]]] = {}
     for entry in document.get("feed") or []:
         by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
-    items: list[str] = []
+    queued = document.get("queued") or []
+    # Messages the PO service holds until the session's running turn ends; newest first, above the turns.
+    items: list[str] = [_po_queued_entry(entry) for entry in reversed(queued)]
     for turn in reversed(turns):
         items.extend(_po_entry(entry) for entry in reversed(by_turn.get(turn.get("seq"), [])))
         items.append(_po_turn_mark(turn))
@@ -3806,6 +3817,7 @@ def po_session(
         .replace("__RUNNING__", "true" if running else "false")
         .replace("__TURNS__", str(len(turns)))
         .replace("__LAST__", _js(str(last.get("state") or "")))
+        .replace("__QUEUED__", str(len(queued)))
     )
     return _page(
         f"PO session {session_id[:8]}",
@@ -3829,6 +3841,15 @@ def _po_entry(entry: dict[str, Any]) -> str:
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
         f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
+    )
+
+
+def _po_queued_entry(entry: dict[str, Any]) -> str:
+    """A message on disk in the PO service's queue, waiting for the session's running turn to end."""
+    return (
+        f'<li class="po-entry po-owner" data-state="queued"><div class="who">owner · '
+        f"{_chip('queued', 'accent')} · {escape(str(entry.get('queued_at') or ''))}</div>"
+        f'<div class="text">{escape(str(entry.get("text") or ""))}</div></li>'
     )
 
 
@@ -3904,8 +3925,11 @@ if (form && draft) {
     form.requestSubmit();
   });
 }
-if (__RUNNING__) {
-  if (status) status.textContent = 'the turn is running; this page updates when it ends';
+const QUEUED = __QUEUED__;
+if (__RUNNING__ || QUEUED > 0) {
+  if (status) status.textContent = __RUNNING__
+    ? 'the turn is running; this page updates when it ends'
+    : 'the message is queued; this page updates when its turn starts';
   const timer = window.setInterval(async () => {
     let doc;
     try {
@@ -3914,7 +3938,8 @@ if (__RUNNING__) {
       doc = await response.json();
     } catch (error) { return; }
     const last = doc.last_turn ? doc.last_turn.state : '';
-    if (doc.running && doc.turns.length === TURNS && last === LAST) return;
+    const waiting = (doc.queued || []).length;
+    if ((doc.running || waiting > 0) && doc.turns.length === TURNS && last === LAST && waiting === QUEUED) return;
     window.clearInterval(timer);
     if (draft && draft.value) { if (status) status.textContent = 'the turn has ended; reload to see the answer'; return; }
     window.location.reload();

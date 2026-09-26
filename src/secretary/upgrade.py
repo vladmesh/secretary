@@ -21,6 +21,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -70,6 +71,7 @@ from secretary.memory.client_config import (
 )
 from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
+from secretary.po import client as po_client
 from secretary.po import token as po_token
 from secretary.po import workspace as po_workspace
 from secretary.projects.availability import ProjectAvailability
@@ -80,6 +82,10 @@ from secretary.web.server import LoopbackOnly
 
 MEMORY_COMPONENT = "memory"
 WEB_COMPONENT = "web"
+PO_COMPONENT = "po"
+# How long an idle PO service is given to exit and come back under `Restart=always` (RestartSec=3).
+PO_RESTART_WAIT_SECONDS = 30.0
+PO_RESTART_POLL_SECONDS = 0.5
 # Git's own spelling, for this repository. Every path in a `git diff --name-only` here starts with
 # `src/`, because that is where the product's packages live; a prefix of `secretary/` matched none
 # of them, so a source-only or schema-only revision — `f9cabc3`, the one that took the web process
@@ -134,6 +140,8 @@ class UpgradeContext:
     schemas_changed: bool = False
     unit_changed: bool = False
     web_unit_changed: bool = False
+    # `secretary-po.service` was rewritten by reconcile (an update; a created unit was just started).
+    po_unit_changed: bool = False
     # A regenerated head snapshot is process-local state too: `load_registry` caches per process,
     # so a profile added to the canon is invisible to the running transport until it is replaced.
     head_registry_changed: bool = False
@@ -1231,6 +1239,10 @@ def step_host(context: UpgradeContext) -> StepResult:
         change.kind == "unit" and change.name.startswith(_component_unit_prefix(report, WEB_COMPONENT))
         for change in pending
     )
+    context.po_unit_changed = any(
+        change.kind == "unit" and change.action == "update" and change.name == _po_unit(report)
+        for change in pending
+    )
     if not pending:
         return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
     detail = ", ".join(f"{change.action} {change.name}" for change in pending)
@@ -1754,6 +1766,103 @@ def _write_private_receipt(
                 pass
 
 
+def _po_unit(report: Any) -> str:
+    return f"{_component_unit_prefix(report, PO_COMPONENT)}.service"
+
+
+def step_po(context: UpgradeContext) -> StepResult:
+    """Put the PO service on this upgrade's code without killing a running PO turn.
+
+    Every PO turn is a child of `secretary-po.service`, and the PO itself runs `secretary upgrade`
+    inside a turn, so restarting the unit here would kill and re-run this very upgrade's caller. The
+    one rule is the service's (`PoService.request_restart`, asked through
+    `secretary.po.client.request_restart`): idle, it exits now and `Restart=always` starts the new
+    code, which this step waits for; busy, it takes no new turn and exits as soon as its running turns
+    settle, and this step reports the restart as deferred rather than failing.
+
+    The reasons are the service's process inputs: the product source and dependencies, the bundled
+    schemas and the unit file (an update; a unit reconcile just created was started on this code). Like
+    the memory service and unlike the web, a stopped PO service is started: nothing runs in a stopped
+    unit, and without it no PO turn runs at all. An installation that opted the component out has no
+    unit, and the step is skipped.
+    """
+    report = context.report
+    unit = _po_unit(report)
+    if context.units.installed(unit) is None:
+        return StepResult("po", "skipped", f"{unit} is not installed; this host runs no PO service")
+    if not context.units.is_active(unit):
+        if context.dry_run:
+            return StepResult("po", "changed", f"would start {unit}: service is not active")
+        try:
+            context.units.restart(unit)
+        except HostCommandError as exc:
+            return StepResult("po", "failed", f"starting {unit} failed: {exc}")
+        return StepResult("po", "changed", f"started {unit}: service was not active")
+    reasons = []
+    if context.po_unit_changed or planned_unit_names(
+        context.changed_paths, f"{_component_unit_prefix(report, PO_COMPONENT)}."
+    ):
+        reasons.append("the PO unit file changed")
+    if context.schemas_changed:
+        reasons.append("bundled schemas changed")
+    if context.code_changed:
+        reasons.append("product code or dependencies changed")
+    if not reasons:
+        return StepResult("po", "unchanged", f"{unit} runs on unchanged process inputs")
+    reason = "; ".join(reasons)
+    if context.dry_run:
+        return StepResult("po", "changed", f"would ask {unit} to restart once no PO turn runs: {reason}")
+    data_dir = report.data_dir
+    if data_dir is None:
+        return StepResult("po", "failed", "the instance has no resolved data directory for the PO service")
+    try:
+        before = context.units.process_identity(unit)
+        directory = po_client.service_dir(data_dir)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _set_runtime_owner(directory, context.runtime_user)
+        answer = po_client.request_restart(data_dir, reason)
+        _set_runtime_owner(po_client.restart_marker_path(data_dir), context.runtime_user)
+    except (HostCommandError, GitError, OSError) as exc:
+        return StepResult("po", "failed", f"could not ask {unit} to restart: {exc}")
+    if answer.outcome == "deferred":
+        return StepResult(
+            "po",
+            "changed",
+            f"PO service restart deferred: {answer.running} turn(s) running; "
+            f"{unit} restarts itself once they end: {reason}",
+        )
+    if answer.outcome == "unanswered":
+        return StepResult(
+            "po",
+            "changed",
+            f"PO service restart requested but not acknowledged ({answer.detail}); "
+            f"{unit} restarts itself at its next idle check: {reason}",
+        )
+    deadline = _monotonic() + PO_RESTART_WAIT_SECONDS
+    while True:
+        try:
+            after = context.units.process_identity(unit)
+        except HostCommandError:
+            after = None
+        if after is not None and after != before and context.units.is_active(unit):
+            return StepResult("po", "changed", f"restarted {unit} while idle (pid {after.pid}): {reason}")
+        if _monotonic() >= deadline:
+            return StepResult(
+                "po",
+                "failed",
+                f"{unit} exited for the restart but no new process came up within {PO_RESTART_WAIT_SECONDS:g}s",
+            )
+        _sleep(PO_RESTART_POLL_SECONDS)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 def step_web(context: UpgradeContext) -> StepResult:
     """Make the long-lived web process coherent with what this upgrade just materialized.
 
@@ -2067,6 +2176,8 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_po_token,
     step_host,
     step_memory,
+    # Never kills a running PO turn: the service restarts itself once idle.
+    step_po,
     # Last of the materializing steps: a restart is the moment the new code becomes the code that
     # answers, so it follows the checkout, the dependencies, the schemas and the unit.
     step_web,

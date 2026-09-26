@@ -3057,10 +3057,10 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one) with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
 | GET | `/po/sessions/{session}` | `po.po_session` | one PO session: feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close |
-| POST | `/po/sessions/{session}/messages` | `po.po_send` | start one turn; form `request_id, text`; a running turn is refused (409 `owner_conflict`), a closed session (409 `session_closed`), and nothing is written |
+| POST | `/po/sessions/{session}/messages` | `po.po_send` | queue one message with the PO service; form `request_id, text`; 303 to the session once it is on disk, where it runs at once or waits for the running turn; a closed session is refused (409 `session_closed`) and a stopped service (503 `backend_unavailable`, `the PO service is not running`), nothing written |
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
-| POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
-| GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs |
+| POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
+| GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs or a message is queued |
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and
@@ -3077,10 +3077,20 @@ unknown field is refused.
 `secretary_po` whose value matches the HMAC of `DATA_DIR/po-web-token`, checked once in
 `WebApp.handle` after the cross-origin check and before any handler; the only exception is `POST
 /po/login`. Without it a page route answers 401 with the login form and a JSON route 401
-`po_token_required`; neither reaches the PO runner or the board store. Token and cookie:
+`po_token_required`; neither reaches the PO service or the board store. Token and cookie:
 [Operations](OPERATIONS.md#the-po-head-in-the-dashboard). A `/po` `request_id` belongs to one operation
 and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
-session or turn and does nothing else; reused otherwise it is 409 `request_conflict`.
+session, the turn, or the message still queued, and does nothing else; reused otherwise it is 409
+`request_conflict`. Reads come from the board store and the queue directory; every write goes to the PO
+service over its socket (`secretary.po.client`), and with the service stopped it is refused as 503
+`backend_unavailable` whose message starts `the PO service is not running`; the web never runs a turn. A
+write that reached the service but lost its answer is 503 `backend_unavailable` with `data: {reason:
+"outcome_unknown", action: "repeat_same_request"}` (`PoOutcomeUnknown`): it may have been done; a stop or
+close may simply be repeated. A create or send that the service accepted (queue file written, session
+committed) is answered as accepted even when a later lookup fails. A refused create or send form keeps its
+request id, so a resend is a replay; it gets a fresh one only after a refusal whose `data` carries
+`nothing_written: true` — service not reached, validation before the id was reserved, `request_conflict`,
+unknown or closed session.
 
 **PO documents.** `po.po_create_session(request_id, cli, model, effort="default")` answers
 `{kind: "po_session_created", request_id, session_id, effort, repeated}`; an `effort` outside
@@ -3089,7 +3099,11 @@ the effort is one of the inputs the request id is bound to. `po_models()` (and `
 `models` and `efforts`, each `{cli: [values]}`. Every session object (`po_overview.sessions[]`,
 `po_session.session`) carries `effort` and `resolved_model` — the model the latest turn that reported one
 ran, `null` before any did — and every turn object (`po_session.turns[]`, `last_turn`) its own
-`resolved_model`. [Operations](OPERATIONS.md#po-head-sessions-and-turns) says where each comes from.
+`resolved_model`. `po_send(request_id, session_id, text)` answers `{kind, request_id, session_id, queued,
+seq, state, repeated}`: `kind` is `po_turn_started` with the turn's `seq` and `state` when the message
+became a turn at once, or `po_turn_queued` with `seq`/`state` null while it waits behind the running
+turn. `po_session` carries `queued`: the session's messages not yet taken, oldest first, each
+`{request_id, text, source, queued_at}`. [Operations](OPERATIONS.md#po-head-sessions-and-turns) says where each comes from.
 
 ### Opening a sprint from a browser
 

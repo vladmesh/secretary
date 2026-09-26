@@ -7,6 +7,9 @@ message goes to the child on stdin; its stdout is kept raw in a file under
 settles the turn when the process exits. Only the owner's message and the agent's final answer reach
 the feed in the board store (`secretary.po.store`).
 
+The runner lives in the PO service (`secretary.po.service`, unit `secretary-po.service`), one per
+installation; the web never builds one.
+
 The CLIs own their conversation memory, addressed by their native flags:
 
 * Claude: turn 1 ``claude -p --session-id <uuid>`` with a uuid the secretary chose at session
@@ -30,7 +33,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,8 +44,10 @@ from secretary.po.store import (
     DEFAULT_EFFORT,
     FAILED,
     INTERRUPTED,
+    OWNER,
     RUNNING,
     PoStore,
+    PoStoreError,
     Session,
     Turn,
 )
@@ -51,7 +56,13 @@ from secretary.runtime.provider_models import codex_rollout_path, codex_session_
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
-RECOVERED_REASON = "the web service restarted while this turn was running"
+RECOVERED_REASON = "the PO service restarted while this turn was running"
+# Recorded on a running turn the PO service re-runs at start (`PoStore.mark_rerun`).
+RERUN_REASON = "re-run: the PO service restarted while this turn was running"
+# The settled reason of a re-run that was itself interrupted: it is not re-run a second time.
+RERUN_INTERRUPTED_REASON = (
+    "the PO service restarted again during this turn's re-run; not re-run a second time"
+)
 # How much of stderr a failed turn quotes in its reason.
 STDERR_TAIL_BYTES = 2000
 STOP_JOIN_SECONDS = 10.0
@@ -83,6 +94,20 @@ def process_identity(pid: int) -> str | None:
     if len(fields) < 20:
         return None
     return f"{boot_id}:{fields[19]}"
+
+
+def still_running(pid: int | None, identity: str | None) -> bool:
+    """Whether the process recorded as (`pid`, `identity`) still runs: same identity, not a zombie.
+
+    A killed turn whose parent has not reaped it yet keeps its identity; it runs nothing any more.
+    """
+    if not pid or not identity or process_identity(pid) != identity:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return stat[stat.rindex(")") + 2 :].split()[:1] not in (["Z"], ["X"])
 
 
 def turn_environment(
@@ -232,8 +257,11 @@ class PoRunner:
         *,
         executables: Mapping[str, str] | None = None,
         env: Mapping[str, str] | None = None,
+        on_settled: Callable[[str, int], None] | None = None,
     ) -> None:
         self.store = store
+        # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
+        self.on_settled = on_settled
         self.data_dir = Path(data_dir)
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
@@ -243,6 +271,9 @@ class PoRunner:
         # Held only while a turn is started, stopped or recovered, never while one runs.
         self._lock = threading.Lock()
         self._live: dict[tuple[str, int], _Live] = {}
+        # Re-runs whose launch failed after the allowance was spent, with why: the next recovery pass
+        # settles the row `failed` with this reason if `_abandon` could not.
+        self._rerun_failures: dict[tuple[str, int], str] = {}
 
     @classmethod
     def for_instance(cls, instance_dir: Path | str, data_dir: Path | str, **kwargs: Any) -> PoRunner:
@@ -352,45 +383,55 @@ class PoRunner:
             )
             if not created:
                 return turn, False
-            files = self.files(session_id, turn.seq)
-            try:
-                # Read after the claim: the previous turn may have recorded Codex's thread id.
-                session = self.store.session(session_id)
-                # Claude is resumed only once a turn completed; after a stopped or failed first turn
-                # the conversation may or may not exist, and the waiter settles that (`_resume_instead`).
-                established = any(
-                    earlier.state == COMPLETED
-                    for earlier in self.store.turns(session_id)
-                    if earlier.seq < turn.seq
-                )
-                argv = self.argv(session, files, established=established)
-                files.directory.mkdir(parents=True, exist_ok=True)
-                files.prompt.write_text(text, encoding="utf-8")
-            except Exception as exc:
-                self._abandon(
-                    session_id, turn.seq, None, f"could not prepare the turn: {type(exc).__name__}: {exc}"
-                )
-                raise
-            process = self._launch(session, turn.seq, argv, files)
-            try:
-                thread = threading.Thread(
-                    target=self._wait,
-                    args=(session, turn.seq, process, argv, files),
-                    name=f"po-turn-{session_id}-{turn.seq}",
-                    daemon=True,
-                )
-                self._live[(session_id, turn.seq)] = _Live(process, thread)
-                thread.start()
-            except BaseException as exc:
-                self._live.pop((session_id, turn.seq), None)
-                self._abandon(
-                    session_id,
-                    turn.seq,
-                    process,
-                    f"the turn's waiter did not start: {type(exc).__name__}: {exc}",
-                )
-                raise
+            self._start(session_id, turn.seq, text)
         return self.store.turn(session_id, turn.seq), True
+
+    def _start(self, session_id: str, seq: int, text: str) -> None:
+        """Launch the process of a claimed `running` turn and its waiter; the caller holds `_lock`."""
+        try:
+            prepared = self._prepare(session_id, seq, text)
+        except Exception as exc:
+            self._abandon(session_id, seq, None, f"could not prepare the turn: {type(exc).__name__}: {exc}")
+            raise
+        self._run(session_id, seq, prepared)
+
+    def _prepare(self, session_id: str, seq: int, text: str) -> tuple[Session, list[str], TurnFiles]:
+        """Everything a launch needs, read and written before anything is launched: session, argv, prompt."""
+        files = self.files(session_id, seq)
+        # Read after the claim: the previous turn may have recorded Codex's thread id.
+        session = self.store.session(session_id)
+        # Claude is resumed only once a turn completed; after a stopped or failed first turn
+        # the conversation may or may not exist, and the waiter settles that (`_resume_instead`).
+        established = any(
+            earlier.state == COMPLETED for earlier in self.store.turns(session_id) if earlier.seq < seq
+        )
+        argv = self.argv(session, files, established=established)
+        files.directory.mkdir(parents=True, exist_ok=True)
+        files.prompt.write_text(text, encoding="utf-8")
+        return session, argv, files
+
+    def _run(self, session_id: str, seq: int, prepared: tuple[Session, list[str], TurnFiles]) -> None:
+        """Launch a prepared turn and start its waiter; any failure settles it `failed` (`_abandon`)."""
+        session, argv, files = prepared
+        process = self._launch(session, seq, argv, files)
+        try:
+            thread = threading.Thread(
+                target=self._wait,
+                args=(session, seq, process, argv, files),
+                name=f"po-turn-{session_id}-{seq}",
+                daemon=True,
+            )
+            self._live[(session_id, seq)] = _Live(process, thread)
+            thread.start()
+        except BaseException as exc:
+            self._live.pop((session_id, seq), None)
+            self._abandon(
+                session_id,
+                seq,
+                process,
+                f"the turn's waiter did not start: {type(exc).__name__}: {exc}",
+            )
+            raise
 
     def _launch(
         self, session: Session, seq: int, argv: list[str], files: TurnFiles
@@ -440,8 +481,8 @@ class PoRunner:
     ) -> None:
         """Kill and reap a turn's process group, then settle the turn `failed` if the store answers.
 
-        If it does not, the row stays `running` with no recorded process, and `recover()` marks it
-        `interrupted` later; there is nothing left alive for it to kill.
+        If it does not, the row stays `running` with no recorded process, and `recover()` settles
+        it (or re-runs it once) at the next start; there is nothing left alive for it to kill.
         """
         if process is not None:
             _kill_group(process.pid)
@@ -489,24 +530,112 @@ class PoRunner:
             self._capture_thread_id(session, Path(turn.stdout_path))
         return self.store.turn(session_id, turn.seq)
 
-    def recover(self) -> list[Turn]:
-        """At service start: every `running` turn is `interrupted`, its own live process killed."""
+    def recover(self, *, rerun: bool = False) -> list[Turn]:
+        """At service start: every `running` turn this runner does not own is settled, or re-run once.
+
+        A turn's own process is killed only while its PID still has the recorded identity, so a
+        reused PID is never hit. Without `rerun` every such turn is `interrupted`. With it (the PO
+        service's start) a turn is re-run once: the same prompt goes to the same CLI conversation
+        (Claude `--resume` once a turn of the session completed, else `--session-id` and
+        `_resume_instead`; Codex `exec resume` when its thread id is known). A turn found `running` that
+        already carries a re-run's reason was interrupted a second time and is settled `interrupted`,
+        never re-run again. A turn the owner stopped was settled by the stop and is never `running` here.
+
+        The re-run allowance (:meth:`PoStore.mark_rerun`) is spent only after everything the re-run
+        needs is loaded and its prompt written (:meth:`_prepare`); a store that fails before that
+        leaves the row as it was, for the next pass. A re-run whose launch fails after the allowance is
+        settled `failed` by `_abandon`, or by the next pass with the reason kept here. A row that
+        cannot be handled now is left for :meth:`orphaned_turns` to report; one bad row does not stop
+        the others.
+        """
         recovered: list[Turn] = []
         for turn in self.store.running_turns():
+            key = (turn.session_id, turn.seq)
             with self._lock:
-                if (turn.session_id, turn.seq) in self._live:
+                if key in self._live:
                     continue
-                killed = bool(
-                    turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity
-                )
-                reason = RECOVERED_REASON + ("; its process was killed" if killed else "")
-                settled = self.store.finish_turn(turn.session_id, turn.seq, INTERRUPTED, reason)
-                if killed and settled:
-                    _kill_group(int(turn.pid))
-            if settled:
-                self._capture_thread_id(self.store.session(turn.session_id), Path(turn.stdout_path))
-                recovered.append(self.store.turn(turn.session_id, turn.seq))
+                try:
+                    done = self._recover_one(turn, rerun)
+                except Exception as exc:  # noqa: BLE001 - this row stays for the next pass
+                    print(
+                        f"secretary po: turn {turn.session_id}/{turn.seq} not recovered yet: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+            if done:
+                try:
+                    recovered.append(self.store.turn(turn.session_id, turn.seq))
+                except PoStoreError:
+                    pass
         return recovered
+
+    def _recover_one(self, turn: Turn, rerun: bool) -> bool:
+        """Settle or re-run one turn this runner does not own; False when nothing changed. Holds `_lock`."""
+        key = (turn.session_id, turn.seq)
+        alive = still_running(turn.pid, turn.process_identity)
+        if not rerun or turn.reason is not None:
+            failed = self._rerun_failures.get(key)
+            if failed is not None:
+                state, reason = FAILED, failed
+            elif rerun:
+                state, reason = (
+                    INTERRUPTED,
+                    f"{RERUN_INTERRUPTED_REASON} (it was re-run because: {turn.reason})",
+                )
+            else:
+                state, reason = INTERRUPTED, RECOVERED_REASON
+            reason += "; its process was killed" if alive else ""
+            settled = self.store.finish_turn(turn.session_id, turn.seq, state, reason)
+            if alive and settled:
+                _kill_group(int(turn.pid))
+            if settled:
+                self._rerun_failures.pop(key, None)
+                self._capture_thread_id(self.store.session(turn.session_id), Path(turn.stdout_path))
+            return settled
+        # Everything the re-run needs, before the allowance is spent.
+        self._capture_thread_id(self.store.session(turn.session_id), Path(turn.stdout_path))
+        try:
+            prepared = self._prepare(turn.session_id, turn.seq, self._owner_text(turn.session_id, turn.seq))
+        except PoStoreError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - not a passing store failure: the row can never re-run
+            if alive:
+                _kill_group(int(turn.pid))
+            return self.store.finish_turn(
+                turn.session_id,
+                turn.seq,
+                FAILED,
+                f"{RERUN_REASON}, but its re-run could not be prepared: {type(exc).__name__}: {exc}",
+            )
+        if alive:
+            _kill_group(int(turn.pid))
+        why = RERUN_REASON + ("; its process was killed first" if alive else "")
+        if not self.store.mark_rerun(turn.session_id, turn.seq, why):
+            return False
+        try:
+            self._run(turn.session_id, turn.seq, prepared)
+        except Exception as exc:  # noqa: BLE001 - `_abandon` settled it failed, or the next pass will
+            self._rerun_failures[key] = f"{why}; the re-run did not start: {type(exc).__name__}: {exc}"
+            print(
+                f"secretary po: re-run of turn {turn.session_id}/{turn.seq} did not start: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        return True
+
+    def orphaned_turns(self) -> list[Turn]:
+        """`running` rows with no waiter of this runner: what recovery has not settled or re-run yet."""
+        running = self.store.running_turns()
+        with self._lock:
+            return [turn for turn in running if (turn.session_id, turn.seq) not in self._live]
+
+    def _owner_text(self, session_id: str, seq: int) -> str:
+        """The owner's message that started turn `seq`, from the feed the claim wrote it to."""
+        for entry in self.store.feed(session_id):
+            if entry.turn_seq == seq and entry.role == OWNER:
+                return entry.text
+        raise RunnerError(f"turn {seq} of PO session {session_id} has no owner message to re-run")
 
     def wait(self, session_id: str, seq: int, timeout: float | None = None) -> Turn:
         """Block until this runner's waiter has settled the turn (a convenience for callers)."""
@@ -549,6 +678,19 @@ class PoRunner:
         finally:
             with self._lock:
                 self._live.pop((session.session_id, seq), None)
+            if self.on_settled is not None:
+                try:
+                    self.on_settled(session.session_id, seq)
+                except Exception as exc:  # noqa: BLE001 - a listener never unsettles a turn
+                    print(
+                        f"secretary po: after turn {session.session_id}/{seq}: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+
+    def live_count(self) -> int:
+        """How many turns this runner's waiters still hold."""
+        with self._lock:
+            return len(self._live)
 
     def _resume_instead(
         self, session: Session, seq: int, code: int, argv: list[str], files: TurnFiles
@@ -635,7 +777,11 @@ class PoRunner:
 
 
 __all__ = [
+    "RECOVERED_REASON",
+    "RERUN_INTERRUPTED_REASON",
+    "RERUN_REASON",
     "RUNS_DIR_NAME",
+    "STOPPED_REASON",
     "PoRunner",
     "RunnerError",
     "TurnFiles",
@@ -645,5 +791,6 @@ __all__ = [
     "codex_thread_id",
     "process_identity",
     "runs_dir",
+    "still_running",
     "turn_environment",
 ]

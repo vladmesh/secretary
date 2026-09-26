@@ -158,6 +158,27 @@ class PoRequestConflict(ReadError):
     code = "request_conflict"
 
 
+#: The `data` of a /po refusal known to have written nothing, set where the refusal is raised. A web
+#: form that took a request id gets a fresh one only after such a refusal; every other refusal of it
+#: keeps its id, so a resend is a replay (`secretary.web.app._keeps_request_id`).
+NOTHING_WRITTEN: dict[str, Any] = {"nothing_written": True}
+
+
+class PoOutcomeUnknown(ReadError):
+    """A /po write reached the PO service and no answer came back, so it may have been carried out.
+
+    Not "nothing was written": the request was delivered. The safe move is the same request again —
+    the same form with the same request id, which the service answers as a replay, or the same stop or
+    close, which are idempotent — and never a new request id. `data` says so for a client:
+    ``{"reason": "outcome_unknown", "action": "repeat_same_request"}``.
+    """
+
+    code = "backend_unavailable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, data={"reason": "outcome_unknown", "action": "repeat_same_request"})
+
+
 class PoSessionClosed(ReadError):
     """The owner closed this PO session; a message into it starts no turn and nothing was written.
 

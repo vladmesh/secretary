@@ -1,7 +1,7 @@
 # systemd assets
 
-Templates for the secretary runtime units: production dispatcher ticks, the memory service, the web
-transport and its front, curator, steward (including the deep sweep) and retro. There is no
+Templates for the secretary runtime units: production dispatcher ticks, the memory service, the PO
+service, the web transport and its front, curator, steward (including the deep sweep) and retro. There is no
 scheduled backup unit: the git checkpoint is the recovery contract ([Recovery](../../docs/RECOVERY.md)),
 and `backup create` is a manual, optional cold archive.
 
@@ -44,5 +44,12 @@ so the pair starts, stops and restarts together, and its configuration is not a 
 carries a bcrypt hash and is rendered from the secret store by `secretary web-front render` into
 `<data-dir>/webfront/Caddyfile` with mode 0600. The distribution's own `caddy.service` is masked on
 this installation so that installing the package can never start an unconfigured public listener;
-see [Operations](../../docs/OPERATIONS.md#the-published-web-front). Scheduler-backed roles must have exactly one owner: the
-systemd timer here.
+see [Operations](../../docs/OPERATIONS.md#the-published-web-front).
+`secretary-po.service` runs `secretary po-serve`, the one owner of PO head turns: every turn process is
+a child in its control group, it takes messages from the durable queue `<data-dir>/po-queue/` and
+listens on the Unix socket `<data-dir>/po-service/po.sock` (mode 0600) for the web and, later, the
+dispatcher. It has no `PartOf=`/`BindsTo=` coupling to the web, so a web restart touches no turn.
+`secretary upgrade` never restarts it while a turn runs: it asks, and the service exits by itself
+(`Restart=always` brings it back on the new code) once no turn runs; see
+[Operations](../../docs/OPERATIONS.md#the-po-service). Scheduler-backed roles must have exactly one
+owner: the systemd timer here.

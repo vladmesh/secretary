@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, quote, unquote
 from secretary.web import pages
 from secretary.web.doctor import DoctorLayer
 from secretary.web.statuses import status_for
-from secretary.webproto.errors import OperationPending, ReadError, ValidationRefused
+from secretary.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from secretary.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME
 from secretary.webproto.po_auth import COOKIE_PATH as PO_COOKIE_PATH
@@ -747,7 +747,7 @@ class WebApp:
         """Why this /po request is refused before its handler, or `None` when it may go on.
 
         Only the token layer is asked, and it reads only the token file: a request without a valid
-        cookie never reaches the PO runner or the board store.
+        cookie never reaches the PO service or the board store.
         """
         if self.po_auth is None or self.po is None:
             return self._deny(route, status=503, code="po_unavailable", message=PO_NOT_SERVED)
@@ -792,12 +792,13 @@ class WebApp:
             created = self.po.po_create_session(
                 request_id=_first(body, "request_id"), cli=cli, model=model, effort=effort
             )
-        except ReadError as exc:
+        except Exception as caught:  # noqa: BLE001 - any refusal re-renders the form, its id kept unless definite
+            exc = _as_refusal(caught)
             return _html(
                 status_for(exc.code),
                 pages.po_page(
                     self.po.po_overview(),
-                    request_id=_po_request_id(),
+                    request_id=_first(body, "request_id") if _keeps_request_id(exc) else _po_request_id(),
                     refusal=exc.to_json(),
                     submitted={"cli": cli, "model": model, "effort": effort},
                 ),
@@ -812,24 +813,26 @@ class WebApp:
         return _json(200, self.po.po_session(params["session"]))
 
     def _po_send(self, params, _query, body) -> Response:
-        """One message. A refusal renders the session again with the text kept and nothing written.
+        """One message into the PO service's queue. A refusal renders the session again with the text kept.
 
-        A turn already running is `owner_conflict`, and the form keeps its request id: the refused
-        submission claimed nothing, so the same form may be sent once that turn is over.
+        A message for a session whose turn is running is queued, not refused. The re-rendered form
+        keeps its request id — so a resend is a replay of whatever the first submission did — unless
+        the refusal is marked as having written nothing (`_keeps_request_id`).
         """
         _fields(body, PO_SEND_FIELDS, "PO message")
         session_id = params["session"]
         request_id, text = _first(body, "request_id"), _first(body, "text")
         try:
             self.po.po_send(request_id=request_id, session_id=session_id, text=text)
-        except ReadError as exc:
+        except Exception as caught:  # noqa: BLE001 - any refusal re-renders the form, its id kept unless definite
+            exc = _as_refusal(caught)
             if exc.code == "not_found":
-                raise
+                raise exc from None
             return _html(
                 status_for(exc.code),
                 pages.po_session(
                     self.po.po_session(session_id),
-                    request_id=request_id if exc.code == "owner_conflict" else _po_request_id(),
+                    request_id=request_id if _keeps_request_id(exc) else _po_request_id(),
                     draft=text,
                     refusal=exc.to_json(),
                 ),
@@ -1191,6 +1194,25 @@ def _html(status: int, markup: str) -> Response:
 def _po_request_id() -> str:
     """The id one PO form carries for its whole life, as the sprint form's does."""
     return f"web-po-{uuid.uuid4()}"
+
+
+def _as_refusal(exc: Exception) -> ReadError:
+    """A /po form's failure as a refusal to render; an exception of any other type is unmarked."""
+    if isinstance(exc, ReadError):
+        return exc
+    return RuntimeUnavailable(f"the PO layer failed: {type(exc).__name__}: {exc}")
+
+
+def _keeps_request_id(exc: ReadError) -> bool:
+    """Whether a refused create or send form keeps its request id: always, unless it wrote nothing.
+
+    Only a refusal marked `nothing_written` where it was raised (`secretary.webproto.errors.NOTHING_WRITTEN`:
+    the service not reached, validation before the request id was reserved, the id taken by another
+    request, an unknown or closed session) gets a fresh id. Anything else — a lost answer, a service
+    error after the message was queued, an exception nobody marked — may follow an accepted request,
+    and only the same id makes the resend a replay rather than a second request.
+    """
+    return exc.data.get("nothing_written") is not True
 
 
 def _presented_cookie(headers: Any) -> str:

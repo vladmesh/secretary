@@ -289,15 +289,15 @@ as reported). Codex: its `--json` event stream names no model, so it is the `mod
 `turn_context` in the thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-THREAD_ID.jsonl`
 (`CODEX_HOME` of the turn environment, else `~/.codex`). A turn that reported nothing (no result object,
 no rollout) keeps `null`; the session reads show the latest turn's non-null value.
-**Environment.** A turn gets the `web-serve` environment (HOME, auth, `SECRETARY_*`, `TA_*` kept) with
-the directory of the interpreter running `web-serve` (the product runtime, `/home/dev/secretary/.venv/bin`
+**Environment.** A turn gets the `po-serve` environment (HOME, auth, `SECRETARY_*`, `TA_*` kept) with
+the directory of the interpreter running `po-serve` (the product runtime, `/home/dev/secretary/.venv/bin`
 on prod) first on `PATH` and the product source it imports first on `PYTHONPATH`. So `python3 -P -m
 secretary ...` and `secretary ...` from the PO workspace run the product, not the system Python.
-`PoRunner.turn_environment()` computes it for both `/po` and recovery; an explicit `env=` replaces it.
+`PoRunner.turn_environment()` computes it for every turn and re-run; an explicit `env=` replaces it.
 Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, then `ok`):
 
 ```bash
-BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-web.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
+BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-po.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
 ```
 
 Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_session_close`,
@@ -306,12 +306,13 @@ Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_s
 | Table | Holds |
 | --- | --- |
 | `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (`default` unless chosen) |
-| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason, `resolved_model` |
+| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, reason (why it failed or was interrupted; on a re-run turn, why it was re-run), `resolved_model` |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
 | `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`), fingerprint of its inputs, the session and, for a send, the turn it made |
 
-A partial unique index allows at most one `running` turn per session: a second send is refused and
-writes nothing. Different sessions run turns in parallel.
+A partial unique index allows at most one `running` turn per session; the PO service keeps a second
+message queued until the running turn ends ([The PO service](#the-po-service)). Different sessions run
+turns in parallel.
 
 **Close.** `PoStore.close_session(session, actor)` locks the session row and, in one transaction, sets
 `state = 'closed'`, `closed_at = now()` and `closed_by`; the CHECK `po_session_closed_iff_audited`
@@ -338,23 +339,108 @@ is appended to the turn's files.
 
 If the process of a turn starts but cannot be recorded in the store, its process group is killed and
 reaped and the turn is `failed`. If the store does not answer at all, the row stays `running` with no
-pid until `recover()` marks it `interrupted`.
+pid until the PO service's next start re-runs it.
 
-**Restart.** `secretary web-serve` settles turns at start: every `running` turn becomes `interrupted`,
-and its process is killed only if the PID still has the recorded identity (boot id plus kernel start
-time), so a reused PID is never killed. The feed is not touched. If the store is unreachable,
-`PO turn recovery did not run` goes to stderr and the service starts anyway. A second `web-serve` on
-the same installation interrupts the first one's running turns. Check:
+### The PO service
+
+`secretary-po.service` (`secretary po-serve --instance INSTANCE`, `Type=simple`, `Restart=always`, the
+runtime user, the web unit's environment) is the one owner of PO turns: it holds the installation's only
+`PoRunner`, and every turn process is a child in its control group. It has no `PartOf=`/`BindsTo=` tie to
+`secretary-web.service`, so **a web restart touches no turn**: a running turn finishes and its answer
+reaches the feed. `reconcile apply` and `upgrade` install and enable it with the other catalogue units,
+doctor lists it, and `host.components.po.enabled: false` opts out (then no PO turn runs anywhere). The
+service takes an exclusive lock, `DATA_DIR/po-service/service.lock`; a second `po-serve` on the same data
+dir refuses to start.
+
+**Queue.** A message is one file in `DATA_DIR/po-queue/` (`<time_ns>-<pid>-<n>.json`: `session_id`,
+`text`, `request_id`, `source` — `web` today — and `queued_at`), written to a temporary name, fsynced and
+renamed before the submitter gets an answer. The service takes inputs oldest first per session and runs
+one turn per session at a time; a message for a busy session waits in the queue, neither refused nor lost,
+and sessions run in parallel. An input leaves the queue only after its turn row exists (`claim_turn`
+under the input's request id), so a crash between the claim and the removal is answered by the same turn
+on the next hand-over and creates nothing. An input that can never become a turn (session gone or closed,
+request id taken by something else) moves to `DATA_DIR/po-queue/refused/` with its `reason`. A session
+with queued messages refuses a close (409). Queued messages survive any restart of either service.
+
+**Request ids.** One check, `PoService._reserve`, decides every request id, for `submit` and
+`create_session` alike (and any later operation that takes one), under the lock that serializes them. An
+id belongs to one operation with fixed inputs from the moment it is acknowledged, wherever it is recorded:
+a `po_requests` row, a message pending in `po-queue/`, or a message set aside in `po-queue/refused/`. The
+same operation with the same inputs is a replay; anything else is 409 `request_conflict`. So a session
+create can never take the id of a message still waiting in the queue.
+
+**Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
+request line, one JSON answer line, ops `submit`, `create_session`, `stop_turn`, `close_session`,
+`status` and `restart` (`secretary.po.client`). The web is only a client: it reads the store and the queue
+directory and sends every write here. The service runs a request only once its whole line arrived.
+
+**Accepted is accepted.** A message is accepted when its queue file is written, a session when its
+`claim_session` commits. From then on the service answers "accepted" from what it knew at that moment —
+the message queued under its id, or the session — even if a later step (the hand-over to a turn, the
+lookup of the turn it became) fails; that lookup only adds detail. A failure *during* the accepting write,
+which may have landed, is `outcome_unknown`. One wrapper in the service (`PoService._answer_id_operation`)
+applies this to every operation that takes a request id.
+
+**A refused form keeps its request id**, so sending it again is a replay of whatever the first attempt
+did, never a second message or session. Only refusals marked, where they are raised, as having written
+nothing (`data.nothing_written`) get a fresh id:
+
+- nothing reached the service (no socket, connection refused, the send failed before the line ended):
+  503, `the PO service is not running ... nothing was sent or written`;
+- the input was refused before its id was reserved (empty text, a model or effort not offered, an unknown
+  CLI): 400;
+- the id already belongs to another request: 409 `request_conflict`;
+- the session is unknown or closed: 404, 409 `session_closed`.
+
+Everything else keeps the id: a lost or late answer (`the PO service may have accepted this message;
+sending again with the same form is safe`, `data.reason = outcome_unknown`), a store that failed, any
+unexpected error. A lost answer to a stop or a close says repeating it is safe (both are idempotent).
+The web never starts a turn itself.
+
+**Service start.** Every turn left `running` is looked at once:
+
+- its recorded process still alive (same PID and identity, not a zombie): killed first, then as below;
+- no re-run recorded yet: **re-run once**. The reason `re-run: the PO service restarted while this turn was
+  running` is written on the running row (`PoStore.mark_rerun`) and stays on it when it completes; the
+  same prompt goes to the same conversation: Claude `--resume` once a turn of the session completed, else
+  `--session-id` and, when Claude says the id is in use, `--resume`; Codex `exec resume THREAD_ID` when the
+  interrupted attempt named its thread, else a new `exec`. Its output is appended to the same turn files;
+- already a re-run (the reason is set): settled `interrupted` with `the PO service restarted again during
+  this turn's re-run; not re-run a second time (it was re-run because: ...)`.
+
+A turn the owner stopped was settled `interrupted`/`stopped by the owner` by the stop and is never re-run.
+The re-run allowance is spent (`mark_rerun`) only after everything the re-run needs is loaded — the
+owner's message from the feed, the session, the prompt file; a store that fails before that leaves the row
+untouched for the next pass. A re-run that cannot be prepared for good (no owner message) is settled
+`failed` with the reason; one whose launch fails after the allowance is settled `failed` (`the re-run did
+not start: ...`), by the next pass if the store did not answer the first time. Recovery counts as done
+only when every `running` row has a process under this service or is settled; until then it is retried,
+first after a second and then doubling up to 30 s (journal: `still running without a process; recovery
+retries in Ns`), and the sessions of those rows take no queued input while every other session goes on.
+So a restart of the PO service costs at most the turn it interrupted, re-run.
+
+**Upgrades never kill a running turn.** The PO itself runs `secretary upgrade` inside a turn. The `po`
+step of `secretary upgrade` asks for a restart when the service's process inputs moved (product code or
+dependencies, bundled schemas, the unit file) and the service decides by one rule
+(`PoService.request_restart`): idle, it exits at once and `Restart=always` starts the new code, which the
+step waits for (`restarted secretary-po.service while idle`); busy, it starts no queued
+turn (new messages keep queueing) and exits by itself as soon as its running turns settle — the step reports `PO service restart
+deferred: N turn(s) running` and does not fail. The request is the marker `DATA_DIR/po-service/restart-pending`;
+the next process removes it at start. A stopped service is started. Check:
 
 ```bash
-journalctl -u secretary-web.service | grep 'PO turn'
-psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' ORDER BY started_at DESC LIMIT 10"
+systemctl status secretary-po.service
+journalctl -u secretary-po.service | grep 'secretary po'   # recovery, re-runs, set-aside inputs, deferred restarts
+ls -l DATA_DIR/po-queue/ DATA_DIR/po-queue/refused/ DATA_DIR/po-service/
+cat DATA_DIR/po-queue/*.json                               # what waits, oldest first by name
+psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' OR reason IS NOT NULL ORDER BY started_at DESC LIMIT 10"
 ```
 
 ### The PO head in the dashboard
 
-`secretary web-serve` builds one `PoRunner` when it starts (and recovers turns with it); `/po` talks to
-the PO head through it. A PO head is a shell on this host, so `/po` has its own token on top of the
+`/po` is a client of the PO service ([The PO service](#the-po-service)): its pages read the board store
+and the queue, and every create, send, stop and close goes over the service's socket. `secretary
+web-serve` builds no runner and recovers no turn. A PO head is a shell on this host, so `/po` has its own token on top of the
 front's password.
 
 **The token** is `DATA_DIR/po-web-token`: one line, mode 0600, owned by the runtime user, outside
@@ -372,7 +458,7 @@ browser cookie issued under the old token stops working on the next request; not
 `hmac.compare_digest` and sets cookie `secretary_po`: `HttpOnly; SameSite=Strict; Path=/po`, 30 days,
 plus `Secure` when the request came through the TLS front (the front sets `X-Forwarded-Proto: https`).
 The cookie value is an HMAC keyed by the token, never the token. Without a valid cookie every `/po`
-route answers 401 (a page with the login form, or JSON `po_token_required`) before the runner or the
+route answers 401 (a page with the login form, or JSON `po_token_required`) before the PO service or the
 board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
 
 **The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI, a model
@@ -402,16 +488,17 @@ form's create is, on `/po`, with the list of what it does offer. A closed sessio
 posted to it anyway is refused (409 `session_closed`). The running-turn count counts turns, whatever their session's state. The PO head's answers are rendered
 server-side as a safe Markdown subset (headings, emphasis, code, lists, quotes, rules, `http(s)`/`mailto`
 links; the text is escaped first, so raw HTML shows as text); the owner's messages are shown as typed.
-While a turn runs the page polls
-`/po/api/sessions/ID` every 3 seconds and reloads when the turn ends. A message sent while a turn runs
-is refused on the page (409) and nothing is written. Each form carries a request id minted when the page was served. It belongs to one
+While a turn runs or a message is queued the page
+polls `/po/api/sessions/ID` every 3 seconds and reloads when the turn ends or the queued message starts. A
+message sent while a turn runs is queued: it shows at the top of the feed marked `queued` and becomes the
+next turn when the running one ends. Each form carries a request id minted when the page was served. It belongs to one
 operation with fixed inputs, installation-wide: `po_requests` binds it to a session create (CLI,
 model and effort; a `default` effort is left out of the fingerprint, so an id recorded before efforts
 existed still binds the same inputs) or a send (session and the exact text), and is written in the transaction that creates the
-session or the turn. Sending the same form again answers with what it made — the session, or the turn
-running, completed, or failed with its reason even when its CLI never started — and writes and launches
-nothing. The same id reused for anything else is refused (409 `request_conflict`). A message refused
-because another turn runs records no request id, so that form can be sent once the turn ends. The dashboard's pipeline strip shows only the number of running PO turns
+session or the turn. Sending the same form again answers with what it made — the session, the message still
+queued, or the turn running, completed, or failed with its reason even when its CLI never started — and
+writes and launches nothing. The same id reused for anything else is refused (409 `request_conflict`). A queued message
+has no request row until its turn is claimed; its id is bound by the queue file meanwhile. The dashboard's pipeline strip shows only the number of running PO turns
 with a link to `/po`; it needs no token, and a PO store that does not answer hides the number.
 
 **Models and efforts.** `instance.yaml`:

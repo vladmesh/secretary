@@ -77,6 +77,7 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
+from secretary.po.service import add_po_serve_subcommands
 from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
 from secretary.restore import RestoreError, _target, restore_findings
@@ -174,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_run_subcommands(subparsers)
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
+    add_po_serve_subcommands(subparsers)
     automations = subparsers.add_parser(
         "automations",
         add_help=False,
