@@ -1252,6 +1252,32 @@ class BoardStoreSchemaTests(unittest.TestCase):
             [(None, [])],
         )
 
+    def test_0016_admits_the_sprint_session_operation_and_nothing_else_new(self) -> None:
+        connection = self.at_0013()
+        self.run_migrations(connection)
+        connection.exec_driver_sql(
+            "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state) "
+            "VALUES ('s-1', 'claude', 'opus', '/po', now(), 'open')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+            "VALUES ('r-1', 'po_sprint_session', 'f', 's-1', NULL, now())"
+        )
+        connection.commit()
+        with self.assertRaisesRegex(Exception, "po_request_operation_in_vocabulary"):
+            connection.exec_driver_sql(
+                "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+                "VALUES ('r-2', 'po_something_else', 'f', 's-1', NULL, now())"
+            )
+        connection.rollback()
+        # A sprint-session request records no turn: `po_request_seq_only_for_a_send` is unchanged.
+        with self.assertRaisesRegex(Exception, "po_request_seq_only_for_a_send"):
+            connection.exec_driver_sql(
+                "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+                "VALUES ('r-3', 'po_sprint_session', 'f', 's-1', 1, now())"
+            )
+        connection.rollback()
+
 
 if __name__ == "__main__":
     unittest.main()

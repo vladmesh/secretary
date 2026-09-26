@@ -23,6 +23,7 @@ from secretary.po.store import (
     FAILED,
     INTERRUPTED,
     OWNER,
+    REQUEST_OPERATIONS,
     RUNNING,
     SEND,
     SESSION_CLOSED,
@@ -87,6 +88,19 @@ class FakePoStore:
             )
         return known
 
+    @staticmethod
+    def _check_operation(request_id: str | None, operation: str) -> None:
+        """The CHECK `po_request_operation_in_vocabulary`, before anything is written.
+
+        PostgreSQL refuses the request row and rolls back the whole transaction with it, so an
+        operation missing from the vocabulary creates nothing here either.
+        """
+        if request_id is not None and operation not in REQUEST_OPERATIONS:
+            raise PoStoreError(
+                f"the board store refused a PO session write: po_requests.operation {operation!r} "
+                "violates check constraint po_request_operation_in_vocabulary"
+            )
+
     # --- sessions ---------------------------------------------------------------------------
 
     def claim_session(
@@ -108,6 +122,7 @@ class FakePoStore:
             known = self._known(board, request_id, operation, fingerprint)
             if known is not None:
                 return board.sessions[known.session_id], False
+            self._check_operation(request_id, operation)
             session = Session(
                 session_id, cli, model, cwd, board.now(), SESSION_OPEN, cli_session_id, effort=effort
             )
@@ -173,6 +188,7 @@ class FakePoStore:
             known = self._known(board, request_id, SEND, send_fingerprint(session_id, text))
             if known is not None:
                 return board.turns[(known.session_id, known.seq)], False
+            self._check_operation(request_id, SEND)
             session = self.session(session_id)
             if session.state == SESSION_CLOSED:
                 raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")

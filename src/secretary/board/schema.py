@@ -896,7 +896,9 @@ class PoRequest(Base):
 
     __table_args__ = (
         sa.CheckConstraint(
-            "operation IN ('po_session_create','po_send')", name="po_request_operation_in_vocabulary"
+            # `po_sprint_session` since 0016; `secretary.po.store.REQUEST_OPERATIONS` is the same list.
+            "operation IN ('po_session_create','po_send','po_sprint_session')",
+            name="po_request_operation_in_vocabulary",
         ),
         sa.CheckConstraint(
             "(operation = 'po_send') = (seq IS NOT NULL)", name="po_request_seq_only_for_a_send"

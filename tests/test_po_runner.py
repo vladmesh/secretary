@@ -551,6 +551,37 @@ class PoRunnerTests(unittest.TestCase):
         self.assertIsNone(turn.resolved_model)
         self.assertIsNone(self.store.session(session.session_id).resolved_model)
 
+    def test_a_sprint_session_request_opens_a_session_the_store_records_and_replays(self) -> None:
+        """The resolver's operation passes the real `po_request_operation_in_vocabulary` CHECK."""
+        fingerprint = po_store.sprint_session_fingerprint("sprint:7")
+        session, created = self.runner.create_session_request(
+            "claude", "opus", "resolve-1", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
+        )
+        again, created_again = self.runner.create_session_request(
+            "claude", "opus", "resolve-1", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
+        )
+
+        self.assertEqual((created, created_again, again.session_id), (True, False, session.session_id))
+        self.assertEqual(self.store.session(session.session_id).state, po_store.SESSION_OPEN)
+        request = self.store.request("resolve-1")
+        self.assertEqual(
+            (request.operation, request.fingerprint, request.session_id, request.seq),
+            (po_store.SPRINT_SESSION, fingerprint, session.session_id, None),
+        )
+        with self.assertRaises(po_store.RequestConflict):
+            self.runner.create_session_request("claude", "opus", "resolve-1")
+        with self.assertRaises(po_store.RequestConflict):
+            self.runner.send_request(session.session_id, "hello", "resolve-1")
+        with self.assertRaises(po_store.RequestConflict):
+            self.runner.create_session_request(
+                "claude",
+                "opus",
+                "resolve-1",
+                operation=po_store.SPRINT_SESSION,
+                fingerprint=po_store.sprint_session_fingerprint("sprint:8"),
+            )
+        self.assertEqual(len(self.store.sessions()), 1)
+
     def test_a_create_request_id_is_bound_to_its_effort(self) -> None:
         session, created = self.runner.create_session_request("claude", "opus", "req-1", "high")
         again, created_again = self.runner.create_session_request("claude", "opus", "req-1", "high")

@@ -1389,6 +1389,36 @@ class SprintSessionTests(ServiceFixture):
         self.assertEqual((second["session_id"], second["repeated"]), (first["session_id"], True))
 
 
+class FakeStoreVocabularyTests(unittest.TestCase):
+    def test_an_operation_outside_the_check_writes_nothing_as_postgresql_would(self) -> None:
+        store = FakePoStore()
+        with self.assertRaisesRegex(po_store.PoStoreError, "po_request_operation_in_vocabulary"):
+            store.claim_session(
+                session_id="s-1",
+                cli="claude",
+                model="opus",
+                cwd="/po",
+                cli_session_id=None,
+                request_id="r-1",
+                operation="po_not_in_the_check",
+                fingerprint="f",
+            )
+        self.assertEqual((store.board.sessions, store.board.requests), ({}, {}))
+        for operation in po_store.REQUEST_OPERATIONS:
+            if operation != po_store.SEND:
+                store.claim_session(
+                    session_id=f"s-{operation}",
+                    cli="claude",
+                    model="opus",
+                    cwd="/po",
+                    cli_session_id=None,
+                    request_id=f"r-{operation}",
+                    operation=operation,
+                    fingerprint="f",
+                )
+        self.assertEqual(len(store.board.sessions), 2)
+
+
 class WhyDocumentTests(unittest.TestCase):
     def test_only_a_decision_that_names_the_whole_reference_is_found(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

@@ -443,6 +443,30 @@ class SchemaModelTests(unittest.TestCase):
 class MigrationScriptTests(unittest.TestCase):
     """Alembic's script directory as this product ships it — no server needed."""
 
+    def test_the_po_request_vocabulary_is_one_list_in_code_schema_and_head_migration(self) -> None:
+        """A `po_requests` operation the CHECK does not admit rolls back every write that records it.
+
+        `secretary.po.store.REQUEST_OPERATIONS` is what the code (and the unit tests' fake store)
+        records; `board/schema.py` and the revision that last widened the CHECK must say the same.
+        """
+        import re
+
+        from secretary.po.store import REQUEST_OPERATIONS
+
+        [check] = [
+            constraint
+            for constraint in schema.Base.metadata.tables["po_requests"].constraints
+            if constraint.name == "po_request_operation_in_vocabulary"
+        ]
+        in_schema = re.findall(r"'([a-z_]+)'", str(check.sqltext))
+        revision = (migrate.SCRIPT_LOCATION / "versions" / "0016_sprint_po_session.py").read_text(
+            encoding="utf-8"
+        )
+        in_revision = re.findall(r"'([a-z_]+)'", re.search(r"operation IN \(([^)]*)\)", revision).group(1))
+
+        self.assertEqual(sorted(in_schema), sorted(REQUEST_OPERATIONS))
+        self.assertEqual(sorted(in_revision), sorted(REQUEST_OPERATIONS))
+
     def test_the_tree_ships_exactly_the_revisions_this_build_expects(self) -> None:
         """Newest first, as `walk_revisions` returns them: each revision sits on the one before.
 

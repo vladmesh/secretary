@@ -45,6 +45,9 @@ SESSION_CREATE = "po_session_create"
 SEND = "po_send"
 # The PO service's resolver opening a fresh session for a sprint (`PoService.sprint_session`).
 SPRINT_SESSION = "po_sprint_session"
+# Every operation a `po_requests` row may record: the CHECK `po_request_operation_in_vocabulary`
+# (board/schema.py, widened in 0016). A new operation joins it here and in a migration together.
+REQUEST_OPERATIONS = (SESSION_CREATE, SEND, SPRINT_SESSION)
 
 # The partial unique index that holds "at most one running turn per session".
 ONE_RUNNING_INDEX = "po_turns_one_running_per_session"

@@ -1232,8 +1232,9 @@ answers `{session_id, created, repeated}`:
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
   and then records the new session as its `po_session`.
 
-The request id is bound to the sprint (`po_sprint_session` in `po_requests`, reserved by
-`PoService._reserve` like every other id). A repeat of a resolve that created a session answers the same
+The request id is bound to the sprint (`po_sprint_session` in `po_requests`, an operation the CHECK
+`po_request_operation_in_vocabulary` admits since `0016`; reserved by `PoService._reserve` like every
+other id). A repeat of a resolve that created a session answers the same
 session (`repeated: true`) and creates nothing; one that failed after the session was claimed answered
 `outcome_unknown`, and its repeat finishes the seed, comment and record, each under its own id derived
 from the request id. Resolves are serialized under the service lock and read the sprint's session inside
