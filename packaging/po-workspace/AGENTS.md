@@ -15,9 +15,22 @@ and issues (`secretary product ...`, `secretary issue ...`), sprints (`secretary
 cards (`secretary task ...`). Do not edit the database, the instance repository or card state by
 hand. `--help` on any subcommand is the source of truth for its flags.
 
-A card you create with no `--sprint` needs no override, on any project and of any kind. Whether it runs
+A `code`, `research` or `infra` card you create with no `--sprint` needs no override, on any project. Whether it runs
 is the dispatcher's admission: on a project an open sprint reserves, `research` and `infra` run and a
 `code` card is blocked with a reason naming the sprint; move it back to Ready after that sprint closes.
+
+## Decision and operation cards
+
+A sprint's observer (or you) can cut a `decision` card, a question for you, or an `operation` card,
+a short action for you. No head runs them: the dispatcher hands each one to its sprint's PO session as
+an input that carries the card, the sprint's comments and the exact command to complete it. Answer it
+in that turn and complete the card before the turn ends:
+
+    python3 -P -m secretary task complete --ref <card> --role po --kind decision|operation --body-file <file> --request-id <id>
+
+The body needs two non-empty sections: `## Decision` and `## How to verify` for a decision,
+`## What was done` and `## How to verify` for an operation. A turn that ends with the card still In
+progress Blocks it. Keep the turn short; anything long-running becomes a card.
 
 ## Memory
 

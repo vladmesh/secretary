@@ -18,6 +18,7 @@ from unittest import mock
 
 from secretary import tasks
 from secretary.board.card_transitions import CARD_TRANSITIONS
+from secretary.board.completion_evidence import po_completion_record
 from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
@@ -2322,6 +2323,113 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(self.card("secretary-468"), before)
         self.assertEqual(self.card("secretary-468")["claim"]["worker"], "codex-terra")
         self.assertEqual(len(self.writer.audit.events()), 1)
+
+    # --- decision and operation cards (secretary-1758) -------------------------------------
+
+    DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`secretary sprint show`\n"
+
+    def test_the_observer_and_the_po_create_both_kinds_skipped_and_unpinned(self) -> None:
+        """The PO needs no sprint override for them, and a sprint's executor pins do not apply."""
+        for number, (kind, role) in enumerate(
+            (("decision", "observer"), ("operation", "observer"), ("decision", "po"), ("operation", "po")),
+            start=580,
+        ):
+            with self.subTest(kind=kind, role=role):
+                reference = f"secretary-{number}"
+                self.assertEqual(self.create_in(self.pinned_sprint(), reference, kind, role=role), ("skipped", None, None))
+                card = self.card(reference)
+                self.assertEqual((card["type"], card["sprint"], card["state"]), (kind, "sprint:test", "ready"))
+                self.assertEqual(self.writer.audit.events(reference)[0]["payload"]["review"], "skipped")
+
+    def test_a_decision_create_refused_for_a_flag_writes_nothing(self) -> None:
+        before = self.board_snapshot()
+        with self.open_sprint() as sprint, self.assertRaisesRegex(TaskError, "takes no --head") as raised:
+            self.writer.create(
+                role="po", actor="po", project="secretary", task_type="decision", title="T",
+                sprint=sprint, head="codex",
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        with self.assertRaisesRegex(TaskError, "needs --sprint"):
+            self.writer.create(role="po", actor="po", project="secretary", task_type="operation", title="T")
+        self.assertBoardUnchanged(before)
+
+    def in_progress_decision(self, reference: str = "secretary-590") -> str:
+        self.create_kind(reference, "decision")
+        self.place_card(reference, "in_progress")
+        return reference
+
+    def test_complete_writes_the_record_and_the_done_in_one_transition_and_repeats_as_a_replay(self) -> None:
+        reference = self.in_progress_decision()
+
+        first = self.writer.complete(
+            role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-590",
+        )
+        after = self.board_snapshot()
+        again = self.writer.complete(
+            role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-590",
+        )
+
+        self.assertEqual((first["replayed"], again["replayed"]), (False, True))
+        self.assertEqual(first["event_id"], again["event_id"])
+        self.assertBoardUnchanged(after)
+        card = self.card(reference)
+        self.assertEqual(card["state"], "done")
+        [comment] = [body for body in self.card_comments(reference) if "[completion:decision]" in body]
+        self.assertTrue(comment.startswith("[po]\n[completion:decision]\n"))
+        self.assertEqual(
+            po_completion_record(card),
+            {"Decision": "Ship the narrow cut.", "How to verify": "`secretary sprint show`"},
+        )
+        [done] = [event for event in self.writer.audit.events(reference) if event.get("transition", {}).get("target") == "done"]
+        self.assertEqual((done["actor"]["role"], done["transition"]["source"]), ("po", "in_progress"))
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.complete(
+                role="po", actor="po", reference=reference, kind="decision",
+                body=self.DECISION_BODY.replace("narrow", "wide"), request_id="complete-590",
+            )
+        self.assertEqual(raised.exception.code, "request_conflict")
+        self.assertBoardUnchanged(after)
+
+    def test_complete_refuses_a_card_not_in_progress_another_kind_or_a_body_without_its_sections(self) -> None:
+        reference = self.in_progress_decision("secretary-591")
+        self.create_kind("secretary-592", "decision")
+        before = self.board_snapshot()
+        for fields, code in (
+            ({"reference": "secretary-592"}, "transition_forbidden"),
+            ({"kind": "operation", "body": "## What was done\nx\n\n## How to verify\ny\n"}, "validation"),
+            ({"body": "## Decision\nYes.\n"}, "validation"),
+            ({"role": "observer"}, "role_forbidden"),
+        ):
+            call = {"role": "po", "actor": "po", "reference": reference, "kind": "decision", "body": self.DECISION_BODY,
+                    "request_id": f"complete-{len(fields)}-{code}", **fields}
+            with self.subTest(fields=fields), self.assertRaises(TaskError) as raised:
+                self.writer.complete(**call)
+            self.assertEqual(raised.exception.code, code)
+        self.assertBoardUnchanged(before)
+
+    def test_a_decision_card_takes_no_head_capacity(self) -> None:
+        """Three active cards fill the capacity for a head, not for a card the PO executes."""
+        for number in (901, 902, 903):
+            self.add_card(
+                reference=f"secretary-{number}",
+                title="Other work",
+                state="in_progress",
+                metadata={"project": "secretary", "task_type": "research", "claim": f"w{number}"},
+            )
+        reference = "secretary-593"
+        self.create_kind(reference, "decision")
+
+        claimed = self.writer.claim(role="dispatcher", actor="d", reference=reference, worker="po-card")
+
+        self.assertEqual(claimed["task"]["state"], "in_progress")
+        self.clear_card_metadata("secretary-468", "claim")
+        self.place_card("secretary-903", "done")
+        # The active decision card is not counted either: two headed cards and it leave room for one.
+        self.writer.claim(role="dispatcher", actor="d", reference="secretary-468", worker="secretary-468-runtime")
+        self.assertEqual(self.card_state("secretary-468"), "in_progress")
 
 
 class DoneRetentionTests(CardStoreCase):

@@ -21,6 +21,13 @@ class TaskType(StrEnum):
     CODE = "code"
     RESEARCH = "research"
     INFRA = "infra"
+    # Executed by the PO service inside a turn of the sprint's PO session, never by a head.
+    DECISION = "decision"
+    OPERATION = "operation"
+
+
+#: The kinds the dispatcher submits to the sprint's PO session instead of launching a head for.
+PO_EXECUTED_TYPES: frozenset[TaskType] = frozenset({TaskType.DECISION, TaskType.OPERATION})
 
 
 class TaskReview(StrEnum):
@@ -295,6 +302,7 @@ __all__ = [
     "FAMILY_PREFERENCE_VALUES",
     "IMPACT_BOUNDS_PARTS",
     "IMPACT_BOUNDS_SECTION",
+    "PO_EXECUTED_TYPES",
     "ROUTING_PHASE_VALUES",
     "TASK_COMPLEXITY_VALUES",
     "TASK_TYPE_VALUES",

@@ -27,8 +27,9 @@ from typing import Any
 QUEUE_DIR_NAME = "po-queue"
 REFUSED_DIR_NAME = "refused"
 SUFFIX = ".json"
-# Who may submit an input (`PoService.submit`). The dispatcher (decision and operation cards) comes later.
-SOURCES = ("web",)
+# Who may submit an input (`PoService.submit`): the owner through the web, and the dispatcher handing
+# a sprint's PO session a decision or operation card (`secretary.dispatch.po_cards`).
+SOURCES = ("web", "dispatcher")
 # The service itself: the seeding message of a session its resolver opened (`PoService.sprint_session`).
 SERVICE_SOURCE = "po-service"
 

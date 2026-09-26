@@ -32,7 +32,7 @@ from secretary.board.task_routing import (
 
 class TaskRoutingVocabularyTests(unittest.TestCase):
     def test_closed_vocabularies_keep_the_released_spellings(self) -> None:
-        self.assertEqual(TASK_TYPE_VALUES, {"code", "research", "infra"})
+        self.assertEqual(TASK_TYPE_VALUES, {"code", "research", "infra", "decision", "operation"})
         self.assertEqual(TASK_COMPLEXITY_VALUES, {"cheap", "standard", "hard", "frontier"})
         self.assertEqual(FAMILY_PREFERENCE_VALUES, {"auto", "claude", "codex"})
         self.assertEqual(ROUTING_PHASE_VALUES, {"worker", "review", "verdict"})

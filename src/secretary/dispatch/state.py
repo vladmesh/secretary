@@ -651,6 +651,74 @@ class PersistedRoutingHeadSnapshot(dict[str, Any]):
 
 
 @dataclass
+class PoSubmission:
+    """A `decision`/`operation` card handed to its sprint's PO session (secretary-1758).
+
+    Empty (`kind == ""`) on every record of a card a head runs. The three request ids are derived at
+    claim from the card ref and the claim attempt and never change afterwards: an unanswered resolve
+    or submit is repeated under the same id, because a fresh one can open a second PO session. The
+    input text is frozen the first time it is composed for the same reason, since the service binds
+    a submit id to its exact text.
+    """
+
+    kind: str = ""
+    sprint_ref: str = ""
+    session_request_id: str = ""
+    submit_request_id: str = ""
+    complete_request_id: str = ""
+    # The resolve's answer: the session, and whether the service opened it (`created`) or the
+    # sprint already recorded it (`recorded`).
+    session_id: str = ""
+    session_outcome: str = ""
+    text: str = ""
+    # The submit's answer: accepted, and the turn it became once the service has claimed it.
+    submitted: bool = False
+    seq: int | None = None
+    # Consecutive resolve/submit calls the service did not answer, and what the last one said.
+    unanswered: int = 0
+    last_error: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.kind)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "sprint_ref": self.sprint_ref,
+            "session_request_id": self.session_request_id,
+            "submit_request_id": self.submit_request_id,
+            "complete_request_id": self.complete_request_id,
+            "session_id": self.session_id,
+            "session_outcome": self.session_outcome,
+            "text": self.text,
+            "submitted": self.submitted,
+            "seq": self.seq,
+            "unanswered": self.unanswered,
+            "last_error": self.last_error,
+        }
+
+    @classmethod
+    def from_json(cls, payload: Any) -> PoSubmission:
+        if not isinstance(payload, dict):
+            return cls()
+        seq = payload.get("seq")
+        return cls(
+            kind=str(payload.get("kind") or ""),
+            sprint_ref=str(payload.get("sprint_ref") or ""),
+            session_request_id=str(payload.get("session_request_id") or ""),
+            submit_request_id=str(payload.get("submit_request_id") or ""),
+            complete_request_id=str(payload.get("complete_request_id") or ""),
+            session_id=str(payload.get("session_id") or ""),
+            session_outcome=str(payload.get("session_outcome") or ""),
+            text=str(payload.get("text") or ""),
+            submitted=bool(payload.get("submitted", False)),
+            seq=seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+            unanswered=int(payload.get("unanswered") or 0),
+            last_error=str(payload.get("last_error") or ""),
+        )
+
+
+@dataclass
 class DispatcherRecord:
     worker: str
     workspace: str
@@ -869,6 +937,8 @@ class DispatcherRecord:
     worker_headless: PersistedHeadlessRecoveryEpisode = field(
         default_factory=PersistedHeadlessRecoveryEpisode
     )
+    # A decision/operation card's hand-over to its sprint's PO session; empty for a headed card.
+    po_submission: PoSubmission = field(default_factory=PoSubmission)
 
     def __setattr__(self, name: str, value: Any) -> None:
         # All producers, including legacy host/dispatcher code that still assigns JSON dictionaries,
@@ -988,6 +1058,8 @@ class DispatcherRecord:
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
             "workspace_settled": self.workspace_settled,
+            # Only on a PO-executed card's record, so every other record keeps its released shape.
+            **({"po_submission": self.po_submission.to_json()} if self.po_submission else {}),
         }
 
     @classmethod
@@ -1117,6 +1189,7 @@ class DispatcherRecord:
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
             workspace_settled=bool(payload.get("workspace_settled", False)),
+            po_submission=PoSubmission.from_json(payload.get("po_submission")),
         )
 
 

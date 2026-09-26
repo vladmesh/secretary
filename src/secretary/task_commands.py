@@ -12,6 +12,7 @@ from secretary.board.backend import card_client
 from secretary.board.models import CardState
 from secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
 from secretary.board.task_routing import (
+    PO_EXECUTED_TYPES,
     BlockClassification,
     FamilyPreference,
     TaskComplexity,
@@ -137,7 +138,7 @@ def add_task_subcommands(subparsers) -> None:
         "--review",
         choices=("", *(value.value for value in TaskReview)),
         default="",
-        help="whether the card is reviewed; default required for code, skipped for research and infra "
+        help="whether the card is reviewed; default required for code, skipped for every other kind "
         "(a --review-head the sprint does not pin is refused with skipped)",
     )
     task_create.add_argument(
@@ -231,6 +232,24 @@ def add_task_subcommands(subparsers) -> None:
         if name == "archive":
             command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
+    task_complete = task_subcommands.add_parser(
+        "complete", help="PO only: complete an In progress decision or operation card it answered"
+    )
+    task_complete.add_argument("--ref", required=True)
+    task_complete.add_argument("--role", required=True, choices=(Role.PO.value,))
+    task_complete.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_complete)
+    task_complete.add_argument("--request-id")
+    task_complete.add_argument(
+        "--kind", required=True, choices=tuple(kind.value for kind in TaskType if kind in PO_EXECUTED_TYPES)
+    )
+    task_complete.add_argument(
+        "--body-file",
+        required=True,
+        help="decision: '## Decision' and '## How to verify'; operation: '## What was done' and "
+        "'## How to verify', both non-empty",
+    )
+    task_complete.set_defaults(handler=run_task_complete)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
     task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
@@ -424,6 +443,20 @@ def run_task_report(args: argparse.Namespace) -> int:
             kind=args.kind,
             body=body,
             classification=args.classification,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_task_complete(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.complete(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            kind=args.kind,
+            body=body,
             request_id=args.request_id,
         ),
     )

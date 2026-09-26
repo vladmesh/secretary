@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.board.completion_evidence import has_candidate
+from secretary.board.completion_evidence import has_candidate, is_po_executed
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import _worker_id, scrub_host_output
 from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
@@ -30,6 +30,7 @@ from secretary.dispatch.launch import (
 from secretary.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
 )
+from secretary.dispatch.po_cards import claim_po_card
 from secretary.dispatch.state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
@@ -731,6 +732,9 @@ def claim_ready_task(
     resume_workspace: bool = False,
 ) -> dict[str, Any]:
     """Claim one Ready card and cross the typed handoff into worker bring-up."""
+    if is_po_executed(task):
+        # No head, no workspace, no broad-check or Git preflight: the PO service executes it.
+        return claim_po_card(runtime, task, records, payload, attempt_id)
     prepared = _prepare_claim(
         runtime,
         task,

@@ -39,6 +39,7 @@ from secretary.dispatch.observer import (
 )
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
+from secretary.dispatch.po_cards import completion_state
 from secretary.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from secretary.dispatch.state import (
     DispatcherRecord,
@@ -922,6 +923,22 @@ class _ProbeHost:
         return getattr(self._inner, name)
 
 
+class _ProbePo:
+    """Stands in for the PO channel. Reading the PO store passes; a resolve or a submit aborts."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def sprint_session(self, **kwargs: Any) -> Any:
+        raise ProbeAbort("po-sprint-session", {"sprint": kwargs.get("sprint_ref", "")})
+
+    def submit(self, **kwargs: Any) -> Any:
+        raise ProbeAbort("po-submit", {"session": kwargs.get("session_id", "")})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _ProbeState:
     """Reads through to the real state; a save is an abort, never a write."""
 
@@ -946,6 +963,7 @@ def _probe_runtime(runtime: Any) -> Any:
     probe.writer = _ProbeWriter(runtime.writer)
     probe.host = _ProbeHost(runtime.host)
     probe.production_state = _ProbeState(runtime.production_state)
+    probe.po = _ProbePo(runtime.po)
     return probe
 
 
@@ -1273,6 +1291,7 @@ def _reconcile_production(
         if state == "ready":
             continue
         records.pop(ref)
+        closed = card(ref)
         outcomes.append(
             {
                 "status": "ok",
@@ -1283,6 +1302,12 @@ def _reconcile_production(
                 "record_state": record.state,
                 "card_state": state,
                 **({"stopped_launch": intent_action} if intent_action else {}),
+                # A decision/operation card closes here once the PO completed it (or anyone moved it).
+                **(
+                    {"po_completion": completion_state(closed)}
+                    if record.po_submission and closed is not None
+                    else {}
+                ),
             }
         )
 

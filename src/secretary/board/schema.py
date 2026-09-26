@@ -382,7 +382,8 @@ class Task(Base):
     __table_args__ = (
         sa.CheckConstraint("title <> ''"),
         sa.CheckConstraint(
-            "task_type IS NULL OR task_type IN ('code','research','infra')",
+            # `decision` and `operation` since 0017.
+            "task_type IS NULL OR task_type IN ('code','research','infra','decision','operation')",
             name="task_type_is_a_known_type_or_nothing",
         ),
         sa.CheckConstraint(

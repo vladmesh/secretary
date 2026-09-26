@@ -353,7 +353,7 @@ service takes an exclusive lock, `DATA_DIR/po-service/service.lock`; a second `p
 dir refuses to start.
 
 **Queue.** A message is one file in `DATA_DIR/po-queue/` (`<time_ns>-<pid>-<n>.json`: `session_id`,
-`text`, `request_id`, `source` — `web` or `po-service` — and `queued_at`), written to a temporary name, fsynced and
+`text`, `request_id`, `source` — `web`, `dispatcher` or `po-service` — and `queued_at`), written to a temporary name, fsynced and
 renamed before the submitter gets an answer. The service takes inputs oldest first per session and runs
 one turn per session at a time; a message for a busy session waits in the queue, neither refused nor lost,
 and sessions run in parallel. An input leaves the queue only after its turn row exists (`claim_turn`
@@ -417,6 +417,18 @@ request id opens nothing and finishes whatever a failed attempt left. Check:
 ```bash
 secretary sprint show --ref sprint:ID | jq '{po_session, allowed_productions}'
 secretary sprint show --ref sprint:ID | jq '.comments[] | select(.body | contains("no longer exists"))'
+```
+
+**The dispatcher, a second source.** The dispatcher submits `decision` and `operation` cards
+([Protocols](PROTOCOLS.md#decision-and-operation-cards)) through the same socket: one `sprint_session`
+and one `submit` with `source: dispatcher` per claimed card, under request ids derived from the card
+ref and the claim attempt. It repeats an unanswered request with the same id on its next tick and
+never starts a turn itself. After the submit it reads only the store (`po_requests` for the turn its
+input became, `po_turns` for that turn's state), never the service. The input is queued like any other,
+so it waits behind the sprint session's seed or a running owner turn. Check what it did for a card:
+
+```bash
+jq '.records["REF"].po_submission | del(.text)' DATA_DIR/dispatcher/production-state.json
 ```
 
 **Service start.** Every turn left `running` is looked at once:
