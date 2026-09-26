@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary._fsutil import ndjson_lines
 from secretary.board.attempt_outcome import (
     AttemptOutcomeCompleteness,
     AttemptOutcomePayload,
@@ -103,7 +104,7 @@ def _read_ndjson(checkpoint: AnalyticsCheckpoint, name: str) -> list[tuple[int, 
     except (OSError, ValueError) as exc:
         raise AnalyticsProjectionError("analytics_read_failed", path, None, str(exc)) from None
     rows: list[tuple[int, dict[str, Any]]] = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(ndjson_lines(text), start=1):
         if not line.strip():
             continue
         try:

@@ -46,6 +46,7 @@ integration-memory tests/test_curator_discover.py
 integration-memory tests/test_curator_harvest.py
 unit tests/test_curator_operator_contract.py
 integration-board tests/test_data.py
+component tests/test_ndjson.py
 integration-dispatcher tests/test_dispatcher.py
 integration-heads tests/test_dispatcher_review_lifecycle.py
 integration-dispatcher tests/test_dispatcher_no_candidate.py
