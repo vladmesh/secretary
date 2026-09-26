@@ -189,6 +189,31 @@ details.drain[open] > summary { display: none; }
    the far end, so the hand reaching for `send` never lands on `close` -- which cannot be undone,
    a closed session is never reopened. The row wraps rather than overflows, and it is in the normal
    flow: the bottom bar's reserved height still keeps the composer clear of the bar at phone width. */
+.po-bar { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; padding:.6rem .9rem; margin:0 0 1rem; background:var(--surface); border:1px solid var(--line); border-radius:6px; }
+.po-bar h2 { margin-right:.3rem; }
+.po-bar select { min-width:7rem; }
+.po-bar button { margin-left:auto; }
+.po-list { list-style:none; margin:-.75rem -.9rem; padding:0; }
+.po-list li { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.2rem 1rem; align-items:center; padding:.65rem .9rem; }
+.po-list li + li { border-top:1px solid var(--line); }
+.po-list li:hover { background:var(--raised); }
+.po-list .title { font-size:.95rem; color:var(--ink); overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2; overflow:hidden; }
+.po-list .title:hover { color:var(--accent); text-decoration:none; }
+.po-list .meta { grid-column:1; display:flex; flex-wrap:wrap; gap:.15rem .5rem; font-size:.8rem; color:var(--muted); }
+.po-list .meta > * + *::before { content:"·"; color:var(--faint); margin-right:.5rem; }
+.po-list .meta b { color:var(--ink); font-weight:500; }
+.po-list .meta time { font:inherit; }
+.po-list .meta .id { font-family:var(--mono); color:var(--faint); }
+.po-list .side { grid-column:2; grid-row:1 / span 2; display:flex; align-items:center; gap:.6rem; }
+.po-list .side .empty { font-size:.85rem; }
+.po-list .po-close button { padding:.2rem .6rem; font-weight:400; border-color:var(--line-strong); color:var(--muted); }
+.po-list .po-close button:hover { border-color:var(--warn); color:var(--warn); filter:none; }
+@media (max-width: 600px) {
+  .po-bar select { flex:1 1 7rem; }
+  .po-bar button { margin-left:0; flex-basis:100%; }
+  .po-list li { grid-template-columns:minmax(0,1fr); }
+  .po-list .side { grid-column:1; grid-row:auto; }
+}
 .po-controls { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-top:.6rem; }
 .po-controls .aside { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-left:auto; }
 .po-controls .aside button { font-weight:400; }
@@ -2325,7 +2350,11 @@ def _head_journal(section: dict[str, Any]) -> str:
             ]
         )
     if rows:
-        parts.append(_rows(["seq", "kind", "at (UTC)", "turn", "bytes", "output bytes", "folded windows", "reason"], rows))
+        parts.append(
+            _rows(
+                ["seq", "kind", "at (UTC)", "turn", "bytes", "output bytes", "folded windows", "reason"], rows
+            )
+        )
     elif section.get("answered"):
         parts.append('<p class="empty">the journal holds no record.</p>')
     return "\n".join(parts)
@@ -3717,70 +3746,86 @@ def po_page(
     request_id: str,
     refusal: dict[str, Any] | None = None,
     submitted: dict[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> str:
-    """The PO head: open sessions (or, with `closed`, the closed ones), and the form that opens a new one."""
+    """The PO head: the bar that opens a new session, then open sessions (or, with `closed`, the closed ones).
+
+    A session is a row of two lines, its first message and what it runs on, rather than a table: the
+    list owns the page's whole width and never scrolls sideways, whatever the window's width.
+    """
     sessions = overview.get("sessions") or []
     models = overview.get("models") or {}
     submitted = submitted or {}
     closed = bool(overview.get("closed"))
-    rows = []
-    for item in sessions:
-        session_id = str(item.get("session_id") or "")
-        row = [
-            (
-                f'<a class="ref" href="/po/sessions/{quote(session_id)}">'
-                f"{_po_first_message(item.get('first_message'))}</a>"
-            ),
-            _or_dash(item.get("last_activity_at")),
-            _po_model_cell(item),
-            f'<span class="effort-cell">{_effort(item.get("effort"))}</span>',
-        ]
-        if closed:
-            row.append(_or_dash(item.get("closed_at")))
-        else:
-            row.append(_or_dash(item.get("state")))
-            row.append(
-                _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>'
-            )
-        row.append(f'<span class="age">{escape(session_id[:8])}</span>')
-        if not closed:
-            row.append(_po_close_form(session_id))
-        rows.append(row)
+    now = now or datetime.now(UTC)
+    items = [_po_session_row(item, closed=closed, now=now) for item in sessions]
     if closed:
-        headers = ["session", "last activity", "model", "effort", "closed at", "id"]
         empty = '<p class="empty">no closed PO session</p>'
         title = "Closed sessions"
         more = '<a class="more" href="/po">open sessions</a>'
     else:
-        headers = ["session", "last activity", "model", "effort", "state", "turn", "id", ""]
         empty = '<p class="empty">no PO session yet</p>'
         title = "Sessions"
         more = (
             f'<a class="more" href="/po?closed=1">closed sessions '
             f"({escape(str(overview.get('closed_count') or 0))})</a>"
         )
-    table = _rows(headers, rows) if rows else empty
+    listing = f'<ul class="po-list">{"".join(items)}</ul>' if items else empty
     body = "\n".join(
         [
             '<div class="lead"><h1>Product owner</h1>',
             f'<span class="age">{escape(str(overview.get("running") or 0))} turn(s) running</span></div>',
             _po_refusal(refusal),
-            '<div class="grid">',
-            '<div class="col">',
-            _panel(title, table, count=len(sessions) if sessions else None, more=more),
-            "</div>",
-            '<div class="col">',
-            _panel(
-                "New session",
-                _po_new_session_form(
-                    models, overview.get("efforts") or {}, request_id=request_id, submitted=submitted
-                ),
+            _po_new_session_form(
+                models, overview.get("efforts") or {}, request_id=request_id, submitted=submitted
             ),
-            "</div></div>",
+            _panel(title, listing, count=len(sessions) if sessions else None, more=more),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
     return _page("Product owner", body, script=_PO_FORM_SCRIPT, nav="po")
+
+
+def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str:
+    """One session: its first message, then CLI · model · effort (unless the CLI's own) · when · id."""
+    session_id = str(item.get("session_id") or "")
+    name, said = _head_model(_po_head(item))
+    meta = [
+        f'<span title="{escape(said)}">{escape(str(item.get("cli") or ""))} · <b>{escape(name)}</b></span>'
+    ]
+    effort = str(item.get("effort") or "").strip().lower()
+    if effort and effort not in EFFORT_DEFAULT:
+        meta.append(f"<span>effort {escape('xhigh' if effort == 'extra' else effort)}</span>")
+    if closed:
+        meta.append(f"<span>closed {_po_when(item.get('closed_at'), now)}</span>")
+    else:
+        meta.append(f"<span>{_po_when(item.get('last_activity_at'), now)}</span>")
+    meta.append(f'<span class="id">{escape(session_id[:8])}</span>')
+    if closed:
+        side = ""
+    else:
+        state = _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>'
+        side = f'<div class="side">{state}{_po_close_form(session_id)}</div>'
+    return (
+        f'<li><a class="title" href="/po/sessions/{quote(session_id)}">'
+        f"{_po_first_message(item.get('first_message'))}</a>"
+        f'<div class="meta">{"".join(meta)}</div>{side}</li>'
+    )
+
+
+def _po_when(value: Any, now: datetime) -> str:
+    """A moment as how long ago it was, with the moment itself on hover; a date once it is days old."""
+    if value in (None, ""):
+        return "—"
+    text = value.isoformat() if isinstance(value, datetime) else str(value)
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(text)
+    except ValueError:
+        return escape(text)
+    moment = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    seconds = max(0.0, (now - moment).total_seconds())
+    said = f"{_age(seconds)} ago" if seconds < 48 * 3600 else moment.date().isoformat()
+    return f'<time datetime="{escape(text)}" title="{escape(text)}">{escape(said)}</time>'
 
 
 def _po_close_form(session_id: str) -> str:
@@ -3840,15 +3885,6 @@ def _po_head(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _po_model_cell(item: dict[str, Any]) -> str:
-    """The model a session runs, as people say it, with the CLI and the exact id under it."""
-    name, said = _head_model(_po_head(item))
-    return (
-        f'<span title="{escape(said)}"><b>{escape(name)}</b>'
-        f'<div class="age">{escape(str(item.get("cli") or ""))} · {escape(str(item.get("resolved_model") or item.get("model") or ""))}</div></span>'
-    )
-
-
 def _po_new_session_form(
     models: dict[str, Any],
     efforts: dict[str, Any] | None = None,
@@ -3858,7 +3894,7 @@ def _po_new_session_form(
 ) -> str:
     offered = [(cli, list(values or [])) for cli, values in models.items() if values]
     if not offered:
-        return '<p class="empty">this installation offers no model for a PO session</p>'
+        return '<p class="po-bar empty">this installation offers no model for a PO session</p>'
     chosen_cli = str(submitted.get("cli") or offered[0][0])
     chosen_model = str(submitted.get("model") or "")
     chosen_effort = str(submitted.get("effort") or "default")
@@ -3897,11 +3933,12 @@ def _po_new_session_form(
     )
     return "\n".join(
         [
-            '<form class="sprint" id="po-new" method="post" action="/po/sessions">',
+            '<form class="po-bar" id="po-new" method="post" action="/po/sessions">',
+            "<h2>New session</h2>",
             f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
-            f'<div class="field"><label for="po-cli">CLI</label> <select id="po-cli" name="cli">{cli_options}</select></div>',
-            f'<div class="field"><label for="po-model">model</label> <select id="po-model" name="model">{groups}</select></div>',
-            f'<div class="field"><label for="po-effort">reasoning effort</label> <select id="po-effort" name="effort">{effort_groups}</select></div>',
+            f'<select id="po-cli" name="cli" aria-label="CLI">{cli_options}</select>',
+            f'<select id="po-model" name="model" aria-label="model">{groups}</select>',
+            f'<select id="po-effort" name="effort" aria-label="reasoning effort">{effort_groups}</select>',
             '<button type="submit">new session</button>',
             "</form>",
         ]
@@ -4048,36 +4085,23 @@ def _po_turn_mark(turn: dict[str, Any]) -> str:
 
 
 _PO_FORM_SCRIPT = """
-// Narrow the model and effort selects to the chosen CLI. Without this every model stays listed and the server
-// still refuses a pair it does not offer.
+// Narrow the model and effort selects to the chosen CLI. The page is served with every CLI's options in
+// one optgroup each, so it still works with no script; the script keeps them aside and lists only the
+// chosen CLI's, flat -- hiding options would leave the other CLIs' group labels showing in the list.
 const cli = document.getElementById('po-cli');
-const model = document.getElementById('po-model');
-function narrowModels() {
-  if (!cli || !model) return;
-  let first = null;
-  for (const option of model.querySelectorAll('option')) {
-    const owned = option.dataset.cli === cli.value;
-    option.hidden = !owned;
-    option.disabled = !owned;
-    if (owned && first === null) first = option;
+const selects = ['po-model', 'po-effort'].map((id) => document.getElementById(id)).filter(Boolean);
+const all = new Map(selects.map((select) => [select, [...select.querySelectorAll('option')]]));
+function narrow() {
+  for (const select of selects) {
+    const current = select.value;
+    const owned = all.get(select).filter((option) => option.dataset.cli === cli.value);
+    select.replaceChildren(...owned);
+    const kept = owned.find((option) => option.value === current);
+    if (kept) kept.selected = true;
+    else if (owned.length) owned[0].selected = true;
   }
-  const current = model.selectedOptions[0];
-  if ((!current || current.disabled) && first) first.selected = true;
-  narrow(document.getElementById('po-effort'));
 }
-function narrow(select) {
-  if (!cli || !select) return;
-  let first = null;
-  for (const option of select.querySelectorAll('option')) {
-    const owned = option.dataset.cli === cli.value;
-    option.hidden = !owned;
-    option.disabled = !owned;
-    if (owned && first === null) first = option;
-  }
-  const current = select.selectedOptions[0];
-  if ((!current || current.disabled) && first) first.selected = true;
-}
-if (cli) { cli.addEventListener('change', narrowModels); narrowModels(); }
+if (cli) { cli.addEventListener('change', narrow); narrow(); }
 """
 
 _PO_SESSION_SCRIPT = """

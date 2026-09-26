@@ -262,9 +262,72 @@ class PoWebOperationTests(unittest.TestCase):
                 # The effort starts at the CLI's own default: no flag is passed until one is chosen.
                 self.assertIn(f'<option value="default" data-cli="{cli}" selected>CLI default</option>', form)
                 self.assertEqual(form.count(" selected>"), 3)
-        # Changing the CLI in the browser selects that CLI's first listed model.
-        self.assertIn("if (owned && first === null) first = option;", _PO_FORM_SCRIPT)
-        self.assertIn("if ((!current || current.disabled) && first) first.selected = true;", _PO_FORM_SCRIPT)
+                # One bar, no label column: each select says what it is to a screen reader instead.
+                self.assertIn('<form class="po-bar" id="po-new"', form)
+                self.assertIn('aria-label="reasoning effort"', form)
+        # Changing the CLI in the browser lists only that CLI's options, flat, so no other CLI's
+        # optgroup label is left showing, and falls back to its first listed model.
+        self.assertIn("select.replaceChildren(...owned);", _PO_FORM_SCRIPT)
+        self.assertIn("else if (owned.length) owned[0].selected = true;", _PO_FORM_SCRIPT)
+        self.assertNotIn("option.hidden", _PO_FORM_SCRIPT)
+
+    def test_a_session_row_says_model_effort_and_age_on_one_line_and_never_a_table(self) -> None:
+        from datetime import UTC, datetime
+
+        from secretary.web.pages import po_page
+
+        now = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+        base = {"cli": "claude", "model": "fable", "first_message": "hi", "state": "open"}
+        sessions = [
+            {
+                **base,
+                "session_id": "a" * 12,
+                "effort": "default",
+                "running": True,
+                "last_activity_at": "2026-09-26T11:58:00+00:00",
+            },
+            {
+                **base,
+                "session_id": "b" * 12,
+                "effort": "high",
+                "running": False,
+                "last_activity_at": "2026-09-26T09:00:00",
+            },
+            {
+                **base,
+                "session_id": "c" * 12,
+                "effort": "extra",
+                "last_activity_at": "2026-09-20T09:00:00+00:00",
+            },
+            {**base, "session_id": "d" * 12, "effort": None, "last_activity_at": "not a moment"},
+            {**base, "session_id": "e" * 12, "effort": None, "last_activity_at": None},
+        ]
+        page = po_page({"sessions": sessions, "models": {"claude": ["fable"]}}, request_id="r", now=now)
+        main = page.split("<main>", 1)[1]
+        self.assertNotIn("<table", main)
+        self.assertNotIn('class="grid"', main)
+        self.assertIn('<span class="id">aaaaaaaa</span>', page)
+        self.assertIn(">2m ago</time>", page)
+        self.assertIn('title="2026-09-26T09:00:00">3h ago</time>', page)
+        self.assertIn(">2026-09-20</time>", page)
+        self.assertIn("<span>not a moment</span>", page)
+        self.assertIn("<span>—</span>", page)
+        # The CLI's own effort is not said; a chosen one is, `extra` under the name people use.
+        self.assertIn("<span>effort high</span>", page)
+        self.assertIn("<span>effort xhigh</span>", page)
+        self.assertEqual(page.count("<span>effort "), 2)
+        self.assertEqual(page.count("turn running</span>"), 1)
+        self.assertEqual(page.count('class="po-close"'), 5)
+
+        closed = po_page(
+            {"closed": True, "sessions": [{**base, "session_id": "f" * 12, "closed_at": now}]},
+            request_id="r",
+            now=now,
+        )
+        self.assertIn("<span>closed <time", closed)
+        self.assertIn(">0s ago</time>", closed)
+        self.assertNotIn('class="po-close"', closed)
+        self.assertIn("this installation offers no model for a PO session", closed)
 
     def test_enter_sends_the_message_once_and_shift_enter_keeps_a_newline(self) -> None:
         from secretary.web.pages import _PO_SESSION_SCRIPT
@@ -656,18 +719,19 @@ class PoWebOperationTests(unittest.TestCase):
         collapsed = " ".join(cyrillic.split())
         shown = collapsed[:79] + "…"
         self.assertEqual(len(shown), 80)
-        self.assertIn(f'<a class="ref" href="/po/sessions/long">{shown}</a>', page)
+        self.assertIn(f'<a class="title" href="/po/sessions/long">{shown}</a>', page)
         self.assertNotIn(collapsed[:80], page)
         self.assertIn(
-            '<a class="ref" href="/po/sessions/html">&lt;b&gt;bold&lt;/b&gt; &amp; **not markdown**</a>', page
+            '<a class="title" href="/po/sessions/html">&lt;b&gt;bold&lt;/b&gt; &amp; **not markdown**</a>',
+            page,
         )
         self.assertNotIn("<b>bold</b>", page)
-        self.assertIn('<a class="ref" href="/po/sessions/short">exactly fits</a>', page)
+        self.assertIn('<a class="title" href="/po/sessions/short">exactly fits</a>', page)
         self.assertIn(
-            '<a class="ref" href="/po/sessions/none"><span class="empty">no message yet</span></a>', page
+            '<a class="title" href="/po/sessions/none"><span class="empty">no message yet</span></a>', page
         )
         self.assertIn("2026-09-04T10:00:00+00:00", page)
-        self.assertIn('<span class="age">long</span>', page)
+        self.assertIn('<span class="id">long</span>', page)
         order = [page.index(f"/po/sessions/{key}") for key in ("long", "html", "short", "none")]
         self.assertEqual(order, sorted(order))
 
@@ -714,7 +778,7 @@ class PoWebOperationTests(unittest.TestCase):
         listed = self.app.handle("GET", "/po", query="closed=1", headers=self.headers())
         self.assertEqual(listed.status, 200)
         listed_page = listed.body.decode()
-        self.assertIn(f'<a class="ref" href="/po/sessions/{session_id}">hello</a>', listed_page)
+        self.assertIn(f'<a class="title" href="/po/sessions/{session_id}">hello</a>', listed_page)
         self.assertNotIn(f"/po/sessions/{kept}", listed_page)
         self.assertIn(session.closed_at.isoformat(), listed_page)
         self.assertIn('<a class="more" href="/po">open sessions</a>', listed_page)
@@ -895,8 +959,8 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual(self.document(session_id)["session"]["effort"], "high")
 
         listing = self.get("/po").body.decode()
-        self.assertIn('<label for="po-effort">reasoning effort</label>', listing)
-        self.assertIn("<span>high</span>", listing)
+        self.assertIn('aria-label="reasoning effort"', listing)
+        self.assertIn("<span>effort high</span>", listing)
         page = self.page(session_id)
         self.assertIn('<span class="head-chip"', page)
         self.assertEqual(dict(self.new_session_form(page))["effort"], "high")
