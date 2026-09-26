@@ -197,8 +197,9 @@ TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
 TASK_MOVE_FIELDS = frozenset({"request_id", "target", "reason", "sprint_override", "sprint_override_reason"})
 CODEX_RESET_FIELDS = frozenset({"request_id"})
 PROVIDER_OPS_NOT_BUILT = "this web process was built without the provider operation layer"
-#: The two owner event forms carry only where to go back to: the unread filter, when it was on.
-OWNER_EVENT_FIELDS = frozenset({"unread"})
+#: The two owner event forms carry only where to go back to: `view=all` when pressed from the all
+#: view; anything else, or nothing, returns to the unread default.
+OWNER_EVENT_FIELDS = frozenset({"view"})
 OWNER_EVENTS_NOT_BUILT = "this web process was built without the owner events layer"
 
 #: How many commands the dashboard's feed and the commands page show per read.
@@ -609,7 +610,9 @@ class WebApp:
         )
 
     def _owner_events_page(self, _params, query, _body) -> Response:
-        unread_only = _one(query, "unread") in {"1", "true", "yes", "on"}
+        # Unread is the default (secretary-1778): only `?all=1` widens it, and `?unread=1` from an
+        # older link or any other value lands on the default rather than failing.
+        unread_only = _one(query, "all") not in {"1", "true", "yes", "on"}
         return _html(200, pages.owner_events(self._owner_event_layer().owner_event_list(unread_only=unread_only)))
 
     def _owner_event_read(self, params, _query, body) -> Response:
@@ -1180,8 +1183,8 @@ def _pin(value: str) -> str | None:
 
 
 def _owner_events_back(body: dict[str, Any]) -> str:
-    """Where an owner event form returns: the list, filtered to the unread when it was."""
-    return "/owner-events?unread=1" if _one(body, "unread") == "1" else "/owner-events"
+    """Where an owner event form returns: the all view when pressed from it, else the unread default."""
+    return "/owner-events?all=1" if _one(body, "view") == "all" else "/owner-events"
 
 
 def _request_id() -> str:

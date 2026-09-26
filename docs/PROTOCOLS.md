@@ -449,11 +449,12 @@ PostgreSQL): `task complete`, or any other move out of In progress. A `needs_own
 carries no mark (the steward's report) is read by a click.
 
 **The web.** The header of every page shows the bell, the unread count read from the board for that
-render (`?` with the reason when the board cannot count, for instance before `0018`). `GET
-/owner-events` lists every event, open `needs_owner` events pinned first, then newest first, unread
-rows highlighted, each with its class badge and a link to its subject; `?unread=1` shows only the
-unread. A notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
-`/owner-events/read-all`. A board without the table lists no events, with the source `unavailable`, and
+render (`?` with the reason when the board cannot count, for instance before `0018`); it links to the
+unread view. `GET /owner-events` lists the unread events, open `needs_owner` events pinned first, then
+newest first, each with its class badge and a link to its subject; `?all=1` lists every event, unread
+rows highlighted. `?unread=1` from an older link, or any other value, is the unread default. A
+notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
+`/owner-events/read-all`; both return to the view they were pressed from. A board without the table lists no events, with the source `unavailable`, and
 refuses the two writes (503). From a terminal: `secretary owner-events list`
 ([Operations](OPERATIONS.md#owner-events)).
 
@@ -3494,9 +3495,9 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
 | POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs or a message is queued |
-| GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: every owner event, open `needs_owner` events first, then newest first, unread highlighted, with its class badge and subject link; `?unread=1` only the unread; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
-| POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `unread?`; 303 to the list |
-| POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `unread?`; 303 to the list |
+| GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: the unread owner events by default, `?all=1` every event (unread highlighted); open `needs_owner` events first, then newest first, with its class badge and subject link; `?unread=1` or any other value is the unread default; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
+| POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
+| POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and

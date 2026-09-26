@@ -15,6 +15,7 @@ import importlib
 import re
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -603,14 +604,60 @@ class WebTests(unittest.TestCase):
         self.assertEqual(page.count("Mark read</button>"), 3, "every unread notice has its button; the held one has none")
         self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', page)
 
-    def test_the_unread_filter_mark_read_and_mark_all(self) -> None:
+    def filter_marks(self, page: str) -> dict[str, str]:
+        """The two filter links as {label: href}, plus `current`: the one marked `aria-current`."""
+        found = re.findall(r'<a href="(/owner-events[^"]*)"( aria-current="true")?>(Unread|All)</a>', page)
+        return {**{label: href for href, _mark, label in found}, "current": ",".join(label for _h, mark, label in found if mark)}
+
+    def test_the_list_opens_on_the_unread_and_all_is_one_link_away(self) -> None:
+        """secretary-1778: no query is the unread view, `?all=1` is every event, `?unread=1` still works."""
+        self.store.mark_read(self.store.of_kind("sprint_closed")[0].id)
+        links = {"Unread": "/owner-events", "All": "/owner-events?all=1"}
+        for query in ("", "unread=1", "all=0", "all=garbage", "unread=nonsense", "other=1"):
+            with self.subTest(query=query):
+                page = self.get("/owner-events", query)
+                self.assertEqual(self.filter_marks(page), {**links, "current": "Unread"})
+                self.assertNotIn("<code>sprint_closed</code>", page)
+                self.assertIn("<code>head_dead</code>", page)
+                # The open `needs_owner` event is in the unread view, pinned at the top.
+                self.assertIn('<li class="unread pinned"', page)
+                self.assertLess(page.index("<code>card_handed_to_owner</code>"), page.index("<code>head_dead</code>"))
+                self.assertIn('<input type="hidden" name="view" value="unread">', page)
+                self.assertNotIn('value="all"', page)
+        for query in ("all=1", "all=true", "all=1&unread=1"):
+            with self.subTest(query=query):
+                page = self.get("/owner-events", query)
+                self.assertEqual(self.filter_marks(page), {**links, "current": "All"})
+                self.assertIn("<code>sprint_closed</code>", page)
+                self.assertIn("<code>card_handed_to_owner</code>", page)
+                self.assertIn('<input type="hidden" name="view" value="all">', page)
+                self.assertNotIn('value="unread"', page)
+
+    def test_the_read_buttons_return_to_the_view_they_were_pressed_from(self) -> None:
+        closed, failed = (self.store.of_kind(kind)[0] for kind in ("sprint_closed", "po_turn_failed"))
+        # The forms each view draws post its own field back, so replay exactly what the page carries.
+        for query, back in (("all=1", "/owner-events?all=1"), ("", "/owner-events")):
+            with self.subTest(view=query or "default"):
+                page = self.get("/owner-events", query)
+                [field] = set(re.findall(r'<input type="hidden" name="view" value="(\w+)">', page))
+                body = f"view={field}".encode()
+                response = self.post(f"/owner-events/{(closed if query else failed).id}/read", body)
+                self.assertEqual((response.status, response.headers["Location"]), (303, back))
+                response = self.post("/owner-events/read-all", body)
+                self.assertEqual((response.status, response.headers["Location"]), (303, back))
+        # A missing or unknown view returns to the unread default.
+        for body in (b"", b"view=", b"view=bogus", b"view=unread"):
+            with self.subTest(body=body):
+                response = self.post("/owner-events/read-all", body)
+                self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events"))
+                response = self.post(f"/owner-events/{closed.id}/read", body)
+                self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events"))
+
+    def test_mark_read_and_mark_all_keep_the_held_event(self) -> None:
         closed = self.store.of_kind("sprint_closed")[0]
-        response = self.post(f"/owner-events/{closed.id}/read", b"unread=1")
-        self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events?unread=1"))
-        filtered = self.get("/owner-events", "unread=1")
-        self.assertNotIn("<code>sprint_closed</code>", filtered)
-        self.assertIn("<code>head_dead</code>", filtered)
-        self.assertIn("<code>sprint_closed</code>", self.get("/owner-events"))
+        self.assertEqual(self.post(f"/owner-events/{closed.id}/read", b"view=all").status, 303)
+        self.assertNotIn("<code>sprint_closed</code>", self.get("/owner-events"))
+        self.assertIn("<code>sprint_closed</code>", self.get("/owner-events", "all=1"))
 
         held = self.store.of_kind("card_handed_to_owner")[0]
         self.assertEqual(self.post(f"/owner-events/{held.id}/read").status, 409)
@@ -619,6 +666,22 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.layer.unread_count()["count"], 1)
         self.assertIsNone(self.store.rows[held.id].read_at)
         self.assertEqual(self.post("/owner-events/read-all", b"other=1").status, 400)
+        # The old filter field is no longer part of the form.
+        self.assertEqual(self.post("/owner-events/read-all", b"unread=1").status, 400)
+
+    def test_the_bell_leads_to_the_unread_view_in_every_state(self) -> None:
+        def bell_href() -> str:
+            [href] = re.findall(r'<a class="bell[^"]*" id="owner-bell" href="([^"]*)"', self.get("/doctor"))
+            return href
+
+        self.assertEqual(bell_href(), "/owner-events")  # some unread
+        for event in list(self.store.rows.values()):
+            self.store.rows[event.id] = replace(event, read_at=event.created_at)
+        self.assertIn('<span class="bell-count">0</span>', self.get("/doctor"))
+        self.assertEqual(bell_href(), "/owner-events")  # nothing unread
+        self.store.missing_table = True
+        self.assertIn('<span class="bell-count">?</span>', self.get("/doctor"))
+        self.assertEqual(bell_href(), "/owner-events")  # unknown
 
     def test_a_board_without_the_table_reads_as_no_events_and_the_writes_refuse(self) -> None:
         self.store.missing_table = True
