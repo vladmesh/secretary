@@ -1,4 +1,4 @@
-"""A sprint's PO session and allowed productions on PostgreSQL: create, refuse, replay, read back.
+"""A sprint's PO session and allowed productions on PostgreSQL: create, refuse, replay, read back, allow.
 
 The unit suite (`tests/test_sprint_po_channel.py`) holds the rules over fakes; this is the same create
 through the real `sprints` columns of revision 0016 and the real `po_sessions` table.
@@ -6,8 +6,14 @@ through the real `sprints` columns of revision 0016 and the real `po_sessions` t
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import unittest
+from unittest import mock
 
+from secretary.cli import main
+from secretary.sprint_observer import head_choice
 from secretary.sprints import SprintReader
 from secretary.tasks import TaskError
 from tests.fakes.sprints import SprintFixture
@@ -94,6 +100,88 @@ class SprintPoChannelBackendTests(SprintFixture):
         recorded = [event for event in self._events() if event.get("kind") == "po_session_set"]
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0]["actor"], {"role": "po", "id": "po-service"})
+
+    def allow(self, project: str, request_id: str, **fields: str) -> dict:
+        call = {"role": "po", "actor": "po", "reference": "sprint:allow", "project": project,
+                "reason": "secretary is the development server", "request_id": request_id, **fields}
+        return self.writer.allow_production(**call)  # type: ignore[arg-type]
+
+    def allowances(self) -> list[dict]:
+        return [event for event in self._events() if event.get("kind") == "production_allowed"]
+
+    def test_allow_production_extends_the_column_once_with_its_audit_event(self) -> None:
+        """`sprint allow-production` (secretary-1769): the column, the event, the replays, the no-op."""
+        self._create(goal="allow", reference="sprint:allow", allowed_productions=["other"])
+
+        answer = self.allow("secretary", "allow-1")
+
+        self.assertEqual(answer["action"], "production_allowed")
+        self.assertEqual(answer["sprint"]["allowed_productions"], ["other", "secretary"])
+        self.assertEqual(
+            self.client._query("SELECT allowed_productions FROM sprints WHERE ref = 'sprint:allow'"),
+            [(["other", "secretary"],)],
+        )
+        self.assertEqual(self.sprint("sprint:allow")["allowed_productions"], ["other", "secretary"])
+        status = SprintReader(self.client, data_dir=self.tmp.name).status("sprint:allow")  # type: ignore[arg-type]
+        self.assertEqual(status["allowed_productions"], ["other", "secretary"])
+        [event] = self.allowances()
+        self.assertEqual(
+            (event["ref"], event["actor"], event["payload"], event["request_id"]),
+            ("sprint:allow", {"role": "po", "id": "po"},
+             {"project": "secretary", "reason": "secretary is the development server"}, "allow-1"),
+        )
+        # The same request id is the same write; a project already allowed writes nothing new.
+        self.assertEqual(self.allow("secretary", "allow-1")["event_id"], answer["event_id"])
+        self.assertEqual(self.allow("secretary", "allow-2")["action"], "already_allowed")
+        self.assertEqual(len(self.allowances()), 1)
+        with self.assertRaises(TaskError) as raised:
+            self.allow("other", "allow-1")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self.sprint("sprint:allow")["allowed_productions"], ["other", "secretary"])
+
+    def test_allow_production_refusals_write_nothing(self) -> None:
+        self._create(goal="allow", reference="sprint:allow")
+        for fields, code in (
+            ({"role": "observer", "actor": "observer"}, "role_forbidden"),
+            ({"role": "po", "actor": "observer"}, "role_masquerade"),
+            ({"project": "not-registered"}, "validation"),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(TaskError) as raised:
+                self.allow(str(fields.pop("project", "secretary")), "refused-1", **fields)
+            self.assertEqual(raised.exception.code, code)
+        for status in ("closed", "stopped"):
+            reference = f"sprint:allow-{status}"
+            self.writer.restore_create(
+                reference=reference,
+                goal="seeded",
+                observer=head_choice("codex-observer"),
+                status=status,
+                request_id=f"fixture-{reference}",
+            )
+            with self.subTest(status=status), self.assertRaises(TaskError) as raised:
+                self.allow("secretary", f"refused-{status}", reference=reference)
+            self.assertEqual((raised.exception.code, raised.exception.exit_code), ("closed", 3))
+            self.assertEqual(self.sprint(reference)["allowed_productions"], [])
+        self.assertEqual(self.allowances(), [])
+        self.assertEqual(self.sprint("sprint:allow")["allowed_productions"], [])
+
+    def test_the_command_takes_the_actor_from_board_actor(self) -> None:
+        self._create(goal="allow", reference="sprint:allow")
+        out = io.StringIO()
+        with (
+            self.board_injected(),
+            mock.patch.dict(os.environ, {"BOARD_ACTOR": "po"}),
+            contextlib.redirect_stdout(out),
+        ):
+            code = main(
+                ["sprint", "allow-production", "--ref", "sprint:allow", "--role", "po", "--project", "secretary",
+                 "--reason", "the development server", "--request-id", "cli-allow-1",
+                 "--instance", str(self.instance), "--data-dir", self.tmp.name]
+            )
+        self.assertEqual(code, 0, out.getvalue())
+        [event] = self.allowances()
+        self.assertEqual(event["actor"], {"role": "po", "id": "po"})
+        self.assertEqual(self.sprint("sprint:allow")["allowed_productions"], ["secretary"])
 
 
 if __name__ == "__main__":

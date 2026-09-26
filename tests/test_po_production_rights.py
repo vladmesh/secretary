@@ -1,46 +1,63 @@
-"""Production rights: an operation card names its production, and the PO service enforces the sprint's rule.
+"""Production rights: an operation card names its production, and the PO decides what its sprint does not allow.
 
-Unit-level (secretary-1764), on the fakes of cards 1 to 4. The card side runs `TaskWriter.create` over a
-mock client, every refusal decided before the board is read. The rule runs in a real `PoService` over its
-socket, reached by the real `advance_po_card`, with the in-memory PO store, the fake CLI, the fake sprint
-port and the one-card board of `tests.po_card_fakes` (its `handover` is what `task handover` leaves). The
-PostgreSQL path of create and the stored field is covered by the integration-board suite
-(`tests/test_tasks.py`).
+Unit-level (secretary-1764, secretary-1769), on the fakes of cards 1 to 4. The card side runs
+`TaskWriter.create` over a mock client, every refusal decided before the board is read. The rule runs in
+a real `PoService` over its socket, reached by the real `advance_po_card`, with the in-memory PO store,
+the fake CLI, the fake sprint port and the one-card board of `tests.po_card_fakes`. The rule refuses
+nothing: every operation becomes a PO turn whose input carries the service's rights section, and the
+three paths are an allowed production, one the PO allows with `sprint allow-production`, and one the PO
+hands to the owner. `SprintWriter.allow_production` runs over a mock board client here; its PostgreSQL
+path and audit event are covered by the integration-board suite (`tests/test_sprint_po_channel_backend.py`),
+and so are create and the stored field (`tests/test_tasks.py`).
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board.owner_handover import HANDED_TO_OWNER, HANDOVER_MARKER, waiting_owner
+from secretary import sprint_commands
+from secretary.board.owner_handover import HANDED_TO_OWNER, waiting_owner
 from secretary.board.production_rights import (
     CARD_INPUT,
     OWNER_ANSWER_INPUT,
+    RIGHTS_HEADING,
+    allow_production_command,
     card_facts,
     facts_problem,
-    refusal_reason,
+    rights_line,
+    rights_note,
     touches_production,
 )
 from secretary.cli import main
-from secretary.dispatch.po_cards import ServicePoChannel, complete_command, owner_answer_request_id
+from secretary.dispatch.po_cards import (
+    ServicePoChannel,
+    complete_command,
+    handover_command,
+    owner_answer_request_id,
+)
 from secretary.dispatch.state import DispatcherRecord
 from secretary.po import store as po_store
 from secretary.po.client import OutcomeUnknown
 from secretary.po.queue import PoQueue
-from secretary.po.sprints import BoardSprintSessions, HandoverRefused, SprintRecord
-from secretary.tasks import TaskError, TaskReader, TaskWriter
+from secretary.po.sprints import BoardSprintSessions, SprintRecord
+from secretary.sprints import ALLOWED_PRODUCTIONS_FIELD, SprintWriter
+from secretary.tasks import TaskError, TaskReader, TaskWriter, admit_role
 from secretary.web import pages
 from secretary.webproto.reads import _card_value
 from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
 from tests.po_fake_store import FakePoStore
 
-NOT_ALLOWED = f"operation touches production relay; sprint {SPRINT} allows []"
+NOT_ALLOWED = f"touches production relay; sprint {SPRINT} allows []"
+DECIDE = "This is not a refusal: decide it under the owner's standing rule."
+ALLOWS_IT = "The sprint allows it: run the operation with no further confirmation"
 
 
 class CreateValidationTests(unittest.TestCase):
@@ -134,6 +151,8 @@ class CreateValidationTests(unittest.TestCase):
         self.assertIsNone(touches_production({}))
 
 
+
+
 class CardFactsTests(unittest.TestCase):
     def test_what_is_missing_or_malformed_is_named(self) -> None:
         good = card_facts(card_ref=REF, kind="operation", touches_production="relay", sprint_ref=SPRINT)
@@ -158,12 +177,37 @@ class CardFactsTests(unittest.TestCase):
         # The owner's answer is not checked again, so it needs no production.
         self.assertEqual(facts_problem({**good, "touches_production": None, "input": OWNER_ANSWER_INPUT}), "")
 
-    def test_the_refusal_reason(self) -> None:
-        self.assertEqual(refusal_reason("relay", SPRINT, ()), NOT_ALLOWED)
+    def test_the_rights_line_and_the_note(self) -> None:
+        self.assertEqual(rights_line("relay", SPRINT, ()), NOT_ALLOWED)
         self.assertEqual(
-            refusal_reason("relay", SPRINT, ("secretary", "site")),
-            f"operation touches production relay; sprint {SPRINT} allows [secretary, site]",
+            rights_line("relay", SPRINT, ("secretary", "site")),
+            f"touches production relay; sprint {SPRINT} allows [secretary, site]",
         )
+        allowed = rights_note("relay", SPRINT, ["relay"], request_id="s-1:allow-production")
+        self.assertIn(f"touches production relay; sprint {SPRINT} allows [relay]", allowed)
+        self.assertIn(ALLOWS_IT, allowed)
+        self.assertNotIn("allow-production", allowed)
+        none = rights_note("none", SPRINT, None, request_id="s-1:allow-production")
+        self.assertIn("touches production none: the sprint allows it", none)
+        decide = rights_note("relay", SPRINT, [], request_id="s-1:allow-production")
+        for expected in (
+            RIGHTS_HEADING,
+            NOT_ALLOWED,
+            DECIDE,
+            "Production of secretary is allowed by default, because it is the development server",
+            "any other production only as agreed at sprint planning",
+            "task handover --to owner",
+        ):
+            self.assertIn(expected, decide)
+        self.assertIn(allow_production_command(SPRINT, "relay", "s-1:allow-production"), decide)
+        self.assertEqual(
+            allow_production_command(SPRINT, "relay", "s-1:allow-production"),
+            f"python3 -P -m secretary sprint allow-production --ref {SPRINT} --role po --project relay "
+            "--reason '<text>' --request-id s-1:allow-production",
+        )
+
+
+REASON = "secretary is the development server; relay was agreed at planning"
 
 
 class RuleFixture(DispatcherFixture):
@@ -183,30 +227,59 @@ class RuleFixture(DispatcherFixture):
     def handovers(self) -> list[dict[str, Any]]:
         return [event for event in self.cards.log if event["kind"] == HANDED_TO_OWNER]
 
-    def handover_comments(self) -> list[str]:
-        return [c["body"] for c in self.cards.card["comments"] if f"[{HANDOVER_MARKER}]" in c["body"]]
+    def allow_as_po(self, project: str, request_id: str, *, actor: str = "po", role: str = "po") -> tuple[int, str]:
+        """`sprint allow-production` as a PO turn runs it: the actor from `BOARD_ACTOR`, the fake sprint writer."""
+        err = io.StringIO()
+        with (
+            mock.patch.object(sprint_commands, "SprintWriter", lambda *_args, **_fields: self.po_sprints),
+            mock.patch.object(sprint_commands, "board_client"),
+            mock.patch.dict(os.environ, {"BOARD_ACTOR": actor}),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(err),
+        ):
+            code = main(
+                ["sprint", "allow-production", "--ref", SPRINT, "--role", role, "--project", project,
+                 "--reason", REASON, "--request-id", request_id, "--instance", str(self.root),
+                 "--data-dir", str(self.data)]
+            )
+        return code, err.getvalue()
+
+    def card_turn(self, runtime: Any) -> tuple[Any, str]:
+        """Claim the card and let its turn settle: the submission and the prompt the PO read."""
+        self.assertEqual(self.claim(runtime)["action"], "po-card-submitted")
+        submission = self.record().po_submission
+        self.settled(submission.session_id, 2)
+        prompt = self.calls()[-1]["prompt"]
+        self.assertTrue(prompt.startswith(submission.text.rstrip()), "the card's text comes first")
+        return submission, prompt
 
 
 class AllowedTests(RuleFixture):
+    """Path (a): the sprint allows it, so it is queued and runs with no confirmation and no handover."""
+
     def test_an_allowed_production_is_queued_and_runs_and_the_facts_bind_the_id(self) -> None:
         self.start()
         self.allow("relay")
         runtime = self.runtime(self.operation("relay"))
 
-        submitted = self.claim(runtime)
+        submission, prompt = self.card_turn(runtime)
 
-        self.assertEqual(submitted["action"], "po-card-submitted")
-        submission = self.record().po_submission
         facts = {"card_ref": REF, "kind": "operation", "touches_production": "relay", "sprint_ref": SPRINT,
                  "input": CARD_INPUT}
         self.assertEqual(submission.card, facts)
-        self.assertFalse(submission.handed_over)
         session = submission.session_id
         self.assertEqual(self.settled(session, 2).state, po_store.COMPLETED)
         request = FakePoStore(self.board).request(submission.submit_request_id)
+        # The id binds the dispatcher's text and facts, not the service's note after it.
         self.assertEqual(request.fingerprint, po_store.send_fingerprint(session, submission.text, facts))
         self.assertNotEqual(request.fingerprint, po_store.send_fingerprint(session, submission.text))
-        self.assertIn("Touches production: relay.", self.calls()[-1]["prompt"])
+        self.assertIn("Touches production: relay.", prompt)
+        self.assertIn(f"touches production relay; sprint {SPRINT} allows [relay]", prompt)
+        self.assertIn(ALLOWS_IT, prompt)
+        self.assertNotIn("allow-production", prompt)
+        # The feed shows the PO's input as the PO read it.
+        [entry] = [e for e in FakePoStore(self.board).feed(session) if e.turn_seq == 2 and e.role == po_store.OWNER]
+        self.assertEqual(entry.text, prompt)
         self.assertEqual(self.handovers(), [])
         self.cards.complete_as_po("operation", OPERATION_BODY)
         self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
@@ -215,25 +288,26 @@ class AllowedTests(RuleFixture):
         self.start()
         runtime = self.runtime(self.operation("none"))
 
-        self.assertEqual(self.claim(runtime)["action"], "po-card-submitted")
+        submission, prompt = self.card_turn(runtime)
 
-        submission = self.record().po_submission
         self.assertEqual(submission.card["touches_production"], "none")
-        self.settled(submission.session_id, 2)
-        self.assertIn("Touches production: none. Touch no production", self.calls()[-1]["prompt"])
+        self.assertIn("Touches production: none. Touch no production", prompt)
+        self.assertIn("touches production none: the sprint allows it", prompt)
         self.assertEqual(self.handovers(), [])
 
-    def test_a_decision_carries_the_same_facts_with_no_production(self) -> None:
+    def test_a_decision_carries_the_same_facts_with_no_production_and_no_note(self) -> None:
         self.start()
         runtime = self.runtime(card())
 
-        self.assertEqual(self.claim(runtime)["action"], "po-card-submitted")
+        submission, prompt = self.card_turn(runtime)
 
         self.assertEqual(
-            self.record().po_submission.card,
+            submission.card,
             {"card_ref": REF, "kind": "decision", "touches_production": None, "sprint_ref": SPRINT,
              "input": CARD_INPUT},
         )
+        self.assertNotIn(RIGHTS_HEADING, prompt)
+        self.assertEqual(prompt, submission.text)
         self.assertEqual(self.handovers(), [])
 
     def test_the_facts_survive_the_dispatcher_record(self) -> None:
@@ -243,80 +317,127 @@ class AllowedTests(RuleFixture):
         record = self.record()
         loaded = DispatcherRecord.from_json(record.to_json())
         self.assertEqual(loaded.po_submission, record.po_submission)
+        # A record written while the service could still hand a card over loads without that field.
+        self.assertNotIn("handed_over", record.to_json()["po_submission"])
+        legacy = record.to_json()
+        legacy["po_submission"]["handed_over"] = True
+        self.assertEqual(DispatcherRecord.from_json(legacy).po_submission, record.po_submission)
 
 
-class NotAllowedTests(RuleFixture):
-    def test_a_production_the_sprint_does_not_allow_is_handed_to_the_owner_and_not_queued(self) -> None:
+class PoDecidesTests(RuleFixture):
+    """A production the sprint does not allow is a normal PO turn: never refused, never handed over by the service."""
+
+    def test_b_the_po_allows_it_with_the_command_and_runs_it(self) -> None:
         self.start()
         runtime = self.runtime(self.operation("relay"))
 
-        outcome = self.claim(runtime)
+        submission, prompt = self.card_turn(runtime)
 
-        self.assertEqual((outcome["status"], outcome["action"]), ("ok", "po-card-handed-over"))
-        self.assertEqual(outcome["reason"], NOT_ALLOWED)
-        submission = self.record().po_submission
-        self.assertTrue(submission.submitted and submission.handed_over)
+        allow_id = f"{submission.submit_request_id}:allow-production"
+        for expected in (
+            "Touches production: relay. Whether the sprint allows it is in the PO service's production rights",
+            RIGHTS_HEADING,
+            NOT_ALLOWED,
+            DECIDE,
+            "Production of secretary is allowed by default",
+            allow_production_command(SPRINT, "relay", allow_id),
+            "task handover --to owner",
+            handover_command(REF, submission.handover_request_id),
+        ):
+            self.assertIn(expected, prompt)
+        self.assertIsNone(waiting_owner(self.cards.card))
+        self.assertEqual(self.handovers(), [])
         self.assertEqual(self.cards.card["state"], "in_progress")
-        mark = waiting_owner(self.cards.card)
-        self.assertEqual((mark["reason"], mark["by"]), (NOT_ALLOWED, "po-service"))
-        self.assertEqual(self.handover_comments(), [f"[po]\n[{HANDOVER_MARKER}]\n\n{NOT_ALLOWED}\n"])
-        [handover] = self.handovers()
-        self.assertEqual(
-            (handover["request_id"], handover["role"], handover["actor"]),
-            (f"{submission.submit_request_id}:handover", "po", "po-service"),
-        )
-        # Nothing was queued and no turn exists for the card: the session holds its seed only.
-        self.assertIsNone(PoQueue(self.data).find(submission.submit_request_id))
-        self.assertIsNone(FakePoStore(self.board).request(submission.submit_request_id))
-        self.settled(submission.session_id, 1)
-        self.assertEqual(len(FakePoStore(self.board).turns(submission.session_id)), 1)
-        # And the dispatcher waits for the owner, tick after tick.
-        for _ in range(2):
-            self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
-        self.assertEqual(len(self.handovers()), 1)
 
-    def test_the_owners_answer_is_queued_without_a_recheck_and_the_po_completes(self) -> None:
+        # The PO, inside that turn: records the allowance, runs the operation, completes the card.
+        self.assertEqual(self.allow_as_po("relay", allow_id), (0, ""))
+        self.cards.complete_as_po("operation", OPERATION_BODY)
+
+        self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
+        self.assertEqual(self.po_sprints.records[SPRINT].allowed_productions, ("relay",))
+        [event] = self.po_sprints.events
+        self.assertEqual(
+            (event["kind"], event["request_id"], event["actor"], event["payload"]),
+            ("production_allowed", allow_id, {"role": "po", "id": "po"}, {"project": "relay", "reason": REASON}),
+        )
+        self.assertEqual(self.handovers(), [])
+        # A repeat of the command writes nothing new.
+        self.assertEqual(self.allow_as_po("relay", allow_id), (0, ""))
+        self.assertEqual(len(self.po_sprints.events), 1)
+
+    def test_c_the_po_hands_it_over_the_owner_answers_and_the_po_completes(self) -> None:
         self.start()
         runtime = self.runtime(self.operation("relay"))
-        self.claim(runtime)
-        session = self.record().po_submission.session_id
-        self.settled(session, 1)
-        self.owner_says("Go ahead on relay, once.", "evt-owner-1")
 
+        submission, prompt = self.card_turn(runtime)
+        self.assertIn(DECIDE, prompt)
+        # The PO may not decide it, so it hands the card over inside its turn.
+        why = "relay is not secretary and was not agreed at planning: may I rotate its key?"
+        self.cards.hand_over_as_po(why, request_id=submission.handover_request_id)
+
+        self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
+        self.owner_says("Go ahead on relay, once.", "evt-owner-1")
         answered = self.tick(runtime)
 
-        # The sprint still allows nothing: the owner decided, so the follow-up is not checked again.
-        self.assertEqual(self.po_sprints.records[SPRINT].allowed_productions, ())
         request_id = owner_answer_request_id(REF, "evt-owner-1")
         self.assertEqual((answered["action"], answered["po_request_id"]), ("po-owner-answer-submitted", request_id))
-        self.assertEqual(self.settled(session, 2).state, po_store.COMPLETED)
+        session = submission.session_id
+        self.assertEqual(self.settled(session, 3).state, po_store.COMPLETED)
         submission = self.record().po_submission
         request = FakePoStore(self.board).request(request_id)
         facts = {**submission.card, "input": OWNER_ANSWER_INPUT}
         self.assertEqual(request.fingerprint, po_store.send_fingerprint(session, submission.owner_text, facts))
-        prompt = self.calls()[-1]["prompt"]
-        self.assertEqual(prompt, submission.owner_text)
-        for expected in ("The PO service handed it to the owner", "Rotate the relay key.", NOT_ALLOWED,
-                         "Go ahead on relay, once.", "Touches production: relay.",
-                         complete_command(REF, "operation", submission.complete_request_id)):
-            self.assertIn(expected, prompt)
-        self.assertEqual(len(self.handovers()), 1)
+        answer = self.calls()[-1]["prompt"]
+        # The owner's answer is not evaluated again: no rights section, and its line says the owner decided.
+        self.assertEqual(answer, submission.owner_text)
+        self.assertNotIn(RIGHTS_HEADING, answer)
+        self.assertNotIn("checked the sprint allows it", answer)
+        for expected in (
+            "which you handed to the owner",
+            "## Why you handed it to the owner",
+            why,
+            "Go ahead on relay, once.",
+            "Touches production: relay. You handed the card to the owner, and the owner decided on it",
+            complete_command(REF, "operation", submission.complete_request_id),
+        ):
+            self.assertIn(expected, answer)
+        self.assertEqual(self.po_sprints.records[SPRINT].allowed_productions, ())
+        self.assertEqual([event["actor"] for event in self.handovers()], ["po"])
 
         self.cards.complete_as_po("operation", OPERATION_BODY)
         self.assertIsNone(waiting_owner(self.cards.card))
         self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
         self.assertNotIn(REF, self.records)
 
-    def test_a_repeat_of_the_same_submit_hands_over_once(self) -> None:
+    def test_a_sprint_opened_before_the_field_sends_its_operations_to_the_po(self) -> None:
+        """An empty `allowed_productions` (every sprint opened before 0016) is a PO turn, never the owner."""
+        self.start()
+        self.assertEqual(self.po_sprints.records[SPRINT].allowed_productions, ())
+        runtime = self.runtime(self.operation("secretary"))
+
+        submission, prompt = self.card_turn(runtime)
+
+        self.assertIn(f"touches production secretary; sprint {SPRINT} allows []", prompt)
+        self.assertIn("Production of secretary is allowed by default", prompt)
+        self.assertEqual(self.settled(submission.session_id, 2).state, po_store.COMPLETED)
+        self.assertIsNone(waiting_owner(self.cards.card))
+        self.assertEqual(self.handovers(), [])
+        self.assertEqual([event["kind"] for event in self.cards.log], ["claim"])
+
+    def test_a_repeat_of_the_same_submit_queues_once_whatever_the_sprint_allows_by_then(self) -> None:
         self.start()
         runtime = self.runtime(self.operation("relay"))
         real = runtime.po
         answers: list[dict[str, Any]] = []
+        sprints = self.po_sprints
+        allow = self.allow
 
         class LosesTheFirstAnswer:
             def submit(self, **fields: Any) -> dict[str, Any]:
                 answers.append(real.submit(**fields))
                 if len(answers) == 1:
+                    # The sprint changes before the repeat: the note is the service's, not the id's.
+                    allow("relay", session=sprints.records[SPRINT].po_session)
                     raise OutcomeUnknown("no answer from the PO service: connection reset")
                 return answers[-1]
 
@@ -332,12 +453,15 @@ class NotAllowedTests(RuleFixture):
 
         self.assertEqual(
             [first["action"], second["action"], third["action"]],
-            ["po-service-unanswered", "po-card-handed-over", "po-card-handed-over"],
+            ["po-service-unanswered", "po-card-submitted", "po-card-submitted"],
         )
         self.assertEqual([answer["repeated"] for answer in answers], [False, True, True])
-        self.assertEqual(len(self.handovers()), 1)
-        self.assertEqual(len(self.handover_comments()), 1)
-        self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
+        submission = self.record().po_submission
+        self.settled(submission.session_id, 2)
+        self.assertEqual(len(FakePoStore(self.board).turns(submission.session_id)), 2)
+        # The one turn carries the note it was queued with.
+        self.assertIn(NOT_ALLOWED, self.calls()[-1]["prompt"])
+        self.assertEqual(self.handovers(), [])
 
 
 class NeverExecutedTests(RuleFixture):
@@ -367,7 +491,7 @@ class NeverExecutedTests(RuleFixture):
         self.assertIsNone(PoQueue(self.data).find(submission.submit_request_id))
         self.assertIsNone(FakePoStore(self.board).request(submission.submit_request_id))
         self.assertEqual(self.handovers(), [])
-        # Once the sprint reads again, the same request id is checked and runs.
+        # Once the sprint reads again, the same request id is evaluated and runs.
         runtime.po = ServicePoChannel(self.data, None)
         runtime.po._store = FakePoStore(self.board)
         self.assertEqual(self.tick(runtime)["action"], "po-card-submitted")
@@ -404,51 +528,156 @@ class NeverExecutedTests(RuleFixture):
         self.assertIn("carries no card facts", bare["error"]["message"])
         self.assertEqual(PoQueue(self.data).pending(), [])
 
-    def test_a_handover_the_board_refuses_refuses_the_submit(self) -> None:
+    def test_the_service_answers_a_not_allowed_production_as_queued_never_handed_over(self) -> None:
         service = self.start(listen=False)
         session = self.session(service)
-        self.po_sprints.cards = mock.Mock(
-            handover=mock.Mock(side_effect=HandoverRefused("transition_forbidden", f"{REF} is blocked"))
-        )
         facts = card_facts(card_ref=REF, kind="operation", touches_production="relay", sprint_ref=SPRINT)
         answer = service.handle(
-            {"op": "submit", "session_id": session, "text": "x", "request_id": "d-2", "source": "dispatcher",
-             "card": facts}
+            {"op": "submit", "session_id": session, "text": "Rotate it.", "request_id": "d-2",
+             "source": "dispatcher", "card": facts}
         )
-        self.assertEqual((answer["error"]["code"], answer["error"].get("nothing_written")), ("validation", True))
-        self.assertIn(f"{REF} could not be handed to the owner", answer["error"]["message"])
-        # A handover that may have committed is a repeat, never a refusal.
-        self.po_sprints.cards = mock.Mock(handover=mock.Mock(side_effect=RuntimeError("connection reset")))
-        answer = service.handle(
-            {"op": "submit", "session_id": session, "text": "x", "request_id": "d-3", "source": "dispatcher",
-             "card": facts}
+        self.assertNotIn("error", answer)
+        self.assertNotIn("handed_over", answer)
+        self.settled(session, 1)
+        [entry] = [e for e in FakePoStore(self.board).feed(session) if e.role == po_store.OWNER]
+        self.assertTrue(entry.text.startswith("Rotate it.\n\n" + RIGHTS_HEADING))
+        self.assertIn(NOT_ALLOWED, entry.text)
+
+
+class AllowProductionWriterTests(unittest.TestCase):
+    """`SprintWriter.allow_production` over a mock board: the rules decided before and around its one write."""
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.instance = self.root / "instance"
+        (self.instance / "projects").mkdir(parents=True)
+        for project in ("secretary", "relay"):
+            (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+        self.client = mock.MagicMock()
+        self.writer = SprintWriter(self.client, data_dir=self.root / "data", instance=self.instance)
+        self.sprint = {"id": "sprint_postgres_1", "ref": SPRINT, "status": "open", "allowed_productions": ["secretary"]}
+        self.writer.reader = mock.Mock()
+        self.writer.reader.show.side_effect = lambda _ref, **_: dict(self.sprint)
+        self.writer.audit = mock.Mock()
+        self.writer.transactions = mock.Mock()
+        self.writer.audit.committed_event.return_value = None
+        self.writer.audit.pending_event.return_value = None
+        self.writer.audit.append.return_value = "evt-1"
+
+    def allow(self, project: str = "relay", **fields: Any) -> dict[str, Any]:
+        call = {"role": "po", "actor": "po", "reference": SPRINT, "project": project, "reason": REASON,
+                "request_id": "allow-1", **fields}
+        return self.writer.allow_production(**call)
+
+    def writes(self) -> list[Any]:
+        return [c for c in self.client.call.call_args_list if c.args and c.args[0] == "saveTaskMetadata"]
+
+    def test_it_appends_the_project_and_records_who_and_why(self) -> None:
+        answer = self.allow()
+
+        self.assertEqual((answer["action"], answer["event_id"]), ("production_allowed", "evt-1"))
+        [write] = self.writes()
+        self.assertEqual(json.loads(write.kwargs["values"][ALLOWED_PRODUCTIONS_FIELD]), ["secretary", "relay"])
+        self.assertEqual(set(write.kwargs["values"]), {ALLOWED_PRODUCTIONS_FIELD})
+        request_id, event = self.writer.audit.append.call_args.args
+        self.assertEqual(request_id, "allow-1")
+        self.assertEqual(
+            (event["kind"], event["ref"], event["actor"], event["payload"]),
+            ("production_allowed", SPRINT, {"role": "po", "id": "po"}, {"project": "relay", "reason": REASON}),
         )
-        self.assertEqual(answer["error"]["code"], "outcome_unknown")
-        self.assertEqual(PoQueue(self.data).pending(), [])
 
+    def test_a_project_already_allowed_writes_nothing(self) -> None:
+        answer = self.allow("secretary")
 
-class BoardHandoverTests(unittest.TestCase):
-    """`BoardSprintSessions.hand_over` is `task handover` as role po, actor po-service, under the given id."""
+        self.assertEqual((answer["action"], answer["event_id"]), ("already_allowed", None))
+        self.assertEqual(self.writes(), [])
+        self.writer.audit.stage.assert_not_called()
+        self.writer.audit.append.assert_not_called()
 
-    def test_it_runs_the_task_handover_and_maps_a_definite_refusal(self) -> None:
-        writer = mock.Mock()
-        writer.return_value.handover.return_value = {"action": HANDED_TO_OWNER, "replayed": True}
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.tasks.TaskWriter", writer),
-            mock.patch("secretary.board.backend.card_client"),
+    def test_a_repeat_of_the_request_id_answers_the_same_write(self) -> None:
+        committed = {"kind": "production_allowed", "ref": SPRINT, "request_id": "allow-1",
+                     "payload": {"project": "relay", "reason": REASON}}
+        self.writer.audit.committed_event.return_value = committed
+        self.sprint["allowed_productions"] = ["secretary", "relay"]
+
+        answer = self.allow()
+
+        self.assertEqual((answer["action"], answer["event_id"]), ("production_allowed", "evt-1"))
+        self.assertEqual(self.writes(), [])
+        self.writer.audit.stage.assert_not_called()
+        with self.assertRaises(TaskError) as raised:
+            self.allow("secretary")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertIn("already belongs to another sprint write", raised.exception.message)
+
+    def test_refusals_write_nothing(self) -> None:
+        for fields, code in (
+            ({"role": "observer", "actor": "observer"}, "role_forbidden"),
+            ({"role": "steward", "actor": "steward"}, "role_forbidden"),
+            ({"role": "po", "actor": "observer"}, "role_masquerade"),
+            ({"project": "elsewhere"}, "validation"),
+            ({"project": " "}, "validation"),
+            ({"reason": " "}, "validation"),
         ):
-            port = BoardSprintSessions(tmp, tmp)
-            self.assertTrue(port.hand_over(REF, NOT_ALLOWED, request_id="s-1:handover"))
-            writer.return_value.handover.assert_called_once_with(
-                role="po", actor="po-service", reference=REF, to="owner", reason=NOT_ALLOWED,
-                request_id="s-1:handover",
-            )
-            for code, raised in (("already_handed_over", HandoverRefused), ("backend_unavailable", TaskError)):
-                writer.return_value.handover.side_effect = TaskError(code, "no", 3)
-                with self.subTest(code=code), self.assertRaises(raised):
-                    port.hand_over(REF, NOT_ALLOWED, request_id="s-1:handover")
+            with self.subTest(fields=fields), self.assertRaises(TaskError) as raised:
+                self.allow(**fields)
+            self.assertEqual(raised.exception.code, code)
+        self.writer.reader.show.assert_not_called()
+        for status in ("closed", "stopped"):
+            self.sprint["status"] = status
+            with self.subTest(status=status), self.assertRaises(TaskError) as raised:
+                self.allow()
+            self.assertEqual((raised.exception.code, raised.exception.exit_code), ("closed", 3))
+        self.assertEqual(self.writes(), [])
+        self.writer.audit.stage.assert_not_called()
 
+
+class AllowProductionCommandTests(unittest.TestCase):
+    """`sprint allow-production`: arguments down to the writer, the actor from `BOARD_ACTOR`."""
+
+    def run_command(self, *extra: str, actor: str | None = "po") -> tuple[int, dict[str, Any], str]:
+        captured: dict[str, Any] = {}
+
+        class Writer:
+            def allow_production(self, **fields: Any) -> dict[str, Any]:
+                captured.update(fields)
+                admit_role(fields["role"], fields["actor"], {"po"})
+                return {"action": "production_allowed"}
+
+        environ = {key: value for key, value in os.environ.items() if key != "BOARD_ACTOR"}
+        if actor is not None:
+            environ["BOARD_ACTOR"] = actor
+        err = io.StringIO()
+        with (
+            mock.patch.object(sprint_commands, "SprintWriter", lambda *_args, **_fields: Writer()),
+            mock.patch.object(sprint_commands, "board_client"),
+            mock.patch.dict(os.environ, environ, clear=True),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(err),
+        ):
+            code = main(
+                ["sprint", "allow-production", "--ref", SPRINT, "--project", "relay", "--reason", REASON,
+                 "--instance", "/nowhere", "--data-dir", "/nowhere", *extra]
+            )
+        return code, captured, err.getvalue()
+
+    def test_the_arguments_and_the_actor_reach_the_writer(self) -> None:
+        code, captured, _ = self.run_command("--role", "po", "--request-id", "a-1")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            captured,
+            {"role": "po", "actor": "po", "reference": SPRINT, "project": "relay", "reason": REASON,
+             "request_id": "a-1"},
+        )
+
+    def test_the_observer_is_refused_by_the_writer_and_its_masquerade_too(self) -> None:
+        code, _, err = self.run_command("--role", "observer", actor="observer")
+        self.assertEqual((code, json.loads(err)["error"]["code"]), (3, "role_forbidden"))
+        code, _, err = self.run_command("--role", "po", actor="observer")
+        self.assertEqual((code, json.loads(err)["error"]["code"]), (3, "role_masquerade"))
+
+
+class SprintRecordTests(unittest.TestCase):
     def test_the_sprint_record_carries_its_allowed_productions(self) -> None:
         document = {"ref": SPRINT, "status": "open", "po_session": None, "allowed_productions": ["relay"]}
         with (
@@ -458,6 +687,7 @@ class BoardHandoverTests(unittest.TestCase):
         ):
             record = BoardSprintSessions(tmp, tmp).sprint(SPRINT)
         self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",)))
+        self.assertFalse(hasattr(BoardSprintSessions, "hand_over"))
 
 
 if __name__ == "__main__":

@@ -109,8 +109,8 @@ class PoServiceClient:
     ) -> dict[str, Any]:
         """One input; a dispatcher's carries its card's facts (`card`), which the service checks first.
 
-        The answer is the input queued or the turn it became, or `handed_over: true` when the service's
-        production rule handed the card to the owner instead of queueing anything.
+        The answer is the input queued or the turn it became. An operation card's input is queued with
+        the service's production rights note; the rule itself refuses nothing (secretary-1769).
         """
         fields = {"card": card} if card is not None else {}
         return self.call("submit", session_id=session_id, text=text, request_id=request_id, source=source, **fields)

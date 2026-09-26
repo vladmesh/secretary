@@ -33,7 +33,6 @@ from secretary.dispatch.state import DispatcherRecord, new_attempt_id
 from secretary.po import store as po_store
 from secretary.po.runner import PoRunner
 from secretary.po.service import PoService, listening
-from secretary.po.sprints import HandoverRefused
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 
@@ -92,26 +91,18 @@ class OneCardBoard:
     def events(self, reference: str = "", **_: Any) -> list[dict[str, Any]]:
         return [event for event in self.log if not reference or event["ref"] == reference]
 
-    # `task handover`, as the PO service's production rule runs it (`BoardSprintSessions.hand_over`)
-    def handover(self, reference: str, reason: str, *, actor: str, request_id: str) -> bool:
-        """What `TaskWriter.handover` leaves: the mark, the `[handover:owner]` comment, the audit fact."""
-        assert reference == self.card["ref"], reference
-        if self.committed_event(request_id) is not None:
-            return True
-        if self.card["state"] != "in_progress":
-            raise HandoverRefused("transition_forbidden", f"{reference} is {self.card['state']}")
-        if waiting_owner(self.card) is not None:
-            raise HandoverRefused("already_handed_over", f"{reference} is already handed to the owner")
+    # the PO, handing the card to the owner inside its turn (what `task handover --role po` leaves)
+    def hand_over_as_po(self, reason: str, *, request_id: str) -> None:
+        assert self.card["state"] == "in_progress" and waiting_owner(self.card) is None
         since = f"2026-09-26T15:00:{len(self.log):02d}+00:00"
-        self.card.setdefault("extensions", {}).setdefault("extra", {}).update(mark_values(since, reason, actor))
+        self.card.setdefault("extensions", {}).setdefault("extra", {}).update(mark_values(since, reason, "po"))
         self.card["comments"].append(
             {"created_at": since, "marker": "po", "body": "[po]\n" + render_handover_comment(reason)}
         )
         self.log.append(
-            {"request_id": request_id, "ref": reference, "kind": HANDED_TO_OWNER, "event_id": f"evt-{request_id}",
-             "role": "po", "actor": actor, "reason": reason}
+            {"request_id": request_id, "ref": self.card["ref"], "kind": HANDED_TO_OWNER,
+             "event_id": f"evt-{request_id}", "role": "po", "actor": "po", "reason": reason}
         )
-        return False
 
     # the PO, completing the card inside its turn
     def complete_as_po(self, kind: str, body: str) -> None:
@@ -247,8 +238,6 @@ class DispatcherFixture(unittest.TestCase):
 
     def runtime(self, task: dict[str, Any], *, comments: list[str] | None = None, po: Any = None):
         self.cards = OneCardBoard(task)
-        # The service's handover of a card its production rule refuses lands on the same card.
-        self.po_sprints.cards = self.cards
         channel = ServicePoChannel(self.data, None)
         channel._store = FakePoStore(self.board)
         self.saved: list[dict[str, Any]] = []

@@ -386,8 +386,12 @@ class PoStore:
         *,
         request_id: str | None = None,
         card: Mapping[str, Any] | None = None,
+        prompt: str | None = None,
     ) -> tuple[Turn, bool]:
         """The new turn, or the one `request_id` already started; the flag is True when this call did.
+
+        The id is bound to `text` and `card`; the feed records `prompt`, the text the turn is started
+        with, when it differs (the PO service's note after the text, `PoRunner.send_request`).
 
         A replay answers with that turn in its current state — running, completed, failed or
         interrupted — before "a turn is running" is asked, so a replay during its own turn is that turn,
@@ -430,7 +434,7 @@ class PoStore:
             connection.execute(
                 "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at) "
                 "VALUES (%s, %s, %s, %s, now())",
-                (session_id, seq, OWNER, text),
+                (session_id, seq, OWNER, text if prompt is None else prompt),
             )
             if request_id is not None:
                 self._record_request(connection, request_id, SEND, fingerprint, session_id, seq)

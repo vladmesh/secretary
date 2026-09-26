@@ -393,22 +393,36 @@ class PoRunner:
         return self._send(session_id, text, None)[0]
 
     def send_request(
-        self, session_id: str, text: str, request_id: str, *, card: dict[str, Any] | None = None
+        self,
+        session_id: str,
+        text: str,
+        request_id: str,
+        *,
+        card: dict[str, Any] | None = None,
+        note: str | None = None,
     ) -> tuple[Turn, bool]:
         """`send` under a form's request id; the flag says whether this call started the turn.
 
         A request id that already started this send gets that turn back and no process, and one that
         belongs to anything else is `RequestConflict` (`PoStore.claim_turn`): a CLI is launched only for
         a turn this call created, after its transaction committed. `card` is the facts a dispatcher
-        input carries beside its text; they are part of what the id is bound to.
+        input carries beside its text; they are part of what the id is bound to. `note` is the PO
+        service's own section after the text (an operation card's production rights): the prompt and
+        the feed carry it, the id does not bind it.
         """
-        return self._send(session_id, text, request_id, card)
+        return self._send(session_id, text, request_id, card, note)
 
     def _send(
-        self, session_id: str, text: str, request_id: str | None, card: dict[str, Any] | None = None
+        self,
+        session_id: str,
+        text: str,
+        request_id: str | None,
+        card: dict[str, Any] | None = None,
+        note: str | None = None,
     ) -> tuple[Turn, bool]:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
+        prompt = f"{text.rstrip()}\n\n{note.strip()}\n" if note and note.strip() else text
         with self._lock:
             turn, created = self.store.claim_turn(
                 session_id,
@@ -416,10 +430,11 @@ class PoRunner:
                 lambda seq: self.files(session_id, seq).stdout,
                 request_id=request_id,
                 card=card,
+                prompt=prompt,
             )
             if not created:
                 return turn, False
-            self._start(session_id, turn.seq, text)
+            self._start(session_id, turn.seq, prompt)
         return self.store.turn(session_id, turn.seq), True
 
     def _start(self, session_id: str, seq: int, text: str) -> None:

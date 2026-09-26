@@ -1,8 +1,10 @@
 """The PO service's durable input queue: messages not yet taken as turns, under ``<data_dir>/po-queue/``.
 
 One file per input, ``<time_ns>-<counter>.json`` holding ``{session_id, text, request_id, source,
-queued_at}`` and, for a dispatcher input, the ``card`` facts it carries beside its text, written to a temporary name, fsynced, renamed into place and the directory fsynced, all
-before the submitter hears an acknowledgement. The names sort in submission order, so FIFO per session
+queued_at}`` and, for a dispatcher input, the ``card`` facts it carries beside its text (and, for an
+operation card, the service's production rights ``note`` its prompt ends with), written to a temporary
+name, fsynced, renamed into place and the directory fsynced, all before the submitter hears an
+acknowledgement. The names sort in submission order, so FIFO per session
 is "the oldest file naming that session".
 
 The queue holds only what no turn row stands for yet. An input leaves it only after its turn exists in
@@ -53,6 +55,9 @@ class QueuedInput:
     queued_at: str
     # The card facts of a dispatcher input (`PoService.submit`); part of what its request id binds.
     card: dict[str, Any] | None = None
+    # What the service adds to the turn's prompt after the text: an operation card's production
+    # rights (`PoService._production_rule`). The service's own, so not part of what the id binds.
+    note: str | None = None
 
     def document(self) -> dict[str, Any]:
         document = {
@@ -64,6 +69,8 @@ class QueuedInput:
         }
         if self.card is not None:
             document["card"] = self.card
+        if self.note is not None:
+            document["note"] = self.note
         return document
 
 
@@ -111,7 +118,14 @@ class PoQueue:
             raise QueueError(f"could not create the PO queue {self.directory}: {exc}") from None
 
     def put(
-        self, *, session_id: str, text: str, request_id: str, source: str, card: dict[str, Any] | None = None
+        self,
+        *,
+        session_id: str,
+        text: str,
+        request_id: str,
+        source: str,
+        card: dict[str, Any] | None = None,
+        note: str | None = None,
     ) -> QueuedInput:
         """Write one input durably and return it; the caller acknowledges only after this returns."""
         if source not in (*SOURCES, SERVICE_SOURCE):
@@ -128,6 +142,7 @@ class PoQueue:
             source=source,
             queued_at=datetime.now(UTC).isoformat(),
             card=dict(card) if card is not None else None,
+            note=note,
         )
         try:
             write_durably(self.directory / name, json.dumps(queued.document(), ensure_ascii=False))
@@ -218,6 +233,7 @@ class PoQueue:
                 source=str(document.get("source") or "web"),
                 queued_at=str(document.get("queued_at") or ""),
                 card=document["card"] if isinstance(document.get("card"), dict) else None,
+                note=document["note"] if isinstance(document.get("note"), str) else None,
             )
         except KeyError:
             return None
