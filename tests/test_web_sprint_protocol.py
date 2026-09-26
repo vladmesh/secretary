@@ -986,9 +986,13 @@ class CurrentCardStateTests(SprintWorkFixture):
         self.assertEqual(self._standing()["transition"], TRANSITION_ABSENT)
 
     def test_a_sprint_that_ended_shows_no_ticking_age(self) -> None:
-        """Criterion 5, decided from `current_task.live` and not re-derived here."""
+        """Criterion 5, decided from `current_task.live` and not re-derived here.
+
+        A stopped sprint keeps its card (it may be resumed); a closed one has none at all
+        (secretary-1777), so neither can carry an age that ticks.
+        """
         self._typed_move(self.LAST, "ready", "in_progress")
-        ended = self.add_sprint_row("sprint:1001", status="closed", current_task=self.card)
+        ended = self.add_sprint_row("sprint:1001", status="stopped", current_task=self.card)
 
         standing = self._standing(ended)
 
@@ -1001,6 +1005,12 @@ class CurrentCardStateTests(SprintWorkFixture):
         watched = self.reads().sprint_state(ended)["work"]
         self.assertEqual(watched["current_task"]["ref"], self.card)
         self.assertFalse(watched["current_task"]["live"])
+
+        closed = self.add_sprint_row("sprint:1003", status="closed", current_task=self.card)
+        standing = self._standing(closed)
+        self.assertEqual(standing["transition"], TRANSITION_NOT_APPLICABLE)
+        self.assertIsNone(standing["card"])
+        self.assertIsNone(standing["age_seconds"])
 
     def test_a_sprint_with_no_current_card_says_so(self) -> None:
         """Criterion 4, in the same words the rest of the document says it in."""
@@ -1091,10 +1101,10 @@ class SprintListTests(SprintWorkFixture):
         document = self.reads().sprint_list()
 
         ended = self._entry(document, "sprint:1001")
-        # The card is kept -- it is where the sprint got to -- and it is qualified.
-        self.assertEqual(ended["current_task"]["ref"], "secretary-1435")
+        # A closed sprint has no current card, whatever its row stores (secretary-1777).
+        self.assertIsNone(ended["current_task"]["ref"])
         self.assertFalse(ended["current_task"]["live"])
-        self.assertIn("not work in progress", ended["current_task"]["reason"])
+        self.assertEqual(ended["current_task"]["reason"], "sprint:1001 is closed; it has no current card")
         self.assertEqual(ended["waiting"]["state"], sprint_reads_module.WAITING_ENDED)
         self.assertEqual(ended["checks"]["state"], sprint_reads_module.CHECKS_NOT_APPLICABLE)
         # The second defect: a sprint that ended is not one whose observer has not come up.
@@ -1117,8 +1127,10 @@ class SprintListTests(SprintWorkFixture):
         for section in ("current_task", "decision", "cards", "degraded_cards", "checks", "waiting"):
             self.assertEqual(watched["work"][section], listed[section], section)
         self.assertEqual(watched["observer"], listed["observer"])
-        # And the sprint's own fields are still there beside the work.
-        self.assertEqual(watched["sprint"]["value"]["current_task"], "secretary-1435")
+        # And the sprint's own fields are still there beside the work -- with no current card, as
+        # `sprint show` has it (secretary-1777).
+        self.assertEqual(watched["sprint"]["value"]["ref"], "sprint:1001")
+        self.assertIsNone(watched["sprint"]["value"]["current_task"])
 
     def test_the_checks_of_a_current_card_are_the_dispatchers_own_gate_record(self) -> None:
         reference = self.reference_of(self.create())
@@ -1540,6 +1552,136 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
         self.assertEqual(code, _EXIT_BY_CODE["backend_unavailable"])
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
+
+
+class ClosedSprintTruthTests(SprintProtocolFixture):
+    """`sprint show`, `sprint status` and `sprint list` read truthfully about a finished sprint.
+
+    secretary-1777, the "CLI truthfulness" items of sprint:1467. A closed sprint has no current card
+    in any read output (PO decision of 2026-09-26 on issue:002bce88: null plus a status, no renamed
+    field), while its stored row keeps what it held. A stopped sprint may be resumed and keeps its
+    card, qualified. `sprint status` names the status first, and `list` and `show` agree on budget.
+    """
+
+    CLOSED_CARD = "secretary-1435"
+    STOPPED_CARD = "secretary-1436"
+    OPEN_CARD = "secretary-1437"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.add_sprint_row("sprint:1001", status="closed", current_task=self.CLOSED_CARD)
+        self.add_sprint_row("sprint:1002", status="stopped", current_task=self.STOPPED_CARD)
+        self.add_sprint_row("sprint:1003", status="open", current_task=self.OPEN_CARD)
+
+    def _run(self, argv: list[str], *, explicit: bool = True) -> tuple[int, str, str]:
+        """One command, told its installation by `--instance` or by the default `SECRETARY_INSTANCE`."""
+        output, errors = io.StringIO(), io.StringIO()
+        environment = {"SECRETARY_INSTANCE": str(self.instance), "SECRETARY_DATA_DIR": str(self.data_dir)}
+        flags = ["--instance", str(self.instance), "--data-dir", str(self.data_dir)] if explicit else []
+        with (
+            self.board_injected(),
+            mock.patch("secretary.sprint_commands.board_client", return_value=self.board),
+            mock.patch.dict("os.environ", environment),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main([*argv, *flags])
+        return code, output.getvalue(), errors.getvalue()
+
+    def _json(self, argv: list[str], **kwargs: Any) -> tuple[str, dict[str, Any]]:
+        code, output, errors = self._run(argv, **kwargs)
+        self.assertEqual(code, 0, errors)
+        return output, json.loads(output)
+
+    def test_show_of_a_closed_sprint_names_no_current_card_and_the_row_keeps_it(self) -> None:
+        for reference, expected in (
+            ("sprint:1001", None),
+            ("sprint:1002", self.STOPPED_CARD),
+            ("sprint:1003", self.OPEN_CARD),
+        ):
+            with self.subTest(reference=reference):
+                _output, shown = self._json(["sprint", "show", "--ref", reference])
+                self.assertEqual(shown["current_task"], expected)
+        # Only the read output changed: the stored row and every internal reader keep the card.
+        self.assertEqual(self.metadata_of("sprint:1001")["sprint_current_task"], self.CLOSED_CARD)
+        self.assertEqual(
+            sprints_module.SprintReader(self.board, data_dir=self.data_dir).show("sprint:1001")["current_task"],
+            self.CLOSED_CARD,
+        )
+
+    def test_status_of_a_closed_sprint_names_its_old_card_nowhere_as_current(self) -> None:
+        output, document = self._json(["sprint", "status", "--ref", "sprint:1001"])
+
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+        work = document["work"]
+        self.assertEqual(
+            {key: value for key, value in work["current_task"].items() if key != "source"},
+            {"ref": None, "live": False, "reason": "sprint:1001 is closed; it has no current card"},
+        )
+        self.assertIsNone(document["sprint"]["value"]["current_task"])
+        self.assertIsNone(work["current_card_state"]["card"])
+        self.assertIsNone(work["checks"]["card"])
+        self.assertIsNone(work["waiting"]["card"])
+        self.assertEqual(work["waiting"]["state"], sprint_reads_module.WAITING_ENDED)
+        self.assertIn(self.CLOSED_CARD, output)
+        # The only place the card may appear is where the sprint's cards are listed by column.
+        rest = {**document, "work": {key: value for key, value in work.items() if key != "cards"}}
+        self.assertIn(self.CLOSED_CARD, json.dumps(work["cards"]))
+        self.assertNotIn(self.CLOSED_CARD, json.dumps(rest))
+
+        listed = self._json(["sprint", "list", "--status", "closed"])[1]
+        entry = next(item for item in listed["sprints"]["items"] if item["ref"] == "sprint:1001")
+        self.assertEqual(entry["current_task"], work["current_task"])
+
+    def test_status_prints_the_sprints_status_first(self) -> None:
+        for reference, status in (("sprint:1001", "closed"), ("sprint:1002", "stopped"), ("sprint:1003", "open")):
+            with self.subTest(reference=reference):
+                output, document = self._json(["sprint", "status", "--ref", reference])
+                self.assertTrue(output.startswith(f'{{"status":"{status}",'), output[:40])
+                self.assertEqual(next(iter(document)), "status")
+                self.assertEqual(document["status"], document["sprint"]["value"]["status"])
+                self.assertEqual(len(output.strip().splitlines()), 1)
+
+    def test_open_and_stopped_sprints_keep_their_card(self) -> None:
+        _output, stopped = self._json(["sprint", "status", "--ref", "sprint:1002"])
+        self.assertEqual(stopped["work"]["current_task"]["ref"], self.STOPPED_CARD)
+        self.assertFalse(stopped["work"]["current_task"]["live"])
+        self.assertIn("not work in progress", stopped["work"]["current_task"]["reason"])
+        self.assertEqual(stopped["sprint"]["value"]["current_task"], self.STOPPED_CARD)
+
+        _output, opened = self._json(["sprint", "status", "--ref", "sprint:1003"])
+        self.assertEqual(opened["work"]["current_task"]["ref"], self.OPEN_CARD)
+        self.assertTrue(opened["work"]["current_task"]["live"])
+        self.assertEqual(opened["sprint"]["value"]["current_task"], self.OPEN_CARD)
+
+    def test_list_and_show_answer_the_same_budget_by_the_installations_thresholds(self) -> None:
+        """issue:16277741: `list` and `show` agree, with `--instance` and with `SECRETARY_INSTANCE`."""
+        instance_file = self.instance / "instance.yaml"
+        instance_file.write_text(
+            instance_file.read_text(encoding="utf-8") + "sprint_budget:\n  signal: 12\n  hard: 30\n",
+            encoding="utf-8",
+        )
+        # A budget is the charges that make it up, recorded through the product's own write.
+        writer = sprints_module.SprintWriter(self.board, data_dir=self.data_dir)
+        for event_type, count in (("red_review", 4), ("blocked", 2)):
+            for occurrence in range(count):
+                writer.record_budget(
+                    role="steward",
+                    actor="fixture",
+                    reference="sprint:1003",
+                    event_type=event_type,
+                    request_id=f"fixture-budget-{event_type}-{occurrence}",
+                )
+        fields = ("total", "thresholds", "signal_reached", "hard_reached")
+        expected = {"total": 6, "thresholds": {"signal": 12, "hard": 30}, "signal_reached": False, "hard_reached": False}
+
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit):
+                _output, shown = self._json(["sprint", "show", "--ref", "sprint:1003"], explicit=explicit)
+                _output, listed = self._json(["sprint", "list"], explicit=explicit)
+                entry = next(item for item in listed["sprints"]["items"] if item["ref"] == "sprint:1003")
+                self.assertEqual({field: shown["budget"][field] for field in fields}, expected)
+                self.assertEqual({field: entry["budget"][field] for field in fields}, expected)
 
 
 class CommentFixture(SprintProtocolFixture):

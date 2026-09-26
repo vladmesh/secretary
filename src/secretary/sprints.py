@@ -136,6 +136,17 @@ SPRINT_STATUSES = {state.value for state in SprintState}
 SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
 
 
+def public_current_task(status: str, stored: str | None) -> str | None:
+    """The current card a read output shows for a sprint: none for a closed one, else the stored one.
+
+    A closed sprint has no current card, whatever its row still holds (PO decision of 2026-09-26,
+    issue:002bce88). The stored value is untouched and every writer, the dispatcher and restore keep
+    reading it; only what `sprint show`, `sprint status` and `sprint list` print goes through here. A
+    stopped sprint may be resumed, so it keeps its card.
+    """
+    return None if status == SprintState.CLOSED.value else (stored or None)
+
+
 def active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
     """Return the local index of projects reserved by open sprints."""
     index = _read_guard_index(Path(data_dir) / _GUARD_INDEX)

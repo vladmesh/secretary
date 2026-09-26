@@ -58,10 +58,12 @@ produced it, and replaces what a refusal would have said with the section's decl
 Adding a section is adding a method there, and it is covered by being one. That module's docstring
 carries the invariant and why it exists.
 
-**A finished sprint is not a working one.** Its current card is kept, because it is where the sprint
-got to, and it is qualified: `current_task.live` is false, its observer is `ended` rather than
-"waiting to be raised", and its checks are `not_applicable`. Roughly sixty closed sprints of this
-installation read as work in progress until that distinction existed.
+**A finished sprint is not a working one.** A closed sprint has no current card: every output here
+shows `current_task` as null for it, whatever its row still stores (`public_current_task`, the PO
+decision of 2026-09-26 on issue:002bce88 -- null and a status, no renamed field). A stopped sprint
+may be resumed, so its card is kept and qualified: `current_task.live` is false. Either way its
+observer is `ended` rather than "waiting to be raised" and its checks are `not_applicable`. Roughly
+sixty closed sprints of this installation read as work in progress until that distinction existed.
 
 **An installation whose config will not validate is a source that refused, not a refusal of the
 operation.** With an explicit data directory and a usable board transport, a caller keeps every
@@ -139,6 +141,7 @@ from secretary.sprints import (
     SprintReader,
     active_sprint_projects,
     audit_traversal,
+    public_current_task,
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
@@ -406,12 +409,11 @@ class SprintSections(SectionSet):
     # -- what one sprint is doing ------------------------------------------------------------
 
     def current_task(self, read: SourceSet) -> Section:
-        """The sprint's current card, and whether it names work or a finished sprint's last card.
+        """The sprint's current card, and whether it names work or a stopped sprint's last card.
 
-        The card of a sprint that ended is a fact worth keeping -- it is where the sprint got to --
-        and it is exactly the field that made roughly sixty closed sprints of this installation read
-        as if they were working. So it is kept and it is qualified: `live` is false for a closed or
-        stopped sprint, and the reason says the card is the record of a sprint that ended.
+        A closed sprint has none: `_subject` already answers null for it, and the reason names no
+        card. A stopped sprint may be resumed, so its card is kept and qualified: `live` is false and
+        the reason says the card is where it stopped, not work in progress.
         """
 
         def from_row(sprint: _Sprint) -> dict[str, Any] | None:
@@ -419,6 +421,8 @@ class SprintSections(SectionSet):
                 return None
             reference, status, current = _subject(sprint)
             terminal = status in SPRINT_TERMINAL_STATUSES
+            if status == "closed":
+                return {"ref": None, "live": False, "reason": f"{reference} is closed; it has no current card"}
             if current is None:
                 return {
                     "ref": None,
@@ -1368,6 +1372,9 @@ class SprintReadLayer(ProtocolBoundary):
         sprint = read.replacing(SOURCE_SPRINTS, (row, view))
         return render(
             {
+                # The sprint's status, before anything else: `secretary sprint status` prints it as
+                # the first key of its one line. Null when the sprint board did not answer.
+                "status": str((row or {}).get("status") or "") or None,
                 "schema_version": SCHEMA_VERSION,
                 "kind": "sprint",
                 "observed_at": sources.isoformat(now),
@@ -1884,13 +1891,18 @@ def _find(read: SourceSet, reference: str) -> _Sprint:
 
 
 def _subject(sprint: _Sprint) -> tuple[str, str, str | None]:
-    """Which sprint a section is about, from the row the sprint board gave: ref, status, card."""
+    """Which sprint a section is about, from the row the sprint board gave: ref, status, card.
+
+    The card is the one a read shows (`public_current_task`): none for a closed sprint, so no
+    section of its document can name the card its row still stores as current.
+    """
     row, view = sprint
     held = view or row or {}
+    status = str(held.get("status") or "")
     return (
         str(held.get("ref") or ""),
-        str(held.get("status") or ""),
-        str(held.get("current_task") or "") or None,
+        status,
+        public_current_task(status, str(held.get("current_task") or "") or None),
     )
 
 
@@ -2472,16 +2484,17 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
     if sprint is None:
         return None
     executors = sprint.get("executors")
+    status = str(sprint.get("status") or "")
     return {
         "ref": str(sprint.get("ref") or ""),
         "goal": str(sprint.get("goal") or ""),
         "definition_of_done": str(sprint.get("definition_of_done") or ""),
-        "status": str(sprint.get("status") or ""),
+        "status": status,
         "product": sprint.get("product"),
         "issues": sprint.get("issues"),
         "reservations": sprint.get("reservations"),
         "repositories": sprint.get("repositories") or [],
-        "current_task": sprint.get("current_task"),
+        "current_task": public_current_task(status, sprint.get("current_task")),
         # Always both roles and always a state, exactly as the reader gives them: "the owner pinned
         # nobody" is an answer and never a missing key.
         "executors": executors if isinstance(executors, dict) else stored_executors({}),

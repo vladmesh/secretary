@@ -1049,8 +1049,9 @@ python3 -P -m secretary sprint status --ref sprint:1431  # one sprint, plus its 
 Both are reads over the same protocol operations and print one JSON document; the listing's
 `sprints.items` entry and the watched sprint's `work` are the same object. Read it in this order:
 
-1. **`status` and `current_task`.** Read `current_task.live`: a closed or stopped sprint keeps the
-   card it ended on with `live: false`.
+1. **`status` and `current_task`.** `sprint status` prints the sprint's `status` as its first key.
+   A closed sprint has no current card: `current_task.ref` is null (as it is in `sprint show`). A
+   stopped sprint keeps the card it stopped on with `live: false`.
 2. **`waiting.state`** (`working`, `waiting`, `blocked`, `ended`, `unknown`) with `waiting.reason` and
    `waiting.source`. `unknown` means the card is in an active column and whether a head is behind it
    could not be established; the reason still names the column.

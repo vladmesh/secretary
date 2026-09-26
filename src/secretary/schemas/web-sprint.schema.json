@@ -962,6 +962,13 @@
         "installation"
       ],
       "properties": {
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The sprint's status (open, closed or stopped), first so `secretary sprint status` names it first. Null when the sprint board did not answer."
+        },
         "schema_version": {
           "type": "integer"
         },
