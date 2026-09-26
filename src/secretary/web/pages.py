@@ -465,6 +465,11 @@ body { padding-bottom: var(--bar-height); }
 .statusbar .credits { display: inline-flex; align-items: baseline; gap: .35rem; font-family: var(--mono); color: var(--ink); }
 .statusbar .credits .dot { color: var(--faint); }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
+.statusbar .bar-reset { font: inherit; font-size: .72rem; padding: 0 .5rem; line-height: 1.4; border-radius: 999px; }
+.statusbar .bar-reset:disabled { opacity: .55; cursor: not-allowed; }
+.statusbar .bar-feedback:empty { display: none; }
+.statusbar .bar-feedback { color: var(--ink); }
+.statusbar .bar-feedback.bad { color: var(--bad); }
 .statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
 .statusbar .bar-refresh input { margin: 0; }
 @media (max-width: 600px) { .statusbar .row { padding: 0 12px; gap: .8rem; } }
@@ -735,7 +740,8 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
         )
     drawn = "".join(_bar_window(window) for window in windows)
     credits = _bar_reset_credits(provider.get("reset_credits"))
-    return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{old}</span>'
+    button = _bar_reset_button(provider.get("reset_credits")) if provider.get("id") == "codex" else ""
+    return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{button}{old}</span>'
 
 
 def _bar_window(window: dict[str, Any]) -> str:
@@ -786,6 +792,39 @@ def _bar_reset_credits(credits: Any) -> str:
                 f'<span class="expires" title="{escape(title)}">{escape(expiry)}</span>'
             )
     return f'<span class="credits">{drawn}</span>'
+
+
+#: The hover title of a reset button with nothing to spend a credit on.
+RESET_NOTHING_TO_RESET = "nothing to reset: no Codex window is exhausted"
+
+
+def _bar_reset_button(credits: Any) -> str:
+    """The button that spends one Codex reset credit, drawn beside the credits label.
+
+    No button when the reading carries no credits or none is available -- a fallback reading never
+    carries any. A disabled one with the reason as its title when no credit is usable now
+    (`applicable` 0 or unknown: no window is exhausted). Enabled only when one is. The click asks the
+    person first, naming what it spends; the operation behind it re-reads the provider and refuses
+    anyway, so a stale page cannot spend a credit this markup offered.
+    """
+    if not isinstance(credits, dict):
+        return ""
+    available = credit_count(credits.get("available"))
+    if not available:
+        return ""
+    feedback = '<span class="bar-feedback" id="codex-reset-feedback" role="status"></span>'
+    applicable = credit_count(credits.get("applicable"))
+    if not applicable:
+        return (
+            f'<button type="button" class="bar-reset" disabled title="{escape(RESET_NOTHING_TO_RESET)}">'
+            f"reset</button>{feedback}"
+        )
+    question = f"Spend 1 of {available} Codex reset credits?"
+    return (
+        '<button type="button" class="bar-reset" data-codex-reset '
+        f'data-confirm="{escape(question)}" title="spend 1 Codex reset credit on the exhausted window">'
+        f"reset</button>{feedback}"
+    )
 
 
 def _bar_no_reading(reason: str) -> str:
@@ -872,7 +911,7 @@ def _page(
             # every page obeys the one rule: nothing reloads while a form holds typed text. One
             # page never carries it at all: the answer to a POST, where a reload is the browser
             # re-sending the submission and asking the reader to confirm it.
-            f"<script>{script}{'' if _FROM_POST.get() else _REFRESH_SCRIPT}</script>",
+            f"<script>{script}{'' if _FROM_POST.get() else _REFRESH_SCRIPT}{_RESET_SCRIPT}</script>",
             "</body></html>",
         ]
     )
@@ -2994,13 +3033,69 @@ _REFRESH_SCRIPT = """
       try { localStorage.setItem('secretary.web.refresh', on ? 'on' : 'off'); } catch (error) {}
     });
   }
-  window.setInterval(() => {
-    if (!on) return;
+  function reloadIfIdle() {
     const active = document.activeElement;
     if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.tagName === 'SELECT')) return;
     for (const field of document.querySelectorAll('textarea, input[type=text], input[type=password], input[type=search], input[type=email], input[type=url], input[type=number], input:not([type])')) if (field.value) return;
     window.location.reload();
+    return true;
+  }
+  // The one reload rule, published for anything else on the page that wants the bar read again
+  // (the Codex reset button): it reloads, or answers false when somebody is typing.
+  window.secretaryReloadWhenIdle = () => reloadIfIdle() === true;
+  window.setInterval(() => {
+    if (!on) return;
+    reloadIfIdle();
   }, 30000);
+})();
+"""
+
+_RESET_SCRIPT = """
+// The Codex reset button on the bar. Every click asks first; the request id is made for the click
+// and kept only while no answer came back, so pressing again after a network failure repeats the
+// same request -- which the operation and the provider both answer once -- and any answer ends it.
+(() => {
+  const button = document.querySelector('button[data-codex-reset]');
+  if (!button) return;
+  const out = document.getElementById('codex-reset-feedback');
+  const KEY = 'secretary.web.request.codex-reset';
+  const WORDS = {reset: 'reset: the Codex limit is reset', already_redeemed: 'already redeemed: this request was spent before',
+    nothing_to_reset: 'nothing to reset', no_credit: 'no credit left', refused: 'refused', error: 'error', unknown: 'unknown'};
+  function say(text, bad) { if (!out) return; out.textContent = text; out.className = 'bar-feedback' + (bad ? ' bad' : ''); }
+  function kept() { try { return sessionStorage.getItem(KEY); } catch (error) { return null; } }
+  function keep(id) { try { if (id) sessionStorage.setItem(KEY, id); else sessionStorage.removeItem(KEY); } catch (error) {} }
+  button.addEventListener('click', async () => {
+    if (!window.confirm(button.dataset.confirm)) return;
+    const id = kept() || ('web-codex-reset-' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()));
+    keep(id);
+    button.disabled = true;
+    say('sending...', false);
+    let response = null, answer = null;
+    try {
+      response = await fetch('/api/providers/codex/reset-limit', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({request_id: id})});
+    } catch (error) {
+      button.disabled = false;
+      say('network failure; press again to repeat the same request', true);
+      return;
+    }
+    keep(null);
+    try { answer = await response.json(); } catch (error) { answer = null; }
+    if (!response.ok || !answer || answer.error) {
+      button.disabled = false;
+      const failure = answer && answer.error ? answer.error.code + ': ' + answer.error.message : 'the answer was not JSON (' + response.status + ')';
+      say(failure, true);
+      return;
+    }
+    const outcome = String(answer.outcome || '');
+    const good = outcome === 'reset' || outcome === 'already_redeemed';
+    say((WORDS[outcome] || outcome) + (answer.reason ? ' — ' + answer.reason : ''), !good);
+    if (!good) { button.disabled = false; return; }
+    // Read the bar again through the page's one reload rule: never while a field holds typed text,
+    // and never on a page that answers a POST, which carries no reload at all.
+    if (outcome === 'reset') window.setTimeout(() => {
+      if (!(window.secretaryReloadWhenIdle && window.secretaryReloadWhenIdle())) say(WORDS.reset + '; reload to read the new limits', false);
+    }, 1500);
+  });
 })();
 """
 

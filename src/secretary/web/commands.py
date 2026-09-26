@@ -26,6 +26,7 @@ from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
+from secretary.webproto.provider_ops import ProviderOperationLayer
 from secretary.webproto.reads import ReadLayer, hold_store_exclusion
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -100,6 +101,8 @@ def run_web_serve(args: argparse.Namespace) -> int:
     # A client of the PO service (`secretary-po.service`): the web starts and recovers no PO turn.
     po = PoLayer(args.instance, data_dir=args.data_dir)
     reads, doctor = health_layers(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
+    # One provider layer for the bar and the reset: a reset clears the cache the next render reads.
+    usage = ProviderUsageLayer()
     app = WebApp(
         reads,
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
@@ -111,11 +114,12 @@ def run_web_serve(args: argparse.Namespace) -> int:
         PauseOperationLayer(args.instance, data_dir=args.data_dir),
         CommandReadLayer(args.instance, data_dir=args.data_dir),
         CardOperationLayer(args.instance, data_dir=args.data_dir),
-        ProviderUsageLayer(),
+        usage,
         doctor,
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
         owner_events=OwnerEventLayer(args.instance),
+        provider_ops=ProviderOperationLayer(args.instance, usage=usage),
     )
     try:
         return serve(app, host=args.host, port=args.port)
