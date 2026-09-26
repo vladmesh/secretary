@@ -30,7 +30,23 @@ in that turn and complete the card before the turn ends:
 
 The body needs two non-empty sections: `## Decision` and `## How to verify` for a decision,
 `## What was done` and `## How to verify` for an operation. A turn that ends with the card still In
-progress Blocks it. Keep the turn short; anything long-running becomes a card.
+progress Blocks it, unless you handed it to the owner. Keep the turn short; anything long-running
+becomes a card.
+
+### Handing a card to the owner
+
+Hand a card over only when a person is needed: money, a key or access only the owner holds, or a
+product decision that is the owner's. An architecture fork is yours: decide it and complete the card.
+Write what the owner has to decide or do to a file, run the command the input quotes and end the turn:
+
+    python3 -P -m secretary task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
+
+The card stays In progress with a visible `waiting_owner` mark, is not Blocked, and the sprint reads as
+waiting on the owner. The owner answers either here, in the sprint's session on the `/po` page, or with
+a card comment (`task comment --role owner`); a comment reaches you as a new input from the dispatcher
+with your reason and the owner's comments since the handover. Complete the card with `task complete` as
+soon as the answer settles it, which takes the mark off. If it does not settle it, say on the card what
+is still missing and end the turn; the card keeps waiting.
 
 ## Memory
 

@@ -108,6 +108,8 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import PRODUCT_ISSUE, SPRINT, board_client
+from secretary.board.completion_evidence import is_po_executed
+from secretary.board.owner_handover import waiting_owner
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.headless import headless_cards
 from secretary.dispatch.observer import (
@@ -775,6 +777,11 @@ class SprintSections(SectionSet):
 
         With every source in hand this changes nothing: the dispatcher's record still decides an
         active column, and the board's columns still decide the ones it settles.
+
+        One active column is the board's to settle after all: a `decision` or `operation` card In
+        progress runs no head, so no record could say a head works it. It is `waiting`, on the PO or,
+        when the PO handed it over, on the owner (secretary-1761). `card` points at the card each
+        answer is about, the sprint's current card, and is null where there is none.
         """
 
         def from_row(sprint: _Sprint) -> dict[str, Any] | None:
@@ -782,21 +789,33 @@ class SprintSections(SectionSet):
             if sprint[1] is None:
                 return None
             if status == "closed":
-                return {"state": WAITING_ENDED, "reason": f"{reference} is closed: nothing is waiting on it"}
+                return {
+                    "state": WAITING_ENDED,
+                    "reason": f"{reference} is closed: nothing is waiting on it",
+                    "card": current,
+                }
             if status == "stopped":
                 stopped = sprint[1].get("stop_reason") or "no reason recorded"
-                return {"state": WAITING_BLOCKED, "reason": f"{reference} was stopped: {stopped}"}
+                return {"state": WAITING_BLOCKED, "reason": f"{reference} was stopped: {stopped}", "card": current}
             if current is None:
                 return {
                     "state": WAITING_WAITING,
                     "reason": f"{reference} has no current card: nobody has cut one for it",
+                    "card": None,
                 }
             return None
 
         def board_holds_it(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
             """A card the board holds in Blocked is blocked, and no record makes it less so."""
-            settled = _board_wait(*_card_of(sprint, linked))
-            return None if settled is None or settled[0] != WAITING_BLOCKED else _said(settled)
+            current, card = _card_of(sprint, linked)
+            settled = _board_wait(current, card)
+            return None if settled is None or settled[0] != WAITING_BLOCKED else _said(settled, current)
+
+        def with_the_po(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+            """An open decision/operation card: the PO has it, or the owner does."""
+            current, card = _card_of(sprint, linked)
+            settled = _po_card_wait(current, card)
+            return None if settled is None else _said(settled, current)
 
         def dispatcher_holds_it(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
             _reference, _status, current = _subject(sprint)
@@ -810,6 +829,7 @@ class SprintSections(SectionSet):
                         f"{current} stands in an active column with no worker the dispatcher can "
                         f"name ({degraded.get('state') or 'no record state'})"
                     ),
+                    "card": current,
                 }
             record = production.record(current)
             if record is None:
@@ -817,11 +837,13 @@ class SprintSections(SectionSet):
             return {
                 "state": WAITING_WORKING,
                 "reason": f"the dispatcher record for {current} is {record.get('state') or 'unnamed'!s}",
+                "card": current,
             }
 
         def board_settled(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-            settled = _board_wait(*_card_of(sprint, linked))
-            return None if settled is None else _said(settled)
+            current, card = _card_of(sprint, linked)
+            settled = _board_wait(current, card)
+            return None if settled is None else _said(settled, current)
 
         def nothing_claimed(sprint: _Sprint, _production: _Production) -> dict[str, Any] | None:
             _reference, _status, current = _subject(sprint)
@@ -832,18 +854,22 @@ class SprintSections(SectionSet):
                 "reason": (
                     f"the dispatcher holds no record for {current}: nothing of it has been claimed yet"
                 ),
+                "card": current,
             }
 
         return read.decide(
             rule(SOURCE_SPRINTS, from_row),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_holds_it),
+            Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), with_the_po),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), dispatcher_holds_it),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_settled),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), nothing_claimed),
-            blank={"state": WAITING_UNKNOWN, "reason": None},
+            blank={"state": WAITING_UNKNOWN, "reason": None, "card": None},
+            narrates=("reason", "card"),
             unresolved=lambda reading: {
                 "state": WAITING_UNKNOWN,
                 "reason": _unsettled_reason(read, reading.source.reason),
+                "card": _current_of(read),
             },
         )
 
@@ -1892,8 +1918,8 @@ def _card_of(
     )
 
 
-def _said(settled: tuple[str, str]) -> dict[str, Any]:
-    return {"state": settled[0], "reason": settled[1]}
+def _said(settled: tuple[str, str], card: str | None) -> dict[str, Any]:
+    return {"state": settled[0], "reason": settled[1], "card": card}
 
 
 def _journal_references(
@@ -2046,6 +2072,21 @@ def _board_wait(reference: str, card: dict[str, Any] | None) -> tuple[str, str] 
             f"{reference} is done: the sprint is waiting for its observer to cut the next card",
         )
     return None
+
+
+def _po_card_wait(reference: str | None, card: dict[str, Any] | None) -> tuple[str, str] | None:
+    """Where an In progress `decision`/`operation` current card puts its sprint, or `None`.
+
+    Such a card runs no head: the dispatcher handed it to the sprint's PO session, and the PO either
+    completes it or hands it to the owner (`task handover`), whose mark the card carries.
+    """
+    if card is None or not is_po_executed(card) or str(card.get("state") or "") != "in_progress":
+        return None
+    kind = str(card.get("type") or "")
+    mark = waiting_owner(card)
+    if mark is not None:
+        return WAITING_WAITING, f"{reference} ({kind}) is handed to the owner: {mark['reason']}"
+    return WAITING_WAITING, f"{reference} ({kind}) is with the PO"
 
 
 def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:

@@ -654,7 +654,7 @@ class PersistedRoutingHeadSnapshot(dict[str, Any]):
 class PoSubmission:
     """A `decision`/`operation` card handed to its sprint's PO session (secretary-1758).
 
-    Empty (`kind == ""`) on every record of a card a head runs. The three request ids are derived at
+    Empty (`kind == ""`) on every record of a card a head runs. The request ids are derived at
     claim from the card ref and the claim attempt and never change afterwards: an unanswered resolve
     or submit is repeated under the same id, because a fresh one can open a second PO session. The
     input text is frozen the first time it is composed for the same reason, since the service binds
@@ -666,6 +666,8 @@ class PoSubmission:
     session_request_id: str = ""
     submit_request_id: str = ""
     complete_request_id: str = ""
+    # The id the input offers the PO for `task handover` (secretary-1761); empty on a record of card 3.
+    handover_request_id: str = ""
     # The resolve's answer: the session, and whether the service opened it (`created`) or the
     # sprint already recorded it (`recorded`).
     session_id: str = ""
@@ -677,6 +679,13 @@ class PoSubmission:
     # Consecutive resolve/submit calls the service did not answer, and what the last one said.
     unanswered: int = 0
     last_error: str = ""
+    # The latest follow-up input carrying the owner's answer to a card the PO handed to the owner
+    # (secretary-1761): the owner comment's event id it answers, its request id (derived from the
+    # card ref and that event id), its frozen text, and whether the service accepted it.
+    owner_event_id: str = ""
+    owner_request_id: str = ""
+    owner_text: str = ""
+    owner_submitted: bool = False
 
     def __bool__(self) -> bool:
         return bool(self.kind)
@@ -688,6 +697,7 @@ class PoSubmission:
             "session_request_id": self.session_request_id,
             "submit_request_id": self.submit_request_id,
             "complete_request_id": self.complete_request_id,
+            "handover_request_id": self.handover_request_id,
             "session_id": self.session_id,
             "session_outcome": self.session_outcome,
             "text": self.text,
@@ -695,6 +705,10 @@ class PoSubmission:
             "seq": self.seq,
             "unanswered": self.unanswered,
             "last_error": self.last_error,
+            "owner_event_id": self.owner_event_id,
+            "owner_request_id": self.owner_request_id,
+            "owner_text": self.owner_text,
+            "owner_submitted": self.owner_submitted,
         }
 
     @classmethod
@@ -708,6 +722,7 @@ class PoSubmission:
             session_request_id=str(payload.get("session_request_id") or ""),
             submit_request_id=str(payload.get("submit_request_id") or ""),
             complete_request_id=str(payload.get("complete_request_id") or ""),
+            handover_request_id=str(payload.get("handover_request_id") or ""),
             session_id=str(payload.get("session_id") or ""),
             session_outcome=str(payload.get("session_outcome") or ""),
             text=str(payload.get("text") or ""),
@@ -715,6 +730,10 @@ class PoSubmission:
             seq=seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
             unanswered=int(payload.get("unanswered") or 0),
             last_error=str(payload.get("last_error") or ""),
+            owner_event_id=str(payload.get("owner_event_id") or ""),
+            owner_request_id=str(payload.get("owner_request_id") or ""),
+            owner_text=str(payload.get("owner_text") or ""),
+            owner_submitted=bool(payload.get("owner_submitted", False)),
         )
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from secretary.board.backend import card_client
 from secretary.board.models import CardState
+from secretary.board.owner_handover import OWNER, OWNER_ROLE
 from secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
 from secretary.board.task_routing import (
     PO_EXECUTED_TYPES,
@@ -192,7 +193,8 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument(
             "--role",
             required=True,
-            choices=_role_choices(BOARD_ROLES),
+            # The owner answers a card handed to it with a comment, and does nothing else here.
+            choices=_role_choices(BOARD_ROLES) + ((OWNER_ROLE,) if name == "comment" else ()),
         )
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         _add_data_dir_args(command)
@@ -250,6 +252,21 @@ def add_task_subcommands(subparsers) -> None:
         "'## How to verify', both non-empty",
     )
     task_complete.set_defaults(handler=run_task_complete)
+    task_handover = task_subcommands.add_parser(
+        "handover",
+        help="PO only: hand an In progress decision or operation card to the owner; it stays In progress "
+        "and waits for the owner's answer",
+    )
+    task_handover.add_argument("--ref", required=True)
+    task_handover.add_argument("--role", required=True, choices=(Role.PO.value,))
+    task_handover.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_handover)
+    task_handover.add_argument("--request-id")
+    task_handover.add_argument("--to", required=True, choices=(OWNER,))
+    reason = task_handover.add_mutually_exclusive_group(required=True)
+    reason.add_argument("--reason", help="what the owner has to decide or do")
+    reason.add_argument("--reason-file")
+    task_handover.set_defaults(handler=run_task_handover)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
     task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
@@ -457,6 +474,20 @@ def run_task_complete(args: argparse.Namespace) -> int:
             reference=args.ref,
             kind=args.kind,
             body=body,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_task_handover(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.handover(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            to=args.to,
+            reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
         ),
     )

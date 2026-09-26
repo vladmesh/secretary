@@ -2431,6 +2431,95 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.writer.claim(role="dispatcher", actor="d", reference="secretary-468", worker="secretary-468-runtime")
         self.assertEqual(self.card_state("secretary-468"), "in_progress")
 
+    # --- handover to the owner (secretary-1761) -----------------------------------------------
+
+    HANDOVER_REASON = "Pay the relay provider: the owner holds the card."
+
+    def hand_over(self, reference: str, request_id: str, reason: str = HANDOVER_REASON) -> dict:
+        return self.writer.handover(
+            role="po", actor="po", reference=reference, to="owner", reason=reason, request_id=request_id
+        )
+
+    def refusing_comments(self):
+        served = self.client.call
+
+        def refuse(method: str, **params: object) -> object:
+            if method == "createComment":
+                raise TaskError("backend_error", "the board refused the comment write", 1)
+            return served(method, **params)
+
+        return mock.patch.object(self.client, "call", side_effect=refuse)
+
+    def test_handover_marks_and_comments_in_one_write_and_repeats_as_a_replay(self) -> None:
+        reference = self.in_progress_decision("secretary-594")
+
+        first = self.hand_over(reference, "handover-594")
+        after = self.board_snapshot()
+        again = self.hand_over(reference, "handover-594")
+
+        self.assertEqual((first["replayed"], again["replayed"]), (False, True))
+        self.assertEqual(first["event_id"], again["event_id"])
+        self.assertBoardUnchanged(after)
+        card = self.card(reference)
+        self.assertEqual(card["state"], "in_progress")
+        self.assertEqual((card["waiting_owner"]["reason"], card["waiting_owner"]["by"]), (self.HANDOVER_REASON, "po"))
+        self.assertEqual(self.card_extension(reference, "waiting_owner_reason"), self.HANDOVER_REASON)
+        [comment] = [body for body in self.card_comments(reference) if "[handover:owner]" in body]
+        self.assertTrue(comment.startswith("[po]\n[handover:owner]\n"))
+        [event] = [e for e in self.writer.audit.events(reference) if e.get("kind") == "handed_to_owner"]
+        self.assertEqual((event["request_id"], event["payload"]["to"]), ("handover-594", "owner"))
+        [listed] = [task for task in self.writer.reader.list() if task["ref"] == reference]
+        self.assertEqual(listed["waiting_owner"], card["waiting_owner"])
+
+        with self.assertRaises(TaskError) as raised:
+            self.hand_over(reference, "handover-594-again", reason="Another reason.")
+        self.assertEqual(raised.exception.code, "already_handed_over")
+        self.assertBoardUnchanged(after)
+
+    def test_a_handover_that_fails_after_its_mark_leaves_nothing(self) -> None:
+        reference = self.in_progress_decision("secretary-595")
+        before = self.board_snapshot()
+
+        with self.refusing_comments(), self.assertRaises(TaskError):
+            self.hand_over(reference, "handover-595")
+
+        self.assertBoardUnchanged(before)
+        self.assertNotIn("waiting_owner", self.card(reference))
+        self.assertIsNone(self.card_extension(reference, "waiting_owner"))
+        self.assertIsNone(self.writer.audit.committed_event("handover-595"))
+
+    def test_complete_clears_the_mark_with_the_done_and_a_failed_completion_keeps_both(self) -> None:
+        reference = self.in_progress_decision("secretary-596")
+        self.hand_over(reference, "handover-596")
+        before = self.board_snapshot()
+
+        with self.refusing_comments(), self.assertRaises(TaskError):
+            self.writer.complete(
+                role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+                request_id="complete-596",
+            )
+        self.assertBoardUnchanged(before)
+        self.assertEqual(self.card(reference)["waiting_owner"]["reason"], self.HANDOVER_REASON)
+
+        self.writer.complete(
+            role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-596",
+        )
+
+        card = self.card(reference)
+        self.assertEqual(card["state"], "done")
+        self.assertNotIn("waiting_owner", card)
+        for key in ("waiting_owner", "waiting_owner_reason", "waiting_owner_by"):
+            self.assertIsNone(self.card_extension(reference, key), key)
+
+    def test_the_owner_comments_on_any_card_as_the_owner(self) -> None:
+        self.writer.comment(role="owner", actor="po", reference="secretary-468", body="Yes.", request_id="owner-468")
+
+        self.assertEqual(self.card_comments("secretary-468")[-1], "[owner]\nYes.")
+        self.assertEqual(self.card("secretary-468")["comments"][-1]["marker"], "owner")
+        event = self.writer.audit.committed_event("owner-468")
+        self.assertEqual((event["kind"], event["actor"], event["payload"]["marker"]), ("commented", {"role": "owner", "id": "owner"}, "owner"))
+
 
 class DoneRetentionTests(CardStoreCase):
     def setUp(self) -> None:

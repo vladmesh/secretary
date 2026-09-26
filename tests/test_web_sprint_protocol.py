@@ -1354,6 +1354,44 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
         self.assertEqual(active["state"], sprint_reads_module.WAITING_WAITING)
         self.assertIn("holds no record", active["reason"])
 
+    def test_an_open_decision_card_waits_on_the_po_and_then_on_the_owner(self) -> None:
+        """secretary-1761: no head runs it, so its record is not `working`; the reason says who has it."""
+        from secretary.board.owner_handover import waiting_owner
+
+        reference = self.reference_of(self.create())
+        bind_observer(self, reference)
+        writer = TaskWriter(self.board, data_dir=self.data_dir)
+        card = str(
+            writer.create(
+                role="observer", actor="observer", project="secretary", task_type="decision",
+                title="the question", sprint=reference,
+            )["task"]["ref"]
+        )
+        self._current_task(reference, card)
+        self._move(card, "In progress")
+        self._production({}, {card: {"state": "po_submitted"}})
+
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation, holder="po"):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertEqual(waiting["reason"], f"{card} (decision) is with the PO")
+                self.assertEqual(waiting["card"], card)
+
+        writer.handover(
+            role="po", actor="po", reference=card, to="owner", reason="The owner holds the payment card."
+        )
+        self.assertIsNotNone(waiting_owner(writer.reader.show(card)))
+
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation, holder="owner"):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertEqual(
+                    waiting["reason"], f"{card} (decision) is handed to the owner: The owner holds the payment card."
+                )
+                self.assertEqual(waiting["card"], card)
+
     def test_a_dispatcher_record_still_decides_an_active_column(self) -> None:
         """The board deliberately settles nothing here: a column is not evidence of a head."""
         reference, card = self._sprint_on_a_card()

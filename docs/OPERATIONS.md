@@ -424,11 +424,14 @@ secretary sprint show --ref sprint:ID | jq '.comments[] | select(.body | contain
 and one `submit` with `source: dispatcher` per claimed card, under request ids derived from the card
 ref and the claim attempt. It repeats an unanswered request with the same id on its next tick and
 never starts a turn itself. After the submit it reads only the store (`po_requests` for the turn its
-input became, `po_turns` for that turn's state), never the service. The input is queued like any other,
-so it waits behind the sprint session's seed or a running owner turn. Check what it did for a card:
+input became, `po_turns` for that turn's state) and the queue directory (an input set aside in
+`po-queue/refused/` Blocks the card), never the service. The input is queued like any other, so it
+waits behind the sprint session's seed or a running owner turn. A card the PO handed to the owner
+(`task handover`) waits instead of Blocking; each owner comment on it becomes one follow-up `submit`
+(`owner_request_id`, `owner_submitted` on the record). Check what it did for a card:
 
 ```bash
-jq '.records["REF"].po_submission | del(.text)' DATA_DIR/dispatcher/production-state.json
+jq '.records["REF"].po_submission | del(.text, .owner_text)' DATA_DIR/dispatcher/production-state.json
 ```
 
 **Service start.** Every turn left `running` is looked at once:

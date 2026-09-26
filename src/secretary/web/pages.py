@@ -1204,6 +1204,7 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
             f'<span class="push">{_waiting_chip(item)}{attention}</span></header>',
             f'<p class="goal clamp">{escape(str(item.get("goal") or ""))}</p>',
             _current_card_box(item),
+            _waiting_line(item),
             f'<div class="heads-line">{heads}</div>' if heads else "",
             _budget_line(budget) if budget else "",
             "</article>",
@@ -1294,6 +1295,20 @@ def _waiting_chip(item: dict[str, Any]) -> str:
     return (
         f'<span title="{escape(str(waiting.get("reason") or ""))}">{_chip("observer " + state, tone)}</span>'
     )
+
+
+def _waiting_line(item: dict[str, Any]) -> str:
+    """What a waiting sprint waits on, in words and with the card it points at.
+
+    The chip carries the same reason only as a hover title; a sprint whose decision or operation card
+    is with the PO, or handed to the owner, has to say so where it can be read at a glance.
+    """
+    waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
+    if waiting.get("state") != "waiting" or not waiting.get("reason"):
+        return ""
+    card = str(waiting.get("card") or "")
+    pointer = f" {_link(card)}" if card else ""
+    return f'<div class="reason">waiting: {escape(_short(waiting.get("reason"), 160))}{pointer}</div>'
 
 
 #: Said where a duration would be when the committed audit dates no transition of the current card.
@@ -1874,6 +1889,11 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
     kind = " · ".join(str(part) for part in (value.get("type"), routing.get("complexity")) if part)
     if kind:
         chips.append(_chip(kind))
+    handed = value.get("waiting_owner") if isinstance(value.get("waiting_owner"), dict) else None
+    if handed:
+        chips.append(
+            f'<span title="{escape(str(handed.get("reason") or ""))}">{_chip("waiting for the owner", "warn")}</span>'
+        )
     event_items = list(events.get("items") or [])
     sprint_ref = str(value.get("sprint") or "")
     crumbs: tuple[tuple[str, str], ...] = ((ref, ""),)
@@ -2170,6 +2190,13 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
     ]
     if card.get("blocked_by"):
         rows.append(["blocked by", _or_dash(card.get("blocked_by"))])
+    handed = card.get("waiting_owner") if isinstance(card.get("waiting_owner"), dict) else None
+    if handed:
+        said = (
+            f'{_or_dash(handed.get("reason"))} <span class="age">(by {_or_dash(handed.get("by"))} '
+            f'at {_or_dash(handed.get("since"))})</span>'
+        )
+        rows.append(["handed to the owner", said])
     return _rows(["", ""], rows)
 
 
