@@ -387,10 +387,8 @@ the card ref, the handover reason, the owner's comments since the handover in bo
 completion command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
 comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
 rebuilt record never makes a second input for the same comment. It carries the card's facts with
-`input: owner_answer`, which the service does not check against the sprint's productions. When the PO
-service handed the card over ([Production rights](#production-rights)), the PO has not seen the card
-yet, so the follow-up also carries the card body and says the service handed it over; a later owner comment makes one more
-follow-up, carrying every comment since the handover. A follow-up the service does not answer is
+`input: owner_answer`, which the service does not check against the sprint's productions. A later
+owner comment makes one more follow-up, carrying every comment since the handover. A follow-up the service does not answer is
 repeated next tick under the same id; one it refuses outright (its session closed, say) Blocks the card
 with `the PO service refused the owner answer of this card: <reason>`, and one it set aside in
 `po-queue/refused/` Blocks it with `the PO service set the owner's answer aside and will not run it:
