@@ -95,8 +95,6 @@ SPRINT_REFERENCE_PREFIX = "sprint:"
 #: it, and the registered projects whose production its operations may touch.
 PO_SESSION_FIELD = "sprint_po_session"
 ALLOWED_PRODUCTIONS_FIELD = "sprint_allowed_productions"
-#: The audit kind of the PO service recording a fresh session on a sprint (`SprintWriter.set_po_session`).
-PO_SESSION_SET = "po_session_set"
 SPRINT_METADATA = {
     "sprint_goal",
     "sprint_definition_of_done",
@@ -1815,8 +1813,10 @@ class SprintWriter:
                 "saveTaskMetadata", task_id=_sprint_number(sprint), values={PO_SESSION_FIELD: session_id}
             )
 
+        # A literal kind, like every `_write` call: the terminal-write table of docs/PROTOCOLS.md
+        # is pinned by a test that reads the kinds from these calls.
         return self._write(
-            PO_SESSION_SET, role, actor, reference, request_id, {"po_session": session_id}, mutation
+            "po_session_set", role, actor, reference, request_id, {"po_session": session_id}, mutation
         )
 
     @_sql_atomic

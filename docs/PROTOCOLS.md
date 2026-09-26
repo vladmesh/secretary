@@ -998,12 +998,15 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `po_session_set` | `accepted` |
 | `restored` | `accepted` |
 | `resume_recorded` | `refused` — `closed`, exit status `3` |
 
 A late budget charge updates the totals `show` reports but cannot stop the sprint again or change its
 status (the hard-limit edge is taken only from `open`). A restore rebuilds fields from a backup and is
-accepted on any status.
+accepted on any status. `po_session_set` is written only by the PO service's resolver, which refuses to
+start a re-seed on a sprint that is not open; a repeat that finishes one begun while the sprint was open
+still records its session.
 
 ### Budget
 

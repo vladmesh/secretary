@@ -54,7 +54,9 @@ def default_session_choice(models: Mapping[str, Any]) -> tuple[str, str] | None:
     """The CLI and model a new session is opened with when nobody chose: the web form's preselection.
 
     The first CLI that offers any model, and the first model it lists; None when no CLI offers one.
-    The effort of such a session is `default`.
+    The effort of such a session is `default`. The web's new-session form (`web/pages.py`,
+    `_po_new_session_form`) preselects by the same rule over the same `po_models` document; the web
+    transport imports nothing outside `secretary.web`/`secretary.webproto`, so it spells it itself.
     """
     for cli, values in models.items():
         listed = [str(value) for value in values or () if str(value).strip()]
