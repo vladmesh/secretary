@@ -29,7 +29,7 @@ def test_live_usage_is_compact_and_credentials_never_leave_headers(tmp_path: Pat
         calls.append((url, headers, timeout))
         if url == CLAUDE_USAGE_URL:
             return {
-                "five_hour": {"utilization": 0.26, "resets_at": NOW + 100},
+                "five_hour": {"utilization": 26.0, "resets_at": NOW + 100},
                 "seven_day": {"utilization": 72, "resets_at": NOW + 200},
             }
         assert url == CODEX_USAGE_URL
@@ -308,3 +308,116 @@ class BoundedCodexFallbackTest(unittest.TestCase):
         self.assertIsNone(found)
         self.assertEqual(counts["listings"], provider_usage.CODEX_FALLBACK_LISTINGS)
         self.assertEqual(counts["opens"], 0)
+
+
+# The rollout shape Codex writes today: `payload.rate_limits` beside `payload.info`.  The structure is
+# copied from a real token_count event; the values are made up.
+
+
+def current_rollout_event(when: str, *, resets_at: float) -> dict[str, object]:
+    return {
+        "timestamp": when,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 2}},
+            "rate_limits": {
+                "limit_id": "codex",
+                "limit_name": None,
+                "primary": {"used_percent": 97.0, "window_minutes": 10080, "resets_at": resets_at},
+                "secondary": None,
+                "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+                "individual_limit": None,
+                "spend_control_reached": None,
+                "plan_type": "plus",
+                "rate_limit_reached_type": None,
+            },
+        },
+    }
+
+
+class CurrentRolloutShapeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name)
+        write(self.home / ".codex/auth.json", {"tokens": {"access_token": "secret", "account_id": "acct"}})
+
+    def write_rollout(self, name: str, lines: list[dict[str, object]]) -> None:
+        path = self.home / ".codex/sessions/2026/09/26" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+    def usage_when_the_live_source_fails(self) -> dict[str, object]:
+        def fail(*_args):
+            raise TimeoutError
+
+        return ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW)._codex(NOW)
+
+    def test_the_current_shape_gives_a_reading_when_the_live_source_fails(self) -> None:
+        observed = datetime.fromtimestamp(NOW - 60, UTC).isoformat().replace("+00:00", "Z")
+        self.write_rollout(
+            "rollout-2026-09-26T12-34-31-a.jsonl",
+            [
+                {"type": "session_meta", "payload": {"id": "a"}},
+                current_rollout_event(observed, resets_at=NOW + 600),
+            ],
+        )
+        codex = self.usage_when_the_live_source_fails()
+        self.assertEqual(codex["status"], "available")
+        self.assertEqual(
+            codex["windows"],
+            [
+                {
+                    "name": "weekly",
+                    "window_minutes": 10080,
+                    "remaining_percent": 3.0,
+                    "resets_at": provider_usage._iso(NOW + 600),
+                }
+            ],
+            "primary set and secondary null is one window, named by its length",
+        )
+        self.assertEqual(codex["age_seconds"], 60.0)
+
+    def test_an_old_current_shape_event_is_stale_and_keeps_its_raw_reset(self) -> None:
+        self.write_rollout(
+            "rollout-2026-01-01T00-00-00-a.jsonl",
+            [current_rollout_event("2026-01-01T00:00:00Z", resets_at=NOW - 3600)],
+        )
+        codex = self.usage_when_the_live_source_fails()
+        self.assertEqual(codex["status"], "stale")
+        self.assertEqual([window["name"] for window in codex["windows"]], ["weekly"])
+        self.assertEqual(codex["windows"][0]["resets_at"], provider_usage._iso(NOW - 3600))
+
+    def test_one_helper_reads_both_shapes_and_nothing_else(self) -> None:
+        limits = {"primary": {"used_percent": 1}}
+        read = ProviderUsageLayer._event_rate_limits
+        self.assertIs(read({"payload": {"rate_limits": limits, "info": None}}), limits)
+        self.assertIs(read({"payload": {"info": {"rate_limits": limits}}}), limits)
+        self.assertIs(read({"payload": {"rate_limits": limits, "info": {"rate_limits": {}}}}), limits)
+        for event in (
+            None,
+            [],
+            {"payload": None},
+            {"payload": {"rate_limits": None, "info": None}},
+            {"payload": {"info": {"rate_limits": []}}},
+            {"payload": {"type": "turn"}},
+        ):
+            with self.subTest(event=event):
+                self.assertIsNone(read(event))
+
+
+class ClaudeUtilizationTest(unittest.TestCase):
+    def test_utilization_is_a_percentage_and_never_a_fraction(self) -> None:
+        for utilization, left in ((1.0, 99.0), (0.5, 99.5), (4.0, 96.0), (26, 74.0), (100.0, 0.0)):
+            with self.subTest(utilization=utilization):
+                window = provider_usage._window("5-hour", {"utilization": utilization}, default_minutes=300)
+                assert window is not None
+                self.assertEqual(window["remaining_percent"], left)
+
+    def test_used_percent_is_read_as_before(self) -> None:
+        for key in ("used_percent", "used_percentage"):
+            with self.subTest(key=key):
+                window = provider_usage._window("weekly", {key: 41, "utilization": 3.0})
+                assert window is not None
+                self.assertEqual(window["remaining_percent"], 59.0)

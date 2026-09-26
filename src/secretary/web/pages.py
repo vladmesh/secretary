@@ -28,7 +28,7 @@ import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
 from urllib.parse import quote
@@ -458,6 +458,7 @@ body { padding-bottom: var(--bar-height); }
 /* The chips sit side by side on one line, so a fixed column for the percentage only opens a hole
    between a window's name and its figure: the figure follows the name at the chip's own gap. */
 .statusbar .window > b { font-variant-numeric: tabular-nums; }
+.statusbar .window > b.stale { color: var(--warn); font-weight: 500; }
 .statusbar .window .dot { color: var(--faint); }
 .resets { color: var(--muted); font-variant-numeric: tabular-nums; }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
@@ -729,13 +730,25 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
             f'<span class="provider"><b>{shown}</b>'
             f"{_bar_no_reading('this reading carried no usage window')}{old}</span>"
         )
-    drawn = "".join(
-        f'<span class="window"><span class="win-name">{escape(str(window.get("name") or "window"))}</span>'
-        f"<b>{_percent(window.get('remaining_percent'))}</b>"
-        f'<span class="dot">·</span>{_reset(window.get("resets_at"))}</span>'
-        for window in windows
-    )
+    drawn = "".join(_bar_window(window) for window in windows)
     return f'<span class="provider"><b>{shown}</b>{drawn}{old}</span>'
+
+
+def _bar_window(window: dict[str, Any]) -> str:
+    """One usage window's chip: its name, what is left, and the time to its next reset.
+
+    A reading whose reset has come and gone describes a window that no longer runs, so its
+    percentage is drawn as stale rather than as a figure somebody would read as what is left now.
+    """
+    countdown, predates_reset = _reset_reading(window.get("resets_at"), window.get("window_minutes"))
+    if predates_reset:
+        figure = f'<b class="stale" title="{escape(READING_PREDATES_RESET)}">stale</b>'
+    else:
+        figure = f"<b>{_percent(window.get('remaining_percent'))}</b>"
+    return (
+        f'<span class="window"><span class="win-name">{escape(str(window.get("name") or "window"))}</span>'
+        f'{figure}<span class="dot">·</span>{countdown}</span>'
+    )
 
 
 def _bar_no_reading(reason: str) -> str:
@@ -938,13 +951,21 @@ def _reset_moment(value: Any) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
+#: The hover title of a percentage that is not drawn, because the window it measured has reset since.
+READING_PREDATES_RESET = "this reading predates the last reset of its window, so what is left now is unknown"
+
+#: The longest window a reset is rolled forward by. A longer one is no usage window this bar knows,
+#: and is treated as no window length at all rather than counted down over centuries.
+LONGEST_WINDOW_MINUTES = 366 * 24 * 60
+
+
 def _time_left(seconds: float) -> str:
-    """A reset as the time left until it: the one spelling of that rule in this module."""
+    """A reset as the time left until it: the one spelling of that rule in this module.
+
+    It is only ever asked about a moment still ahead -- `_reset_reading` rolls a past one forward
+    first -- so anything under a minute, a rounded-down zero included, is less than a minute.
+    """
     total = int(seconds)
-    if total <= 0:
-        # Never a negative duration and never a bare zero: a zero beside a percentage reads as a
-        # window that is resetting right now, and this one is a reading that has simply aged out.
-        return "reset already passed"
     if total < 60:
         return "less than a minute left"
     # A unit belongs to the number in front of it: `1h 6m`, never `1 h 6 m`, where the spaces make
@@ -959,8 +980,20 @@ def _time_left(seconds: float) -> str:
     return f"{days}d {hours}h left"
 
 
-def _reset(resets_at: Any) -> str:
-    """A usage window's reset, drawn once for both the bar and the dashboard panel.
+def _window_length(value: Any) -> int | None:
+    """A window's length in minutes when it is one a reset can be rolled forward by, else `None`."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if 0 < value <= LONGEST_WINDOW_MINUTES else None
+
+
+def _reset(resets_at: Any, window_minutes: Any = None) -> str:
+    """A usage window's reset as the time left until it; see :func:`_reset_reading`."""
+    return _reset_reading(resets_at, window_minutes)[0]
+
+
+def _reset_reading(resets_at: Any, window_minutes: Any = None) -> tuple[str, bool]:
+    """A usage window's reset, and whether the reading predates it: the one place both are decided.
 
     What is shown is how long is left, because that is what a reader of a usage window wants and
     an ISO moment is not it. The moment is not lost: it is the element's hover title, wherever
@@ -971,16 +1004,36 @@ def _reset(resets_at: Any) -> str:
     `observed_at`. The reading is served from a cache that may be up to `CACHE_SECONDS` old, so
     counting from when it was observed would keep showing the time that was left then and overstate
     what is left now; the page is drawn now, so now is what it counts from.
+
+    A reset at or before now has happened, so the window running now resets whole window lengths
+    later: the moment is rolled forward to the first of those still ahead, and the second value is
+    true because the reading's percentage belongs to the window before. The number of lengths is
+    divided out, never stepped, so a far-past moment costs the same as a recent one. A past reset
+    with no usable window length cannot be rolled, and is said as no reset recorded.
     """
     moment = _reset_moment(resets_at)
     if moment is None:
-        return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>'
+        return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>', False
     clock = _RENDER_CLOCK.get()
     now = clock() if clock is not None else datetime.now(UTC)
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
-    left = _time_left((moment - now).total_seconds())
-    return f'<span class="resets" title="{escape(str(resets_at))}">{escape(left)}</span>'
+    try:
+        ahead = (moment - now) // timedelta(microseconds=1)
+    except (OverflowError, ValueError):
+        return f'<span class="resets">{escape(NO_RESET_RECORDED)}</span>', False
+    if ahead > 0:
+        left = _time_left(ahead / 1_000_000)
+        return f'<span class="resets" title="{escape(str(resets_at))}">{escape(left)}</span>', False
+    minutes = _window_length(window_minutes)
+    if minutes is None:
+        title = f"the recorded reset {resets_at} has come, and no window length says when the next one is"
+        return f'<span class="resets" title="{escape(title)}">{escape(NO_RESET_RECORDED)}</span>', True
+    period = minutes * 60_000_000
+    left_us = period - (-ahead) % period
+    title = f"rolled forward by whole {minutes}-minute windows from the recorded reset {resets_at}"
+    left = _time_left(left_us / 1_000_000)
+    return f'<span class="resets" title="{escape(title)}">{escape(left)}</span>', True
 
 
 def _percent(remaining: Any) -> str:

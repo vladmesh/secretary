@@ -50,9 +50,9 @@ def _window(name: str, raw: Any, *, default_minutes: int | None = None) -> dict[
     if not isinstance(raw, dict):
         return None
     used = _number(raw.get("used_percent", raw.get("used_percentage")))
-    utilization = _number(raw.get("utilization"))
-    if used is None and utilization is not None:
-        used = utilization * 100 if utilization <= 1 else utilization
+    if used is None:
+        # Claude's `utilization` is already a percentage: a fresh window reads 1.0, not 0.01.
+        used = _number(raw.get("utilization"))
     if used is None:
         return None
     minutes = raw.get("window_minutes")
@@ -211,10 +211,10 @@ class ProviderUsageLayer:
             for line in self._tail_lines(path):
                 try:
                     event = json.loads(line)
-                    limits = event["payload"]["info"]["rate_limits"]
-                except (json.JSONDecodeError, KeyError, TypeError):
+                except json.JSONDecodeError:
                     continue
-                if isinstance(limits, dict):
+                limits = self._event_rate_limits(event)
+                if limits is not None:
                     timestamp = event.get("timestamp")
                     try:
                         source_time = datetime.fromisoformat(timestamp).timestamp()
@@ -222,6 +222,23 @@ class ProviderUsageLayer:
                         source_time = mtime
                     return limits, source_time
         return None
+
+    @staticmethod
+    def _event_rate_limits(event: Any) -> dict[str, Any] | None:
+        """The rate-limit document a rollout event carries, in the current or the older shape.
+
+        Current rollouts put it at `payload.rate_limits` beside `payload.info`; older ones nested it
+        at `payload.info.rate_limits`.
+        """
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        limits = payload.get("rate_limits")
+        if isinstance(limits, dict):
+            return limits
+        info = payload.get("info")
+        limits = info.get("rate_limits") if isinstance(info, dict) else None
+        return limits if isinstance(limits, dict) else None
 
     def _newest_codex_rollouts(self) -> list[tuple[Path, float]]:
         """Return up to CODEX_FALLBACK_FILES rollouts from the newest days, newest mtime first.

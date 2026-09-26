@@ -514,8 +514,8 @@ class BarCostsNoExtraReadTests(RouteFixture):
         self.fetched.append(url)
         if url == CLAUDE_USAGE_URL:
             return {
-                "five_hour": {"utilization": 0.26, "resets_at": self.clock + 100},
-                "seven_day": {"utilization": 0.09, "resets_at": self.clock + 200},
+                "five_hour": {"utilization": 26.0, "resets_at": self.clock + 100},
+                "seven_day": {"utilization": 9.0, "resets_at": self.clock + 200},
             }
         return {
             "rate_limit": {
@@ -636,15 +636,81 @@ class ResetRenderingTests(unittest.TestCase):
         self.assertIn(">less than a minute left<", drawn)
         self.assertNotIn("0m left", drawn)
 
-    def test_a_moment_already_past_is_said_as_past_and_never_as_a_negative_or_a_zero(self) -> None:
-        drawn = self.left("2026-09-20T11:00:00Z")
-        self.assertIn(">reset already passed<", drawn)
+    def rolled(self, resets_at: Any, window_minutes: Any, *, minutes: float = 0.0) -> tuple[str, bool]:
+        now = RENDERED_AT + timedelta(minutes=minutes)
+        with pages.render_clock(lambda: now):
+            return pages._reset_reading(resets_at, window_minutes)
+
+    def test_a_moment_already_past_rolls_forward_by_its_window(self) -> None:
+        """A reset ten minutes ago on a 5-hour window means the running window resets in 4h 50m."""
+        drawn, predates = self.rolled("2026-09-20T11:50:00Z", 300)
+        self.assertIn(">4h 50m left<", drawn)
+        self.assertTrue(predates, "the reading belongs to the window before the reset")
         text = drawn.split(">")[1].split("<")[0]
         self.assertNotIn("-", text, "never a negative duration")
-        self.assertNotIn("0", text, "and never a zero that could read as live")
 
-    def test_the_exact_moment_at_the_reset_is_past_rather_than_a_live_zero(self) -> None:
-        self.assertIn(">reset already passed<", self.left("2026-09-20T12:00:00Z"))
+    def test_several_windows_back_rolls_to_the_same_next_reset(self) -> None:
+        # 2 x 300 min + 10 min ago.
+        drawn, predates = self.rolled("2026-09-20T01:50:00Z", 300)
+        self.assertIn(">4h 50m left<", drawn)
+        self.assertTrue(predates)
+
+    def test_the_exact_moment_at_the_reset_starts_a_whole_new_window(self) -> None:
+        drawn, predates = self.rolled("2026-09-20T12:00:00Z", 300)
+        self.assertIn(">5h 0m left<", drawn)
+        self.assertTrue(predates)
+
+    def test_a_moment_still_ahead_is_not_rolled_and_its_reading_is_current(self) -> None:
+        drawn, predates = self.rolled("2026-09-20T18:00:00Z", 300)
+        self.assertIn(">6h 0m left<", drawn)
+        self.assertFalse(predates)
+
+    def test_a_moment_a_fraction_of_a_second_ahead_is_less_than_a_minute(self) -> None:
+        drawn, predates = self.rolled("2026-09-20T12:00:00.400000Z", 300)
+        self.assertIn(">less than a minute left<", drawn)
+        self.assertFalse(predates)
+
+    def test_a_past_moment_with_no_usable_window_says_no_reset_recorded(self) -> None:
+        for minutes in (None, 0, -300, True, False, 300.0, "300", 1e300):
+            with self.subTest(window_minutes=minutes):
+                drawn, predates = self.rolled("2026-09-20T11:50:00Z", minutes)
+                self.assertIn(f">{pages.NO_RESET_RECORDED}<", drawn)
+                self.assertTrue(predates, "the percentage is stale all the same")
+
+    def test_hostile_moments_and_windows_never_raise_or_loop(self) -> None:
+        """A table of hostile inputs: each is answered in bounded time with no exception."""
+        cases: list[tuple[Any, Any, str | None, bool]] = [
+            # (resets_at, window_minutes, expected text or None for "any countdown", predates)
+            ("2026-09-20T11:50:00Z", 1e300, pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", 10**400, pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", -(10**400), pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", True, pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", "300", pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", -1, pages.NO_RESET_RECORDED, True),
+            ("1970-01-01T00:00:00Z", 1, "1m left", True),
+            ("1970-01-01T00:00:00Z", 300, None, True),
+            ("0001-01-01T00:00:00+14:00", 1, None, True),
+            ("0001-01-01T00:00:00Z", pages.LONGEST_WINDOW_MINUTES, None, True),
+            ("9999-12-31T23:59:59-14:00", 300, None, False),
+            (1e300, 300, pages.NO_RESET_RECORDED, False),
+            (10**400, 300, pages.NO_RESET_RECORDED, False),
+            (True, 300, pages.NO_RESET_RECORDED, False),
+            (-5, 300, pages.NO_RESET_RECORDED, False),
+        ]
+        for resets_at, minutes, text, predates in cases:
+            with self.subTest(resets_at=resets_at, window_minutes=minutes):
+                drawn, stale = self.rolled(resets_at, minutes)
+                self.assertEqual(stale, predates)
+                if text is not None:
+                    self.assertIn(f">{text}<", drawn)
+                else:
+                    self.assertRegex(drawn, r">(\d+d \d+h|\d+h \d+m|\d+m|less than a minute) left<")
+
+    def test_no_text_in_the_web_package_says_a_reset_already_passed(self) -> None:
+        root = Path(pages.__file__).parent
+        for path in root.rglob("*.py"):
+            with self.subTest(path=path.name):
+                self.assertNotIn("already passed", path.read_text(encoding="utf-8"))
 
     def test_a_reading_with_no_moment_says_so_and_carries_no_title(self) -> None:
         for absent in (None, "", "   ", "not a moment", 17):
@@ -711,6 +777,61 @@ class TheBarDrawsTheResetTests(RouteFixture):
         )
         page = self.get("/")
         self.assertEqual(page.count(pages.NO_RESET_RECORDED), 1, "once, on the bar")
+
+
+class TheBarNeverDrawsAPreResetFigureTests(RouteFixture):
+    """A window whose reset has come shows its next reset, and its old percentage only as stale."""
+
+    def test_a_rolled_window_draws_stale_and_the_countdown_to_its_next_reset(self) -> None:
+        self.usage = Recording(
+            usage_snapshot=usage_document(
+                [
+                    provider(
+                        "claude",
+                        "Claude",
+                        windows=[
+                            window("5-hour", 63.0, "2026-09-20T11:50:00Z"),
+                            window("weekly", 88.0, "2026-09-22T12:00:00Z"),
+                        ],
+                    )
+                ]
+            )
+        )
+        bar = bar_of(self.get("/"))
+        chips = re.findall(r'<span class="window">.*?</span></span>', bar)
+        self.assertEqual(len(chips), 2)
+        self.assertIn(">4h 50m left<", chips[0])
+        self.assertIn(f'<b class="stale" title="{pages.READING_PREDATES_RESET}">stale</b>', chips[0])
+        self.assertNotIn("63%", bar, "no figure from before the reset is drawn")
+        self.assertIn("<b>88%</b>", chips[1])
+        self.assertIn(">2d 0h left<", chips[1])
+
+    def test_a_past_window_with_no_length_says_no_reset_recorded_and_stale(self) -> None:
+        past = {"name": "5-hour", "remaining_percent": 63.0, "resets_at": "2026-09-20T11:50:00Z"}
+        self.usage = Recording(usage_snapshot=usage_document([provider("claude", "Claude", windows=[past])]))
+        bar = bar_of(self.get("/"))
+        self.assertIn(pages.NO_RESET_RECORDED, bar)
+        self.assertIn(">stale</b>", bar)
+        self.assertNotIn("63%", bar)
+
+
+class ClaudeUtilizationIsAPercentageTests(unittest.TestCase):
+    def test_a_utilization_of_one_is_one_percent_used_and_draws_99_percent_left(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            credentials = Path(home) / ".claude/.credentials.json"
+            credentials.parent.mkdir(parents=True)
+            credentials.write_text(json.dumps({"claudeAiOauth": {"accessToken": "c"}}), encoding="utf-8")
+
+            def fetch(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
+                if url != CLAUDE_USAGE_URL:
+                    raise TimeoutError
+                return {"five_hour": {"utilization": 1.0, "resets_at": "2026-09-20T15:00:00Z"}}
+
+            document = ProviderUsageLayer(home=home, fetch_json=fetch, now=lambda: NOW).usage_snapshot()
+        with pages.render_clock(lambda: RENDERED_AT):
+            bar = pages._limits_bar_of({"available": True, "document": document})
+        self.assertIn("<b>99%</b>", bar)
+        self.assertIn(">3h 0m left<", bar)
 
 
 # -- the two findings folded in from secretary-1645's review -------------------------------------
