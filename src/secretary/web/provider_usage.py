@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import socket
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -21,6 +22,13 @@ from urllib.request import Request, urlopen
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+CODEX_RESET_CONSUME_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+#: Spending a credit is a person's explicit act, not a background poll, so the provider gets the room
+#: Orca's `REDEEM_BACKEND_TIMEOUT_MS` gives it.
+CODEX_RESET_TIMEOUT = 30.0
+#: What the consume answer's `code` can say, each spelled as the outcome it is recorded as. Anything
+#: else is no outcome this layer knows, and is recorded as an error rather than guessed at.
+CODEX_RESET_CODES = frozenset({"reset", "nothing_to_reset", "no_credit", "already_redeemed"})
 STALE_AFTER_SECONDS = 15 * 60
 CACHE_SECONDS = 5 * 60
 # The Codex fallback reads a fixed amount however large ~/.codex/sessions grows: it descends the
@@ -156,6 +164,14 @@ def _window(name: str, raw: Any, *, default_minutes: int | None = None) -> dict[
     }
 
 
+def _without(text: str, *secrets: str | None) -> str:
+    """`text` with every non-empty secret in it replaced, for a reason that quotes the provider."""
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
 def _fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
     request = Request(url, headers=headers, method="GET")
     with urlopen(request, timeout=timeout) as response:
@@ -163,6 +179,12 @@ def _fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, 
     if not isinstance(value, dict):
         raise TypeError("provider returned a non-object document")
     return value
+
+
+def _post_json(url: str, headers: dict[str, str], body: dict[str, Any], timeout: float) -> Any:
+    request = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read(1024 * 1024))
 
 
 class ProviderUsageLayer:
@@ -173,14 +195,70 @@ class ProviderUsageLayer:
         *,
         home: str | os.PathLike[str] | None = None,
         fetch_json: Callable[[str, dict[str, str], float], dict[str, Any]] = _fetch_json,
+        post_json: Callable[[str, dict[str, str], dict[str, Any], float], Any] = _post_json,
         now: Callable[[], float] = time.time,
         timeout: float = 3.0,
     ) -> None:
         self.home = Path(home) if home is not None else Path.home()
         self.fetch_json = fetch_json
+        self.post_json = post_json
         self.now = now
         self.timeout = timeout
         self._cached: tuple[float, dict[str, Any]] | None = None
+
+    def invalidate(self) -> None:
+        """Forget the cached snapshot, so the next render asks the providers again."""
+        self._cached = None
+
+    def codex_live(self) -> dict[str, Any]:
+        """The Codex reading as it is now, past the cache and without replacing what the cache holds."""
+        return self._codex(self.now())
+
+    def consume_codex_reset(self, redeem_request_id: str) -> tuple[str, str | None]:
+        """Spend one Codex rate-limit reset credit under `redeem_request_id`: `(outcome, reason)`.
+
+        The outcome is a code of :data:`CODEX_RESET_CODES` with no reason, or `error` with one. It
+        never raises: a missing login, a transport failure, a timeout, an HTTP error, an answer that
+        is not a JSON object and a code nobody knows are each an `error` with its reason. The provider
+        deduplicates on `redeem_request_id`, so a repeat under the same id spends nothing twice.
+        The token goes into the header and nowhere else; no reason carries it.
+        """
+        auth = self.home / ".codex" / "auth.json"
+        token = self._auth(auth, ("tokens", "access_token"))
+        if token is None:
+            return "error", "Codex login is unavailable"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        account = self._auth(auth, ("tokens", "account_id"))
+        if account:
+            headers["ChatGPT-Account-Id"] = account
+        try:
+            answer = self.post_json(
+                CODEX_RESET_CONSUME_URL,
+                headers,
+                {"redeem_request_id": redeem_request_id},
+                CODEX_RESET_TIMEOUT,
+            )
+        except HTTPError as exc:
+            return "error", f"the provider answered HTTP {exc.code}"
+        except (TimeoutError, socket.timeout):
+            return "error", f"the provider did not answer within {CODEX_RESET_TIMEOUT:g} s"
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                return "error", f"the provider did not answer within {CODEX_RESET_TIMEOUT:g} s"
+            return "error", f"the provider could not be reached ({type(exc.reason).__name__})"
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return "error", "the provider's answer was not JSON"
+        except OSError as exc:
+            return "error", f"the provider could not be reached ({type(exc).__name__})"
+        except Exception as exc:  # noqa: BLE001 -- an injected or future transport failure is still an outcome
+            return "error", f"the consume call failed ({type(exc).__name__})"
+        if not isinstance(answer, dict):
+            return "error", "the provider's answer was not a JSON object"
+        code = answer.get("code")
+        if isinstance(code, str) and code in CODEX_RESET_CODES:
+            return code, None
+        shown = code[:40] if isinstance(code, str) else type(code).__name__
+        return "error", _without(f"the provider answered an unknown code: {shown!r}", token, account)
 
     def usage_snapshot(self) -> dict[str, Any]:
         observed = self.now()

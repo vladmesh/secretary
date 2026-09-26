@@ -403,6 +403,7 @@ class StatusMappingTests(unittest.TestCase):
         "/api/sprints/{ref}/close": {"request_id": "r", "reason": "why", "closeout": "what became"},
         "/api/tasks/{ref}/comment": {"request_id": "r", "body": "a comment"},
         "/api/tasks/{ref}/move": {"request_id": "r", "target": "ready", "reason": "why"},
+        "/api/providers/codex/reset-limit": {"request_id": "r"},
     }
     BODIES: ClassVar[dict[str, bytes]] = {
         "json": json.dumps({"ref": "secretary-1", "request_id": "r", "profile": "p"}).encode("utf-8"),
@@ -453,6 +454,7 @@ class StatusMappingTests(unittest.TestCase):
                 po_auth=RaisingLayer(error),
                 po=RaisingLayer(error),
                 owner_events=RaisingLayer(error),
+                provider_ops=RaisingLayer(error),
             )
             for route in ROUTES:
                 if route.pattern in self.ANSWERS_ITS_OWN_REFUSAL:
@@ -516,6 +518,7 @@ class RouteTableTests(TransportFixture):
         ("GET", "/api/history/{request_id}"),
         ("POST", "/api/tasks/{ref}/comment"),
         ("POST", "/api/tasks/{ref}/move"),
+        ("POST", "/api/providers/codex/reset-limit"),
         ("POST", "/po/login"),
         ("GET", "/po"),
         ("POST", "/po/sessions"),
@@ -539,7 +542,7 @@ class RouteTableTests(TransportFixture):
                 self.assertRegex(
                     route.operation,
                     r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops"
-                    r"|doctor|po_auth|po|owner_events)\.[a-z_]+$",
+                    r"|doctor|po_auth|po|owner_events|provider_ops)\.[a-z_]+$",
                 )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:

@@ -125,6 +125,9 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/history/{request_id}", "command_request", "command_reads.command_request"),
     Route("POST", "/api/tasks/{ref}/comment", "task_comment", "card_ops.task_comment"),
     Route("POST", "/api/tasks/{ref}/move", "task_move", "card_ops.task_move"),
+    # The owner spends one Codex rate-limit reset credit (secretary-1776): the button beside the
+    # credits on the bar. Idempotent on `request_id`, which is also the provider's redeem id.
+    Route("POST", "/api/providers/codex/reset-limit", "codex_reset_limit", "provider_ops.codex_reset_limit"),
     # The PO head (secretary-1631). Every route under /po is behind the PO token
     # (:func:`requires_po_token`); the login form is the one that cannot be.
     Route("POST", "/po/login", "po_login", "po_auth.po_login", body=FORM_BODY, page=True),
@@ -192,6 +195,8 @@ PAUSE_DRAIN_FIELDS = frozenset({"reason"})
 PAUSE_RESUME_FIELDS: frozenset[str] = frozenset()
 TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
 TASK_MOVE_FIELDS = frozenset({"request_id", "target", "reason", "sprint_override", "sprint_override_reason"})
+CODEX_RESET_FIELDS = frozenset({"request_id"})
+PROVIDER_OPS_NOT_BUILT = "this web process was built without the provider operation layer"
 #: The two owner event forms carry only where to go back to: the unread filter, when it was on.
 OWNER_EVENT_FIELDS = frozenset({"unread"})
 OWNER_EVENTS_NOT_BUILT = "this web process was built without the owner events layer"
@@ -255,6 +260,7 @@ class WebApp:
         po_auth: Any | None = None,
         po: Any | None = None,
         owner_events: Any | None = None,
+        provider_ops: Any | None = None,
     ) -> None:
         self.reads = reads
         self.ops = ops
@@ -276,6 +282,9 @@ class WebApp:
         #: The owner's bell. Optional like the PO layers: a process built without it draws no bell
         #: and answers its routes with the reason.
         self.owner_events = owner_events
+        #: The owner's provider writes: the Codex reset. Optional like the bell: a process built
+        #: without it answers the reset route with the reason (503) and spends nothing.
+        self.provider_ops = provider_ops
 
     # -- the entry point -------------------------------------------------------------------
 
@@ -520,6 +529,17 @@ class WebApp:
                 sprint_override=_flag(body.get("sprint_override")),
                 sprint_override_reason=_text(body.get("sprint_override_reason")),
             ),
+        )
+
+    # -- provider operation routes ---------------------------------------------------------
+
+    def _codex_reset_limit(self, _params, _query, body) -> Response:
+        _fields(body, CODEX_RESET_FIELDS, "Codex reset")
+        if self.provider_ops is None:
+            raise RuntimeUnavailable(PROVIDER_OPS_NOT_BUILT)
+        return _json(
+            200,
+            self.provider_ops.codex_reset_limit(request_id=_required(body, "request_id"), actor=SPRINT_ACTOR),
         )
 
     # -- pages -----------------------------------------------------------------------------
