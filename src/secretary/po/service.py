@@ -21,7 +21,11 @@ Queued inputs are taken after that.
 `secretary upgrade` inside a turn. The upgrade writes the restart marker and asks
 (`secretary.po.client.request_restart`); :meth:`PoService.request_restart` is the rule. Idle, the
 service exits at once and `Restart=always` starts the new code. Busy, it starts no new turn (inputs
-keep queueing) and exits as soon as its last running turn settles.
+keep queueing) and exits as soon as its last running turn settles. Each process writes its process
+receipt at start, before it takes the queue (``<data_dir>/po-service/process-receipt.json``: its pid,
+start ticks and systemd invocation, and the checkout's revision and input digests), so an upgrade can
+tell a service still running old code from a current one without trusting its own pull
+(`secretary.upgrade.step_po`, secretary-1759).
 
 **A sprint's session.** `sprint_session` answers the live PO session of a sprint: the one the sprint
 recorded (`sprint create --po-session`) while it is open, else a fresh one, opened once, seeded with the
@@ -826,12 +830,26 @@ def run_po_serve(args: argparse.Namespace) -> int:
     try:
         with listening(service) as path:
             _say(f"secretary po: serving {path}; queue {service.queue.directory}")
+            # Before `start` fulfils a pending restart: a cleared marker then means a written receipt.
+            _say(_write_process_receipt(data_dir))
             for line in service.start():
                 _say(line)
             return service.run()
     except ServiceStartError as exc:
         _say(f"secretary po-serve: {exc}")
         return 1
+
+
+def _write_process_receipt(data_dir: Path) -> str:
+    """Bind this process to the checkout its code was imported from; a journal line either way."""
+    from secretary.upgrade import ReceiptError, write_po_process_receipt
+
+    # src/secretary/po/service.py: the checkout this process runs, not the one it was pointed at.
+    product_root = Path(__file__).resolve().parents[3]
+    try:
+        return f"secretary po: {write_po_process_receipt(data_dir, product_root)}"
+    except ReceiptError as exc:
+        return f"secretary po: no process receipt was written ({exc}); an upgrade will ask for a restart"
 
 
 __all__ = [

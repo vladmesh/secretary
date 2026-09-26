@@ -58,6 +58,7 @@ from secretary.host_apply import (
     SystemdUnitInstaller,
     UnitInstaller,
     UnitProcessIdentity,
+    _process_start_ticks,
     apply_host,
     resolve_packaged,
     resolve_runtime_owner,
@@ -1770,6 +1771,115 @@ def _po_unit(report: Any) -> str:
     return f"{_component_unit_prefix(report, PO_COMPONENT)}.service"
 
 
+# The PO service writes its own process receipt when it starts (`secretary po-serve`), unlike the web
+# and memory receipts, which the upgrade writes after its own restart: an upgrade only asks the PO
+# service to restart, and a busy service exits long after the upgrade that asked has ended
+# (secretary-1759). It lives in the service's own directory, which the runtime user owns, and no
+# backup carries it (`po-service/` is outside the backed-up roots).
+PO_PROCESS_RECEIPT_VERSION = 1
+PO_PROCESS_INPUT_KEYS = ("product_revision", "product_sha256", "dependency_sha256", "schemas_sha256")
+
+
+def po_process_inputs(product_root: Path) -> dict[str, str]:
+    """The checkout a PO process has to be bound to: its code, dependencies and bundled schemas."""
+    return {
+        "product_revision": _product_revision(product_root, ReceiptError),
+        "product_sha256": _git_tracked_digest(product_root, PRODUCT_SOURCE_PATHS),
+        "dependency_sha256": _git_tracked_digest(product_root, DEPENDENCY_PATHS),
+        "schemas_sha256": _git_tracked_digest(product_root, SCHEMA_PATHS),
+    }
+
+
+def _valid_po_inputs(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(PO_PROCESS_INPUT_KEYS):
+        return None
+    revision = value["product_revision"]
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40,64}", revision):
+        return None
+    for key in PO_PROCESS_INPUT_KEYS[1:]:
+        if not isinstance(value[key], str) or not SHA256_RE.fullmatch(value[key]):
+            return None
+    return {key: value[key] for key in PO_PROCESS_INPUT_KEYS}
+
+
+def write_po_process_receipt(
+    data_dir: Path, product_root: Path, *, environ: dict[str, str] | None = None
+) -> str:
+    """Bind the calling PO service process to the checkout it was started on; the journal line.
+
+    The identity is the one `SystemdUnitInstaller.process_identity` observes from outside: this pid,
+    its kernel start ticks and systemd's ``INVOCATION_ID``. A process systemd did not start has no
+    invocation id and gets no receipt, so an upgrade asks it to restart. The receipt is one private
+    atomic replacement, so a new process generation replaces the previous one's.
+    """
+    env = os.environ if environ is None else environ
+    pid = os.getpid()
+    invocation_id = env.get("INVOCATION_ID", "")
+    if not invocation_id:
+        raise ReceiptError("no INVOCATION_ID: the process was not started by systemd")
+    start_ticks = _process_start_ticks(pid)
+    if start_ticks is None:
+        raise ReceiptError(f"cannot read the start ticks of pid {pid}")
+    identity = UnitProcessIdentity(pid, start_ticks, invocation_id)
+    inputs = po_process_inputs(product_root)
+    payload = {"version": PO_PROCESS_RECEIPT_VERSION, "process": _receipt_process(identity), "inputs": inputs}
+    path = po_client.process_receipt_path(data_dir)
+    _write_private_receipt(path, payload, None, ReceiptError, "PO process receipt")
+    return f"wrote the PO process receipt {path}: pid {pid}; {_po_inputs_summary(inputs)}"
+
+
+def _read_po_process_receipt(
+    data_dir: Path,
+) -> tuple[tuple[UnitProcessIdentity, dict[str, str]] | None, str]:
+    payload, reason = _load_receipt(po_client.process_receipt_path(data_dir), "PO process receipt")
+    if payload is None:
+        return None, reason
+    malformed = "the PO process receipt is malformed"
+    if set(payload) != {"version", "process", "inputs"}:
+        return None, malformed
+    version = payload["version"]
+    if type(version) is not int or version != PO_PROCESS_RECEIPT_VERSION:
+        return None, malformed
+    identity = _receipt_identity(payload["process"])
+    inputs = _valid_po_inputs(payload["inputs"])
+    if identity is None or inputs is None:
+        return None, malformed
+    return (identity, inputs), ""
+
+
+def _po_receipt_evidence(
+    data_dir: Path | None, identity: UnitProcessIdentity | None, inputs: dict[str, str]
+) -> tuple[bool, str]:
+    """Whether the active PO process is the one its receipt bound to these inputs, and why."""
+    if data_dir is None:
+        return False, "the PO process receipt cannot be located: instance has no resolved data directory"
+    if identity is None:
+        return False, "the active PO process identity is unavailable"
+    receipt, reason = _read_po_process_receipt(data_dir)
+    if receipt is None:
+        return False, reason
+    recorded_identity, recorded = receipt
+    if recorded_identity != identity:
+        return False, "the PO process receipt belongs to a different process generation"
+    moved = [
+        f"{key.replace('_', ' ')} {_short(recorded[key])} -> {_short(inputs[key])}"
+        for key in PO_PROCESS_INPUT_KEYS
+        if recorded[key] != inputs[key]
+    ]
+    if moved:
+        return False, f"the PO process receipt is stale: {'; '.join(moved)}"
+    return True, f"PO process receipt verified: pid {identity.pid}, {_po_inputs_summary(inputs)}"
+
+
+def _po_inputs_summary(inputs: dict[str, str]) -> str:
+    return (
+        f"revision {_short(inputs['product_revision'])}, "
+        f"product sha256 {_short(inputs['product_sha256'])}, "
+        f"deps sha256 {_short(inputs['dependency_sha256'])}, "
+        f"schemas sha256 {_short(inputs['schemas_sha256'])}"
+    )
+
+
 def step_po(context: UpgradeContext) -> StepResult:
     """Put the PO service on this upgrade's code without killing a running PO turn.
 
@@ -1781,7 +1891,13 @@ def step_po(context: UpgradeContext) -> StepResult:
     settle, and this step reports the restart as deferred rather than failing.
 
     The reasons are the service's process inputs: the product source and dependencies, the bundled
-    schemas and the unit file (an update; a unit reconcile just created was started on this code). Like
+    schemas and the unit file (an update; a unit reconcile just created was started on this code).
+    This run's pull delta is not enough: on an installation whose dispatcher release fast-forwards the
+    checkout before the PO runs `upgrade`, the pull is empty while the service still runs the old code
+    (secretary-1759). So, like the web and memory services, the running process is bound to what it
+    was started on by a process receipt the service writes at start (`write_po_process_receipt`): a
+    missing one, one of another process generation, or one whose revision or digests differ from the
+    checkout is a reason too. Like
     the memory service and unlike the web, a stopped PO service is started: nothing runs in a stopped
     unit, and without it no PO turn runs at all. An installation that opted the component out has no
     unit, and the step is skipped.
@@ -1798,6 +1914,10 @@ def step_po(context: UpgradeContext) -> StepResult:
         except HostCommandError as exc:
             return StepResult("po", "failed", f"starting {unit} failed: {exc}")
         return StepResult("po", "changed", f"started {unit}: service was not active")
+    try:
+        inputs = po_process_inputs(context.product_root)
+    except ReceiptError as exc:
+        return StepResult("po", "failed", f"cannot compare the PO service with the checkout: {exc}")
     reasons = []
     if context.po_unit_changed or planned_unit_names(
         context.changed_paths, f"{_component_unit_prefix(report, PO_COMPONENT)}."
@@ -1807,8 +1927,16 @@ def step_po(context: UpgradeContext) -> StepResult:
         reasons.append("bundled schemas changed")
     if context.code_changed:
         reasons.append("product code or dependencies changed")
-    if not reasons:
-        return StepResult("po", "unchanged", f"{unit} runs on unchanged process inputs")
+    try:
+        identity = context.units.process_identity(unit)
+    except HostCommandError as exc:
+        reasons.append(f"the active PO process identity could not be observed: {exc}")
+    else:
+        verified, evidence = _po_receipt_evidence(report.data_dir, identity, inputs)
+        if verified and not reasons:
+            return StepResult("po", "unchanged", evidence)
+        if not verified:
+            reasons.append(evidence)
     reason = "; ".join(reasons)
     if context.dry_run:
         return StepResult("po", "changed", f"would ask {unit} to restart once no PO turn runs: {reason}")
@@ -2018,6 +2146,27 @@ def step_verify(context: UpgradeContext) -> StepResult:
             return StepResult(
                 "verify", "failed", f"active web process receipt is not current: {web_evidence}"
             )
+    po_unit = _po_unit(context.report)
+    if context.units.installed(po_unit) is None:
+        po_evidence = f"PO process receipt not checked: {po_unit} is not installed"
+    elif not context.units.is_active(po_unit):
+        po_evidence = f"PO process receipt not checked: {po_unit} is not active"
+    else:
+        data_dir = getattr(context.report, "data_dir", None)
+        try:
+            po_inputs = po_process_inputs(context.product_root)
+            po_identity = context.units.process_identity(po_unit)
+        except (HostCommandError, ReceiptError) as exc:
+            return StepResult("verify", "failed", f"active PO process receipt cannot be verified: {exc}")
+        verified, po_evidence = _po_receipt_evidence(data_dir, po_identity, po_inputs)
+        if not verified:
+            # A busy service restarts itself once its turns end (`step_po` deferred it): the PO runs
+            # `secretary upgrade` inside a turn, so its own upgrade always ends here.
+            if data_dir is None or not po_client.restart_marker_path(data_dir).exists():
+                return StepResult(
+                    "verify", "failed", f"active PO process receipt is not current: {po_evidence}"
+                )
+            po_evidence = f"PO service restart pending: {po_evidence}"
     try:
         audit = role_skills.audit(
             instance_path=context.instance_path,
@@ -2045,6 +2194,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
     detail = "host reconciled and role skills in sync"
     if web_evidence:
         detail += f"; {web_evidence}"
+    detail += f"; {po_evidence}"
     return StepResult("verify", "unchanged", detail)
 
 

@@ -455,17 +455,36 @@ So a restart of the PO service costs at most the turn it interrupted, re-run.
 
 **Upgrades never kill a running turn.** The PO itself runs `secretary upgrade` inside a turn. The `po`
 step of `secretary upgrade` asks for a restart when the service's process inputs moved (product code or
-dependencies, bundled schemas, the unit file) and the service decides by one rule
+dependencies, bundled schemas, the unit file) or its **process receipt** does not match the checkout,
+and the service decides by one rule
 (`PoService.request_restart`): idle, it exits at once and `Restart=always` starts the new code, which the
 step waits for (`restarted secretary-po.service while idle`); busy, it starts no queued
 turn (new messages keep queueing) and exits by itself as soon as its running turns settle — the step reports `PO service restart
 deferred: N turn(s) running` and does not fail. The request is the marker `DATA_DIR/po-service/restart-pending`;
-the next process removes it at start. A stopped service is started. Check:
+the next process removes it at start. A stopped service is started.
+
+**Process receipt.** This run's pull delta alone cannot tell whether the service runs current code: the
+dispatcher's release fast-forwards the checkout before the PO runs `upgrade`, so the pull is empty
+(secretary-1759). So, like the web and memory services, the service is bound to what it was started
+on. Each process writes `DATA_DIR/po-service/process-receipt.json` at start, before it removes the
+restart marker and takes the queue: its pid, kernel start ticks and systemd `INVOCATION_ID`, and the
+checkout it runs from — product revision and the sha256 of the tracked product source, dependencies and
+bundled schemas, computed as for the web and memory receipts. It is one private (0600) atomic
+replacement, so a new process generation replaces the previous one's; no backup carries it. The `po`
+step asks for a restart when the receipt is missing (`the PO process receipt is missing`), belongs to
+another generation (`... belongs to a different process generation`), or names another revision or
+digest (`the PO process receipt is stale: product revision A -> B; ...`); with a matching receipt and no
+other reason it answers `unchanged` with `PO process receipt verified: pid N, revision R, ...`. A process
+not started by systemd writes none (journal: `no process receipt was written`). The `verify` step
+reports the receipt too: a current one is named, a non-current one fails the upgrade unless a restart is
+pending (`PO service restart pending: ...`, the deferred case), and an uninstalled or stopped unit is
+named as not checked. Check:
 
 ```bash
 systemctl status secretary-po.service
 journalctl -u secretary-po.service | grep 'secretary po'   # recovery, re-runs, set-aside inputs, deferred restarts
 ls -l DATA_DIR/po-queue/ DATA_DIR/po-queue/refused/ DATA_DIR/po-service/
+jq . DATA_DIR/po-service/process-receipt.json                # compare .process.pid with MainPID
 cat DATA_DIR/po-queue/*.json                               # what waits, oldest first by name
 psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' OR reason IS NOT NULL ORDER BY started_at DESC LIMIT 10"
 ```
