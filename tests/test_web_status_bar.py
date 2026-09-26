@@ -22,7 +22,13 @@ from typing import Any
 
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
-from secretary.web.provider_usage import CACHE_SECONDS, CLAUDE_USAGE_URL, CODEX_USAGE_URL, ProviderUsageLayer
+from secretary.web.provider_usage import (
+    CACHE_SECONDS,
+    CLAUDE_USAGE_URL,
+    CODEX_RESET_CREDITS_URL,
+    CODEX_USAGE_URL,
+    ProviderUsageLayer,
+)
 from secretary.webproto.errors import InstallationUnavailable
 from tests.web_fakes import Recording, system_snapshot
 
@@ -560,6 +566,143 @@ class BarCostsNoExtraReadTests(RouteFixture):
         self.assertNotIn("Usage limits", page)
         self.assertIn("74%", bar_of(page))
         self.assertEqual(page.count("74%"), 1)
+
+
+class ResetCreditsCostTests(BarCostsNoExtraReadTests):
+    """The same walk over a Codex reading that carries a reset credit: the list is one GET per refresh."""
+
+    def fetch(self, url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
+        if url == CODEX_RESET_CREDITS_URL:
+            self.fetched.append(url)
+            return {"credits": [{"status": "available", "expires_at": "2026-10-22T20:24:55Z"}]}
+        raw = super().fetch(url, headers, timeout)
+        if url == CODEX_USAGE_URL:
+            raw["rate_limit_reset_credits"] = {"available_count": 1, "applicable_available_count": 0}
+        return raw
+
+    def test_many_renders_inside_one_cache_window_ask_each_provider_once(self) -> None:
+        app = self.app(provider_usage=self.layer)
+        for route in self.page_routes():
+            bar = bar_of(self.get(self.concrete(route.pattern), app=app))
+            self.assertIn("1 reset (0 usable)", bar)
+        self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL, CODEX_RESET_CREDITS_URL])
+
+    def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:
+        app = self.app(provider_usage=self.layer)
+        paths = [self.concrete(route.pattern) for route in self.page_routes()]
+        for path in paths:
+            self.get(path, app=app)
+        self.clock += CACHE_SECONDS - 1
+        for path in paths:
+            self.get(path, app=app)
+        self.assertEqual(len(self.fetched), 3)
+        self.clock += 2
+        for path in paths:
+            self.get(path, app=app)
+        self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 2)
+        self.assertEqual(self.fetched.count(CODEX_RESET_CREDITS_URL), 2)
+
+    def test_the_dashboard_draws_the_limits_once_from_one_read(self) -> None:
+        app = self.app(provider_usage=self.layer)
+        page = self.get("/", app=app)
+        self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL, CODEX_RESET_CREDITS_URL])
+        self.assertEqual(page.count("1 reset (0 usable)"), 1, "the credits are drawn once, on the bar")
+        claude, codex = provider_places(bar_of(page))[:2]
+        self.assertNotIn("reset (", claude, "Claude gets no analogue")
+        self.assertIn("1 reset (0 usable)", codex)
+
+
+# -- the Codex reset credits: one label after the Codex windows ----------------------------------
+
+
+class ResetCreditsLabelTests(unittest.TestCase):
+    """The label :func:`pages._bar_reset_credits` draws, in every case the card names."""
+
+    EXPIRES = "2026-10-16T10:00:00Z"  # 25d 22h after RENDERED_AT
+
+    def setUp(self) -> None:
+        self.enterContext(pages.render_clock(lambda: RENDERED_AT))
+
+    def codex(self, credits: Any = None, *, carry: bool = True) -> str:
+        codex = provider("codex", "Codex", windows=[window("5-hour", 41.0, "2026-09-20T15:00:00Z")])
+        if carry:
+            codex["reset_credits"] = credits
+        section = {"available": True, "reason": None, "document": usage_document([codex])}
+        return provider_places(bar_of(pages._limits_bar_of(section)))[1]
+
+    def test_counts_with_a_usable_count_and_no_expiry(self) -> None:
+        place = self.codex({"available": 1, "applicable": 0, "next_expires_at": None})
+        self.assertIn('<span class="credits">1 reset (0 usable)</span>', place)
+        self.assertNotIn("expires", place)
+
+    def test_the_nearest_expiry_is_a_countdown_with_the_moment_as_its_title(self) -> None:
+        place = self.codex({"available": 1, "applicable": 0, "next_expires_at": self.EXPIRES})
+        self.assertIn(
+            '<span class="credits">1 reset (0 usable)<span class="dot">·</span>'
+            f'<span class="expires" title="{self.EXPIRES}">expires in 25d 22h</span></span>',
+            place,
+        )
+
+    def test_the_label_follows_the_windows_in_the_same_group(self) -> None:
+        place = self.codex({"available": 1, "applicable": 0, "next_expires_at": self.EXPIRES})
+        self.assertLess(place.index('class="window"'), place.index('class="credits"'))
+        self.assertEqual(place.count('<span class="provider">'), 1)
+
+    def test_an_unknown_usable_count_draws_the_available_count_alone(self) -> None:
+        place = self.codex({"available": 1, "applicable": None, "next_expires_at": None})
+        self.assertIn('<span class="credits">1 reset</span>', place)
+        self.assertIn(
+            '<span class="credits">3 resets (2 usable)</span>', self.codex({"available": 3, "applicable": 2})
+        )
+
+    def test_no_available_credit_and_no_credits_draw_no_label(self) -> None:
+        for credits, carry in (
+            ({"available": 0, "applicable": 0, "next_expires_at": None}, True),
+            ({"available": 0, "applicable": 0, "next_expires_at": self.EXPIRES}, True),
+            (None, False),
+            (None, True),
+        ):
+            with self.subTest(credits=credits, carry=carry):
+                place = self.codex(credits, carry=carry)
+                self.assertNotIn("credits", place)
+                self.assertNotIn("reset (", place)
+
+    def test_the_countdown_is_measured_against_the_render_clock(self) -> None:
+        with pages.render_clock(lambda: RENDERED_AT + timedelta(days=25, hours=21, minutes=30)):
+            place = self.codex({"available": 1, "applicable": 1, "next_expires_at": self.EXPIRES})
+        self.assertIn(">expires in 30m<", place)
+        with pages.render_clock(lambda: RENDERED_AT + timedelta(days=30)):
+            place = self.codex({"available": 1, "applicable": 1, "next_expires_at": self.EXPIRES})
+        self.assertIn(">expired<", place)
+
+    def test_hostile_documents_never_raise_and_draw_only_normalised_values(self) -> None:
+        cases: list[tuple[Any, str | None]] = [
+            ({"available": True, "applicable": 0}, None),
+            ({"available": "1", "applicable": 0}, None),
+            ({"available": 1e300, "applicable": 0}, None),
+            ({"available": 10**400, "applicable": 0}, None),
+            ({"available": -1, "applicable": 0}, None),
+            ({"available": float("nan")}, None),
+            ({"available": 1.7, "applicable": "0"}, "1 reset"),
+            ({"available": 1, "applicable": -5}, "1 reset (0 usable)"),
+            ({"available": 1, "applicable": 10**400}, "1 reset"),
+            ({"available": 1, "next_expires_at": "garbage"}, "1 reset"),
+            ({"available": 1, "next_expires_at": 10**400}, "1 reset"),
+            ({"available": 1, "next_expires_at": "0001-01-01T00:00:00Z"}, "1 reset"),
+            ({"available": 1, "next_expires_at": "9999-12-31T23:59:59Z"}, "1 reset"),
+            ({"available": 1, "next_expires_at": ["x"]}, "1 reset"),
+            ([], None),
+            ("1 reset", None),
+            (1, None),
+        ]
+        for credits, text in cases:
+            with self.subTest(credits=credits):
+                place = self.codex(credits)
+                self.assertIn("41%", place, "the Codex reading stays drawn")
+                if text is None:
+                    self.assertNotIn('class="credits"', place)
+                else:
+                    self.assertIn(f'<span class="credits">{text}', place)
 
 
 # -- criterion 6: what keeps the bar current never discards what somebody is typing --------------

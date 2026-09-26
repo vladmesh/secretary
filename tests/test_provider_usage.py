@@ -421,3 +421,228 @@ class ClaudeUtilizationTest(unittest.TestCase):
                 window = provider_usage._window("weekly", {key: 41, "utilization": 3.0})
                 assert window is not None
                 self.assertEqual(window["remaining_percent"], 59.0)
+
+
+CREDITS_EXPIRE_AT = "2026-10-22T20:24:55.697042Z"
+
+
+def codex_usage(credits: object = None, *, carry: bool = True) -> dict[str, object]:
+    raw: dict[str, object] = {
+        "rate_limit": {"primary_window": {"used_percent": 41, "window_minutes": 300, "reset_at": NOW + 300}}
+    }
+    if carry:
+        raw["rate_limit_reset_credits"] = credits
+    return raw
+
+
+def credits_listing(*credits: dict[str, object]) -> dict[str, object]:
+    return {"credits": list(credits), "available_count": len(credits), "total_earned_count": 0}
+
+
+def credit(expires_at: object, status: object = "available") -> dict[str, object]:
+    return {
+        "id": "c",
+        "reset_type": "codex_rate_limits",
+        "status": status,
+        "granted_at": "2026-09-22T20:24:55.697042Z",
+        "expires_at": expires_at,
+        "redeemed_at": None,
+    }
+
+
+class ResetCreditsTest(unittest.TestCase):
+    """The Codex reset credits: two counts from the usage response and the nearest expiry from the list."""
+
+    def setUp(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name)
+        write(self.home / ".codex/auth.json", {"tokens": {"access_token": "secret", "account_id": "acct"}})
+        self.fetched: list[tuple[str, dict[str, str], float]] = []
+
+    def codex(self, usage: object, listing: object = None) -> dict[str, object]:
+        def fetch(url, headers, timeout):
+            self.fetched.append((url, headers, timeout))
+            if url == CODEX_USAGE_URL:
+                return usage
+            assert url == provider_usage.CODEX_RESET_CREDITS_URL
+            if isinstance(listing, BaseException):
+                raise listing
+            return listing
+
+        return ProviderUsageLayer(home=self.home, fetch_json=fetch, now=lambda: NOW)._codex(NOW)
+
+    def test_counts_and_the_nearest_available_expiry_are_one_document(self) -> None:
+        codex = self.codex(
+            codex_usage({"available_count": 1, "applicable_available_count": 0}),
+            credits_listing(credit(CREDITS_EXPIRE_AT)),
+        )
+        self.assertEqual(codex["status"], "available")
+        self.assertEqual(
+            codex["reset_credits"],
+            {"available": 1, "applicable": 0, "next_expires_at": CREDITS_EXPIRE_AT},
+        )
+        (_, usage_headers, _), (url, headers, timeout) = self.fetched
+        self.assertEqual(url, provider_usage.CODEX_RESET_CREDITS_URL)
+        self.assertEqual(headers, usage_headers, "the list is asked with the usage request's own headers")
+        self.assertEqual(timeout, 3.0)
+        self.assertNotIn("secret", json.dumps(codex))
+
+    def test_a_failing_list_keeps_the_counts_and_drops_the_expiry(self) -> None:
+        for failure in (TimeoutError(), OSError("down"), RuntimeError("anything"), KeyError("x")):
+            with self.subTest(failure=failure):
+                codex = self.codex(
+                    codex_usage({"available_count": 2, "applicable_available_count": 1}), failure
+                )
+                self.assertEqual(codex["status"], "available")
+                self.assertEqual(
+                    codex["reset_credits"], {"available": 2, "applicable": 1, "next_expires_at": None}
+                )
+
+    def test_no_available_credit_asks_for_no_list(self) -> None:
+        codex = self.codex(codex_usage({"available_count": 0, "applicable_available_count": 0}))
+        self.assertEqual(codex["reset_credits"], {"available": 0, "applicable": 0, "next_expires_at": None})
+        self.assertEqual([url for url, _, _ in self.fetched], [CODEX_USAGE_URL])
+
+    def test_usage_without_the_field_carries_no_key(self) -> None:
+        for usage in (codex_usage(carry=False), codex_usage(None), codex_usage([]), codex_usage("1")):
+            with self.subTest(usage=usage):
+                self.fetched.clear()
+                codex = self.codex(usage)
+                self.assertEqual(codex["status"], "available")
+                self.assertNotIn("reset_credits", codex)
+                self.assertEqual([url for url, _, _ in self.fetched], [CODEX_USAGE_URL])
+
+    def test_the_rollout_fallback_carries_no_key(self) -> None:
+        path = self.home / ".codex/sessions/2026/09/26/rollout-2026-09-26T00-00-00-a.jsonl"
+        event = {
+            "timestamp": "2026-09-26T00:00:00Z",
+            "payload": {
+                "rate_limits": {"primary": {"used_percent": 1, "window_minutes": 300}},
+                "rate_limit_reset_credits": {"available_count": 1},
+            },
+        }
+        write(path, event)
+
+        def fail(*_args):
+            raise TimeoutError
+
+        codex = ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW)._codex(NOW)
+        self.assertIn(codex["status"], ("available", "stale"))
+        self.assertTrue(codex["windows"])
+        self.assertNotIn("reset_credits", codex)
+
+    def test_every_hostile_count_is_absent_or_a_clamped_whole_number(self) -> None:
+        cases: list[tuple[object, int | None]] = [
+            (1, 1),
+            (0, 0),
+            (2.9, 2),
+            (0.5, 0),
+            (-3, 0),
+            (-(10**400), 0),
+            (-1e300, 0),
+            (True, None),
+            (False, None),
+            ("1", None),
+            (None, None),
+            ([1], None),
+            ({"n": 1}, None),
+            (float("nan"), None),
+            (float("inf"), None),
+            (float("-inf"), None),
+            (1e300, None),
+            (10**400, None),
+            (provider_usage.MAX_RESET_CREDITS, provider_usage.MAX_RESET_CREDITS),
+            (provider_usage.MAX_RESET_CREDITS + 1, None),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(provider_usage.credit_count(value), expected)
+                self.fetched.clear()
+                codex = self.codex(
+                    codex_usage({"available_count": value, "applicable_available_count": value}),
+                    credits_listing(credit(CREDITS_EXPIRE_AT)),
+                )
+                self.assertEqual(codex["status"], "available")
+                if expected is None:
+                    self.assertNotIn("reset_credits", codex)
+                else:
+                    self.assertEqual(codex["reset_credits"]["available"], expected)
+                    self.assertEqual(codex["reset_credits"]["applicable"], expected)
+                    self.assertEqual(len(self.fetched), 2 if expected > 0 else 1)
+
+    def test_a_malformed_applicable_count_is_null_and_keeps_the_available_one(self) -> None:
+        for value in (True, "0", None, float("nan"), 10**400):
+            with self.subTest(value=value):
+                codex = self.codex(
+                    codex_usage({"available_count": 1, "applicable_available_count": value}), {"credits": []}
+                )
+                self.assertEqual(
+                    codex["reset_credits"], {"available": 1, "applicable": None, "next_expires_at": None}
+                )
+
+    def test_every_hostile_moment_is_absent_or_one_utc_moment(self) -> None:
+        cases: list[tuple[object, str | None]] = [
+            (CREDITS_EXPIRE_AT, CREDITS_EXPIRE_AT),
+            ("2026-10-22T22:24:55+02:00", "2026-10-22T20:24:55Z"),
+            ("2026-10-22T20:24:55", "2026-10-22T20:24:55Z"),
+            ("  2026-10-22T20:24:55Z  ", "2026-10-22T20:24:55Z"),
+            (1_792_700_000, "2026-10-22T20:13:20Z"),
+            (1_792_700_000_000, "2026-10-22T20:13:20Z"),
+            ("1792700000", "2026-10-22T20:13:20Z"),
+            (1_792_700_000.5, "2026-10-22T20:13:20.500000Z"),
+            ("1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"),
+            ("0001-01-01T00:00:00+14:00", None),
+            ("garbage", None),
+            ("", None),
+            ("   ", None),
+            ("nan", None),
+            ("inf", None),
+            ("1e400", None),
+            (10**400, None),
+            (-(10**400), None),
+            (1e300, None),
+            (-1e300, None),
+            (float("nan"), None),
+            (True, None),
+            (None, None),
+            ([], None),
+            ({}, None),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(provider_usage.credit_moment_iso(value), expected)
+
+    def test_the_nearest_expiry_is_the_earliest_available_one_and_hostile_lists_are_null(self) -> None:
+        earliest = "2026-10-01T00:00:00Z"
+        cases: list[tuple[object, str | None]] = [
+            (credits_listing(credit(CREDITS_EXPIRE_AT), credit(earliest)), earliest),
+            (credits_listing(credit(earliest, "redeemed"), credit(CREDITS_EXPIRE_AT)), CREDITS_EXPIRE_AT),
+            (credits_listing(credit(earliest, "AVAILABLE")), earliest),
+            (credits_listing(credit(earliest, None), credit(earliest, 1)), None),
+            (
+                credits_listing(credit("garbage"), credit(10**400), credit(CREDITS_EXPIRE_AT)),
+                CREDITS_EXPIRE_AT,
+            ),
+            (
+                credits_listing(credit("1970-01-01T00:00:00Z"), credit(CREDITS_EXPIRE_AT)),
+                "1970-01-01T00:00:00Z",
+            ),
+            (credits_listing(credit("garbage")), None),
+            (credits_listing(), None),
+            ({"credits": "not a list"}, None),
+            ({"credits": {"0": credit(earliest)}}, None),
+            ({"credits": [None, 1, "x", [], credit(earliest)]}, earliest),
+            ({"available_count": 1}, None),
+            ([credit(earliest)], None),
+            ("not an object", None),
+            (None, None),
+        ]
+        for listing, expected in cases:
+            with self.subTest(listing=listing):
+                codex = self.codex(
+                    codex_usage({"available_count": 1, "applicable_available_count": 1}), listing
+                )
+                self.assertEqual(codex["status"], "available")
+                self.assertEqual(codex["reset_credits"]["next_expires_at"], expected)
+                self.assertEqual(codex["reset_credits"]["available"], 1)

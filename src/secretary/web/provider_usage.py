@@ -8,6 +8,7 @@ fallback: the CLI records the same rate-limit document on normal turns.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from urllib.request import Request, urlopen
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 STALE_AFTER_SECONDS = 15 * 60
 CACHE_SECONDS = 5 * 60
 # The Codex fallback reads a fixed amount however large ~/.codex/sessions grows: it descends the
@@ -44,6 +46,89 @@ def _iso(epoch: float | str | None) -> str | None:
 
 def _number(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+#: The largest reset-credit count a reading is believed to carry. A larger one is no count this
+#: account could hold, and is read as a malformed field rather than drawn as a figure.
+MAX_RESET_CREDITS = 1_000_000
+#: A numeric credit moment below this is unix seconds, at or above it unix milliseconds (as Orca's
+#: `parseCreditTimestamp` reads them).
+CREDIT_MILLISECONDS_FROM = 10_000_000_000
+
+
+def credit_count(value: Any) -> int | None:
+    """A reset-credit count, floored and clamped at 0, or `None` when the value is not a count.
+
+    The one normaliser of every count the reset-credit fields carry, for the layer and the bar
+    alike. A bool, a string, a non-finite number or one beyond :data:`MAX_RESET_CREDITS` is not a
+    count: it is `None`, never zero, because no reading is not a reading of none.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value > MAX_RESET_CREDITS:
+        return None
+    return max(0, math.floor(value))
+
+
+def credit_moment(value: Any) -> datetime | None:
+    """A reset-credit moment as an aware UTC datetime, or `None` when it is not one.
+
+    The one normaliser of every moment the reset-credit fields carry. It reads an ISO-8601 string
+    (one without an offset is UTC) or unix seconds or milliseconds, as a number or a numeric string.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            try:
+                moment = datetime.fromisoformat(text)
+                if moment.tzinfo is None:
+                    moment = moment.replace(tzinfo=UTC)
+                return moment.astimezone(UTC)
+            except (OverflowError, ValueError):
+                return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+        if not math.isfinite(seconds):
+            return None
+        if seconds >= CREDIT_MILLISECONDS_FROM:
+            seconds /= 1000
+        return datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
+def credit_moment_iso(value: Any) -> str | None:
+    """A reset-credit moment as the ISO-8601 `Z` string a provider document carries."""
+    moment = credit_moment(value)
+    return None if moment is None else _credit_iso(moment)
+
+
+def _credit_iso(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def _next_credit_expiry(listing: Any) -> str | None:
+    """The earliest `expires_at` among the listed credits whose status is `available`."""
+    credits = listing.get("credits") if isinstance(listing, dict) else None
+    if not isinstance(credits, list):
+        return None
+    moments = [
+        moment
+        for credit in credits
+        if isinstance(credit, dict)
+        and isinstance(credit.get("status"), str)
+        and credit["status"].lower() == "available"
+        and (moment := credit_moment(credit.get("expires_at"))) is not None
+    ]
+    return _credit_iso(min(moments)) if moments else None
 
 
 def _window(name: str, raw: Any, *, default_minutes: int | None = None) -> dict[str, Any] | None:
@@ -155,7 +240,11 @@ class ProviderUsageLayer:
                 raw = self.fetch_json(CODEX_USAGE_URL, headers, self.timeout)
                 windows = self._codex_windows(raw)
                 if windows:
-                    return self._available("codex", "Codex", observed, windows)
+                    result = self._available("codex", "Codex", observed, windows)
+                    credits = self._codex_reset_credits(raw, headers)
+                    if credits is not None:
+                        result["reset_credits"] = credits
+                    return result
             except (OSError, TypeError, ValueError, HTTPError, URLError, TimeoutError):
                 pass
         fallback = self._latest_codex_event()
@@ -175,6 +264,31 @@ class ProviderUsageLayer:
             result["status"] = "stale"
             result["reason"] = "Latest Codex usage observation is stale"
         return result
+
+    def _codex_reset_credits(self, raw: dict[str, Any], headers: dict[str, str]) -> dict[str, Any] | None:
+        """The live reading's reset credits, or `None` when it carries no count this layer can read.
+
+        The credits list is asked for only when there is a credit to list, inside the same uncached
+        refresh and with the same timeout. Whatever goes wrong with it keeps the counts and drops
+        the expiry: it never makes the Codex reading unavailable.
+        """
+        summary = raw.get("rate_limit_reset_credits")
+        if not isinstance(summary, dict):
+            return None
+        available = credit_count(summary.get("available_count"))
+        if available is None:
+            return None
+        expires = None
+        if available > 0:
+            try:
+                expires = _next_credit_expiry(self.fetch_json(CODEX_RESET_CREDITS_URL, headers, self.timeout))
+            except Exception:  # noqa: BLE001 -- any failure of the list only drops the expiry
+                expires = None
+        return {
+            "available": available,
+            "applicable": credit_count(summary.get("applicable_available_count")),
+            "next_expires_at": expires,
+        }
 
     def _codex_windows(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
         limits = raw.get("rate_limits", raw.get("rate_limit", raw))
