@@ -95,8 +95,7 @@ from secretary.tasks import TaskError, _digest
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
-    IDENTITY_REFUSAL_CODES,
-    IdentityRefused,
+    IDENTITY_REFUSALS,
     InstallationUnavailable,
     OperationPending,
     OwnerConflict,
@@ -654,9 +653,7 @@ class SprintOperationLayer(ProtocolBoundary):
                 exc.message,
                 data=self._pending_action(request_id, operation=operation, reason=reason),
             )
-        if exc.code in IDENTITY_REFUSAL_CODES:
-            return IdentityRefused(exc.code, exc.message)
-        return _CODES.get(exc.code, RuntimeUnavailable)(exc.message)
+        return {**_CODES, **IDENTITY_REFUSALS}.get(exc.code, RuntimeUnavailable)(exc.message)
 
     def _pending_action(
         self,

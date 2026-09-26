@@ -1763,8 +1763,10 @@ class CommentTests(CommentFixture):
         PO comment on a sprint that has ended (issue:9eee1d8ee505bc4ecdc2), which
         `PostCloseCommentTests` pins. What is left here is a rule the writer still holds.
         """
+        # The observer was the refused role here until secretary-1765 admitted its comment under the
+        # identity guard; `owner` is a role the sprint writer still refuses.
         with self.assertRaises(ValidationRefused):
-            self.comment(request_id="po-role", role="observer")
+            self.comment(request_id="po-role", role="owner")
 
     def test_a_body_the_writer_refuses_is_a_validation_refusal(self) -> None:
         with self.assertRaises(ValidationRefused):

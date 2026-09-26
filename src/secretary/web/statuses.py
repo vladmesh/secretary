@@ -16,6 +16,7 @@ So handlers here raise nothing and return no numbers. They call the layer, let a
 | `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
 | `request_conflict` | 409 | a /po request id reused for another operation or other inputs; repeating it never succeeds |
 | `session_closed` | 409 | a message into a PO session the owner closed; nothing was written |
+| `forbidden`, `role_masquerade`, `observer_identity_unbound`, `observer_sprint_mismatch` | 403 | a well-formed write refused on who is asking; nothing was written |
 | `backend_unavailable` | 503 | a source this request needs could not be reached at all |
 
 An unmapped code is 500 and not a guess: a code this transport has never heard of is a defect of
@@ -33,6 +34,10 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     "owner_conflict": 409,
     "request_conflict": 409,
     "session_closed": 409,
+    "forbidden": 403,
+    "role_masquerade": 403,
+    "observer_identity_unbound": 403,
+    "observer_sprint_mismatch": 403,
     "backend_unavailable": 503,
 }
 

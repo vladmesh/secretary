@@ -26,7 +26,9 @@ from secretary.product_issues import ProductIssueStore
 from secretary.runtime import role_env
 from secretary.sprints import SprintWriter
 from secretary.tasks import TaskError, TaskWriter, admit_role, is_significant_observer_event
+from secretary.web.statuses import status_for
 from secretary.webproto import sprint_ops
+from secretary.webproto.errors import IdentityRefused, ValidationRefused
 from tests.observer_identity import as_observer, unbound_observer
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "secretary"
@@ -112,6 +114,21 @@ class AdmitRoleTests(unittest.TestCase):
             for _match in re.finditer(r'TaskError\(\s*"role_masquerade"', path.read_text(encoding="utf-8"))
         ]
         self.assertEqual(raises, ["tasks.py"])
+
+
+class IdentityRefusalTransportTests(unittest.TestCase):
+    """The operation layer carries each identity refusal under the writer's code, and HTTP answers 403."""
+
+    def test_each_writer_code_becomes_its_own_typed_refusal_and_status(self) -> None:
+        layer = sprint_ops.SprintOperationLayer("/nonexistent")
+        for code in ("role_masquerade", "observer_identity_unbound", "observer_sprint_mismatch"):
+            with self.subTest(code=code):
+                refused = layer._refusal(TaskError(code, "who is asking", 3), request_id="r")
+                self.assertIsInstance(refused, IdentityRefused)
+                self.assertEqual(refused.code, code)
+                self.assertEqual(status_for(code), 403)
+        # `role_forbidden` keeps the answer it had.
+        self.assertIsInstance(layer._refusal(TaskError("role_forbidden", "no", 3), request_id="r"), ValidationRefused)
 
 
 class CliMasqueradeTests(unittest.TestCase):

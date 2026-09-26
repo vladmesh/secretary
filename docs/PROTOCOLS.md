@@ -1080,7 +1080,8 @@ message naming `--role observer`, before anything is read or written. It is one 
 `secretary.tasks.admit_role`, the role admission every role-taking sprint, task and issue write makes
 first, so it covers every verb: `sprint` comment, close and the other sprint writes, every `task` write,
 `product create` and every `issue` write. The operation layer carries the code through unchanged, as
-it does `observer_identity_unbound` and `observer_sprint_mismatch`. No other role or actor is affected.
+it does `observer_identity_unbound` and `observer_sprint_mismatch` (exit 3 from the CLI, 403 over
+HTTP). No other role or actor is affected.
 
 Stored fields: goal, Definition of Done text, repositories, owning product, its issues, reserved
 projects, `open`/`closed`/`stopped` status, declared observer, optional worker and reviewer pins, the PO
