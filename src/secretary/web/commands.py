@@ -21,6 +21,7 @@ from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from secretary.webproto.card_ops import CardOperationLayer
 from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.owner_events import OwnerEventLayer
 from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.po_auth import PoTokenLayer
@@ -114,6 +115,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
         doctor,
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
+        owner_events=OwnerEventLayer(args.instance),
     )
     try:
         return serve(app, host=args.host, port=args.port)

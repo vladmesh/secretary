@@ -424,6 +424,9 @@ class StatusMappingTests(unittest.TestCase):
     def _body(self, route) -> bytes:
         if route.pattern == "/po/login":
             return urlencode([("token", "t")]).encode("utf-8")
+        if route.pattern.startswith("/owner-events/"):
+            # The owner event forms carry only the unread filter.
+            return b""
         if route.body == "form":
             return self.BODIES["form"]
         if route.method != "POST":
@@ -449,6 +452,7 @@ class StatusMappingTests(unittest.TestCase):
                 *(RaisingLayer(error) for _ in range(LAYERS)),
                 po_auth=RaisingLayer(error),
                 po=RaisingLayer(error),
+                owner_events=RaisingLayer(error),
             )
             for route in ROUTES:
                 if route.pattern in self.ANSWERS_ITS_OWN_REFUSAL:
@@ -458,6 +462,7 @@ class StatusMappingTests(unittest.TestCase):
                     .replace("{run_id}", "pr-1")
                     .replace("{request_id}", "r-1")
                     .replace("{session}", "s-1")
+                    .replace("{event_id}", "1")
                 )
                 with self.subTest(code=error.code, route=route.pattern):
                     response = app.handle(route.method, path, body=self._body(route))
@@ -519,6 +524,9 @@ class RouteTableTests(TransportFixture):
         ("POST", "/po/sessions/{session}/stop"),
         ("POST", "/po/sessions/{session}/close"),
         ("GET", "/po/api/sessions/{session}"),
+        ("GET", "/owner-events"),
+        ("POST", "/owner-events/read-all"),
+        ("POST", "/owner-events/{event_id}/read"),
     }
 
     def test_the_route_table_is_exactly_what_is_documented(self) -> None:
@@ -531,7 +539,7 @@ class RouteTableTests(TransportFixture):
                 self.assertRegex(
                     route.operation,
                     r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops"
-                    r"|doctor|po_auth|po)\.[a-z_]+$",
+                    r"|doctor|po_auth|po|owner_events)\.[a-z_]+$",
                 )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:

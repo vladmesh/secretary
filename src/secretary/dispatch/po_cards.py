@@ -71,7 +71,7 @@ from secretary.dispatch.state import (
 )
 from secretary.po.client import OutcomeUnknown, PoServiceError, ServiceRefused, ServiceUnavailable
 from secretary.po.queue import QueuedInput
-from secretary.po.store import RUNNING, PoRequest, PoStoreError, RequestConflict, Turn
+from secretary.po.store import FAILED, INTERRUPTED, RUNNING, PoRequest, PoStoreError, RequestConflict, Turn
 
 #: The source the PO service records for a dispatcher input (`secretary.po.queue.SOURCES`).
 DISPATCHER_SOURCE = "dispatcher"
@@ -659,8 +659,15 @@ def _await_owner(
         submission.owner_submitted = False
         runtime.save_records(payload, records)
     if submission.owner_submitted:
+        ended = None
         try:
-            set_aside = None if runtime.po.request(request_id) is not None else runtime.po.refused(request_id)
+            known = runtime.po.request(request_id)
+            set_aside = None if known is not None else runtime.po.refused(request_id)
+            if known is not None and known.seq is not None:
+                # The follow-up's turn: settled without completing the card (it is still marked),
+                # it says so, instead of reading as with the PO for good (secretary-1770).
+                state = runtime.po.turn(known.session_id, int(known.seq)).state
+                ended = state if state in {FAILED, INTERRUPTED} else None
         except PoStoreError as exc:
             set_aside, unread = None, exc
         else:
@@ -674,6 +681,15 @@ def _await_owner(
                 record.attempt_id,
                 "the PO service set the owner's answer aside and will not run it: "
                 f"{set_aside.get('reason') or 'no reason recorded'}",
+            )
+        if ended is not None:
+            return _waiting(
+                record,
+                ref,
+                "po-card-owner-answer-turn-ended",
+                f"handed to the owner: {mark.get('reason') or ''}; the owner's answer reached the PO, "
+                f"but its turn {'failed' if ended == FAILED else 'was interrupted'}; a new owner comment "
+                "sends it again",
             )
         return _waiting(
             record,

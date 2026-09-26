@@ -58,10 +58,12 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from secretary.board import owner_events
 from secretary.board.production_rights import (
     CARD_INPUT,
     NO_PRODUCTION,
     OPERATION_KIND,
+    OWNER_ANSWER_INPUT,
     facts_problem,
     is_allowed,
     rights_line,
@@ -145,9 +147,12 @@ class PoService:
         instance: Path | str | None = None,
         sprints: SprintSessions | None = None,
         models: dict[str, tuple[str, ...]] | None = None,
+        owner_events: Any = None,
     ) -> None:
         self.runner = runner
         self.store = runner.store
+        # Where a failed turn's owner event goes: the given sink, else the PO store's own board store.
+        self.owner_events = owner_events if owner_events is not None else self.store
         self.data_dir = Path(data_dir) if data_dir is not None else runner.data_dir
         # What `sprint_session` needs: the installation's sprints, and the models a session opened
         # without a previous one takes its default from (read from instance.yaml when not given).
@@ -157,6 +162,7 @@ class PoService:
         self.queue = queue or PoQueue(self.data_dir)
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
+        runner.on_failed = self._turn_failed
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._exit = threading.Event()
@@ -243,6 +249,23 @@ class PoService:
 
     def _settled(self, _session_id: str, _seq: int) -> None:
         self._wake.set()
+
+    def _turn_failed(self, session_id: str, seq: int, reason: str) -> None:
+        """A turn settled `failed`: one `po_turn_failed` notice (a stop by the owner is `interrupted`).
+
+        Its subject is the card when a dispatcher input started the turn (the facts the runner kept
+        beside it), else the session.
+        """
+        card = self.runner.turn_card(session_id, seq) or {}
+        card_ref = str(card.get("card_ref") or "")
+        on = f" on {card_ref}" + (" (the owner's answer)" if card.get("input") == OWNER_ANSWER_INPUT else "")
+        owner_events.record(
+            owner_events.PO_TURN_FAILED,
+            card_ref or owner_events.po_session_subject(session_id),
+            f"PO turn {session_id}/{seq} failed{on if card_ref else ''}: {reason}",
+            f"{owner_events.PO_TURN_FAILED}:{session_id}:{seq}",
+            to=self.owner_events,
+        )
 
     # --- the queue --------------------------------------------------------------------------
 

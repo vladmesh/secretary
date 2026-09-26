@@ -913,6 +913,42 @@ class PoRequest(Base):
     )
 
 
+
+class OwnerEvent(Base):
+    """What needs the owner, and what the owner should know (revision 0018, `board.owner_events`).
+
+    Written only through `board.owner_events.record`, idempotent on `dedup_key`; read by the web's
+    bell. `class` is derived from `kind` (`owner_events.KIND_CLASS`), and the CHECKs below are those
+    lists: `class` joins the vocabulary and the rule together with a new kind.
+    """
+
+    __tablename__ = "owner_events"
+
+    id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
+    kind = sa.Column(sa.Text, nullable=False)
+    event_class = sa.Column("class", sa.Text, nullable=False)
+    # A card, sprint or issue ref, `po-session:<id>`, or nothing.
+    subject_ref = sa.Column(sa.Text)
+    text = sa.Column(sa.Text, nullable=False)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    read_at = sa.Column(TIMESTAMPTZ)
+    dedup_key = sa.Column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "kind IN ('card_handed_to_owner','steward_needs_human','sprint_closed','sprint_stopped',"
+            "'budget_signal','observer_dead','head_dead','po_turn_failed','provider_red')",
+            name="owner_event_kind_in_vocabulary",
+        ),
+        sa.CheckConstraint("class IN ('needs_owner','notice')", name="owner_event_class_in_vocabulary"),
+        sa.CheckConstraint(
+            "(class = 'needs_owner') = (kind IN ('card_handed_to_owner','steward_needs_human'))",
+            name="owner_event_class_follows_kind",
+        ),
+        sa.UniqueConstraint("dedup_key", name="owner_event_dedup_key_is_unique"),
+        sa.Index("owner_events_by_subject", "subject_ref"),
+    )
+
 #: The three §5.5 role names.  They are literals of the design, not of one installation:
 #: `board-store.env` carries the *passwords*, which is what the revision takes as parameters.
 OWNER_ROLE = "secretary_owner"
@@ -962,6 +998,7 @@ __all__ = [
     "BoardEvent",
     "Issue",
     "IssueComment",
+    "OwnerEvent",
     "Product",
     "ProductComment",
     "ProductProject",

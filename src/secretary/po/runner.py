@@ -244,6 +244,8 @@ class TurnFiles:
     stdout: Path
     stderr: Path
     last_message: Path
+    # The card facts of a dispatcher input, kept beside the turn so a failure names the card.
+    card: Path | None = None
 
 
 @dataclass
@@ -263,10 +265,13 @@ class PoRunner:
         executables: Mapping[str, str] | None = None,
         env: Mapping[str, str] | None = None,
         on_settled: Callable[[str, int], None] | None = None,
+        on_failed: Callable[[str, int, str], None] | None = None,
     ) -> None:
         self.store = store
         # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
         self.on_settled = on_settled
+        # Told (session id, seq, reason) once when this runner settled a turn `failed` (`_finish`).
+        self.on_failed = on_failed
         self.data_dir = Path(data_dir)
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
@@ -343,6 +348,7 @@ class PoRunner:
             stdout=directory / f"{stem}.stdout",
             stderr=directory / f"{stem}.stderr",
             last_message=directory / f"{stem}.last-message",
+            card=directory / f"{stem}.card.json",
         )
 
     def argv(self, session: Session, files: TurnFiles, *, established: bool = False) -> list[str]:
@@ -434,6 +440,8 @@ class PoRunner:
             )
             if not created:
                 return turn, False
+            if card is not None:
+                self._keep_card(session_id, turn.seq, card)
             self._start(session_id, turn.seq, prompt)
         return self.store.turn(session_id, turn.seq), True
 
@@ -535,6 +543,45 @@ class PoRunner:
         """
         return {**self.env, PO_SESSION_ENV: session.session_id}
 
+    def _finish(
+        self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
+    ) -> bool:
+        """`PoStore.finish_turn`, the one way this runner settles a turn failed or interrupted.
+
+        A turn it settled `failed` is told to `on_failed` once, here and nowhere else: every failure
+        path of the runner (a launch, a waiter, a re-run, a recovery) ends in this call.
+        """
+        extra = {"resolved_model": resolved_model} if resolved_model is not None else {}
+        settled = self.store.finish_turn(session_id, seq, state, reason, **extra)
+        if settled and state == FAILED and self.on_failed is not None:
+            try:
+                self.on_failed(session_id, seq, reason)
+            except Exception as exc:  # noqa: BLE001 - a listener never unsettles a turn
+                print(
+                    f"secretary po: after failed turn {session_id}/{seq}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+        return settled
+
+    def _keep_card(self, session_id: str, seq: int, card: Mapping[str, Any]) -> None:
+        """The card facts of a claimed dispatcher input, beside its turn's files (best effort)."""
+        path = self.files(session_id, seq).card
+        try:
+            assert path is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(dict(card), sort_keys=True), encoding="utf-8")
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"secretary po: turn {session_id}/{seq} card facts not kept: {exc}", file=sys.stderr)
+
+    def turn_card(self, session_id: str, seq: int) -> dict[str, Any] | None:
+        """The card facts the input of turn `seq` carried, or None for an input that carried none."""
+        path = self.files(session_id, seq).card
+        try:
+            document = json.loads(path.read_text(encoding="utf-8")) if path is not None else None
+        except (OSError, ValueError):
+            return None
+        return document if isinstance(document, dict) else None
+
     def _abandon(
         self, session_id: str, seq: int, process: subprocess.Popen[bytes] | None, reason: str
     ) -> None:
@@ -550,7 +597,7 @@ class PoRunner:
             except subprocess.TimeoutExpired:
                 pass
         try:
-            self.store.finish_turn(session_id, seq, FAILED, reason)
+            self._finish(session_id, seq, FAILED, reason)
         except Exception as exc:  # noqa: BLE001 - the unsettled row is recover()'s to settle
             print(
                 f"secretary po: turn {session_id}/{seq} left running for recovery: {reason}; "
@@ -577,7 +624,7 @@ class PoRunner:
                 return None
             turn = running[0]
             # Mark first, so the waiter sees a settled turn and does not call the kill a failure.
-            self.store.finish_turn(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
+            self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
             live = self._live.get((session_id, turn.seq))
             if live is not None:
                 _kill_group(live.process.pid)
@@ -645,7 +692,7 @@ class PoRunner:
             else:
                 state, reason = INTERRUPTED, RECOVERED_REASON
             reason += "; its process was killed" if alive else ""
-            settled = self.store.finish_turn(turn.session_id, turn.seq, state, reason)
+            settled = self._finish(turn.session_id, turn.seq, state, reason)
             if alive and settled:
                 _kill_group(int(turn.pid))
             if settled:
@@ -661,7 +708,7 @@ class PoRunner:
         except Exception as exc:  # noqa: BLE001 - not a passing store failure: the row can never re-run
             if alive:
                 _kill_group(int(turn.pid))
-            return self.store.finish_turn(
+            return self._finish(
                 turn.session_id,
                 turn.seq,
                 FAILED,
@@ -722,7 +769,7 @@ class PoRunner:
             self._settle(session, seq, code, files)
         except Exception as exc:  # noqa: BLE001 - a waiter must never leave a turn running without a word
             try:
-                self.store.finish_turn(
+                self._finish(
                     session.session_id,
                     seq,
                     FAILED,
@@ -790,9 +837,9 @@ class PoRunner:
             tail = self._stderr_tail(files)
             if tail:
                 reason += f": {tail}"
-            self.store.finish_turn(session.session_id, seq, FAILED, reason, resolved_model=resolved)
+            self._finish(session.session_id, seq, FAILED, reason, resolved_model=resolved)
         elif answer is None:
-            self.store.finish_turn(
+            self._finish(
                 session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
             )
         else:

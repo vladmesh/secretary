@@ -163,6 +163,17 @@ class RouteFixture(unittest.TestCase):
                 "running": False,
             },
         )
+        self.owner_events = Recording(
+            owner_event_list={
+                "kind": "owner_events",
+                "observed_at": "2026-09-20T12:00:00Z",
+                "source": {"state": "available", "reason": None},
+                "unread_only": False,
+                "unread": 0,
+                "events": [],
+            },
+            unread_count={"state": "available", "reason": None, "count": 0},
+        )
         # The pause refuses, so the dashboard draws that section as a marked block: this suite is
         # about the bar, and a page that also has an unreadable section is the harder case for it.
         self.layers = [
@@ -206,6 +217,7 @@ class RouteFixture(unittest.TestCase):
             doctor=self.doctor if doctor is ... else doctor,
             po_auth=Recording(po_admits={"admitted": True}),
             po=self.po if po is ... else po,
+            owner_events=self.owner_events,
         )
 
     def page_routes(self) -> list[Any]:
@@ -252,6 +264,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 "/doctor",
                 "/po",
                 "/po/sessions/s-1",
+                "/owner-events",
             },
         )
 
@@ -518,7 +531,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74%", bar)
                 self.assertIn("41%", bar)
-        self.assertEqual(len(paths) * 5, 60, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 65, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:

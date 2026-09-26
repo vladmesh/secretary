@@ -110,6 +110,23 @@ nav.primary a[aria-current="page"] { color: var(--ink); border-bottom-color: var
 .top .theme-toggle .sun, .top .theme-toggle .moon { opacity:.35; }
 .top .theme-toggle[data-theme="light"] .sun, .top .theme-toggle[data-theme="dark"] .moon { opacity:1; color:var(--ink); }
 
+/* the owner's bell (secretary-1770): the unread count on every page, and its list */
+.top .bell { display: inline-flex; align-items: center; gap: .3rem; padding: .25rem .55rem; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); font-size: .85rem; line-height: 1; }
+.top .bell:hover { text-decoration: none; color: var(--ink); }
+.top .bell .bell-count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.top .bell.bell-unread { border-color: transparent; background: var(--warn-soft); color: var(--warn); }
+.top .bell.bell-unknown { color: var(--faint); }
+ol.owner-events { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+ol.owner-events li { display: flex; flex-wrap: wrap; gap: .4rem .75rem; align-items: baseline; padding: .55rem .75rem; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+ol.owner-events li.unread { border-left: 3px solid var(--warn); background: var(--warn-soft); }
+ol.owner-events li.pinned { border-left-color: var(--bad); }
+ol.owner-events .text { flex: 1 1 100%; order: 3; white-space: pre-wrap; overflow-wrap: anywhere; }
+ol.owner-events .when { margin-left: auto; }
+ol.owner-events form { order: 4; }
+ol.owner-events .held { order: 4; color: var(--muted); font-size: .85rem; }
+.owner-events-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .75rem; }
+.owner-events-actions form { margin: 0; }
+
 /* the page */
 main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-inline: 20px; }
 .lead { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
@@ -481,6 +498,13 @@ _DOCTOR_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = Context
     "secretary.web.doctor_source", default=None
 )
 
+#: The bell's reading for the span of one request: a `{"state", "reason", "count"}` document from the
+#: owner events layer, or `None` when this process was built without it. Fed like the doctor lamp:
+#: lazily, per request, never module state, so the count is the board's at the moment of the render.
+_BELL_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
+    "secretary.web.bell_source", default=None
+)
+
 #: Said when nothing fed the bar: no provider layer was built into this process at all.
 LIMITS_NOT_BUILT = "this web process was built without the provider usage layer"
 #: Said when the reading came back but carries nothing about this provider.
@@ -518,6 +542,44 @@ def doctor_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[
         yield
     finally:
         _DOCTOR_SOURCE.reset(token)
+
+
+@contextmanager
+def bell_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
+    """Feed the header bell for the span of one request, and stop feeding it when that span ends."""
+    token = _BELL_SOURCE.set(read)
+    try:
+        yield
+    finally:
+        _BELL_SOURCE.reset(token)
+
+
+def _bell() -> str:
+    """The bell in the header: the unread owner events, or `?` when the board could not count them."""
+    read = _BELL_SOURCE.get()
+    if read is None:
+        return ""
+    try:
+        reading = read()
+    except Exception as exc:  # noqa: BLE001 - a bell that cannot count never takes a page down
+        reading = {"state": "unavailable", "reason": f"{type(exc).__name__}: {exc}", "count": 0}
+    if not isinstance(reading, dict):
+        return ""
+    if reading.get("state") != "available":
+        reason = str(reading.get("reason") or "the owner events could not be read")
+        return (
+            f'<a class="bell bell-unknown" id="owner-bell" href="/owner-events" title="{escape(reason)}" '
+            'aria-label="owner events: unread count unknown">'
+            '<span aria-hidden="true">🔔</span><span class="bell-count">?</span></a>'
+        )
+    count = int(reading.get("count") or 0)
+    tone = " bell-unread" if count else ""
+    label = f"owner events: {count} unread"
+    return (
+        f'<a class="bell{tone}" id="owner-bell" href="/owner-events" title="{escape(label)}" '
+        f'aria-label="{escape(label)}"><span aria-hidden="true">🔔</span>'
+        f'<span class="bell-count">{count}</span></a>'
+    )
 
 
 @contextmanager
@@ -700,6 +762,7 @@ def _page(
             f'<nav class="primary" aria-label="primary">{links}</nav>',
             trail,
             f'<p class="notice" title="{escape(LOOPBACK_NOTICE)}">local only</p>',
+            _bell(),
             '<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme"><span class="sun" aria-hidden="true">☀</span><span class="moon" aria-hidden="true">☾</span></button>',
             '<a class="top-action" href="/sprints/new">New sprint</a>',
             "</div></header>",
@@ -1559,6 +1622,96 @@ def commands(document: dict[str, Any]) -> str:
     return _page("History", body, nav="history")
 
 
+#: How the two owner event classes read on the list: the badge's words and tone.
+OWNER_EVENT_CLASSES: dict[str, tuple[str, str]] = {
+    "needs_owner": ("needs the owner", "bad"),
+    "notice": ("notice", "accent"),
+}
+
+
+def owner_event_subject(subject: str) -> str:
+    """A subject ref as a link to its page where it has one: a card, a sprint, a PO session."""
+    if not subject:
+        return ""
+    if subject.startswith("po-session:"):
+        session = subject.removeprefix("po-session:")
+        return f'<a class="ref" href="/po/sessions/{quote(session)}">{escape(subject)}</a>'
+    if subject.startswith("sprint:"):
+        return f'<a class="ref" href="/sprints/{quote(subject)}">{escape(subject)}</a>'
+    if ":" in subject:
+        return f'<span class="ref">{escape(subject)}</span>'
+    return f'<a class="ref" href="/tasks/{quote(subject)}">{escape(subject)}</a>'
+
+
+def owner_events(document: dict[str, Any]) -> str:
+    """The bell's list: every event newest first, open `needs_owner` events pinned, unread highlighted.
+
+    A notice is marked read by its own button, and "Mark all read" takes the notices only. A
+    `needs_owner` event whose card still waits for the owner has no button: its card clears it.
+    """
+    unread_only = bool(document.get("unread_only"))
+    events = [event for event in document.get("events") or [] if isinstance(event, dict)]
+    back = '<input type="hidden" name="unread" value="1">' if unread_only else ""
+    rows = []
+    for event in events:
+        label, tone = OWNER_EVENT_CLASSES.get(str(event.get("class") or ""), (str(event.get("class") or "?"), ""))
+        unread = bool(event.get("unread"))
+        subject = str(event.get("subject_ref") or "")
+        state = _chip("unread", "warn") if unread else (
+            f'<span class="age">read {escape(str(event.get("read_at") or ""))}</span>'
+        )
+        if not unread:
+            action = ""
+        elif event.get("class") == "needs_owner" and event.get("held"):
+            action = (
+                f'<span class="held">stays unread until {escape(subject)} leaves waiting_owner: '
+                "the PO completes the card</span>"
+            )
+        else:
+            action = (
+                f'<form method="post" action="/owner-events/{int(event.get("id") or 0)}/read">{back}'
+                '<button type="submit" class="quiet">Mark read</button></form>'
+            )
+        classes = " ".join(
+            name for name, on in (("unread", unread), ("pinned", bool(event.get("pinned")))) if on
+        )
+        rows.append(
+            f'<li class="{classes}" id="owner-event-{int(event.get("id") or 0)}">'
+            f"{_chip(label, tone)}"
+            f'<code>{escape(str(event.get("kind") or ""))}</code>'
+            f"{owner_event_subject(subject)}"
+            f"{state}"
+            f'<time class="when age">{escape(str(event.get("created_at") or ""))}</time>'
+            f'<div class="text">{escape(str(event.get("text") or ""))}</div>'
+            f"{action}</li>"
+        )
+    all_mark = ' aria-current="true"' if not unread_only else ""
+    unread_mark = ' aria-current="true"' if unread_only else ""
+    actions = (
+        '<div class="owner-events-actions">'
+        f'<div class="filters"><a href="/owner-events"{all_mark}>All</a>'
+        f'<a href="/owner-events?unread=1"{unread_mark}>Unread</a></div>'
+        f'<form method="post" action="/owner-events/read-all">{back}'
+        '<button type="submit" class="quiet" title="marks every unread notice read; '
+        'what needs the owner stays">Mark all notices read</button></form></div>'
+    )
+    listing = _section(
+        document.get("source"),
+        events,
+        what="the owner events",
+        empty="no unread event." if unread_only else "no owner event yet.",
+        table=f'<ol class="owner-events">{"".join(rows)}</ol>',
+    )
+    body = "\n".join(
+        [
+            '<div class="lead"><h1>Owner events</h1>',
+            f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
+            _panel("What needs you, and what you should know", actions + listing, count=document.get("unread")),
+        ]
+    )
+    return _page("Owner events", body)
+
+
 def sprints_page(
     document: dict[str, Any], *, view: str = "active", search: str = "", project: str = ""
 ) -> str:
@@ -1938,11 +2091,15 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
                 _card(card.get("value"), project) + _attempt(snapshot.get("attempt") or {}),
             ),
             _panel(
-                "Tell the head working this card",
+                # A card handed to the owner is answered here: the comment is written as the owner's
+                # and reaches the PO (`card_ops._comment_role`).
+                "Answer the PO as the owner" if handed else "Tell the head working this card",
                 _comment_form(
                     f"/api/tasks/{quote(ref)}/comment",
                     f"card.{ref}",
-                    "A comment the head reads on its next turn",
+                    "Your answer, written as the owner; the PO completes the card"
+                    if handed
+                    else "A comment the head reads on its next turn",
                 )
                 + f'<details class="more-actions"><summary>Move this card…</summary>{_move_form(ref)}</details>',
             ),

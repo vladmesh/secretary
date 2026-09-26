@@ -71,8 +71,9 @@ SELECT
 #: on `po_sessions` (closed exactly when audited). `0011` restates the `task_type` CHECK (one for one)
 #: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
 #: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves. `0017`
-#: restates the `task_type` CHECK again, one for one.
-DOCUMENTED_COUNTS = (28, 50, 44, 28, 17, 5)
+#: restates the `task_type` CHECK again, one for one. `0018` adds `owner_events`: three `CHECK`, one
+#: primary key, one `UNIQUE`.
+DOCUMENTED_COUNTS = (29, 53, 44, 29, 18, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -93,6 +94,7 @@ REVISIONS = (
     "0015_po_effort_resolved_model",
     "0016_sprint_po_session",
     "0017_po_card_kinds",
+    "0018_owner_events",
 )
 
 
@@ -469,6 +471,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -722,6 +725,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
 
@@ -1097,6 +1101,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1133,6 +1138,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
 
@@ -1209,6 +1215,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
 
@@ -1223,6 +1230,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
+                "0018_owner_events",
             ),
         )
 
@@ -1232,7 +1240,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
             )
         connection.rollback()
-        self.assertEqual(migrate.current_revision(connection), "0017_po_card_kinds")
+        self.assertEqual(migrate.current_revision(connection), "0018_owner_events")
 
     # --- 0015: a PO session's effort and each turn's resolved model -----------------------------
 
@@ -1323,7 +1331,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-5", task_type="decision")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0017_po_card_kinds",))
+        self.assertEqual(self.run_migrations(connection), ("0017_po_card_kinds", "0018_owner_events"))
 
         self.assertEqual(
             connection.exec_driver_sql(
@@ -1346,6 +1354,81 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "task_live_impact_is_research_only"):
             connection.exec_driver_sql("UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-5'")
         connection.rollback()
+
+    # --- 0018: owner events ---------------------------------------------------------------------
+
+    def test_0018_adds_owner_events_and_every_pre_0018_row_loads_unchanged(self) -> None:
+        """secretary-1770: a store at 0017 keeps its sprints and cards; the writer, dedup and mark-read work."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        from secretary.board.owner_events import OwnerEventStore, ReadRefused, record, settle
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords), "0017_po_card_kinds"
+        )
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        self.sprint(connection, "sprint:5", 5)
+        mark = '{"extra": {"waiting_owner": "2026-09-26T15:00:00Z", "waiting_owner_reason": "pay", "waiting_owner_by": "po"}}'
+        self.card(connection, "secretary-1", sprint="sprint:5", task_type="decision", extensions=mark)
+        self.card(connection, "secretary-2", task_type="code")
+        connection.commit()
+        before = (
+            connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall(),
+            connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(),
+        )
+        store = OwnerEventStore(self.credentials("app"))
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
+
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events",))
+
+        self.assertEqual(
+            (
+                connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall(),
+                connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(),
+            ),
+            before,
+        )
+        self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "h-1", to=store))
+        self.assertFalse(record("card_handed_to_owner", "secretary-1", "again", "h-1", to=store))
+        self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))
+        self.assertTrue(record("budget_signal", "sprint:5", "signal", "b-1", to=store))
+        self.assertEqual(store.unread_count(), 3)
+        events = store.events()
+        self.assertEqual([event.kind for event in events], ["card_handed_to_owner", "budget_signal", "sprint_closed"])
+        self.assertTrue(events[0].held and events[0].pinned)
+        self.assertEqual(events[0].text, "handed")
+
+        with self.assertRaises(ReadRefused):
+            store.mark_read(events[0].id)
+        self.assertEqual(store.mark_all_read(), 2)
+        self.assertIsNone(store.events()[0].read_at)
+        self.assertEqual(store.unread_count(), 1)
+
+        connection.exec_driver_sql("UPDATE tasks SET extensions = '{\"extra\": {}}' WHERE task_ref = 'secretary-1'")
+        connection.commit()
+        self.assertEqual(settle("secretary-1", to=store), 1)
+        self.assertEqual(store.unread_count(), 0)
+        self.assertEqual([event.kind for event in store.events(unread_only=True)], [])
+
+        # The CHECKs hold the vocabularies and the kind-to-class rule; the read role only reads.
+        for kind, event_class in (("card_moved", "notice"), ("sprint_closed", "needs_owner"), ("sprint_closed", "urgent")):
+            with self.subTest(kind=kind, event_class=event_class), self.assertRaises(sa.exc.IntegrityError):
+                connection.exec_driver_sql(
+                    'INSERT INTO owner_events (kind, "class", text, created_at, dedup_key) '
+                    "VALUES (%s, %s, 'x', now(), %s)",
+                    (kind, event_class, f"{kind}-{event_class}"),
+                )
+            connection.rollback()
+        reader = OwnerEventStore(self.credentials("read"))
+        self.assertEqual(len(reader.events()), 3)
+        from secretary.board.owner_events import OwnerEventsUnavailable
+
+        with self.assertRaises(OwnerEventsUnavailable):
+            reader.mark_all_read()
 
 
 if __name__ == "__main__":

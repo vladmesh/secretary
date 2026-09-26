@@ -366,8 +366,11 @@ card, column or role is refused, as is an empty reason, and a card already hande
   does not parse, reads as no mark;
 - **a PO comment** `[handover:owner]` with the reason;
 - **the audit record** of kind `handed_to_owner` (payload: `to`, `reason_sha256`, the card's `kind` and
-  `sprint`, and the mark's moment). The owner-event card turns it into an owner event; nothing else
-  consumes it yet.
+  `sprint`, and the mark's moment).
+
+After that transaction commits, the same call writes the owner event `card_handed_to_owner` (class
+`needs_owner`, subject the card; [Owner events](#owner-events-and-the-bell)) under the dedup key
+`card_handed_to_owner:<card>:<event id of the handover>`, so a repeat writes nothing new.
 
 The card stays In progress. The request id makes it idempotent: a repeat answers the recorded handover
 and writes nothing, and the same id with another card or reason is refused. `task show` and `task list`
@@ -394,8 +397,15 @@ with `the PO service refused the owner answer of this card: <reason>`, and one i
 `po-queue/refused/` Blocks it with `the PO service set the owner's answer aside and will not run it:
 <reason>`. The owner's comments are the only thing that re-submits: a settled turn on a marked card,
 the first one or a follow-up, means wait (`po-card-waiting-owner`, then `po-card-owner-answered`), never
-Blocked. The PO completes the card with `task complete`, which takes the mark off in the same
-transaction as the Done; any other move out of In progress takes it off too.
+Blocked. A follow-up whose turn ended `failed` or `interrupted` with the card still marked waits as
+`po-card-owner-answer-turn-ended`, with the reason `the owner's answer reached the PO, but its turn
+failed` (or `was interrupted`); the `po_turn_failed` owner event tells the owner. The PO completes the
+card with `task complete`, which takes the mark off in the same transaction as the Done; any other move
+out of In progress takes it off too, and with it marks the card's `needs_owner` events read.
+
+The dashboard's card comment form answers too: on a card carrying the mark it posts with role and actor
+`owner` (the web front is behind the owner's password), so the dispatcher forwards it like a CLI owner
+comment; on any other card it posts as `po`.
 
 **The sprint reads `waiting`.** While the sprint's current card is an In progress `decision` or
 `operation` card, `sprint status` (`work.waiting`) and the dashboard's sprint row read `state:
@@ -403,6 +413,49 @@ waiting`, with `card` pointing at it and the reason `<card> (<kind>) is handed t
 when it carries the mark, or `<card> (<kind>) is with the PO` otherwise. The Pipeline listing decides
 it, before the dispatcher's record, since no head runs such a card; every other answer of the section
 carries `card` as well (the sprint's current card, or null).
+
+### Owner events and the bell
+
+What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
+(revision `0018_owner_events`), written and read only through `secretary.board.owner_events`. A row is
+`id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
+`created_at`, `read_at` (null while unread) and `dedup_key` (unique).
+
+**Kinds and classes.** The class is derived from the kind (`owner_events.KIND_CLASS`); the database
+holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
+
+| kind | class | written by, at | subject | dedup key |
+| --- | --- | --- | --- | --- |
+| `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), after the handover commits | the card | `card_handed_to_owner:<card>:<handover event id>` |
+| `steward_needs_human` | `needs_owner` | `TaskWriter.move` of a steward report card to Blocked by role `steward` whose reason carries a non-empty "Needs a human" section | the report card | `steward_needs_human:<card>:<move event id>` |
+| `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
+| `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
+| `budget_signal` | `notice` | `SprintWriter.record_budget` once the sprint's budget reaches its signal threshold | the sprint | `budget_signal:<sprint>` |
+| `observer_dead` | `notice` | the dispatcher's observer reconcile: a head positively dead at the start of the tick that the tick did not relaunch (backoff, drain, a failed bring-up) | the sprint | `observer_dead:<sprint>:<launch count>` |
+| `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
+| `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
+| `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
+
+**The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
+dedup_key, to=...)` once, at the place its fact is decided. It is idempotent on the dedup key (`ON
+CONFLICT DO NOTHING`) and swallows and logs every failure: a store that does not answer, a board without
+`0018` (merged code runs before the upgrade applies the migration), no board store at all. A producer's
+own write never depends on it.
+
+**Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark stays unread:
+a click on it is refused and "mark all read" takes notices only. Its `read_at` is set when the mark
+clears, by `TaskWriter._reset_transition_metadata` in the transition's own transaction (a savepoint on
+PostgreSQL): `task complete`, or any other move out of In progress. A `needs_owner` event whose card
+carries no mark (the steward's report) is read by a click.
+
+**The web.** The header of every page shows the bell, the unread count read from the board for that
+render (`?` with the reason when the board cannot count, for instance before `0018`). `GET
+/owner-events` lists every event, open `needs_owner` events pinned first, then newest first, unread
+rows highlighted, each with its class badge and a link to its subject; `?unread=1` shows only the
+unread. A notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
+`/owner-events/read-all`. A board without the table lists no events, with the source `unavailable`, and
+refuses the two writes (503). From a terminal: `secretary owner-events list`
+([Operations](OPERATIONS.md#owner-events)).
 
 ### Cards outside a sprint
 
@@ -3426,7 +3479,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/sprints/{ref}/close` | `sprint_ops.sprint_close` | close a sprint; body `{request_id, reason, closeout, decisions?}` — `decisions` is the CLI's decisions file, as text or as its parsed object |
 | GET | `/api/history` | `command_reads.command_history` | a page of the last commands across every entity; `?cursor=C&limit=N` |
 | GET | `/api/history/{request_id}` | `command_reads.command_request` | what became of one request id |
-| POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
+| POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`, or role and actor `owner` on a card carrying `waiting_owner` (the owner's answer, which the dispatcher forwards to the PO; a repeated request id keeps its first role); body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 | POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one) with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
@@ -3436,6 +3489,9 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
 | POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs or a message is queued |
+| GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: every owner event, open `needs_owner` events first, then newest first, unread highlighted, with its class badge and subject link; `?unread=1` only the unread; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
+| POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `unread?`; 303 to the list |
+| POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `unread?`; 303 to the list |
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and

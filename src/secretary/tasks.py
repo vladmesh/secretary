@@ -41,6 +41,7 @@ from secretary.board.legacy_codec import (
     split_heads as _split_heads,
     text as _text,
 )
+from secretary.board import owner_events
 from secretary.board.outcome_round_context import OutcomeRoundContext
 from secretary.board.owner_handover import (
     CLEAR_MARK,
@@ -1976,9 +1977,19 @@ class TaskWriter:
                 content=f"[{role.value}]\n{render_handover_comment(reason)}",
             )
 
-        return self._write(
+        result = self._write(
             HANDED_TO_OWNER, role, actor, reference, request_id, payload, mutation, identity=identity
         )
+        # The bell's half of the handover: one `needs_owner` event per handover record, written after
+        # the handover committed, so a store without it (or without 0018) costs the bell, not the card.
+        owner_events.record(
+            owner_events.CARD_HANDED_TO_OWNER,
+            reference,
+            f"{reference} is handed to the owner: {reason}",
+            f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{result.get('event_id') or request_id}",
+            to=self.client,
+        )
+        return result
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
@@ -2674,6 +2685,7 @@ class TaskWriter:
             }
             if outcome_owed is not None:
                 replay["outcome_owed"] = outcome_owed
+            self._steward_needs_human(task, role=role, target=target, reason=reason, moved=replay)
             return replay
         override_payload = self._guard_sprint_write(
             role=role,
@@ -2734,7 +2746,30 @@ class TaskWriter:
         }
         if outcome_owed is not None:
             moved["outcome_owed"] = outcome_owed
+        self._steward_needs_human(task, role=role, target=target, reason=reason, moved=moved)
         return moved
+
+    def _steward_needs_human(
+        self, task: dict[str, Any], *, role: str, target: str, reason: str, moved: dict[str, Any]
+    ) -> None:
+        """The steward's report card went Blocked carrying "Needs a human": one `needs_owner` event.
+
+        This move is the one place that fact is decided (the steward skill, step 5, moves its report
+        card to Blocked with that section as the reason), so the event is written here, once per move.
+        """
+        if role != Role.STEWARD.value or target != CardState.BLOCKED.value or not _is_steward_report(task):
+            return
+        section = owner_events.needs_human_section(reason)
+        if section is None:
+            return
+        reference = str(task.get("ref") or "")
+        owner_events.record(
+            owner_events.STEWARD_NEEDS_HUMAN,
+            reference,
+            f"The steward's report {reference} needs a human:\n{section}",
+            f"{owner_events.STEWARD_NEEDS_HUMAN}:{reference}:{moved.get('event_id')}",
+            to=self.client,
+        )
 
     def _legacy_move(
         self,
@@ -2841,6 +2876,10 @@ class TaskWriter:
             )
         elif clear_mark:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=clear_mark)
+        if clear_mark:
+            # The stay-unread rule's one end: the card no longer waits for the owner, so its
+            # `needs_owner` events are read now, in this transaction (a savepoint on PostgreSQL).
+            owner_events.settle(str(task.get("ref") or ""), to=self.client)
         if source == "validate" and target not in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}

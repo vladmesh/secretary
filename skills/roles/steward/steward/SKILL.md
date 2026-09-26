@@ -39,11 +39,13 @@ watermark (step 6):
   python3 -P -m secretary task move --role steward --ref <ref> --to done
   ```
 - There are items under "Needs a human" → instead of Done, move the report card itself to Blocked with
-  the same "Needs a human" section as in the report comment:
+  the same "Needs a human" section as in the report comment as the move's reason (the file holds the
+  `## Needs a human` heading and its items; the reason lands on the card as your comment):
   ```
-  python3 -P -m secretary task move --role steward --ref <ref> --to blocked
-  python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
+  python3 -P -m secretary task move --role steward --ref <ref> --to blocked --reason-file <file>
   ```
+  That move is what puts a "needs the owner" event on the owner's bell, so the section goes in the move
+  itself, never in a separate comment after it.
 
 This is separate from the ordinary escalation path (`task move --to blocked`) for OTHER cards you touch
 while investigating (the Blocked card from a signal, a new card for an anomaly you found, and so on);
@@ -324,8 +326,8 @@ positive, nothing to do").
 ### 5. Close the report card
 
 A mandatory step, see "The report card for this wake-up" above: `--to Done` when "Needs a human" is empty,
-otherwise `--to Blocked` with the same section as a comment. Without this step the card stays in In progress
-forever.
+otherwise `--to Blocked` with the same section as the move's `--reason-file`. Without this step the card stays
+in In progress forever.
 
 ### 6. Move the watermark
 

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import card_client
+from secretary.board.owner_handover import OWNER_ROLE, waiting_owner
 from secretary.config import InstanceReport, validate_instance
 from secretary.tasks import TaskError, TaskWriter
 from secretary.webproto import sources
@@ -115,7 +116,11 @@ class CardOperationLayer(ProtocolBoundary):
         _named(body, "a card comment carries a non-empty body")
         written = self._write(
             lambda writer: writer.comment(
-                role=role, actor=actor, reference=reference, body=body, request_id=request_id
+                role=_comment_role(writer, role, reference, request_id),
+                actor=actor,
+                reference=reference,
+                body=body,
+                request_id=request_id,
             )
         )
         return self._document("card_commented", written, request_id=request_id, reference=reference, now=now)
@@ -196,6 +201,27 @@ class CardOperationLayer(ProtocolBoundary):
             # What the writer answered, as it answered it: the CLI prints this same object.
             "result": written,
         }
+
+
+def _comment_role(writer: TaskWriter, role: str, reference: str, request_id: str) -> str:
+    """The role the dashboard's comment is written as: the owner's on a card that waits for the owner.
+
+    The web front is behind the owner's password, so a comment on a card carrying `waiting_owner` is
+    the owner's answer (`task comment --role owner`), which the dispatcher forwards to the PO; as
+    `po` it would never be (secretary-1770). A repeat of a request id keeps the role its first
+    comment was written as, so a card completed in between does not turn the replay into a conflict.
+    """
+    if role != "po":
+        return role
+    recorded = writer.audit.committed_event(request_id) or writer.audit.pending_event(request_id)
+    payload = recorded.get("payload") if isinstance(recorded, dict) else None
+    if isinstance(payload, dict) and payload.get("marker") in {OWNER_ROLE, "po"}:
+        return str(payload["marker"])
+    try:
+        card = writer.reader.show(reference)
+    except TaskError:
+        return role
+    return OWNER_ROLE if waiting_owner(card) is not None else role
 
 
 def _named(value: Any, message: str) -> None:
