@@ -295,32 +295,57 @@ do not.
 #### Production rights
 
 By default an operation touches no production; a sprint allows its operations the productions it names
-at create ([`allowed_productions`](#the-sprints-po-session-and-productions)). The rule is enforced in one
-place: the PO service's handling of a dispatcher submit (`PoService.submit`), after the request id is
-reserved and the session found open, and before anything is queued. Neither the dispatcher nor the web
-decides it. On a submit whose facts say `kind: operation`, `input: card`:
+at create ([`allowed_productions`](#the-sprints-po-session-and-productions)), and the ones its PO allows
+later with `sprint allow-production` (below). The rule is evaluated in one place: the PO service's
+handling of a dispatcher submit (`PoService.submit`), after the request id is reserved and the session
+found open. Neither the dispatcher nor the web evaluates it. It refuses nothing and hands nothing over
+(secretary-1769): every operation card becomes a normal PO turn, and the rule only decides what that
+turn's input says. On a submit whose facts say `kind: operation`, `input: card`, the service queues the
+input with a **rights section** (`## Production rights (the PO service)`) that the turn's prompt, and
+the session's feed, carry after the dispatcher's text:
 
 - `touches_production` is `none`, or is in the sprint's `allowed_productions` (read through the
-  service's sprint port): the input is queued as any other;
-- otherwise nothing is queued. The service hands the card to the owner through the existing handover
-  ([below](#handover-to-the-owner)): role `po`, actor `po-service`, request id `<submit id>:handover`,
-  reason `operation touches production <p>; sprint <ref> allows [<list>]` (the list comma-separated, `[]`
-  when empty). It answers the submit `{queued: false, seq: null, handed_over: true, reason}`, and the
-  dispatcher records `handed_over` on its record (tick action `po-card-handed-over`) and from then on
-  waits for the owner like any marked card (`_await_owner`). A repeat of the same submit id answers the
-  same handover (`repeated: true`) and writes nothing. A handover the board refuses before writing (the
-  card not In progress, already handed over) refuses the submit as `validation`, which Blocks the card;
-  a handover that may have committed is `outcome_unknown`, repeated under the same id;
+  service's sprint port): the section gives the rights line `touches production <p>; sprint <ref> allows
+  [<list>]` and says the sprint allows it. The PO runs the operation with no confirmation;
+- otherwise the section gives the same rights line (the list comma-separated, `[]` when empty) and the
+  instruction to decide under the owner's standing rule: production of secretary is allowed by default,
+  because it is the development server; any other production only as agreed at sprint planning. If the
+  PO may allow it, it records the allowance with `python3 -P -m secretary sprint allow-production --ref
+  <sprint> --role po --project <p> --reason <text> --request-id <submit id>:allow-production` and runs
+  the operation in the same turn. If it may not, it hands the card to the owner with `task handover
+  --to owner` ([below](#handover-to-the-owner)), as for any card. The service journal says `<card>
+  queued for the PO to decide: <rights line>`;
 - facts that are missing or malformed (an operation with no `touches_production`, a dispatcher input
   with no facts at all) and a sprint that cannot be read are refused as `unavailable`, with nothing
-  queued and nothing handed over. The input is never executed; the dispatcher repeats it each tick
-  (`po-service-unanswered`) and the card stays In progress.
+  queued. The input is never executed; the dispatcher repeats it each tick (`po-service-unanswered`)
+  and the card stays In progress.
 
-A decision card is not checked. Neither is the owner's answer on a handed-over card (`input:
-owner_answer`): the owner decided, so the follow-up is queued as today and the PO executes the card
-within the owner's answer. Inside a turn the PO touches only the production the card names. The
-sprint's `allowed_productions` is not changed after create, so an operation outside it always reaches
-the owner.
+The rights section is the service's, not the submitter's: the request id binds the dispatcher's text
+and card facts only, so a repeat of the same submit id answers the input already queued (or its turn)
+whatever the sprint allows by then. A sprint opened before `allowed_productions` existed reads `[]`, so
+each of its operations goes to the PO turn above, never straight to the owner.
+
+A decision card gets no rights section. Neither does the owner's answer on a handed-over card (`input:
+owner_answer`): the owner decided, so the follow-up is queued as today, its production line says the
+owner decided, and the PO executes the card within the owner's answer. Inside a turn the PO touches
+only the production the card names.
+
+**`sprint allow-production`.**
+
+```text
+sprint allow-production --ref <sprint> --role po --project <p> --reason <text> [--request-id <id>]
+```
+
+Role `po` only; the actor is `--actor`, default `$BOARD_ACTOR` (`po` in a PO turn). Another role is
+refused with `role_forbidden`, and `--role po` with actor `observer` with `role_masquerade` (the one
+check every sprint write makes). `--project` must be a project of the instance registry and `--reason`
+non-empty (`validation`); the sprint must be `open` (`closed`, exit status `3`, otherwise). It appends the
+project to `allowed_productions` and writes one audit event `production_allowed` (payload `project` and
+`reason`; the actor in the event), so `sprint show` and `status` carry it at once. It only adds: a
+project already allowed is a no-op that writes nothing and answers `already_allowed`. The request id
+makes a repeat the same write, and binds the sprint and project; the same id for another project is
+`validation`. No other field of the sprint's contract is editable this way, and nothing removes a
+production.
 
 #### Handover to the owner
 
@@ -362,10 +387,8 @@ the card ref, the handover reason, the owner's comments since the handover in bo
 completion command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
 comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
 rebuilt record never makes a second input for the same comment. It carries the card's facts with
-`input: owner_answer`, which the service does not check against the sprint's productions. When the PO
-service handed the card over ([Production rights](#production-rights)), the PO has not seen the card
-yet, so the follow-up also carries the card body and says the service handed it over; a later owner comment makes one more
-follow-up, carrying every comment since the handover. A follow-up the service does not answer is
+`input: owner_answer`, which the service does not check against the sprint's productions. A later
+owner comment makes one more follow-up, carrying every comment since the handover. A follow-up the service does not answer is
 repeated next tick under the same id; one it refuses outright (its session closed, say) Blocks the card
 with `the PO service refused the owner answer of this card: <reason>`, and one it set aside in
 `po-queue/refused/` Blocks it with `the PO service set the owner's answer aside and will not run it:
@@ -1051,6 +1074,7 @@ python3 -P -m secretary sprint current-task --role dispatcher --ref sprint:ID --
 python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
 python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
 python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
+python3 -P -m secretary sprint allow-production --role po --ref sprint:ID --project PROJECT_ID --reason WHY
 python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
@@ -1260,6 +1284,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
+| `production_allowed` | `refused` — `closed`, exit status `3` |
 | `restored` | `accepted` |
 | `resume_recorded` | `refused` — `closed`, exit status `3` |
 
@@ -1476,8 +1501,10 @@ request: the staged intent carries each only when set, so a repeat with a differ
 session id or `null`) and `allowed_productions` (a list); a sprint opened before `0016` reads `null` and
 `[]`. The observer launch document prints both, as `## PO session` and `## Allowed productions`. The
 checkpoint export carries each only where set, restore writes it back, and sprint parity compares both.
-Neither is changed after create except `po_session` by the PO service's resolver below; the audit kind of
-that write is `po_session_set`, role `po`, actor `po-service`.
+Neither is changed after create except `po_session` by the PO service's resolver below (the audit kind
+of that write is `po_session_set`, role `po`, actor `po-service`), and `allowed_productions`, which the
+PO only extends with `sprint allow-production` ([Production rights](#production-rights), audit kind
+`production_allowed`).
 
 **The resolver.** `sprint_session(sprint_ref, request_id)` is an operation of the PO service
 (`secretary.po.client.PoServiceClient.sprint_session`, [Operations](OPERATIONS.md#the-po-service)). It

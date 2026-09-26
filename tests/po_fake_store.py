@@ -41,6 +41,7 @@ from secretary.po.store import (
     send_fingerprint,
     session_fingerprint,
 )
+from secretary.tasks import admit_role
 
 
 class FakeBoard:
@@ -181,7 +182,14 @@ class FakePoStore:
     # --- turns ------------------------------------------------------------------------------
 
     def claim_turn(
-        self, session_id: str, text: str, stdout_path, *, request_id: str | None = None, card: Any = None
+        self,
+        session_id: str,
+        text: str,
+        stdout_path,
+        *,
+        request_id: str | None = None,
+        card: Any = None,
+        prompt: str | None = None,
     ) -> tuple[Turn, bool]:
         board = self._open()
         with board.lock:
@@ -198,7 +206,9 @@ class FakePoStore:
             seq = max((t.seq for t in turns), default=0) + 1
             turn = Turn(session_id, seq, board.now(), None, RUNNING, str(stdout_path(seq)), None, None, None)
             board.turns[(session_id, seq)] = turn
-            board.feed.append(FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text, board.now()))
+            board.feed.append(
+                FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text if prompt is None else prompt, board.now())
+            )
             if request_id is not None:
                 board.requests[request_id] = PoRequest(
                     request_id, SEND, send_fingerprint(session_id, text, card), session_id, seq, board.now()
@@ -292,8 +302,8 @@ class FakeSprints:
     Every sprint is open unless `status` says otherwise, and allows the productions `allowed` names
     (none by default). A comment and a session record are kept by their request id and a repeat of one
     changes nothing, as the sprint audit does. `fail` makes the next call of a method raise, as a board
-    that dropped the connection would. A handover lands on `cards` (an object with `handover`, the
-    dispatcher fixture's one card) when a test wires one, and is kept in `handovers` either way.
+    that dropped the connection would. It also stands in for the sprint writer of `sprint
+    allow-production` (`allow_production`), so a test can play the PO recording an allowance.
     """
 
     def __init__(
@@ -308,8 +318,8 @@ class FakeSprints:
             ref: SprintRecord(ref, (status or {}).get(ref, "open"), session, (allowed or {}).get(ref, ()))
             for ref, session in sessions.items()
         }
-        self.cards: Any = None
-        self.handovers: dict[str, tuple[str, str]] = {}
+        # The sprint audit's `production_allowed` events (`allow_production`), in order.
+        self.events: list[dict[str, Any]] = []
         self.documents = dict(documents or {})
         self.comments: dict[str, tuple[str, str]] = {}
         self.recorded: dict[str, tuple[str, str]] = {}
@@ -326,14 +336,33 @@ class FakeSprints:
             self._maybe_fail("sprint")
             return self.records.get(sprint_ref)
 
-    def hand_over(self, card_ref: str, reason: str, *, request_id: str) -> bool:
+    def allow_production(
+        self, *, role: str, actor: str, reference: str, project: str, reason: str, request_id: str | None
+    ) -> dict[str, Any]:
+        """What `SprintWriter.allow_production` leaves, as `sprint allow-production` reaches it.
+
+        The writer's own rules (role, registry, status, request id) are its unit and PostgreSQL tests'
+        subject; this keeps the result: the project appended once and one `production_allowed` event.
+        """
         with self.lock:
-            self._maybe_fail("hand_over")
-            replayed = request_id in self.handovers
-            if self.cards is not None:
-                replayed = self.cards.handover(card_ref, reason, actor="po-service", request_id=request_id)
-            self.handovers.setdefault(request_id, (card_ref, reason))
-            return replayed
+            admit_role(role, actor, {"po"})
+            record = self.records[reference]
+            known = next((event for event in self.events if event["request_id"] == request_id), None)
+            if known is not None:
+                return {"action": "production_allowed", "event_id": known["event_id"]}
+            if project in record.allowed_productions:
+                return {"action": "already_allowed", "event_id": None}
+            self.records[reference] = replace(record, allowed_productions=(*record.allowed_productions, project))
+            event = {
+                "event_id": f"evt-allow-{len(self.events) + 1}",
+                "request_id": request_id,
+                "kind": "production_allowed",
+                "ref": reference,
+                "actor": {"role": role, "id": actor},
+                "payload": {"project": project, "reason": reason},
+            }
+            self.events.append(event)
+            return {"action": "production_allowed", "event_id": event["event_id"]}
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:
         return list(self.documents.get(sprint_ref, []))

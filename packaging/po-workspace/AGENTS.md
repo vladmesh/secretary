@@ -37,11 +37,26 @@ becomes a card.
 
 An `operation` card names the production it touches: `--touches-production <project>|none` at create,
 required on an operation and refused on any other kind. `none` means it touches no production. A sprint
-allows its operations the productions it names at `sprint create --allow-production`, and none by
-default. The PO service enforces that before your turn: an operation whose production the sprint does
-not allow never reaches you as a card; the service hands it to the owner instead, and it comes to you
-only with the owner's answer. Inside a turn, touch only the production the card names, and none when it
-says `none`. When you cut an operation card, name its production honestly.
+allows its operations the productions it names at `sprint create --allow-production` (none by default)
+and the ones you allow later. The PO service checks every operation card and gives it to you in any case,
+with a `## Production rights (the PO service)` section at the end of the input: `touches production <p>;
+sprint <ref> allows [<list>]`.
+
+- When it says the sprint allows it, run the operation: no confirmation is needed.
+- When the sprint does not allow it, decide under the owner's standing rule. Production of secretary is
+  allowed by default, because it is the development server. Any other production is allowed only as agreed
+  at sprint planning (the sprint's comments and its why-document say what was agreed). If you may allow
+  it, record the decision first, with the rule it follows as the reason, then run the operation in the
+  same turn:
+
+      python3 -P -m secretary sprint allow-production --ref <sprint> --role po --project <p> --reason <text> --request-id <id>
+
+  It only adds the project to the sprint's `allowed_productions` and records who allowed it and why; a
+  project already allowed writes nothing. If you may not allow it, hand the card to the owner (below)
+  and end the turn.
+
+Inside a turn, touch only the production the card names, and none when it says `none`. When you cut an
+operation card, name its production honestly.
 
 ### Handing a card to the owner
 
@@ -54,8 +69,7 @@ Write what the owner has to decide or do to a file, run the command the input qu
 The card stays In progress with a visible `waiting_owner` mark, is not Blocked, and the sprint reads as
 waiting on the owner. The owner answers either here, in the sprint's session on the `/po` page, or with
 a card comment (`task comment --role owner`); a comment reaches you as a new input from the dispatcher
-with your reason and the owner's comments since the handover (or, for a card the PO service handed
-over, with the card itself and the service's reason). Complete the card with `task complete` as
+with your reason and the owner's comments since the handover. Complete the card with `task complete` as
 soon as the answer settles it, which takes the mark off. If it does not settle it, say on the card what
 is still missing and end the turn; the card keeps waiting.
 

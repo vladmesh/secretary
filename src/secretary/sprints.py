@@ -1834,6 +1834,90 @@ class SprintWriter:
             "po_session_set", role, actor, reference, request_id, {"po_session": session_id}, mutation
         )
 
+    def allow_production(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        project: str,
+        reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Add one production the sprint's operations may touch: the PO's decision, recorded (secretary-1769).
+
+        Role `po` only, on an open sprint, for a registered project, with a reason. It only adds: a
+        project the sprint already allows is a no-op that writes nothing and answers
+        `already_allowed`. Nothing else of the sprint's contract is changed here. The request id makes
+        a repeat the same write, and binds the sprint and the project.
+        """
+        self._role(role, {"po"}, actor=actor)
+        project = str(project or "").strip()
+        reason = str(reason or "").strip()
+        if not project:
+            raise TaskError("validation", "--project names a registered project; it is empty", 2)
+        if not reason:
+            raise TaskError("validation", "allowing a production requires a non-empty --reason", 2)
+        if self.instance is None:
+            raise TaskError("validation", "allowing a production needs the instance directory; pass --instance", 2)
+        from secretary.product_issues import registered_projects
+
+        if project not in registered_projects(self.instance):
+            raise TaskError("validation", f"--project names unknown registered project: {project}", 2)
+        return self._allow_production_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            project=project,
+            reason=reason,
+            request_id=request_id or str(uuid.uuid4()),
+        )
+
+    @_sql_atomic
+    def _allow_production_atomic(
+        self, *, role: str, actor: str, reference: str, project: str, reason: str, request_id: str
+    ) -> dict[str, Any]:
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        allowed: list[str] = []
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("project")) != (
+                "production_allowed",
+                reference,
+                project,
+            ):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a request id is "
+                    "repeated only with the same sprint and project",
+                    2,
+                )
+        else:
+            sprint = self.reader.show(reference)
+            status = str(sprint.get("status") or "")
+            if status != SprintState.OPEN.value:
+                raise TaskError("closed", f"sprint {reference} is {status}; it allows no new production", 3)
+            allowed = [str(item) for item in sprint.get("allowed_productions") or []]
+            if project in allowed:
+                return {"action": "already_allowed", "sprint": sprint, "event_id": None}
+
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={ALLOWED_PRODUCTIONS_FIELD: json.dumps([*allowed, project], separators=(",", ":"))},
+            )
+
+        return self._write(
+            "production_allowed",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"project": project, "reason": reason},
+            mutation,
+        )
+
     @_sql_atomic
     def record_budget(
         self,
@@ -3101,6 +3185,7 @@ class SprintWriter:
         sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
         if sprint.state in {SprintState.CLOSED, SprintState.STOPPED} and kind in {
             "current_task_set",
+            "production_allowed",
             "resume_recorded",
         }:
             raise TaskError("closed", "sprint is closed", 3)

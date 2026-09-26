@@ -6,10 +6,14 @@ An `operation` card names the production it touches at create (`task create --to
 a registered project id or `none`. Only create writes it, and it is read only through
 :func:`touches_production`, which treats a malformed value as no value rather than a guess.
 
-A sprint allows its operations some productions (`sprint create --allow-production`, stored as
-`sprints.allowed_productions`). The PO service enforces the rule, in one place, before it queues a
-dispatcher's input (`secretary.po.service.PoService.submit`): `none` or an allowed production is
-queued, anything else is handed to the owner with :func:`refusal_reason`.
+A sprint allows its operations some productions (`sprint create --allow-production`, and later
+`sprint allow-production --role po`, stored as `sprints.allowed_productions`). The PO service
+evaluates the rule, in one place, when it queues a dispatcher's input
+(`secretary.po.service.PoService.submit`), and refuses nothing by it: every operation goes to the PO
+as a normal turn, and :func:`rights_note` tells the PO what the rule says. A production the sprint
+allows (or `none`) runs with no confirmation; any other one the PO decides under the owner's
+standing rule, and records with `sprint allow-production` or hands the card to the owner
+(secretary-1769).
 """
 
 from __future__ import annotations
@@ -111,9 +115,58 @@ def is_allowed(production: str, allowed: Iterable[str]) -> bool:
     return production == NO_PRODUCTION or production in set(allowed)
 
 
-def refusal_reason(production: str, sprint_ref: str, allowed: Iterable[str]) -> str:
-    """The handover reason the PO service writes when the rule refuses an operation."""
-    return f"operation touches production {production}; sprint {sprint_ref} allows [{', '.join(allowed)}]"
+def rights_line(production: str, sprint_ref: str, allowed: Iterable[str]) -> str:
+    """What the rule was evaluated on: the card's production and what its sprint allows."""
+    return f"touches production {production}; sprint {sprint_ref} allows [{', '.join(allowed)}]"
+
+
+#: The heading of the section the PO service adds to an operation card's input.
+RIGHTS_HEADING = "## Production rights (the PO service)"
+
+
+def allow_production_command(sprint_ref: str, production: str, request_id: str) -> str:
+    """The exact command the PO runs to allow a production on its sprint (`--reason` is the PO's)."""
+    return (
+        f"python3 -P -m secretary sprint allow-production --ref {sprint_ref} --role po --project {production} "
+        f"--reason '<text>' --request-id {request_id}"
+    )
+
+
+def rights_note(
+    production: str, sprint_ref: str, allowed: Iterable[str] | None, *, request_id: str
+) -> str:
+    """The section the PO service adds to an operation card's input: the rule's verdict and what to do.
+
+    `allowed` is the sprint's list, or None for `none`, which is allowed without reading the sprint.
+    A production the sprint does not allow is not refused: the PO decides it under the owner's
+    standing rule and either records an allowance (`allow_production_command`, `request_id` its id)
+    or hands the card to the owner.
+    """
+    if production == NO_PRODUCTION or allowed is None:
+        return (
+            f"{RIGHTS_HEADING}\n\n"
+            f"touches production {NO_PRODUCTION}: the sprint allows it. Touch no production in this turn."
+        )
+    allowed = list(allowed)
+    line = rights_line(production, sprint_ref, allowed)
+    if is_allowed(production, allowed):
+        return (
+            f"{RIGHTS_HEADING}\n\n{line}\n\n"
+            "The sprint allows it: run the operation with no further confirmation, and touch no other "
+            "production in this turn."
+        )
+    return (
+        f"{RIGHTS_HEADING}\n\n{line}\n\n"
+        f"The sprint does not allow production {production} yet. This is not a refusal: decide it under "
+        "the owner's standing rule. Production of secretary is allowed by default, because it is the "
+        "development server; any other production only as agreed at sprint planning (the sprint's "
+        "comments and its why-document say what was agreed).\n\n"
+        "- If you may allow it, record the decision first, with the owner's rule it follows as the "
+        "reason, then run the operation in this turn:\n\n"
+        f"      {allow_production_command(sprint_ref, production, request_id)}\n\n"
+        "- If you may not, hand the card to the owner with `task handover --to owner` (the command "
+        'under "Or hand it to the owner" above) and end the turn.'
+    )
 
 
 __all__ = [
@@ -123,11 +176,14 @@ __all__ = [
     "OPERATION_KIND",
     "OWNER_ANSWER_INPUT",
     "PO_CARD_KINDS",
+    "RIGHTS_HEADING",
     "TOUCHES_PRODUCTION",
+    "allow_production_command",
     "card_facts",
     "create_refusal",
     "facts_problem",
     "is_allowed",
-    "refusal_reason",
+    "rights_line",
+    "rights_note",
     "touches_production",
 ]

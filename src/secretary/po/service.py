@@ -28,9 +28,12 @@ tell a service still running old code from a current one without trusting its ow
 (`secretary.upgrade.step_po`, secretary-1759).
 
 **Production rights.** A dispatcher's input carries its card's facts beside its text, and `submit`
-checks an operation card's own input against its sprint's `allowed_productions` before anything is
-queued (:meth:`PoService._production_rule`, secretary-1764). This is the only place the rule is
-enforced: a production the sprint does not allow is handed to the owner instead of queued.
+evaluates an operation card's own input against its sprint's `allowed_productions` when it queues it
+(:meth:`PoService._production_rule`, secretary-1764). This is the only place the rule is evaluated,
+and it refuses nothing (secretary-1769): it annotates. The input is queued as a normal turn with a
+production rights section beside its text (`QueuedInput.note`), which the turn's prompt carries: the
+sprint allows it, or the PO decides under the owner's standing rule and records the allowance
+(`sprint allow-production`) or hands the card to the owner itself.
 
 **A sprint's session.** `sprint_session` answers the live PO session of a sprint: the one the sprint
 recorded (`sprint create --po-session`) while it is open, else a fresh one, opened once, seeded with the
@@ -61,7 +64,8 @@ from secretary.board.production_rights import (
     OPERATION_KIND,
     facts_problem,
     is_allowed,
-    refusal_reason,
+    rights_line,
+    rights_note,
 )
 from secretary.po.client import (
     LOCK_NAME,
@@ -82,7 +86,6 @@ from secretary.po.queue import (
 from secretary.po.runner import PoRunner, RunnerError
 from secretary.po.sprints import (
     BoardSprintSessions,
-    HandoverRefused,
     SprintRecord,
     SprintSessions,
     reseed_comment,
@@ -265,7 +268,7 @@ class PoService:
     def _hand_over(self, item: QueuedInput) -> None:
         """One input becomes its turn, then leaves the queue; the claim's request id makes a repeat harmless."""
         try:
-            self.runner.send_request(item.session_id, item.text, item.request_id, card=item.card)
+            self.runner.send_request(item.session_id, item.text, item.request_id, card=item.card, note=item.note)
         except TurnInProgress:
             return
         except (SessionNotFound, SessionClosed, RequestConflict) as exc:
@@ -340,9 +343,9 @@ class PoService:
         The same id with the same session, text and card facts is a replay: the turn it became, or the
         input still queued. The id bound to anything else is `RequestConflict` (:meth:`_reserve`). A
         message into an unknown or closed session is refused with nothing queued. A dispatcher's input
-        carries its card's facts (`card`) and passes the production rule first (:meth:`_production_rule`),
-        which may hand the card to the owner instead of queueing anything. Otherwise it is queued and
-        handed over at once when its session is idle, and the answer says which.
+        carries its card's facts (`card`), and an operation card's own input is queued with the
+        production rule's note (:meth:`_production_rule`). It is queued and handed over at once when its
+        session is idle, and the answer says which.
         """
         request_id = _required(request_id, "request_id")
         session_id = _required(session_id, "session_id")
@@ -369,12 +372,11 @@ class PoService:
             session = self.store.session(session_id)
             if session.state == SESSION_CLOSED:
                 raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
-            if source == DISPATCHER_SOURCE:
-                refused = self._production_rule(card, request_id)
-                if refused is not None:
-                    return self._hand_over_card(session_id, request_id, *refused)
+            note = self._production_rule(card, request_id) if source == DISPATCHER_SOURCE else None
             self._accepting()
-            self.queue.put(session_id=session_id, text=text, request_id=request_id, source=source, card=card)
+            self.queue.put(
+                session_id=session_id, text=text, request_id=request_id, source=source, card=card, note=note
+            )
             self._accepted(
                 {"session_id": session_id, "queued": True, "seq": None, "state": None, "repeated": False}
             )
@@ -382,14 +384,17 @@ class PoService:
             self.pump()
             return {**self._sent(session_id, request_id), "repeated": False}
 
-    def _production_rule(self, card: dict[str, Any] | None, request_id: str) -> tuple[str, str] | None:
-        """The one place production rights are enforced: None to queue, `(card, reason)` to hand over.
+    def _production_rule(self, card: dict[str, Any] | None, request_id: str) -> str | None:
+        """The one place production rights are evaluated: the note an operation card's input is queued with.
 
-        An `operation` card's own input is queued when it touches no production (`none`) or one its
-        sprint allows (`sprints.allowed_productions`). Anything else is not queued: the card goes to the
-        owner. A decision card, and the owner's answer to a card handed to the owner, are not checked:
-        the owner decided. Facts that are missing or malformed, and a sprint that cannot be read, refuse
-        the input as `unavailable`: it is never executed, and the dispatcher repeats it.
+        It refuses nothing by the rule (secretary-1769). An `operation` card's own input gets
+        :func:`rights_note`: `none` and a production its sprint allows (`sprints.allowed_productions`)
+        say the sprint allows it; any other production is the PO's to decide under the owner's
+        standing rule, with the command that records the allowance. A decision card names no
+        production, and the owner's answer to a card handed to the owner is not evaluated again (the
+        owner decided): neither gets a note. Facts that are missing or
+        malformed, and a sprint that cannot be read, refuse the input as `unavailable`: it is never
+        executed without its verdict, and the dispatcher repeats it.
         """
         problem = facts_problem(card)
         if problem:
@@ -401,9 +406,10 @@ class PoService:
         if card["kind"] != OPERATION_KIND or card["input"] != CARD_INPUT:
             return None
         production = str(card["touches_production"])
-        if production == NO_PRODUCTION:
-            return None
         sprint_ref = str(card["sprint_ref"])
+        allow_id = f"{request_id}:allow-production"
+        if production == NO_PRODUCTION:
+            return rights_note(production, sprint_ref, None, request_id=allow_id)
         try:
             sprint = self._sprint_sessions().sprint(sprint_ref)
         except Exception as exc:  # noqa: BLE001 - a sprint that cannot be read runs nothing
@@ -420,39 +426,12 @@ class PoService:
                 f"sprint {sprint_ref} cannot be read for its allowed productions ({unread}); "
                 f"operation card {card['card_ref']} is not executed",
             )
-        if is_allowed(production, sprint.allowed_productions):
-            return None
-        return str(card["card_ref"]), refusal_reason(production, sprint.ref, sprint.allowed_productions)
-
-    def _hand_over_card(self, session_id: str, request_id: str, card_ref: str, reason: str) -> dict[str, Any]:
-        """Hand a card the production rule refused to the owner; nothing is queued.
-
-        Through the existing handover (`task handover`, role `po`, actor `po-service`) under a request
-        id derived from the submit id, so a repeat of the same submit answers the same handover and
-        writes nothing. A handover the board refused before writing refuses the submit; any other
-        failure may have committed, so it is `outcome_unknown` and the repeat completes it.
-        """
-        handover_id = f"{request_id}:handover"
-        try:
-            replayed = self._sprint_sessions().hand_over(card_ref, reason, request_id=handover_id)
-        except HandoverRefused as exc:
-            raise Refused("validation", f"{card_ref} could not be handed to the owner: {exc}") from None
-        except Exception:
-            self._accepting()
-            raise
-        if not replayed:
-            _say(f"secretary po: {card_ref} not queued: {reason}; handed to the owner ({handover_id})")
-        answer = {
-            "session_id": session_id,
-            "queued": False,
-            "seq": None,
-            "state": None,
-            "handed_over": True,
-            "reason": reason,
-            "repeated": bool(replayed),
-        }
-        self._accepted(answer)
-        return answer
+        if not is_allowed(production, sprint.allowed_productions):
+            _say(
+                f"secretary po: {card['card_ref']} queued for the PO to decide: "
+                f"{rights_line(production, sprint.ref, sprint.allowed_productions)}"
+            )
+        return rights_note(production, sprint.ref, sprint.allowed_productions, request_id=allow_id)
 
     def _reserve(
         self,

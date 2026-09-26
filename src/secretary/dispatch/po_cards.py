@@ -19,9 +19,11 @@ Blocks the card with the service's reason.
 
 Every input carries the card's facts beside its text (`card_ref`, `kind`, `touches_production`,
 `sprint_ref`; secretary-1764), frozen with the text since the service binds the submit id to both. The
-service, and only the service, enforces the sprint's production rights on them: an operation whose
-production the sprint does not allow is not queued but handed to the owner (`handed_over` in the
-answer), and the card then waits for the owner like any handed-over card.
+service, and only the service, evaluates the sprint's production rights on them, and refuses nothing by
+them (secretary-1769): an operation card's input is queued as a normal turn with the service's rights
+section after its text. A production the sprint does not allow is the PO's to decide in that turn:
+it records the allowance (`sprint allow-production`) and runs the operation, or hands the card to the
+owner like any other.
 
 The PO may hand the card to the owner inside its turn (`task handover`, secretary-1761). A card that
 carries that mark is not Blocked when the turn settles: it waits for the owner. Each owner comment on
@@ -256,17 +258,29 @@ def render_po_card_input(task: dict[str, Any], sprint: dict[str, Any], submissio
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _production_lines(submission: PoSubmission) -> list[str]:
-    """What an operation card's input says about the production it touches; nothing for a decision."""
+def _production_lines(submission: PoSubmission, *, owner_answer: bool = False) -> list[str]:
+    """What an operation card's input says about the production it touches; nothing for a decision.
+
+    The card's own input points at the PO service's rights section, which the service adds after the
+    text: only the service evaluates the rule. The owner's answer to a handed-over card is not
+    evaluated again, so its line says the owner decided.
+    """
     production = submission.card.get("touches_production")
     if submission.kind != OPERATION_KIND or not production:
         return []
     if production == NO_PRODUCTION:
         return [f"Touches production: {NO_PRODUCTION}. Touch no production in this turn."]
+    if owner_answer:
+        return [
+            (
+                f"Touches production: {production}. You handed the card to the owner, and the owner "
+                "decided on it in the answer below; touch no other production in this turn."
+            )
+        ]
     return [
         (
-            f"Touches production: {production}. The PO service checked the sprint allows it; touch no "
-            "other production in this turn."
+            f"Touches production: {production}. Whether the sprint allows it is in the PO service's "
+            "production rights section at the end of this input; touch no other production in this turn."
         )
     ]
 
@@ -294,39 +308,18 @@ def render_owner_answer_input(
     reference = str(task.get("ref") or "")
     kind = submission.kind
     first, second = completion_sections(kind)
-    if submission.handed_over:
-        # The PO service handed it over before the card reached this session: the card comes with it.
-        opening = (
-            f"The owner answered {kind} card {reference} of {submission.sprint_ref}. The PO service "
-            f"handed it to the owner on {mark['since']} instead of giving it to you, so this is the first "
-            "time you see it. Execute it within the owner's answer and complete the card in this turn if "
-            "the answer settles it. If it does not, say on the card what is still missing and end the "
-            "turn: the card keeps waiting for the owner and is not Blocked."
-        )
-        why = "## Why the PO service handed it to the owner"
-        card_lines = [
-            "## Card body",
-            "",
-            str(task.get("description") or "").strip() or "(empty)",
-            "",
-        ]
-    else:
-        opening = (
+    lines = [
+        (
             f"The owner answered {kind} card {reference} of {submission.sprint_ref}, which you handed to "
             f"the owner on {mark['since']}. Complete the card in this turn if the answer settles it. If "
             "it does not, say on the card what is still missing and end the turn: the card keeps waiting "
             "for the owner and is not Blocked."
-        )
-        why = "## Why you handed it to the owner"
-        card_lines = []
-    lines = [
-        opening,
+        ),
         "",
         f"Card: {reference} ({kind}): {task.get('title') or ''}",
-        *_production_lines(submission),
+        *_production_lines(submission, owner_answer=True),
         "",
-        *card_lines,
-        why,
+        "## Why you handed it to the owner",
         "",
         mark["reason"],
         "",
@@ -532,23 +525,10 @@ def _submit(
     submission.submitted = True
     seq = answer.get("seq")
     submission.seq = seq if isinstance(seq, int) and not isinstance(seq, bool) else None
-    submission.handed_over = answer.get("handed_over") is True
     submission.unanswered = 0
     submission.last_error = ""
     record.state = PO_SUBMITTED
     runtime.save_records(payload, records)
-    if submission.handed_over:
-        # The production rule refused it: nothing is queued, and the card waits for the owner.
-        return {
-            "status": "ok",
-            "step": "po-card",
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id,
-            "action": "po-card-handed-over",
-            "po_session": submission.session_id,
-            "po_request_id": submission.submit_request_id,
-            "reason": str(answer.get("reason") or ""),
-        }
     return {
         "status": "ok",
         "step": "po-card",
@@ -589,9 +569,6 @@ def _settle(
 ) -> dict[str, Any]:
     ref = task["ref"]
     submission = record.po_submission
-    if submission.handed_over:
-        # No turn will ever come of this input; the card read here carries no mark (yet), so it waits.
-        return _waiting(record, ref, "po-card-waiting-owner", "the PO service handed the card to the owner")
     try:
         if submission.seq is None:
             known = runtime.po.request(submission.submit_request_id)

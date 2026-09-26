@@ -679,8 +679,6 @@ class PoSubmission:
     # The submit's answer: accepted, and the turn it became once the service has claimed it.
     submitted: bool = False
     seq: int | None = None
-    # The service did not queue the input: the production rule handed the card to the owner.
-    handed_over: bool = False
     # Consecutive resolve/submit calls the service did not answer, and what the last one said.
     unanswered: int = 0
     last_error: str = ""
@@ -709,7 +707,6 @@ class PoSubmission:
             "card": dict(self.card),
             "submitted": self.submitted,
             "seq": self.seq,
-            "handed_over": self.handed_over,
             "unanswered": self.unanswered,
             "last_error": self.last_error,
             "owner_event_id": self.owner_event_id,
@@ -736,7 +733,6 @@ class PoSubmission:
             card=dict(payload["card"]) if isinstance(payload.get("card"), dict) else {},
             submitted=bool(payload.get("submitted", False)),
             seq=seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
-            handed_over=bool(payload.get("handed_over", False)),
             unanswered=int(payload.get("unanswered") or 0),
             last_error=str(payload.get("last_error") or ""),
             owner_event_id=str(payload.get("owner_event_id") or ""),

@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.board.backend import SPRINT, board_client
+from secretary.board.roles import Role
 from secretary.config import ConfigError, load_config
 from secretary.po import PO_SESSION_ENV
 from secretary.sprint_observer import observer_choice
@@ -160,6 +161,20 @@ def add_sprint_subcommands(subparsers) -> None:
                 "the sprint. Closing is not a claim that the Definition of Done was reached",
             )
         command.set_defaults(handler=handler)
+    allowed = commands.add_parser(
+        "allow-production",
+        help="record the PO's decision that this sprint's operations may touch one more production",
+    )
+    allowed.add_argument("--ref", required=True)
+    # Every board role parses: the writer admits `po` only and answers the others, the observer
+    # first, with `role_forbidden`, and `po` as the observer with `role_masquerade` (`admit_role`).
+    allowed.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    allowed.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    allowed.add_argument("--project", required=True, help="the registered project whose production to allow")
+    allowed.add_argument("--reason", required=True, help="why the PO may allow it (the owner's rule it follows)")
+    _add_data_dir_args(allowed)
+    allowed.add_argument("--request-id")
+    allowed.set_defaults(handler=run_allow_production)
     sprint.set_defaults(handler=not_implemented)
 
 
@@ -373,6 +388,20 @@ def run_create(args: argparse.Namespace) -> int:
             reviewer=args.reviewer,
             po_session=args.po_session,
             allowed_productions=args.allow_production,
+        ),
+    )
+
+
+def run_allow_production(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.allow_production(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            project=args.project,
+            reason=args.reason,
+            request_id=args.request_id,
         ),
     )
 
