@@ -2,8 +2,9 @@
 
 Each fake logs its argv, cwd and stdin to `$FAKE_LOG`, prints an event stream that carries reasoning
 and a tool call beside the final answer, and changes behaviour on words in the owner's message:
-`SLEEP` keeps the turn running with a child in its process group, `FAIL` exits non-zero, `SILENT`
-exits zero without a final answer, `NOPERSIST` makes Claude save no conversation.
+`SLEEP` keeps the turn running with a child in its process group, `GATE` keeps it running until the
+file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without a final answer,
+`NOPERSIST` makes Claude save no conversation.
 
 Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
 by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
@@ -45,6 +46,10 @@ print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), 
 print(json.dumps({"type": "assistant", "message": {"content": [
     {"type": "thinking", "thinking": "THINKING-SECRET"},
     {"type": "tool_use", "name": "Bash", "input": {"command": "TOOL-CALL-SECRET"}}]}}), flush=True)
+if "GATE" in prompt:
+    gate, deadline = log + ".gate", time.time() + 60
+    while not os.path.exists(gate) and time.time() < deadline:
+        time.sleep(0.02)
 if "SLEEP" in prompt:
     child = subprocess.Popen(["sleep", "300"])
     with open(log + ".pids", "a") as handle:
@@ -83,6 +88,10 @@ if home:
         handle.write(json.dumps({"type": "turn_context", "payload": context}) + "\n")
 print(json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "THINKING-SECRET"}}), flush=True)
 print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "TOOL-CALL-SECRET"}}), flush=True)
+if "GATE" in prompt:
+    gate, deadline = log + ".gate", time.time() + 60
+    while not os.path.exists(gate) and time.time() < deadline:
+        time.sleep(0.02)
 if "SLEEP" in prompt:
     child = subprocess.Popen(["sleep", "300"])
     with open(log + ".pids", "a") as handle:

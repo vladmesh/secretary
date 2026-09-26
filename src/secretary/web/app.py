@@ -747,7 +747,7 @@ class WebApp:
         """Why this /po request is refused before its handler, or `None` when it may go on.
 
         Only the token layer is asked, and it reads only the token file: a request without a valid
-        cookie never reaches the PO runner or the board store.
+        cookie never reaches the PO service or the board store.
         """
         if self.po_auth is None or self.po is None:
             return self._deny(route, status=503, code="po_unavailable", message=PO_NOT_SERVED)
@@ -812,10 +812,11 @@ class WebApp:
         return _json(200, self.po.po_session(params["session"]))
 
     def _po_send(self, params, _query, body) -> Response:
-        """One message. A refusal renders the session again with the text kept and nothing written.
+        """One message into the PO service's queue. A refusal renders the session again with the text kept.
 
-        A turn already running is `owner_conflict`, and the form keeps its request id: the refused
-        submission claimed nothing, so the same form may be sent once that turn is over.
+        A message for a session whose turn is running is queued, not refused. A refused submission
+        (the service not running, a closed session) wrote nothing; an `owner_conflict` keeps the form's
+        request id, so the same form may be sent again.
         """
         _fields(body, PO_SEND_FIELDS, "PO message")
         session_id = params["session"]

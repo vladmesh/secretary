@@ -421,6 +421,21 @@ class PoStore:
             )
             return cursor.rowcount == 1
 
+    def mark_rerun(self, session_id: str, seq: int, reason: str) -> bool:
+        """Record on a `running` turn that it is being re-run and why; False when it already was.
+
+        A running turn carries no reason otherwise, so a set reason on a running row is the record
+        that this turn is a re-run: the PO service re-runs a turn once and settles a second
+        interruption. The recorded process is cleared with it; the relaunch records its own.
+        """
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE po_turns SET reason = %s, pid = NULL, process_identity = NULL "
+                "WHERE session_id = %s AND seq = %s AND state = %s AND reason IS NULL",
+                (reason, session_id, seq, RUNNING),
+            )
+            return cursor.rowcount == 1
+
     def complete_turn(
         self, session_id: str, seq: int, answer: str, *, resolved_model: str | None = None
     ) -> bool:
@@ -443,6 +458,7 @@ class PoStore:
     def finish_turn(
         self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
     ) -> bool:
+        """The turn `failed` or `interrupted` with `reason`, replacing a re-run's; False once settled."""
         if state not in (FAILED, INTERRUPTED):
             raise ValueError(f"a turn is finished as failed or interrupted, not {state}")
         with self._transaction() as connection:

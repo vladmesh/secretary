@@ -1,7 +1,8 @@
-"""`/po` end to end: the real PO layer and runner, fake `claude`/`codex`, PostgreSQL 16.
+"""`/po` end to end: the real PO layer, PO service and runner, fake `claude`/`codex`, PostgreSQL 16.
 
-Every request goes through `WebApp.handle` with a valid PO cookie; the fakes are the ones
-`tests.test_po_runner` drives the runner with (`SLEEP` keeps a turn running).
+Every request goes through `WebApp.handle` with a valid PO cookie; the layer writes through the PO
+service's Unix socket, and the service owns the runner. The fakes are the ones `tests.test_po_runner`
+drives the runner with (`SLEEP` keeps a turn running).
 """
 
 from __future__ import annotations
@@ -22,7 +23,9 @@ from urllib.parse import urlencode
 from secretary.po import store as po_store
 from secretary.po import token as po_token
 from secretary.po.models import DEFAULT_MODELS
+from secretary.po.queue import PoQueue
 from secretary.po.runner import PoRunner
+from secretary.po.service import PoService, listening
 from secretary.po.store import PoStore
 from secretary.web.app import WebApp
 from secretary.webproto.errors import PoRequestConflict, ValidationRefused
@@ -70,7 +73,14 @@ class PoWebOperationTests(unittest.TestCase):
         env = {**os.environ, "FAKE_LOG": str(self.log), "CODEX_HOME": str(self.root / "codex-home")}
         self.runner = PoRunner(self.store, self.data, executables=executables, env=env)
         self.addCleanup(self.stop_everything)
-        self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=MODELS)
+        self.service = PoService(self.runner, data_dir=self.data)
+        self.enterContext(listening(self.service))
+        self.service.start()
+        loop = threading.Thread(target=self.service.run, kwargs={"tick": 0.05, "say": lambda _line: None})
+        loop.start()
+        self.addCleanup(loop.join, 10)
+        self.addCleanup(self.service.stop)
+        self.layer = PoLayer(self.root, data_dir=self.data, store=self.store, models=MODELS)
         po_token.ensure_token(self.data)
         self.cookie = po_token.cookie_value(po_token.read_token(self.data))
         self.app = WebApp(
@@ -126,7 +136,10 @@ class PoWebOperationTests(unittest.TestCase):
         ]
 
     def settle(self, session_id: str) -> None:
-        eventually(lambda: not self.document(session_id)["running"], "the turn never settled")
+        eventually(
+            lambda: not self.document(session_id)["running"] and not self.document(session_id)["queued"],
+            "the turn never settled",
+        )
 
     def spawned(self, count: int) -> None:
         pids = self.log.with_name(self.log.name + ".pids")
@@ -161,7 +174,7 @@ class PoWebOperationTests(unittest.TestCase):
     def test_the_default_list_opens_fable_and_gpt_6_astra_sessions_and_refuses_an_off_list_model(
         self,
     ) -> None:
-        self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=DEFAULT_MODELS)
+        self.layer = PoLayer(self.root, data_dir=self.data, store=self.store, models=DEFAULT_MODELS)
         self.app = WebApp(
             *(Recording() for _ in range(8)),
             po_auth=PoTokenLayer(self.root, data_dir=self.data),
@@ -195,7 +208,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.layer = PoLayer(
             self.root,
             data_dir=self.data,
-            runner=self.runner,
+            store=self.store,
             models=MODELS,
             efforts={"claude": ("high", "max"), "codex": ()},
         )
@@ -258,10 +271,10 @@ class PoWebOperationTests(unittest.TestCase):
 
         page = self.page(self.create())
         self.assertIn("Enter to send, Shift+Enter for a new line", page)
-        # The key handler is installed outside the running-turn branch.
+        # The key handler is installed outside the running-or-queued polling branch.
         self.assertLess(
             _PO_SESSION_SCRIPT.index("addEventListener('keydown'"),
-            _PO_SESSION_SCRIPT.index("if (__RUNNING__)"),
+            _PO_SESSION_SCRIPT.index("if (__RUNNING__ || QUEUED > 0)"),
         )
         self.assertIn("draft.addEventListener('keydown'", page)
         for line in (
@@ -302,9 +315,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn('data-state="completed"', page)
         self.assertNotIn("stop turn", page)
 
-    def test_while_a_turn_runs_the_page_says_so_and_a_second_message_is_refused_with_nothing_written(
-        self,
-    ) -> None:
+    def test_while_a_turn_runs_the_page_says_so_and_a_second_message_waits_in_the_queue(self) -> None:
         session_id = self.create("codex", "gpt-5.6-sol")
         self.assertEqual(self.send(session_id, "SLEEP please", "message-1").status, 303)
         self.spawned(1)
@@ -318,16 +329,21 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn('data-state="running"', page)
         self.assertIn("stop turn", page)
 
-        refused = self.send(session_id, "hurry up", "message-2")
+        waiting = self.send(session_id, "hurry up", "message-2")
 
-        self.assertEqual(refused.status, 409)
-        body = refused.body.decode()
-        self.assertIn("not sent: a turn is still running in this session", body)
-        self.assertIn("hurry up", body)
-        self.assertIn('value="message-2"', body)
+        self.assertEqual(waiting.status, 303)
         self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1])
-        self.assertEqual(self.feed(session_id), [(1, "owner", "SLEEP please")])
+        self.assertEqual([item["text"] for item in self.document(session_id)["queued"]], ["hurry up"])
+        self.assertIn('data-state="queued"', self.page(session_id))
         self.assertEqual(self.calls(), 1)
+
+        self.assertEqual(self.post(f"/po/sessions/{session_id}/stop", [("seq", "1")]).status, 303)
+        self.settle(session_id)
+        feed = self.feed(session_id)
+        self.assertEqual(feed[1], (2, "owner", "hurry up"))
+        self.assertEqual(feed[2][:2], (2, "agent"))
+        self.assertIn("hurry up", feed[2][2])
+        self.assertEqual(self.store.request("message-2").seq, 2)
 
     def test_stop_interrupts_the_running_turn_and_the_next_message_goes_through(self) -> None:
         session_id = self.create()
@@ -387,7 +403,8 @@ class PoWebOperationTests(unittest.TestCase):
             second = self.send(session_id, "hello", "message-broken")
             replay = self.layer.po_send(request_id="message-broken", session_id=session_id, text="hello")
 
-        self.assertEqual(first.status, 503)
+        # The service accepted the message; its turn then failed to launch.
+        self.assertEqual(first.status, 303)
         self.assertEqual(second.status, 303)
         self.assertEqual(second.headers["Location"], f"/po/sessions/{session_id}")
         self.assertEqual(launch.call_count, 1)
@@ -448,22 +465,25 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1])
         self.assertEqual(self.calls(), 1)
 
-    def test_an_id_refused_while_another_turn_runs_records_nothing_and_goes_through_after(self) -> None:
+    def test_an_id_sent_while_another_turn_runs_waits_and_becomes_the_next_turn(self) -> None:
         session_id = self.create()
         self.assertEqual(self.send(session_id, "SLEEP please", "running-form").status, 303)
         self.spawned(1)
 
-        refused = self.send(session_id, "later", "waiting-form")
+        waiting = self.send(session_id, "later", "waiting-form")
 
-        self.assertEqual(refused.status, 409)
-        self.assertIn("not sent: a turn is still running in this session", refused.body.decode())
-        self.assertIsNone(self.store.request("waiting-form"))
+        self.assertEqual(waiting.status, 303)
+        self.assertIsNone(self.store.request("waiting-form"), "no turn is claimed while the session is busy")
+        self.assertEqual([item.request_id for item in PoQueue(self.data).pending()], ["waiting-form"])
+        self.assertEqual(
+            self.send(session_id, "later", "waiting-form").status, 303, "a repeat is the same message"
+        )
         self.assertEqual(self.post(f"/po/sessions/{session_id}/stop", [("seq", "1")]).status, 303)
 
-        self.assertEqual(self.send(session_id, "later", "waiting-form").status, 303)
         self.settle(session_id)
         self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1, 2])
         self.assertEqual(self.store.request("waiting-form").seq, 2)
+        self.assertEqual(PoQueue(self.data).pending(), [])
 
     def test_concurrent_claims_of_one_new_request_id_have_exactly_one_winner(self) -> None:
         workers = 8

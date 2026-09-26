@@ -138,6 +138,7 @@ unit tests/test_runtime_provenance.py
 unit tests/test_role_skills.py
 unit tests/test_skill_commands.py
 unit tests/test_po_workspace.py
+unit tests/test_po_service.py
 unit tests/test_schemas.py
 integration-recovery tests/test_secret_recover.py
 component tests/test_secret_store.py

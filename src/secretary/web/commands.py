@@ -96,7 +96,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
     refused = hold_store_exclusion(args.instance)
     if refused is not None:
         print(f"board store: {refused}", file=sys.stderr)
-    # The one PO runner of this process: built here, recovering what a previous run left running.
+    # A client of the PO service (`secretary-po.service`): the web starts and recovers no PO turn.
     po = PoLayer(args.instance, data_dir=args.data_dir)
     reads, doctor = health_layers(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
     app = WebApp(
@@ -115,8 +115,6 @@ def run_web_serve(args: argparse.Namespace) -> int:
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
     )
-    for line in po.start_service():
-        print(line, file=sys.stderr)
     try:
         return serve(app, host=args.host, port=args.port)
     except LoopbackOnly as refused:

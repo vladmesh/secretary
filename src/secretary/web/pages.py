@@ -3737,7 +3737,9 @@ def po_session(
     by_turn: dict[Any, list[dict[str, Any]]] = {}
     for entry in document.get("feed") or []:
         by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
-    items: list[str] = []
+    queued = document.get("queued") or []
+    # Messages the PO service holds until the session's running turn ends; newest first, above the turns.
+    items: list[str] = [_po_queued_entry(entry) for entry in reversed(queued)]
     for turn in reversed(turns):
         items.extend(_po_entry(entry) for entry in reversed(by_turn.get(turn.get("seq"), [])))
         items.append(_po_turn_mark(turn))
@@ -3806,6 +3808,7 @@ def po_session(
         .replace("__RUNNING__", "true" if running else "false")
         .replace("__TURNS__", str(len(turns)))
         .replace("__LAST__", _js(str(last.get("state") or "")))
+        .replace("__QUEUED__", str(len(queued)))
     )
     return _page(
         f"PO session {session_id[:8]}",
@@ -3829,6 +3832,15 @@ def _po_entry(entry: dict[str, Any]) -> str:
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
         f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
+    )
+
+
+def _po_queued_entry(entry: dict[str, Any]) -> str:
+    """A message on disk in the PO service's queue, waiting for the session's running turn to end."""
+    return (
+        f'<li class="po-entry po-owner" data-state="queued"><div class="who">owner · '
+        f"{_chip('queued', 'accent')} · {escape(str(entry.get('queued_at') or ''))}</div>"
+        f'<div class="text">{escape(str(entry.get("text") or ""))}</div></li>'
     )
 
 
@@ -3904,8 +3916,11 @@ if (form && draft) {
     form.requestSubmit();
   });
 }
-if (__RUNNING__) {
-  if (status) status.textContent = 'the turn is running; this page updates when it ends';
+const QUEUED = __QUEUED__;
+if (__RUNNING__ || QUEUED > 0) {
+  if (status) status.textContent = __RUNNING__
+    ? 'the turn is running; this page updates when it ends'
+    : 'the message is queued; this page updates when its turn starts';
   const timer = window.setInterval(async () => {
     let doc;
     try {
@@ -3914,7 +3929,8 @@ if (__RUNNING__) {
       doc = await response.json();
     } catch (error) { return; }
     const last = doc.last_turn ? doc.last_turn.state : '';
-    if (doc.running && doc.turns.length === TURNS && last === LAST) return;
+    const waiting = (doc.queued || []).length;
+    if ((doc.running || waiting > 0) && doc.turns.length === TURNS && last === LAST && waiting === QUEUED) return;
     window.clearInterval(timer);
     if (draft && draft.value) { if (status) status.textContent = 'the turn has ended; reload to see the answer'; return; }
     window.location.reload();
