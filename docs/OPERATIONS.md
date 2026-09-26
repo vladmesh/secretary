@@ -362,7 +362,11 @@ and sessions run in parallel. An input leaves the queue only after its turn row 
 under the input's request id), so a crash between the claim and the removal is answered by the same turn
 on the next hand-over and creates nothing. An input that can never become a turn (session gone or closed,
 request id taken by something else) moves to `DATA_DIR/po-queue/refused/` with its `reason`. A session
-with queued messages refuses a close (409). Queued messages survive any restart of either service.
+with queued messages refuses a close (409). Queued messages survive any restart of either service. A
+`backup create` archive, core and full, carries `po-queue/` with `refused/` (the in-flight temporary dot
+files stay out), and `restore` puts them back. When the runner starts a dispatcher input's turn it keeps
+that input's card facts beside the turn (`DATA_DIR/po-runs/<session>/turn-NNNN.card.json`), so a turn that
+ends `failed` names its card in the `po_turn_failed` owner event.
 
 **Request ids.** One check, `PoService._reserve`, decides every request id, for `submit` and
 `create_session` alike (and any later operation that takes one), under the lock that serializes them. An
@@ -668,6 +672,46 @@ installation is no finding. `reconcile` neither creates nor deletes it.
 Timer-started oneshot units are neither required enabled nor active; their state is still
 reported. No unit outside the installation's own is expected or probed; before A20 step 9 the
 host-owned Orca unit was ([Head runtime](HEAD_RUNTIME.md)).
+
+Doctor is also the writer of the owner's `provider_red` events ([Owner events](#owner-events)): a
+resource whose probe verdict is `unauthenticated`, `exhausted`, `unavailable` or `probe_broken` puts one
+notice on the bell per resource, verdict and UTC day. `--dry-run` writes none; nothing else of doctor
+writes anything.
+
+## Owner events
+
+The bell in the dashboard's header counts the owner events nobody has read; `/owner-events` lists them
+([Protocols](PROTOCOLS.md#owner-events-and-the-bell) has the entity, the producers and the rules). The
+same list from a terminal, read-only through the board store's read role (it marks nothing read):
+
+```bash
+python3 -P -m secretary owner-events list --instance INSTANCE            # open needs-the-owner first, then newest first
+python3 -P -m secretary owner-events list --instance INSTANCE --unread   # only what nobody read
+python3 -P -m secretary owner-events list --instance INSTANCE --json     # {unread, events: [...]}
+```
+
+Each line is `*` for unread, `#id`, the moment, the class, the kind and the subject, then the text.
+Exit status `1` means the board store did not answer or has no `owner_events` table yet (migration
+`0018` not applied: `the board store has no owner_events table yet`).
+
+What each kind means:
+
+| kind | class | means | what to do |
+| --- | --- | --- | --- |
+| `card_handed_to_owner` | needs the owner | the PO handed a `decision`/`operation` card to you with a reason | answer on the card page (the comment form posts as the owner) or in the sprint's PO session; it clears when the PO completes the card |
+| `steward_needs_human` | needs the owner | the steward's report card went Blocked with a "Needs a human" section | read the report card; mark the event read once handled |
+| `sprint_closed` | notice | a sprint was closed | read its closeout on the sprint page |
+| `sprint_stopped` | notice | a sprint's budget reached the hard limit and it was stopped | decide whether to reopen it |
+| `budget_signal` | notice | a sprint's budget reached its signal threshold | look at why its cards keep going round |
+| `observer_dead` | notice | a sprint's observer head is dead and the tick did not relaunch it (backoff, drain, a failed bring-up) | `secretary status`; the dispatcher retries after the backoff |
+| `head_dead` | notice | a worker or reviewer head died or stalled again after its one respawn, or its respawn failed; the card is Blocked | read the card's Blocked reason |
+| `po_turn_failed` | notice | a PO turn ended `failed` (its subject is the card a dispatcher input was about, else `po-session:<id>`) | read the turn on `/po`; for a handed-over card, a new owner comment sends the answer again |
+| `provider_red` | notice | doctor found a provider's key expired or login missing, its quota spent, its provider down, or its probe broken | fix the login or wait for the quota |
+
+A notice is marked read by its button or by "Mark all notices read"; an event that needs the owner is
+read by a click only when its card does not wait for the owner, and otherwise stays unread until the
+card leaves `waiting_owner`. A producer's write never fails what it reports: a board without `0018` logs
+`owner event <kind> (<key>) not recorded: ...` and goes on.
 
 ## How long things take
 

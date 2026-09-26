@@ -52,6 +52,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from secretary.board import owner_events
 from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.dispatch.heartbeat import sprint_task
 from secretary.dispatch.launch import merge_launch_head_run
@@ -608,22 +609,61 @@ def reconcile_observers(
                 _stop_observer(runtime, payload, observers, ref, reason="sprint is no longer open")
             )
         for ref in sorted(open_sprints):
-            outcomes.append(
-                _reconcile_open_sprint(
-                    runtime,
-                    payload,
-                    observers,
-                    ref,
-                    pause_mode=pause_mode,
-                    sprint=open_sprints[ref],
-                )
+            dead = _dead_launch(observers.get(ref))
+            outcome = _reconcile_open_sprint(
+                runtime,
+                payload,
+                observers,
+                ref,
+                pause_mode=pause_mode,
+                sprint=open_sprints[ref],
             )
+            if dead is not None and outcome.get("action") not in _BROUGHT_UP:
+                _record_observer_dead(runtime, ref, dead, outcome)
+            outcomes.append(outcome)
     finally:
         # Whatever went wrong above, the heads that were started or stopped before it are already
         # real. The records go back into the payload so the caller saves them: a lost record means
         # an unattended terminal and a second head on the same sprint next tick.
         put_observers(payload, observers)
     return outcomes
+
+
+#: The outcomes of a tick that brought an observer head up.
+_BROUGHT_UP = frozenset({"observer-launched", "observer-relaunched"})
+
+
+def _dead_launch(record: ObserverRecord | None) -> int | None:
+    """The launch count of this record's head when it is positively dead at the start of the tick, else None.
+
+    Read before the tick's reconcile, with the same reader the reconcile uses (`observer_head_is_dead`):
+    a head this tick then does not bring back up is a dead observer without relaunch (secretary-1770).
+    A head stopped on purpose (a pause, a pending stop) is not a dead one.
+    """
+    if (
+        record is None
+        or record.launches <= 0
+        or record.state in PENDING_STOP_STATES
+        or record.state == STATE_STOPPED_BY_PAUSE
+        or not _head_may_be_running(record)
+    ):
+        return None
+    try:
+        return record.launches if observer_head_is_dead(observer_head_status(record)) else None
+    except Exception:  # noqa: BLE001 - the bell's reading never decides a tick
+        return None
+
+
+def _record_observer_dead(runtime: Any, ref: str, launches: int, outcome: dict[str, Any]) -> None:
+    """One `observer_dead` notice per dead head generation: repeated deferrals of it write nothing new."""
+    why = str(outcome.get("reason") or outcome.get("action") or "no reason recorded")
+    owner_events.record(
+        owner_events.OBSERVER_DEAD,
+        ref,
+        f"The observer head of {ref} is dead and was not relaunched this tick: {why}",
+        f"{owner_events.OBSERVER_DEAD}:{ref}:{launches}",
+        to=getattr(getattr(runtime, "reader", None), "client", None),
+    )
 
 
 def _reconcile_open_sprint(

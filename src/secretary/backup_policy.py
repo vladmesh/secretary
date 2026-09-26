@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from secretary.data import DataExport
+from secretary.po.queue import QUEUE_DIR_NAME
 
 ARCHIVE_ROOT = "secretary-backup"
 POSTGRES_BACKUP_VERSION = 2
@@ -190,8 +191,14 @@ def build_components_manifest(
     return components
 
 
+#: The PO service's durable input queue (`secretary.po.queue`): inputs not yet taken as turns, and the
+#: set-aside ones under `refused/`. Both archive kinds carry it (secretary-1770); its in-flight
+#: temporary files are dot files and stay out like every other.
+PO_QUEUE_ROOT = QUEUE_DIR_NAME
+
+
 def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
-    allowed_roots = {"board", "memory", "runs", "transcripts", "artifacts"}
+    allowed_roots = {"board", "memory", "runs", "transcripts", "artifacts", PO_QUEUE_ROOT}
     if not relative.parts:
         return False
     if relative.parts == WEB_PROCESS_RECEIPT:

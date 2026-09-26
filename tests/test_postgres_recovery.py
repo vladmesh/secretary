@@ -379,6 +379,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()
+        # secretary-1770: owner events are a board table, so the engine dump carries them.
+        from secretary.board.owner_events import OwnerEventStore, record
+
+        source_events = OwnerEventStore(self.source_config.for_role("app"))
+        self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "recovery-handover", to=source_events))
         with (
             mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
             mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
@@ -423,6 +428,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(counts["sprint_decisions"], 2)
         self.assertGreater(counts["board_events"], 0)
         self.assertGreaterEqual(counts["requests"], 12)
+        self.assertGreaterEqual(counts["owner_events"], 1)
         self.assertGreater(result.manifest["components"]["postgres_dump"]["bytes"], 0)
         source_probe = SqlCardClient(self.source_config.for_role("read"), self.source_instance)
         self.assertEqual(
@@ -547,6 +553,13 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(
             target_probe._query("SELECT path FROM repositories ORDER BY path"),
             [(str(self.root / "repository"),)],
+        )
+        self.assertEqual(
+            target_probe._query(
+                "SELECT kind, \"class\", subject_ref, read_at FROM owner_events WHERE dedup_key = %s",
+                ("recovery-handover",),
+            ),
+            [("card_handed_to_owner", "needs_owner", "secretary-1", None)],
         )
         print(
             "postgres recovery evidence:",

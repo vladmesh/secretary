@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0017` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0018` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
@@ -665,6 +665,8 @@ an Alembic revision shipped with the code that emits the new value.
 | `board_events.kind` | the 23 `EventKind` values (§3.9) | `board/models.py:EventKind` |
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
 | `repositories.role` | `primary`, `curator_root` | this schema (§3.1) |
+| `owner_events.kind` | the nine owner event kinds | `board.owner_events.KINDS` |
+| `owner_events.class` | `needs_owner`, `notice`, derived from the kind (`owner_event_class_follows_kind`) | `board.owner_events.KIND_CLASS` |
 
 A retired `codex_launch_mode` reads as NULL (`tasks.py`); an audit record whose kind is not an
 `EventKind` stays a generic `requests` row (§3.9).
@@ -704,7 +706,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0014_neutral_extension_bag` | data only: the extension bag of current `tasks`, `products` and `issues` rows moves onto the key `extra` (§8.2); refuses a store whose premise does not hold or that holds a non-committed `done-retention-` request; history is not rewritten; no downgrade |
 | `0015_po_effort_resolved_model` | `po_sessions.effort` (text, not null, default `'default'`: every existing session ran at the CLI's own effort) and `po_turns.resolved_model` (nullable text: the model the CLI reported for that turn); no downgrade |
 | `0016_sprint_po_session` | `sprints.po_session` (nullable text: the PO session that opened the sprint, or the one the PO service's resolver opened for it) and `sprints.allowed_productions` (text[], not null, default `'{}'`: registered projects whose production the sprint's operations may touch); every existing sprint loads with neither; `po_request_operation_in_vocabulary` re-created to admit `po_sprint_session` beside `po_session_create` and `po_send` (`po_request_seq_only_for_a_send` unchanged); no downgrade |
-| `0017_po_card_kinds` | `decision` and `operation` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row of `code`, `research`, `infra` or no type loads unchanged; no column; no downgrade (head) |
+| `0017_po_card_kinds` | `decision` and `operation` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row of `code`, `research`, `infra` or no type loads unchanged; no column; no downgrade |
+| `0018_owner_events` | `owner_events` (`id` identity, `kind`, `class`, `subject_ref`, `text`, `created_at`, `read_at`, `dedup_key` unique as `owner_event_dedup_key_is_unique`; index `owner_events_by_subject`), with `owner_event_kind_in_vocabulary`, `owner_event_class_in_vocabulary` and `owner_event_class_follows_kind`; one new table, every existing row loads unchanged; no downgrade (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -716,7 +719,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 28 tables, 50 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
+(including `alembic_version`): 29 tables, 53 `CHECK`, 44 foreign keys, 29 primary keys, 18 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1061,7 +1064,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0017_po_card_kinds`). PostgreSQL restore compares against `head_revision()`.
+  (`0018_owner_events`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

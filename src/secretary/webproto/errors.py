@@ -169,6 +169,12 @@ IDENTITY_REFUSALS: dict[str, type[IdentityRefused]] = {
 }
 
 
+class OwnerEventMissing(ReadError):
+    """The board store answered and holds no owner event under this id (secretary-1770)."""
+
+    code = "not_found"
+
+
 # -- the PO head half (secretary-1631) ----------------------------------------------------------
 
 

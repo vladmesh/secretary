@@ -323,10 +323,13 @@ archive for raw material, with no timer, offsite transfer or `doctor` gate. Comm
 [Operations](OPERATIONS.md#optional-cold-archive).
 
 Every archive carries the normalized Product, Issue, Task and Sprint views, comments, request/audit
-history and inert run/claim state. A `core` archive holds only that engine-independent set. A `full`
-archive is version 2 and adds
+history, inert run/claim state and the PO service's input queue `po-queue/` (pending inputs and the
+set-aside ones under `refused/`, which a restore puts back). A `core` archive holds only that
+engine-independent set. A `full` archive is version 2 and adds
 `engine/postgres.dump`, a custom-format data-only dump made and listed by the pinned `postgres:16`
 client; its manifest records source Alembic head, server/client version, table counts and purpose. The
+dump covers every board table, the owner events (`owner_events`) and the PO sessions, turns and feed
+included, so `restore-postgres` brings them back. The
 dump is taken after the pipeline pause, and its table counts are taken inside the same exported
 snapshot the dump reads, so rows the pause itself writes are in both or neither. `backup verify`
 checks the manifest's counts are well formed but does not decode the dump; `restore-postgres` is the

@@ -135,6 +135,18 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/po/sessions/{session}/stop", "po_stop", "po.po_stop", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/close", "po_close", "po.po_close", body=FORM_BODY, page=True),
     Route("GET", "/po/api/sessions/{session}", "po_session_json", "po.po_session"),
+    # The owner's bell (secretary-1770): the list behind the header's count, a click that marks one
+    # event read, and "mark all read", which takes notices only. Each is one call of the owner events
+    # layer, which reads and writes the board's `owner_events` and nothing else.
+    Route("GET", "/owner-events", "owner_events_page", "owner_events.owner_event_list", page=True),
+    Route(
+        "POST", "/owner-events/read-all", "owner_events_read_all", "owner_events.mark_all_read",
+        body=FORM_BODY, page=True,
+    ),
+    Route(
+        "POST", "/owner-events/{event_id}/read", "owner_event_read", "owner_events.mark_read",
+        body=FORM_BODY, page=True,
+    ),
 )
 
 #: The prefix the PO token guards, and the cookie's `Path`: one value, so no route under it is outside.
@@ -180,6 +192,9 @@ PAUSE_DRAIN_FIELDS = frozenset({"reason"})
 PAUSE_RESUME_FIELDS: frozenset[str] = frozenset()
 TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
 TASK_MOVE_FIELDS = frozenset({"request_id", "target", "reason", "sprint_override", "sprint_override_reason"})
+#: The two owner event forms carry only where to go back to: the unread filter, when it was on.
+OWNER_EVENT_FIELDS = frozenset({"unread"})
+OWNER_EVENTS_NOT_BUILT = "this web process was built without the owner events layer"
 
 #: How many commands the dashboard's feed and the commands page show per read.
 FEED_LIMIT = 25
@@ -239,6 +254,7 @@ class WebApp:
         *,
         po_auth: Any | None = None,
         po: Any | None = None,
+        owner_events: Any | None = None,
     ) -> None:
         self.reads = reads
         self.ops = ops
@@ -257,6 +273,9 @@ class WebApp:
         #: serve /po at all, and the dashboard omits the indicator.
         self.po_auth = po_auth
         self.po = po
+        #: The owner's bell. Optional like the PO layers: a process built without it draws no bell
+        #: and answers its routes with the reason.
+        self.owner_events = owner_events
 
     # -- the entry point -------------------------------------------------------------------
 
@@ -292,6 +311,7 @@ class WebApp:
         with (
             pages.limits_source(self._limits_section),
             pages.doctor_source(self._doctor_section),
+            pages.bell_source(self._bell_section if self.owner_events is not None else None),
             pages.from_post(method == "POST"),
             self._one_health_reading(),
         ):
@@ -567,6 +587,32 @@ class WebApp:
             200,
             pages.commands(self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))),
         )
+
+    def _owner_events_page(self, _params, query, _body) -> Response:
+        unread_only = _one(query, "unread") in {"1", "true", "yes", "on"}
+        return _html(200, pages.owner_events(self._owner_event_layer().owner_event_list(unread_only=unread_only)))
+
+    def _owner_event_read(self, params, _query, body) -> Response:
+        _fields(body, OWNER_EVENT_FIELDS, "owner event read")
+        self._owner_event_layer().mark_read(params["event_id"])
+        return _redirect(_owner_events_back(body), what="the event is read")
+
+    def _owner_events_read_all(self, _params, _query, body) -> Response:
+        _fields(body, OWNER_EVENT_FIELDS, "owner events read")
+        self._owner_event_layer().mark_all_read()
+        return _redirect(_owner_events_back(body), what="every notice is read")
+
+    def _owner_event_layer(self) -> Any:
+        if self.owner_events is None:
+            raise RuntimeUnavailable(OWNER_EVENTS_NOT_BUILT)
+        return self.owner_events
+
+    def _bell_section(self) -> dict[str, Any]:
+        """The header bell's count, read from the board for this render; a refusal is its reason."""
+        try:
+            return self._owner_event_layer().unread_count()
+        except ReadError as exc:
+            return {"state": "unavailable", "reason": exc.message, "count": 0}
 
     def _limits_section(self) -> dict[str, Any] | None:
         """The provider limits for a page, or `None` when this process was built without them.
@@ -1111,6 +1157,11 @@ def _pin(value: str) -> str | None:
     """
     text = str(value or "").strip()
     return None if text == EXECUTOR_UNPINNED else text
+
+
+def _owner_events_back(body: dict[str, Any]) -> str:
+    """Where an owner event form returns: the list, filtered to the unread when it was."""
+    return "/owner-events?unread=1" if _one(body, "unread") == "1" else "/owner-events"
 
 
 def _request_id() -> str:

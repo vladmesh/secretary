@@ -7,6 +7,7 @@ import shlex
 import sys
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from secretary import state_repo
@@ -77,6 +78,7 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
+from secretary.board.owner_event_commands import add_owner_event_subcommands
 from secretary.po.service import add_po_serve_subcommands
 from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
@@ -176,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
     add_po_serve_subcommands(subparsers)
+    add_owner_event_subcommands(subparsers)
     automations = subparsers.add_parser(
         "automations",
         add_help=False,
@@ -817,6 +820,8 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for readiness in resource_probes
         if readiness.status == PROBE_BROKEN
     )
+    if not args.dry_run:
+        record_provider_owner_events(report, recovery.get("resources") or [])
     findings.extend(_recovery_findings(recovery))
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
@@ -833,6 +838,43 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         collected,
         diffs,
     )
+
+
+#: The probe verdicts that put a provider in front of the owner, and what each one means to them.
+PROVIDER_RED_STATES = {
+    "unauthenticated": "its key is expired or its login is missing",
+    "exhausted": "its quota is spent",
+    "unavailable": "its provider does not answer",
+    PROBE_BROKEN: "its probe cannot run, so claims on it are not gated by health",
+}
+
+
+def record_provider_owner_events(report, resources: list[object]) -> int:
+    """One `provider_red` notice per provider, condition and UTC day: repeated doctor runs add nothing.
+
+    Doctor is the writer (issue:1d3d86edba8c2193b93e); the web's lamp only reads recorded health. A
+    dry run records nothing, and an installation without a board store has nowhere to record.
+    """
+    from secretary.board import owner_events
+
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    recorded = 0
+    for row in resources:
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("state") or "")
+        meaning = PROVIDER_RED_STATES.get(state)
+        if meaning is None:
+            continue
+        resource = str(row.get("resource") or "")
+        recorded += owner_events.record(
+            owner_events.PROVIDER_RED,
+            None,
+            f"Provider {resource} is {state}: {meaning} ({row.get('reason') or 'no reason recorded'})",
+            f"{owner_events.PROVIDER_RED}:{resource}:{state}:{day}",
+            to=report.instance_path.parent,
+        )
+    return recorded
 
 
 def _recovery_findings(recovery: dict[str, object]) -> list[dict[str, object]]:

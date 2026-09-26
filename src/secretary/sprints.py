@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from secretary.board import owner_events
 from secretary.board.backend import (
     BoardIdentityError,
     entity_id,
@@ -1918,8 +1919,40 @@ class SprintWriter:
             mutation,
         )
 
-    @_sql_atomic
     def record_budget(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        event_type: str,
+        request_id: str | None = None,
+        source_event_id: str = "",
+    ) -> dict[str, Any]:
+        result = self._record_budget(
+            role=role,
+            actor=actor,
+            reference=reference,
+            event_type=event_type,
+            request_id=request_id,
+            source_event_id=source_event_id,
+        )
+        sprint = result.get("sprint") if isinstance(result.get("sprint"), dict) else {}
+        budget = sprint.get("budget") if isinstance(sprint.get("budget"), dict) else {}
+        if budget.get("signal_reached"):
+            # Once per sprint: the charges only grow, so the signal once reached stays reached.
+            owner_events.record(
+                owner_events.BUDGET_SIGNAL,
+                reference,
+                f"{reference} reached its budget signal: {budget.get('total')} restart events of "
+                f"{(budget.get('thresholds') or {}).get('hard')} before the hard stop",
+                f"{owner_events.BUDGET_SIGNAL}:{reference}",
+                to=self.client,
+            )
+        return result
+
+    @_sql_atomic
+    def _record_budget(
         self,
         *,
         role: str,
@@ -2097,6 +2130,14 @@ class SprintWriter:
             event_type=event_type,
             source_event_id=source_event_id,
         )
+        # The charge that stopped the sprint, once: written in this transaction, beside the stop.
+        owner_events.record(
+            owner_events.SPRINT_STOPPED,
+            reference,
+            f"{reference} was stopped: its budget reached the hard limit ({event_type} charged)",
+            f"{owner_events.SPRINT_STOPPED}:{reference}:{request_id}",
+            to=self.client,
+        )
         # The generic event is deliberately returned only after the typed host
         # transition, so callers and dispatcher output observe the stopped row.
         result["sprint"] = self.reader.show(reference)
@@ -2234,7 +2275,7 @@ class SprintWriter:
         self._role(role, {"po", "observer"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
-        return self._close_atomic(
+        closed = self._close_atomic(
             role=role,
             actor=actor,
             reference=reference,
@@ -2243,6 +2284,16 @@ class SprintWriter:
             reason=reason,
             closeout=closeout,
         )
+        # After the close committed, once per close record: a repeat of this request id answers the
+        # same record and writes nothing new, and a reopened sprint's next close is a new record.
+        owner_events.record(
+            owner_events.SPRINT_CLOSED,
+            reference,
+            f"{reference} was closed by the {role}" + (f": {reason.strip()}" if str(reason or "").strip() else ""),
+            f"{owner_events.SPRINT_CLOSED}:{reference}:{closed.get('event_id') or request_id}",
+            to=self.client,
+        )
+        return closed
 
     @_sql_atomic
     def _close_atomic(

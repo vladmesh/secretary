@@ -218,6 +218,47 @@ class BackupTests(unittest.TestCase):
             )
             self.assertFalse((restored / "memory" / "fastembed-cache").exists())
 
+    def test_the_po_queue_round_trips_through_a_full_and_a_core_archive(self):
+        """secretary-1770: pending and set-aside PO inputs come back; an in-flight temporary file does not."""
+        from secretary.po.queue import PoQueue
+        from secretary.restore import restore_backup
+
+        for kind in ("full", "core"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                instance, data_dir = self._full_backup_with_model_cache(root)
+                queue = PoQueue(data_dir)
+                queue.put(session_id="s-1", text="the owner's message", request_id="web-po-1", source="web")
+                refused = queue.put(session_id="s-2", text="for a closed session", request_id="web-po-2", source="web")
+                queue.refuse(refused, "PO session s-2 is closed")
+                (queue.directory / ".0001.json.tmp").write_text("half-written", encoding="utf-8")
+                exports = {
+                    "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
+                    "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
+                    "runs": DataExport(data_dir / "runs" / "runs.ndjson", 1, "test"),
+                    "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 1, "test"),
+                    "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
+                }
+                with (
+                    mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                    mock.patch("secretary.backup._pipeline_action", return_value=None),
+                    mock.patch("secretary.backup.export_all", return_value=exports),
+                ):
+                    result = create_backup(instance, backup_kind=kind)
+                self.assertEqual(verify_backup(result.archive).code, 0)
+                target = root / "target-instance"
+                restored = root / "restored-data"
+                _write_instance(target, restored)
+                restore_backup(result.archive, target, _allow_postgres_engine=True)
+
+                back = PoQueue(restored)
+                self.assertEqual(
+                    [(item.session_id, item.text, item.request_id) for item in back.pending()],
+                    [("s-1", "the owner's message", "web-po-1")],
+                )
+                self.assertEqual(back.find_refused("web-po-2")["reason"], "PO session s-2 is closed")
+                self.assertFalse((back.directory / ".0001.json.tmp").exists())
+
     def test_create_rejects_claimed_worker_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1026,6 +1067,8 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
                 "board/data-manifest.json",
                 "memory/export.ndjson",
                 "runs/watermarks.json",
+                "po-queue/1-0.json",
+                "po-queue/refused/1-0.json",
             ),
             "full": (
                 "board/cards.json",
@@ -1035,6 +1078,8 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
                 "transcripts/inventory.json",
                 "artifacts/inventory.json",
                 "artifacts/data-manifest.json",
+                "po-queue/1-0.json",
+                "po-queue/refused/1-0.json",
             ),
         }
         for kind, relatives in admitted.items():
