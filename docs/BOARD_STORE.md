@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0016` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0017` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
@@ -301,7 +301,8 @@ CREATE TABLE tasks (
     title          text NOT NULL CHECK (title <> ''),
     description    text NOT NULL DEFAULT '',
     task_type      text CONSTRAINT task_type_is_a_known_type_or_nothing
-                     CHECK (task_type IS NULL OR task_type IN ('code','research','infra')),
+                     CHECK (task_type IS NULL OR task_type IN ('code','research','infra',
+                                                               'decision','operation')),
     review         text CONSTRAINT task_review_is_a_known_choice_or_nothing
                      CHECK (review IS NULL OR review IN ('required','skipped')),  -- NULL reads as required
     live_impact    boolean NOT NULL DEFAULT false,    -- research only (task_live_impact_is_research_only)
@@ -702,7 +703,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0013_budget_candidates` | one partial index on `requests` only, `requests_budget_candidates`: committed rows meeting the budget pass's candidate predicate (`board/budget_candidates.py`), in claim order |
 | `0014_neutral_extension_bag` | data only: the extension bag of current `tasks`, `products` and `issues` rows moves onto the key `extra` (§8.2); refuses a store whose premise does not hold or that holds a non-committed `done-retention-` request; history is not rewritten; no downgrade |
 | `0015_po_effort_resolved_model` | `po_sessions.effort` (text, not null, default `'default'`: every existing session ran at the CLI's own effort) and `po_turns.resolved_model` (nullable text: the model the CLI reported for that turn); no downgrade |
-| `0016_sprint_po_session` | `sprints.po_session` (nullable text: the PO session that opened the sprint, or the one the PO service's resolver opened for it) and `sprints.allowed_productions` (text[], not null, default `'{}'`: registered projects whose production the sprint's operations may touch); every existing sprint loads with neither; `po_request_operation_in_vocabulary` re-created to admit `po_sprint_session` beside `po_session_create` and `po_send` (`po_request_seq_only_for_a_send` unchanged); no downgrade (head) |
+| `0016_sprint_po_session` | `sprints.po_session` (nullable text: the PO session that opened the sprint, or the one the PO service's resolver opened for it) and `sprints.allowed_productions` (text[], not null, default `'{}'`: registered projects whose production the sprint's operations may touch); every existing sprint loads with neither; `po_request_operation_in_vocabulary` re-created to admit `po_sprint_session` beside `po_session_create` and `po_send` (`po_request_seq_only_for_a_send` unchanged); no downgrade |
+| `0017_po_card_kinds` | `decision` and `operation` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row of `code`, `research`, `infra` or no type loads unchanged; no column; no downgrade (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1059,7 +1061,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0016_sprint_po_session`). PostgreSQL restore compares against `head_revision()`.
+  (`0017_po_card_kinds`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

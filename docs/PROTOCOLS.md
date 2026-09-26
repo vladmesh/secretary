@@ -60,11 +60,14 @@ past the steward's stale threshold is reported like any other stuck card.
 
 ### Card kinds, live impact and the review choice
 
-`task create --type` takes one of three kinds:
+`task create --type` takes one of five kinds:
 
 - `code`: a change to a repository, delivered as a candidate branch.
 - `research`: an investigation or experiment; hypotheses and budget live in the description.
 - `infra`: work on hosts or services rather than a repository.
+- `decision` and `operation`: a question or a short action the PO answers inside a turn of its
+  sprint's PO session. The PO service executes them, not a head; see
+  [Decision and operation cards](#decision-and-operation-cards).
 
 Kind, live-impact flag and review choice are set at create and shown by `task show` and `task list`
 as `type`, `live_impact` and `review`. None of them is editable afterwards.
@@ -90,8 +93,8 @@ All three subsections must be present and non-empty inside the `## Impact bounds
 refusal names what is missing or empty.
 
 **Review choice** is stored on the card as `review: required|skipped`. The default is `required`
-for `code` and `skipped` for `research` and `infra`; `--review required|skipped` overrides it in
-either direction, and a reviewer head never changes it. The review choice decides whether review
+for `code` and `skipped` for every other kind; `--review required|skipped` overrides it in
+either direction (a `decision` or `operation` card refuses `required`), and a reviewer head never changes it. The review choice decides whether review
 runs; the reviewer head decides who reviews, and a sprint's reviewer pin sets that head exactly as
 for any card, whatever the review choice. A caller-supplied reviewer head with `skipped` is refused,
 at create and at `task edit --review-head`, unless it is the head the sprint pins. A card written
@@ -173,9 +176,90 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
   still the only check before Done.
 
+### Decision and operation cards
+
+A `decision` card asks the PO a question; an `operation` card asks it to do something short. Both are
+executed by the PO service in a turn of the sprint's PO session, never by a head, and both are
+no-candidate kinds: no workspace, branch, pull request, CI or reviewer.
+
+**Create.** The observer or the PO creates one (`task create --type decision|operation`, no other
+role). It must carry `--sprint`, and it refuses, each with its reason, `--head`, `--review-head`,
+`--review required`, `--live-impact`, `--seed-ref` and `--base-branch`. Its review is `skipped`, and
+a sprint's executor pins do not apply to it. The PO needs no `--sprint-override` to create one in its
+sprint.
+
+**Submit.** When the dispatcher claims a Ready one it launches no head and cuts no workspace. The
+claim moves the card In progress; such a card neither takes nor counts against the claim capacity,
+which counts heads. The dispatcher then:
+
+1. resolves the sprint's PO session, `sprint_session(sprint_ref, request_id)` (see
+   [The sprint's PO session and productions](#the-sprints-po-session-and-productions));
+2. submits one input to that session, `source: dispatcher`, carrying the card ref, kind and title, the
+   card body, the sprint's comments in board order, and the exact completion command:
+
+   ```text
+   python3 -P -m secretary task complete --ref <card> --role po --kind <kind> --body-file <file> --request-id <id>
+   ```
+
+The three request ids (resolve, submit, completion) are `dispatcher-<claim attempt>-po-session-<card>`,
+`...-po-submit-<card>` and `...-po-complete-<card>`, derived at claim and kept on the card's dispatcher
+record with the resolve's answer (the session, `created` or `recorded`), the frozen input text and the
+submit's answer. A resolve or submit the service did not answer (`outcome_unknown`, the service not
+running, or a refusal coded `unavailable`) is repeated on the next tick under the same id, never a
+fresh one, since a fresh id could open a second PO session. The card stays In progress and the tick
+reports `po-service-unanswered` (degraded); a service that stays down is not a failure of the card. A
+refusal that is an answer (the sprint closed or missing, the session closed, the id bound to something
+else) Blocks the card with `the PO service refused the <resolve|submit> of this card: <reason>`. A
+dispatcher record lost with its state file is rebuilt from the dispatcher's own claim event, whose
+request id carries the claim attempt, so the same requests are repeated.
+
+**Complete.** The PO answers the card in that turn and completes it:
+
+```text
+task complete --ref <card> --role po --kind decision|operation --body-file <file> [--request-id <id>]
+```
+
+The body must carry two non-empty level-2 sections: `## Decision` and `## How to verify` for a
+decision, `## What was done` and `## How to verify` for an operation. Otherwise it is refused and
+nothing is written. It is allowed only on an In progress card of that kind and only for role `po`.
+It is one Card transition In progress → Done whose reason is the rendered completion record, written
+as the PO's comment in the same transaction:
+
+```markdown
+[completion:decision]
+
+## Decision
+
+...
+
+## How to verify
+
+...
+```
+
+(`[completion:operation]` with `## What was done` for an operation.) The record is read back only from
+a comment the PO wrote, the way the infra record is read only from the dispatcher's. The same request
+id repeated with the same body is a replay that writes nothing; with another body it is
+`request_conflict`. `task complete` does not pass the sprint guard: it is the PO executing its
+sprint's card, not an override move.
+
+**Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and not
+the service: `po_requests` names the turn the input became once the service claimed it. Three outcomes:
+
+- the card left In progress (Done with its completion record): the dispatcher record is closed;
+- the turn that took the input settled `completed`, `failed` or `interrupted` and the card is still In
+  progress: the card goes to Blocked with `PO turn <session>/<seq> ended <state> without completing the
+  card`;
+- otherwise it waits: the input may still be queued behind a seed or another turn (`po-card-queued`),
+  or its turn is running (`po-card-turn-running`).
+
+The PO's Done and the dispatcher's Blocked are card transitions of a card linked to the sprint, so each
+wakes the observer ([Resume and observer wakes](#resume-and-observer-wakes)); the claim and the submit
+do not.
+
 ### Cards outside a sprint
 
-The PO may create a card of any kind (`code`, `research`, `infra`) with no `--sprint`, in Ready, on
+The PO may create a card of kind `code`, `research` or `infra` with no `--sprint`, in Ready, on
 any project, including one an open sprint reserves, and may move and edit it without
 `--sprint-override` (see [The sprint guard](#the-sprint-guard)). Other roles keep their rules: the
 observer creates only cards of its own sprint, the steward creates its report card In progress, and
@@ -1086,8 +1170,9 @@ dispatcher card event (a comment carrying the `post_merge_ci` payload) and, for 
 dispatcher comment on the sprint naming the card, the full 40-hex merge commit, result and runs. A replay after a crash
 republishes the same fact and writes nothing new. The one enforcement place is the observer
 significance predicate (`tasks.is_significant_card_event`): the Done of a release that merged is not a
-wake, the post-merge result is. A Done with no merge (research and infra cards, a release that merged
-nothing, automerge off, a manual PO or steward Done) wakes as before. The wake text states the result
+wake, the post-merge result is. A Done with no merge (research and infra cards, a decision or
+operation card the PO completed, a release that merged nothing, automerge off, a manual PO or steward
+Done) wakes as before. The wake text states the result
 with its runs, and for `red` the failed checks and classification; a red result is never worded as a
 plain Done.
 

@@ -357,7 +357,7 @@ class SchemaModelTests(unittest.TestCase):
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
-            "task_type IN ('code','research','infra')",
+            "task_type IN ('code','research','infra','decision','operation')",
             "review IN ('required','skipped')",
             "status IN ('staged','committed','discarded')",
         ):
@@ -478,6 +478,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0017_po_card_kinds",
                 "0016_sprint_po_session",
                 "0015_po_effort_resolved_model",
                 "0014_neutral_extension_bag",

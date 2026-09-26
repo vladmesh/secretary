@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from secretary.board.completion_evidence import has_candidate, review_required
+from secretary.board.completion_evidence import has_candidate, is_po_executed, review_required
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
@@ -101,6 +101,8 @@ from secretary.dispatch.pause_ops import (
 from secretary.dispatch.pause_ops import (
     resume as _resume_pipeline,
 )
+from secretary.dispatch.po_cards import ServicePoChannel
+from secretary.dispatch.po_cards import advance_po_card as _advance_po_card
 from secretary.dispatch.production import (
     ProductionState,
 )
@@ -246,6 +248,7 @@ class DispatcherRuntime:
         checkpoint: CheckpointWriter | None = None,
         checkpoint_push: CheckpointPusher | None = None,
         sprints: Any | None = None,
+        po: Any | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -266,6 +269,10 @@ class DispatcherRuntime:
             sprints
             if sprints is not None
             else SprintReader(reader.client, data_dir=self.data_dir, thresholds=limits)
+        )
+        # The PO service and its store, for the decision and operation cards the PO executes.
+        self.po = (
+            po if po is not None else ServicePoChannel(self.data_dir, getattr(catalog, "instance_dir", None))
         )
 
     def head_readiness(self, head: str) -> HeadReadiness:
@@ -446,6 +453,10 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        if is_po_executed(task):
+            # A decision/operation card has no head, workspace or launch intent to settle: the PO
+            # service executes it, and the dispatcher only submits it and watches the turn.
+            return _advance_po_card(self, task, records, payload, attempt_id)
         # Staged usage obligations are deliberately not settled here: a card can finish its last
         # phase and leave `ACTIVE_STATES` in the same tick, so no per-card pass can be the site that
         # guarantees publication. `publish_pending_attempt_usage` owns that, over the whole pending

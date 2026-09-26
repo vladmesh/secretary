@@ -70,7 +70,8 @@ SELECT
 #: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key. `0010` adds one `CHECK`
 #: on `po_sessions` (closed exactly when audited). `0011` restates the `task_type` CHECK (one for one)
 #: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
-#: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves.
+#: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves. `0017`
+#: restates the `task_type` CHECK again, one for one.
 DOCUMENTED_COUNTS = (28, 50, 44, 28, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
@@ -91,6 +92,7 @@ REVISIONS = (
     "0014_neutral_extension_bag",
     "0015_po_effort_resolved_model",
     "0016_sprint_po_session",
+    "0017_po_card_kinds",
 )
 
 
@@ -466,6 +468,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0014_neutral_extension_bag",
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
+                "0017_po_card_kinds",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -718,6 +721,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0014_neutral_extension_bag",
                 "0015_po_effort_resolved_model",
                 "0016_sprint_po_session",
+                "0017_po_card_kinds",
             ),
         )
 
@@ -1088,7 +1092,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection, dry_run=True),
-            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
+            (
+                "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
+                "0017_po_card_kinds",
+            ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
 
@@ -1119,7 +1128,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
+            (
+                "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
+                "0017_po_card_kinds",
+            ),
         )
 
         self.assertEqual(
@@ -1190,7 +1204,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
+            (
+                "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
+                "0017_po_card_kinds",
+            ),
         )
 
     def test_0014_has_no_downgrade(self) -> None:
@@ -1199,7 +1218,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.at_0013()
         self.assertEqual(
             self.run_migrations(connection),
-            ("0014_neutral_extension_bag", "0015_po_effort_resolved_model", "0016_sprint_po_session"),
+            (
+                "0014_neutral_extension_bag",
+                "0015_po_effort_resolved_model",
+                "0016_sprint_po_session",
+                "0017_po_card_kinds",
+            ),
         )
 
         with self.assertRaisesRegex(NotImplementedError, "forward-only"):
@@ -1208,7 +1232,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0013_budget_candidates",
             )
         connection.rollback()
-        self.assertEqual(migrate.current_revision(connection), "0016_sprint_po_session")
+        self.assertEqual(migrate.current_revision(connection), "0017_po_card_kinds")
 
     # --- 0015: a PO session's effort and each turn's resolved model -----------------------------
 
@@ -1276,6 +1300,51 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
                 "VALUES ('r-3', 'po_sprint_session', 'f', 's-1', 1, now())"
             )
+        connection.rollback()
+
+    # --- 0017: the PO-executed card kinds ----------------------------------------------------
+
+    def test_0017_keeps_every_existing_card_and_admits_decision_and_operation(self) -> None:
+        """secretary-1758: rows of the three old kinds and the typeless row load unchanged."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords), "0016_sprint_po_session"
+        )
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        for number, kind in enumerate(("code", "research", "infra", None), start=1):
+            self.card(connection, f"secretary-{number}", task_type=kind)
+        connection.exec_driver_sql("UPDATE tasks SET review = 'skipped' WHERE task_ref = 'secretary-3'")
+        connection.commit()
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.card(connection, "secretary-5", task_type="decision")
+        connection.rollback()
+
+        self.assertEqual(self.run_migrations(connection), ("0017_po_card_kinds",))
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT task_ref, task_type, review, live_impact FROM tasks ORDER BY task_ref"
+            ).fetchall(),
+            [
+                ("secretary-1", "code", None, False),
+                ("secretary-2", "research", None, False),
+                ("secretary-3", "infra", "skipped", False),
+                ("secretary-4", None, None, False),
+            ],
+        )
+        self.card(connection, "secretary-5", task_type="decision")
+        self.card(connection, "secretary-6", task_type="operation")
+        connection.commit()
+        with self.assertRaisesRegex(Exception, "task_type_is_a_known_type_or_nothing"):
+            self.card(connection, "secretary-7", task_type="chore")
+        connection.rollback()
+        # Live impact stays research-only for the new kinds too.
+        with self.assertRaisesRegex(Exception, "task_live_impact_is_research_only"):
+            connection.exec_driver_sql("UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-5'")
         connection.rollback()
 
 

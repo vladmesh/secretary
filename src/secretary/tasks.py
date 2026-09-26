@@ -18,7 +18,15 @@ from typing import TYPE_CHECKING, Any
 from secretary.board.audit_contract import is_protocol_event
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.completion_evidence import has_candidate, infra_report_fields, research_report_refusal
+from secretary.board.completion_evidence import (
+    PO_COMPLETION_MARKERS,
+    has_candidate,
+    infra_report_fields,
+    is_po_executed,
+    po_completion_fields,
+    render_po_completion_record,
+    research_report_refusal,
+)
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
@@ -58,6 +66,7 @@ from secretary.board.task_routing import (
     DECISION_VALUES,
     EDITABLE_STATES,
     FAMILY_PREFERENCE_VALUES,
+    PO_EXECUTED_TYPES,
     ROUTING_PHASE_VALUES,
     TASK_COMPLEXITY_VALUES,
     TASK_TYPE_VALUES,
@@ -274,6 +283,41 @@ def specification_revision(events: Iterable[dict[str, Any]], description: str) -
         return ""
     revision = latest.get("event_id")
     return revision if isinstance(revision, str) and revision else ""
+
+
+def _po_card_create_refusal(
+    kind: str,
+    *,
+    role: str,
+    sprint: str,
+    head: str,
+    review_head: str,
+    review: TaskReview,
+    live_impact: bool,
+    seed_ref: str,
+    base_branch: str,
+) -> str:
+    """Why a `decision`/`operation` card cannot be created as asked, or `""`.
+
+    The PO service executes such a card in a turn of its sprint's PO session: it needs that sprint,
+    and it has no head, no reviewer, no checkout and no live impact of its own to declare.
+    """
+    if role not in {Role.OBSERVER.value, Role.PO.value}:
+        return f"a {kind} card is cut by the observer or the PO, not by {role}"
+    if not sprint:
+        return f"a {kind} card needs --sprint: the PO session of that sprint executes it"
+    refused = [
+        (bool(head), "--head", "no head runs it; the PO service does"),
+        (bool(review_head), "--review-head", "nobody reviews it"),
+        (review is TaskReview.REQUIRED, "--review required", "its review is skipped"),
+        (live_impact, "--live-impact", "that is a research attribute"),
+        (bool(seed_ref), "--seed-ref", "it has no checkout to seed"),
+        (bool(base_branch), "--base-branch", "it integrates into no branch"),
+    ]
+    for present, flag, reason in refused:
+        if present:
+            return f"a {kind} card takes no {flag}: {reason}"
+    return ""
 
 
 def _check_execution_record(task: dict[str, Any]) -> None:
@@ -1092,6 +1136,21 @@ class TaskWriter:
         else:
             review_value = default_review(task_type_value)
         review = review_value.value
+        po_executed = task_type_value in PO_EXECUTED_TYPES
+        if po_executed:
+            refusal = _po_card_create_refusal(
+                task_type,
+                role=role,
+                sprint=sprint,
+                head=head,
+                review_head=review_head,
+                review=review_value,
+                live_impact=live_impact,
+                seed_ref=seed_ref,
+                base_branch=base_branch,
+            )
+            if refusal:
+                raise TaskError("validation", refusal, 2)
         if live_impact and task_type_value is not TaskType.RESEARCH:
             raise TaskError(
                 "validation", f"--live-impact is a research attribute; a {task_type} card cannot carry it", 2
@@ -1175,7 +1234,8 @@ class TaskWriter:
                     f"project {project!r} is not reserved by sprint {sprint}",
                     3,
                 )
-            if not restoring:
+            # A PO-executed card has no head to pin: the PO service runs it.
+            if not restoring and not po_executed:
                 pinned_head, pinned_review = self._sprint_executor_pins(
                     sprint_ref=sprint,
                     head=head,
@@ -1206,6 +1266,7 @@ class TaskWriter:
             request_id=request_id,
             reference=reference,
             steward_report=steward_report,
+            po_card=po_executed,
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
         # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
@@ -1668,6 +1729,97 @@ class TaskWriter:
             },
             fresh_admission=None,
         )
+
+    def complete(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        kind: str,
+        body: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """The PO completes a `decision`/`operation` card it answered in its turn.
+
+        One Card transition In progress -> Done whose reason is the rendered completion record; the
+        transition writes that record as the PO's comment inside its own transaction, so the
+        `[completion:<kind>]` comment and the Done land together or not at all. The request id makes
+        it idempotent: a repeat answers the recorded transition and writes nothing, and the same id
+        with another record is a conflict. Every refusal is decided before anything is written.
+
+        The sprint guard is not asked: this is the PO executing the card its sprint's dispatcher
+        submitted to it, not the PO's escape-hatch move of a sprint's card.
+        """
+        role = self._role(role, {Role.PO})
+        if kind not in PO_COMPLETION_MARKERS:
+            known = ", ".join(sorted(PO_COMPLETION_MARKERS))
+            raise TaskError("validation", f"task complete takes --kind {known}, not {kind!r}", 2)
+        body = self._redact_for_board(body)
+        fields, refusal = po_completion_fields(kind, body)
+        if refusal:
+            raise TaskError("validation", refusal, 2)
+        record = render_po_completion_record(kind, fields)
+        request_id = request_id or str(uuid.uuid4())
+        task = self.reader.show(reference)
+        existing = self._typed_event(request_id)
+        if existing is not None:
+            if str(existing.ref) != reference or existing.reason != record:
+                raise TaskError(
+                    "request_conflict",
+                    f"request id {request_id!r} already completed {existing.ref} with another record; "
+                    "repeat a completion only with the same card and body",
+                    3,
+                )
+            result = self._transition_card(
+                reference=reference,
+                target=CardState.DONE,
+                role=role,
+                actor=actor,
+                reason=record,
+                request_id=request_id,
+                finish=self._transition_cleanup(
+                    task, source=str(existing.source_state or ""), target="done", reason="", role=role
+                ),
+            )
+            return {
+                "action": "completed",
+                "task": self.reader.show(reference),
+                "event_id": result.event.event_id,
+                "replayed": True,
+            }
+        _check_execution_record(task)
+        if str(task.get("type") or "") != kind:
+            raise TaskError(
+                "validation",
+                f"{reference} is a {task.get('type') or 'typeless'} card; task complete --kind {kind} "
+                f"completes only a {kind} card",
+                2,
+            )
+        if task["state"] != CardState.IN_PROGRESS.value:
+            raise TaskError(
+                "transition_forbidden",
+                f"task complete needs the card In progress, where the dispatcher put it when it "
+                f"submitted it to the PO; {reference} is {task['state']}",
+                3,
+            )
+        result = self._transition_card(
+            reference=reference,
+            target=CardState.DONE,
+            role=role,
+            actor=actor,
+            reason=record,
+            request_id=request_id,
+            finish=self._transition_cleanup(
+                task, source=task["state"], target="done", reason=record, role=role
+            ),
+        )
+        return {
+            "action": "completed",
+            "task": self.reader.show(reference),
+            "event_id": result.event.event_id,
+            "replayed": False,
+        }
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
@@ -2196,9 +2348,14 @@ class TaskWriter:
                 predecessor = self.reader.show(str(blocked_by))
                 if predecessor["state"] != "done":
                     raise TaskError("predecessor_open", "blocked_by task is not Done", 3)
-            for active in self.reader.list(states=set(ACTIVE_STATES)):
-                if active["id"] == task["id"] or _is_steward_report(active):
-                    continue
+            # A decision/operation card runs no head, so it neither takes nor counts against the
+            # capacity, which is how many heads the installation runs at once.
+            headed = [
+                active
+                for active in self.reader.list(states=set(ACTIVE_STATES))
+                if active["id"] != task["id"] and not _is_steward_report(active) and not is_po_executed(active)
+            ]
+            for active in headed:
                 if (
                     active["type"] == "code"
                     and task["type"] == "code"
@@ -2207,12 +2364,7 @@ class TaskWriter:
                     raise TaskError(
                         "capacity_reached", "one active code task per project is already claimed", 3
                     )
-            active_count = sum(
-                1
-                for active in self.reader.list(states=set(ACTIVE_STATES))
-                if active["id"] != task["id"] and not _is_steward_report(active)
-            )
-            if active_count >= cap:
+            if len(headed) >= cap and not is_po_executed(task):
                 raise TaskError("capacity_reached", "active task capacity is reached", 3)
 
         values = {
@@ -2692,6 +2844,11 @@ class TaskWriter:
             and (bounds_refusal := impact_bounds_refusal(description))
         ):
             raise TaskError("validation", bounds_refusal, 2)
+        # Nothing edits a head onto a card the PO service executes.
+        if is_po_executed(current) and ((head or "").strip() or (review_head or "").strip()):
+            raise TaskError(
+                "validation", f"a {current.get('type')} card takes no head or reviewer: the PO service runs it", 2
+            )
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -2926,6 +3083,7 @@ class TaskWriter:
         request_id: str,
         reference: str,
         steward_report: bool = False,
+        po_card: bool = False,
     ) -> dict[str, str]:
         """Authorize one create/move/edit against the caller and the open-sprint reservation index.
 
@@ -2935,7 +3093,9 @@ class TaskWriter:
         of a card linked to no sprint is not the holding sprint's and passes once the index is
         verified; the dispatcher's admission decides whether such a card runs. So does a steward
         write of its own report card (`steward_report`, the caller's reading of the create or of
-        the card's recorded marker), which is the steward's accounting, never a sprint's work.
+        the card's recorded marker), which is the steward's accounting, never a sprint's work. A PO
+        create of a `decision` or `operation` card (`po_card`) is the sprint's own channel to its PO
+        and needs no override either: it touches no branch the sprint owns.
 
         The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
         the observer of, and an unprovable caller is refused rather than admitted.
@@ -2998,6 +3158,8 @@ class TaskWriter:
         # asked before the claim), not this guard. A card linked to a sprint, and a create that
         # links one, keep the override rule above.
         if role == "po" and not card_sprint and linked_sprint is None:
+            return {}
+        if role == "po" and po_card:
             return {}
         # The steward's own report card is its tick's accounting, created In progress as research
         # and linked to no sprint; the dispatcher never claims it. Its proposals and every other

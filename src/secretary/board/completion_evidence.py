@@ -14,6 +14,12 @@ for it, so its completion is proved by a marked dispatcher comment on the card i
 
 Both markers are read only from comments the dispatcher wrote, so a worker or reviewer comment that
 happens to contain the marker line proves nothing.
+
+A `decision` or `operation` card has no candidate and no head either: the dispatcher submits it to
+its sprint's PO session, and the PO completes it inside that turn with `task complete`, which writes
+one `[completion:decision]` (`## Decision`, `## How to verify`) or `[completion:operation]`
+(`## What was done`, `## How to verify`) comment and moves the card to Done in one transition. That
+record is read only from comments the PO wrote, the same way.
 """
 
 from __future__ import annotations
@@ -23,19 +29,36 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from secretary.board.task_routing import TaskReview, TaskType
+from secretary.board.task_routing import PO_EXECUTED_TYPES, TaskReview, TaskType
 
-NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value})
+#: The kinds the PO service executes (`decision`, `operation`); they are no-candidate kinds too.
+PO_EXECUTED_KINDS = frozenset(kind.value for kind in PO_EXECUTED_TYPES)
+NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value}) | PO_EXECUTED_KINDS
 
 INFRA_COMPLETION_MARKER = "completion:infra"
 RESEARCH_COMPLETION_MARKER = "completion:research"
 INFRA_REPORT_SECTIONS = ("What was done", "How to verify")
+#: A PO-executed card's completion record: its marker and its two sections, by kind.
+PO_COMPLETION_MARKERS = {
+    TaskType.DECISION.value: "completion:decision",
+    TaskType.OPERATION.value: "completion:operation",
+}
+PO_COMPLETION_SECTIONS = {
+    TaskType.DECISION.value: ("Decision", "How to verify"),
+    TaskType.OPERATION.value: ("What was done", "How to verify"),
+}
+#: The role whose comments carry a PO-executed card's completion record.
+PO_COMPLETION_ROLE = "po"
 # The research report directory, relative to the worker's workspace, and the file it must hold.
 RESEARCH_REPORT_DIR = ".secretary-report"
 RESEARCH_REPORT_FILE = "report.md"
 
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
-_DISPATCHER_LINE = "[dispatcher]"
+
+
+def is_po_executed(task: Mapping[str, Any]) -> bool:
+    """Whether the PO service executes this card (`decision`, `operation`) instead of a head."""
+    return str(task.get("type") or "") in PO_EXECUTED_KINDS
 
 
 def has_candidate(task: Mapping[str, Any]) -> bool:
@@ -85,39 +108,60 @@ def _sections(body: str) -> dict[str, str]:
     return {name: "\n".join(lines).strip() for name, lines in found.items()}
 
 
-def infra_report_fields(body: str) -> tuple[dict[str, str], str]:
-    """The two infra report fields, and why the body lacks them (`""` when it has both)."""
+def _required_sections(body: str, names: tuple[str, ...], what: str) -> tuple[dict[str, str], str]:
+    """The named non-empty level-2 sections of `body`, and why it lacks some (`""` when it has all)."""
     sections = _sections(body)
-    fields = {name: sections.get(name, "") for name in INFRA_REPORT_SECTIONS}
+    fields = {name: sections.get(name, "") for name in names}
     missing = [f"`## {name}`" for name, text in fields.items() if not text]
     if not missing:
         return fields, ""
     return fields, (
-        "an infra done report must carry two non-empty sections, `## What was done` and "
-        "`## How to verify` (a command or an observation); missing or empty: " + ", ".join(missing)
+        f"{what} must carry two non-empty sections, `## {names[0]}` and `## {names[1]}` (a command "
+        "or an observation); missing or empty: " + ", ".join(missing)
     )
+
+
+def _render_completion_record(marker: str, names: tuple[str, ...], fields: Mapping[str, str]) -> str:
+    parts = [f"[{marker}]", ""]
+    for name in names:
+        parts += [f"## {name}", "", str(fields.get(name) or "").strip(), ""]
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def infra_report_fields(body: str) -> tuple[dict[str, str], str]:
+    """The two infra report fields, and why the body lacks them (`""` when it has both)."""
+    return _required_sections(body, INFRA_REPORT_SECTIONS, "an infra done report")
 
 
 def render_infra_completion_record(fields: Mapping[str, str]) -> str:
     """The comment body the dispatcher writes; `infra_completion_record` reads it back."""
-    parts = [f"[{INFRA_COMPLETION_MARKER}]", ""]
-    for name in INFRA_REPORT_SECTIONS:
-        parts += [f"## {name}", "", str(fields.get(name) or "").strip(), ""]
-    return "\n".join(parts).rstrip() + "\n"
+    return _render_completion_record(INFRA_COMPLETION_MARKER, INFRA_REPORT_SECTIONS, fields)
+
+
+def po_completion_fields(kind: str, body: str) -> tuple[dict[str, str], str]:
+    """The two sections a `task complete` body of this kind carries, and why it lacks them."""
+    return _required_sections(body, PO_COMPLETION_SECTIONS[kind], f"a {kind} completion body")
+
+
+def render_po_completion_record(kind: str, fields: Mapping[str, str]) -> str:
+    """The comment body `task complete` writes; `po_completion_record` reads it back."""
+    return _render_completion_record(PO_COMPLETION_MARKERS[kind], PO_COMPLETION_SECTIONS[kind], fields)
 
 
 def render_research_completion_link(reference: str) -> str:
     return f"[{RESEARCH_COMPLETION_MARKER}]\n\n{research_report_path(reference)}\n"
 
 
-def _dispatcher_marked(comments: Iterable[Mapping[str, Any]], marker: str) -> list[str]:
-    """Bodies of dispatcher comments whose first content line is `[marker]`, oldest first."""
+def _marked(
+    comments: Iterable[Mapping[str, Any]], marker: str, *, role: str = "dispatcher"
+) -> list[str]:
+    """Bodies of `role` comments (the dispatcher's by default) whose first content line is `[marker]`."""
     bodies: list[str] = []
     for comment in comments:
-        if comment.get("marker") != "dispatcher":
+        if comment.get("marker") != role:
             continue
         lines = str(comment.get("body") or "").splitlines()
-        if lines and lines[0].strip() == _DISPATCHER_LINE:
+        if lines and lines[0].strip() == f"[{role}]":
             lines = lines[1:]
         while lines and not lines[0].strip():
             lines = lines[1:]
@@ -128,8 +172,21 @@ def _dispatcher_marked(comments: Iterable[Mapping[str, Any]], marker: str) -> li
 
 def infra_completion_record(task: Mapping[str, Any]) -> dict[str, str] | None:
     """The latest well-formed infra completion record on the card, or None."""
-    for body in reversed(_dispatcher_marked(task.get("comments") or [], INFRA_COMPLETION_MARKER)):
+    for body in reversed(_marked(task.get("comments") or [], INFRA_COMPLETION_MARKER)):
         fields, refusal = infra_report_fields(body)
+        if not refusal:
+            return fields
+    return None
+
+
+def po_completion_record(task: Mapping[str, Any]) -> dict[str, str] | None:
+    """The latest well-formed completion record the PO wrote on this decision/operation card, or None."""
+    kind = str(task.get("type") or "")
+    if kind not in PO_EXECUTED_KINDS:
+        return None
+    marked = _marked(task.get("comments") or [], PO_COMPLETION_MARKERS[kind], role=PO_COMPLETION_ROLE)
+    for body in reversed(marked):
+        fields, refusal = po_completion_fields(kind, body)
         if not refusal:
             return fields
     return None
@@ -138,14 +195,14 @@ def infra_completion_record(task: Mapping[str, Any]) -> dict[str, str] | None:
 def research_completion_link(task: Mapping[str, Any]) -> str | None:
     """The report directory the latest research completion link names, or None."""
     expected = research_report_path(str(task.get("ref") or ""))
-    for body in reversed(_dispatcher_marked(task.get("comments") or [], RESEARCH_COMPLETION_MARKER)):
+    for body in reversed(_marked(task.get("comments") or [], RESEARCH_COMPLETION_MARKER)):
         if any(line.strip().strip("`") == expected for line in body.splitlines()):
             return expected
     return None
 
 
 def missing_completion_evidence(task: Mapping[str, Any]) -> str:
-    """Name the completion evidence a research/infra card lacks, or `""` when it has it.
+    """Name the completion evidence a no-candidate card lacks, or `""` when it has it.
 
     A `code` card answers `""`: its evidence is the merge, which the release performs itself.
     """
@@ -154,6 +211,8 @@ def missing_completion_evidence(task: Mapping[str, Any]) -> str:
         return "" if infra_completion_record(task) is not None else INFRA_COMPLETION_MARKER
     if kind == TaskType.RESEARCH.value:
         return "" if research_completion_link(task) is not None else RESEARCH_COMPLETION_MARKER
+    if kind in PO_EXECUTED_KINDS:
+        return "" if po_completion_record(task) is not None else PO_COMPLETION_MARKERS[kind]
     return ""
 
 
