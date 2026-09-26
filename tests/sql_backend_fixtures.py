@@ -790,15 +790,25 @@ def card_store(
 def terminate_session(client: SqlCardClient) -> None:
     """End the client's server session from a second connection, as a board-store restart would.
 
-    The shared test server keeps running; only this client's backend goes away.
+    The shared test server keeps running; only this client's backend goes away.  The session is
+    the connection this thread would use next: the pinned one inside a session or transaction,
+    else the one the pool hands out next.  Returns once the backend has exited and its hang-up has
+    reached the client's socket, so what the client does next does not race the server.
     """
+    import select
+
     import psycopg
 
-    pid = client.connection.info.backend_pid
+    connection = client.connection
+    pid = connection.info.backend_pid
     with psycopg.connect(client.credentials.conninfo(), autocommit=True) as admin:
-        row = admin.execute("SELECT pg_terminate_backend(%s)", (pid,)).fetchone()
+        row = admin.execute("SELECT pg_terminate_backend(%s, 5000)", (pid,)).fetchone()
     if not row or not row[0]:
         raise AssertionError(f"backend {pid} was not terminated")
+    poller = select.poll()
+    poller.register(connection.fileno(), select.POLLIN)
+    if not poller.poll(5000):
+        raise AssertionError(f"the hang-up of backend {pid} never reached the client")
 
 
 class CardStoreCase(unittest.TestCase):

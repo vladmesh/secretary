@@ -71,9 +71,13 @@ class ProductIssueRecords:
 
     def __init__(self, client: Any) -> None:
         self.client = client
-        # References staged by `createTask` and not yet inserted by `saveTaskMetadata`, keyed by
-        # the synthetic board key.  Emptied by the insert, by a rollback, and checked at commit.
-        self.staged: dict[int, dict[str, Any]] = {}
+
+    @property
+    def staged(self) -> dict[int, dict[str, Any]]:
+        """References staged by `createTask` and not yet inserted by `saveTaskMetadata`, keyed by
+        the synthetic board key: this thread's open transaction's own (`SqlCardClient._staged`).
+        Emptied by the insert, by a rollback, and checked at commit."""
+        return self.client._staged("records")
 
     # --- identity --------------------------------------------------------------------
 
@@ -243,7 +247,7 @@ class ProductIssueRecords:
                 f"{kind} board-key collision between {identifier!r} and {collision[0][0]!r}"
             )
         lane = identifier if kind == "product" else None
-        self.staged[key] = {
+        self.client._staged("records")[key] = {
             "reference": reference,
             "title": title,
             "description": description or "",

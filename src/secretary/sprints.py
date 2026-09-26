@@ -851,13 +851,13 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
     def wrapped(self: SprintWriter, *args: Any, **kwargs: Any) -> dict[str, Any]:
         request_id = kwargs.get("request_id")
         try:
-            with self.client._transaction_lock:
-                if self.client._depth:
-                    return method(self, *args, **kwargs)
-                with self.client.transaction():
-                    # Admission, request claims and reservations share this transaction-scoped lock.
-                    self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
-                    return method(self, *args, **kwargs)
+            # `_depth` is this thread's own, so the check needs no lock around it.
+            if self.client._depth:
+                return method(self, *args, **kwargs)
+            with self.client.transaction():
+                # Admission, request claims and reservations share this transaction-scoped lock.
+                self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
+                return method(self, *args, **kwargs)
         except TaskError as exc:
             if isinstance(request_id, str):
                 try:

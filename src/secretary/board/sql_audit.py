@@ -619,12 +619,15 @@ class SqlTaskAudit:
             self._execute("SELECT pg_advisory_xact_lock(%s)", (key,))
             yield
             return
-        self._execute("SELECT pg_advisory_lock(%s)", (key,))
-        try:
-            yield
-        finally:
-            self._execute("SELECT pg_advisory_unlock(%s)", (key,))
-            self._commit()
+        # A session-level lock belongs to one server session: the lock, the claim and the
+        # unlock stay on this thread's one pooled connection.
+        with self.client._session():
+            self._execute("SELECT pg_advisory_lock(%s)", (key,))
+            try:
+                yield
+            finally:
+                self._execute("SELECT pg_advisory_unlock(%s)", (key,))
+                self._commit()
 
     @contextlib.contextmanager
     def marker_comment_lock(self, reference: str) -> Iterator[None]:
@@ -642,19 +645,21 @@ class SqlTaskAudit:
             return
         key = _advisory_key(f"secretary.board.marker:{reference}")
         in_transaction = bool(self.client._depth)
-        if in_transaction:
-            self._execute("SELECT pg_advisory_xact_lock(%s)", (key,))
-        else:
-            self._execute("SELECT pg_advisory_lock(%s)", (key,))
-            self._commit()
-        held[reference] = 1
-        try:
-            yield
-        finally:
-            del held[reference]
-            if not in_transaction:
-                self._execute("SELECT pg_advisory_unlock(%s)", (key,))
+        # As in `_locked`: the session-level lock and its unlock share one pooled connection.
+        with self.client._session():
+            if in_transaction:
+                self._execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+            else:
+                self._execute("SELECT pg_advisory_lock(%s)", (key,))
                 self._commit()
+            held[reference] = 1
+            try:
+                yield
+            finally:
+                del held[reference]
+                if not in_transaction:
+                    self._execute("SELECT pg_advisory_unlock(%s)", (key,))
+                    self._commit()
 
     # --- marker reservations ---------------------------------------------------------
 

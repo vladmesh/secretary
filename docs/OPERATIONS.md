@@ -497,8 +497,8 @@ host-owned Orca unit was ([Head runtime](HEAD_RUNTIME.md)).
 
 ## How long things take
 
-Three durations are recorded on every running installation, and one command measures the dashboard's
-warm response times against the thresholds a sprint is judged on.
+Three durations are recorded on every running installation, and one command measures the dashboard
+against the thresholds a sprint is judged on.
 
 ### Where the durations are
 
@@ -519,44 +519,128 @@ python3 scripts/measure_dashboard.py            # against http://127.0.0.1:8787
 python3 scripts/measure_dashboard.py --json     # the same facts, as one document
 ```
 
-This command measures the warm items only; the Definition-of-Done item about four concurrent `GET /` while a PO page polls is measured separately, not by it.
+Run it from a checkout, on the host the installation runs on, as the runtime user. It reads only,
+and only from the installation named by `--base-url`: three dashboard pages and, to reproduce what
+an operator's browser is doing, the `/po` overview and one session's JSON. It makes no POST and
+starts no head. It also cannot be sent anywhere else: its one opener follows no redirect — a 3xx
+from any route ends the run instead — and reads no `http_proxy`/`https_proxy` variable, because
+either would time a different installation under this route's name and hand it this installation's
+PO cookie.
 
-Run it from a checkout, on the host the installation runs on. It reads only, and only from the
-installation named by `--base-url`: a `HEAD /` to check the installation answers, then the three
-dashboard pages. It makes no POST and starts no head. It also cannot be sent anywhere else: its
-one opener follows no redirect — a 3xx from any route ends the run instead — and reads no
-`http_proxy`/`https_proxy` variable, because either would time a different installation under this
-route's name.
+It prints, with the Definition of Done threshold beside each number and whether that number meets it:
 
-It prints, with the Definition of Done threshold beside each number and whether that number meets
-it, **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up
-request, then twenty timed ones per route. The judged number is the **p95 by nearest rank**, which
-over twenty samples is the second-slowest of the twenty: one request that actually happened, so two
-runs compare the same way every time. Min, median and max are printed beside it, and the warm-up is
-discarded because the first request after a deploy pays for import and cache warming that no later
-request pays again. Threshold: 1.0 s per route.
+- **warm sequential** `GET /`, `GET /sprints` and `GET /projects` — one discarded warm-up request,
+  then twenty timed ones per route. The judged number is the **p95 by nearest rank**, which over
+  twenty samples is the second-slowest of the twenty: one request that actually happened, so two
+  runs compare the same way every time. Min, median and max are printed beside it, and the warm-up
+  is discarded because the first request after a deploy pays for import and cache warming that no
+  later request pays again. Threshold: 1.0 s.
+- **four concurrent** `GET /`, all four released together, while a `/po/api/sessions/{session}`
+  poll runs on the three-second cadence the `/po` page itself uses. The scenario is repeated
+  **three rounds**; every round's four durations are printed, and the threshold is judged on the
+  **worst round** — the one holding the slowest single request. One round is not a measurement:
+  the same unchanged installation produced 17 s, 27 s and 38 s on three runs of the first version
+  of this script, and the DoD says *each* of the four answers within 2.0 s, so a scenario that
+  breaches that in one round of three has not met it. Threshold: 2.0 s for each request of the
+  worst round.
 
-Before any clock starts, the data directory is resolved the way the product resolves it:
+The session it polls is not just any open one. The `/po` session page installs its three-second
+poll only while a turn is running and clears it when the turn ends, so the command picks the first
+session the overview lists **whose own JSON reports `running: true`**, read at the route that would
+be polled. An installation where nothing is running is one where no page is polling, and the
+concurrent half cannot be reproduced on it at all — see the exit statuses below.
+
+### The cadence, and how a round is scheduled against it
+
+The concurrent number is only the DoD's number if the four requests ran *while* a session was being
+polled every three seconds. Two things in the output say whether that happened, and the command
+refuses to judge anything if either of them says no.
+
+- **The cadence is an independent schedule, and it is observed.** The page polls with
+  `setInterval(async () => { await fetch(...) }, 3000)`, which starts a read every three seconds
+  whether or not the previous one has answered. The command does the same: poll *k* starts at
+  `anchor + 3k` s on a thread of its own, so a slow session read neither delays the next start nor
+  stretches an interval, and slow reads overlap each other as they would under the page. Every
+  poll's actual start is compared with its scheduled one, both ways, and the run is refused if any
+  is more than 100 ms off. The output prints the spacing and the furthest offset
+  (`start against schedule: furthest +1.2 ms …`) and says `the poll started every 3 s` only where
+  those numbers show it.
+- **Every round is launched by a poll that fell due, while it is in flight.** The four requests
+  wait for the next poll on the cadence; when that poll's clock starts they are released, together
+  with the poll's own request, so all five go out at once. A round therefore costs up to three
+  seconds of waiting before its first clock starts — that wait is in no number — and the ordering
+  holds at any installation speed, because it is the order one thread does two things in. A round
+  that no poll was issued for is refused.
+- **Every request starts under a poll.** For each of the four requests the command records how many
+  polls were in flight when it started. A round counts only when every request had at least one; a
+  round that did not is printed as `not counted` and taken again, up to nine attempts for the three
+  rounds, and a run that cannot collect three is refused.
+
+Each round's line reports both facts:
+
+```
+round 2: 2102, 1976, 2034, 2004 ms [launched by a due poll; polls in flight at each start: 1, 1, 1, 1; 1 during the round]
+```
+
+`--no-poll` takes the same three rounds of four concurrent `GET /` with no poll beside them, and
+labels every number `no poll`: the baseline an under-the-poll run is compared against, so the
+difference the poll makes can be read off two runs of one command.
+
+### The load is never lighter than the page's
+
+The concurrent poll is held to a one-sided standard: **it is a load no lighter than an open `/po`
+page on a running turn, so a number that meets its threshold under it is sound, and one that
+exceeds it may be conservative.** The command prints that sentence with the poll it chose. It
+need not be an exact copy of the page — a heavier load can at worst turn a pass into a
+conservative fail, never a fail into a false pass.
+
+That standard is why a turn that **ends during the run** is reported and not refused. The page
+clears its timer when a poll answers `running: false`, which is zero load from then on; the command
+keeps polling on schedule, which is more. It reads `running` from every poll and prints one line
+naming where it happened — `the turn ended during round 2 (a poll answered running: false);
+polling continued on schedule, at least as heavy as the page, which stops polling there` — and the
+run stands. The session still has to be running when it is selected: that is what makes it a
+session a real page is polling at the start.
+
+### What it refuses to report
+
+The rule the whole script is built around: **no number is judged MEETS unless it came from exactly
+the scenario the DoD names.** So the exit statuses are
+
+- `0` — every request answered 2xx, the whole specified scenario ran, and every judged number is at
+  or under its threshold;
+- `1` — the same, except that a judged number is over its threshold. A red number is still a real
+  number, and the full table is printed;
+- `2` — everything else.
+
+Everything else includes: the installation is unreachable; any request on any route answers
+non-2xx, including a 3xx (a missing route, a refusal, a redirect, or the transport's contained 500
+under the load being measured); the data directory or the PO token cannot be resolved or read; a
+session's JSON cannot be read for whether it is running, at selection or in any later poll; a
+poll started more than 100 ms off its three-second schedule, either way; a round ran with no poll
+issued for it; the installation has **no open PO session**; and
+the installation has open sessions but **no turn running in any of them**.
+
+Those last two are not faults of the installation — `/po` answered, and simply lists nothing, or
+lists only sessions no page is polling. The concurrent half of the DoD cannot be reproduced without
+a running session, and polling an idle one instead would put a request no page makes beside the
+four and report it under the same heading. In every case the command prints the numbers it did
+take, marks every one of them `NOT JUDGED`, says in one line what could not be measured, and exits
+2. For the two PO cases, run it again while a PO turn is running.
+
+When no turn is running and a number is still wanted, `--poll-idle-session` measures beside a
+stand-in: of the open sessions, the one whose JSON is largest — the heaviest read the page's poll
+makes on this installation — polled on the same cadence. The output names it as a `SUBSTITUTE`
+and every concurrent label carries `substitute poll`, so such a run is never read as the DoD
+scenario itself. An installation with no open session at all still exits 2.
+
+The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
+command as the runtime user. The data directory is resolved the way the product resolves it:
 `--data-dir`, then `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the instance the CLI
 itself defaults to (`secretary.onboarding.DEFAULT_INSTANCE`, read through
 `secretary.config.instance_data_dir`). That last step is what makes the one command above work in
 an ordinary checkout shell, which does not inherit the service unit's environment. The output names
 the directory it resolved and which of those four rules chose it.
-
-### What it refuses to report
-
-**No number is judged MEETS unless it came from exactly the measurement the DoD names.** So the
-exit statuses are
-
-- `0` — every request answered 2xx and every judged number is at or under its threshold;
-- `1` — the same, except that a judged number is over its threshold. A red number is still a real
-  number, and the full table is printed;
-- `2` — everything else: the installation is unreachable, the data directory cannot be resolved, or
-  any request on any route answers non-2xx, including a 3xx (a missing route, a refusal, a
-  redirect, or the transport's contained 500).
-
-On exit 2 the command prints the numbers it did take, marks every one of them `NOT JUDGED`, and
-says in one line what could not be measured.
 
 ## Record reconciliation and controlled divergences
 

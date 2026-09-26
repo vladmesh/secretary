@@ -449,11 +449,7 @@ class DegradedSourceTests(ReadLayerFixture):
         self.assertEqual(before["source"]["state"], "available")
         terminate_session(self.board)
 
-        failed = layer.system_snapshot()["tasks"]
-        self.assertEqual(failed["source"]["state"], "unavailable")
-        self.assertIn("unreachable", failed["source"]["reason"])
-        self.assertNotIn(self.board.credentials.password, failed["source"]["reason"])
-
+        # The pool finds the terminated connection hung up and never hands it out (§5.6).
         recovered = layer.system_snapshot()["tasks"]
         self.assertEqual(recovered["source"]["state"], "available")
         self.assertEqual(recovered["items"], before["items"])
