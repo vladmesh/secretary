@@ -3265,8 +3265,12 @@ A column is not evidence that a head is behind it, so the board alone settles on
 Issues and Done. `checks` is `not_applicable` from the sprint row for an ended sprint or one with no
 current card, never under an unavailable production state.
 
-`current_task.live` qualifies a finished sprint's current card as the record of an ended sprint rather
-than work in progress. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
+A closed sprint has no current card: `current_task.ref` (and `sprint.value.current_task`) is null
+whatever its row stores, and the reason names no card (`secretary.sprints.public_current_task`, the
+same rule `secretary sprint show` prints through). A stopped sprint may be resumed, so it keeps its
+card, and `current_task.live` qualifies it as the record of an ended sprint rather than work in
+progress. The watched sprint document carries the sprint's `status` as its first key, so
+`secretary sprint status` names it first. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
 source is unreadable.
 
 **`current_card_state`** is where the current card stands and since when, and it is a section of its own

@@ -29,7 +29,12 @@ from secretary.board.roles import Role
 from secretary.config import ConfigError, load_config
 from secretary.po import PO_SESSION_ENV
 from secretary.sprint_observer import observer_choice
-from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
+from secretary.sprints import (
+    BUDGET_RECORDED_EVENT_TYPES,
+    SprintReader,
+    SprintWriter,
+    public_current_task,
+)
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import TaskError
 from secretary.webproto.commands import (
@@ -330,8 +335,34 @@ def _answer(
     except ReadError as exc:
         print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
         return statuses.get(exc.code, EXIT_BACKEND)
-    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    print(json.dumps(_status_first(document), separators=(",", ":")))
     return 0
+
+
+def _status_first(document: object) -> object:
+    """The document with its keys sorted at every level, except a top-level `status` goes first.
+
+    `sprint status` names the sprint's status before anything else on its one line of output, and the
+    document stays one JSON object the observer parses. Nothing is added or dropped here.
+    """
+
+    def ordered(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: ordered(value[key]) for key in sorted(value)}
+        if isinstance(value, list):
+            return [ordered(item) for item in value]
+        return value
+
+    result = ordered(document)
+    if isinstance(result, dict) and "status" in result:
+        result = {"status": result["status"], **{k: v for k, v in result.items() if k != "status"}}
+    return result
+
+
+def _public_show(sprint: dict) -> dict:
+    """The sprint row as `sprint show` prints it: a closed sprint names no current card."""
+    current = public_current_task(str(sprint.get("status") or ""), sprint.get("current_task"))
+    return {**sprint, "current_task": current}
 
 
 def run_list(args: argparse.Namespace) -> int:
@@ -341,7 +372,7 @@ def run_list(args: argparse.Namespace) -> int:
 def run_show(args: argparse.Namespace) -> int:
     return _read(
         args,
-        lambda reader: reader.show(args.ref),
+        lambda reader: _public_show(reader.show(args.ref)),
         data_dir=resolve_data_dir(args),
         thresholds=_thresholds(args),
     )
