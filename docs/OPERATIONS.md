@@ -307,7 +307,7 @@ Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_s
 
 | Table | Holds |
 | --- | --- |
-| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (`default` unless chosen) |
+| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (always an explicit offered one for a new session; `default` only on sessions opened before that rule, which resume with no effort flag and read `not set`) |
 | `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, reason (why it failed or was interrupted; on a re-run turn, why it was re-run), `resolved_model` |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
 | `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`, or `po_sprint_session` for a resolver's session, since 0016), fingerprint of its inputs, the session and, for a send, the turn it made |
