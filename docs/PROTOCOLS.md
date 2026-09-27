@@ -1321,14 +1321,31 @@ workflow does not declare, HTTP 422).
 
 **Placement.** For a `code` card of a declaring project, the stage runs in `park_green_verdict`: after a
 green review verdict, or right after green CI when the card's review is `skipped`, and before the park in
-Assessment or the no-observer release. The merge gate is read first, and the run is dispatched on
-the exact SHA that passed it. While that run is underway the gate is not read again; the gate is
-accepted, and its receipt attested on the card, once, after the stage is green. So a review-required
-card parks in Assessment with the e2e result on it, and a red e2e never parks. A red review never
-reaches the stage, so rework rounds spend no runs. The release audit (`release_parked`) runs the
-stage before its own gate read: a SHA that already has a green run is not dispatched again, and a
-card parked without one (a red review released by the observer) dispatches it there, waits, and
-merges only after it is green.
+Assessment or the no-observer release. A red review never reaches the stage, so rework rounds spend
+no runs. The release audit (`release_parked`) runs the same stage: a card parked without a green run
+(a red review released by the observer) dispatches it there, waits, and merges only after it is green.
+
+**One SHA, from the gate.** The stage never reads HEAD itself. Each tick it first deals with a run
+still underway or a result not yet acted on, without reading the gate. Then it reads the merge gate,
+without accepting it (`read_merge_gate`, `read_release_gate`); that read may refresh-merge a newer base
+(`_recover_base`). The SHA the green receipt validated (`validated_sha`) is the one the stage
+dispatches on, records, identifies against and judges. The caller accepts that same gate result once,
+after the stage is green, and attests it on the card. So a review-required card parks in Assessment
+with the e2e result on it, and a red e2e never parks.
+
+The stage proceeds only on a SHA with a green run of its own, or one reconciled to a green run:
+- the validated SHA has a green run: proceed;
+- otherwise, the newest green run's SHA reconciles to it through `reconcile_reviewed_base_move`: proceed.
+  This is the rule that carries a review across a base-only move. Nothing between the two SHAs but base
+  history, and the card's own changed paths byte-identical. The reconciliation is recorded on the green
+  entry (`reconciled`, shown in `task show` as `reconciled_to`) and in the attestation of the park or the
+  release audit (`E2E/base reconciliation: ...`);
+- otherwise, the green run does not authorize this SHA: the stage runs again for it, which counts
+  against the run cap.
+
+A base-only move does not invalidate an e2e result for the card's own change, as it does not invalidate
+a review; CI still gates the new SHA. This avoids re-paying a long run for every base move on an active
+main (the observer's decision, secretary-1795).
 
 **Dispatch identity.** The card's `e2e` field (`extensions.extra.e2e`, JSON, written only by the
 dispatcher through `TaskWriter.record_e2e_state`; no column, no migration) is the stage's record: one
@@ -1341,18 +1358,38 @@ through `gh api`, so it does not depend on the host's `gh` version. The run id i
 the call, and the run's `head_sha` (`GET repos/<repo>/actions/runs/<id>`) is checked against the
 candidate.
 
-An entry that exists for the SHA is continued and never dispatched again. When no answer named the run
-(the dispatcher died after the POST and before recording it, the POST got no answer or was rate
-limited, or the answer carried no details), the run is looked up among the workflow's runs by all of:
-`event == workflow_dispatch`, branch `pipeline/<card>`, `head_sha ==` the candidate, and `created_at`
-no earlier than the intent less a 120-second clock margin (GitHub's clock against the dispatcher's).
-One dispatch per SHA makes one match the run. Several matches are ambiguous and are never guessed: the
-card is Blocked with every candidate listed. With `dispatch_id_input` declared, the dispatch id is sent
-in that input and, among several matches, the ones whose title carries it are kept, which breaks a tie
-for a workflow that puts the input in its `run-name`. A run not identified (or whose SHA could not be
-read) within 15 minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`), a run on another SHA, and a
-dispatch GitHub refused (no workflow, no `workflow_dispatch` trigger, an input the workflow does not
-take, no access) Block the card with the reason, not rework.
+An entry is continued and never dispatched again.
+
+**Recovery.** Recovery runs only when GitHub's answer naming the run was lost: the dispatcher died after
+the POST and before recording it, the POST got no answer or was rate limited, or the answer carried no
+details. The run is looked up among the workflow's runs by all of:
+- `event == workflow_dispatch`;
+- branch `pipeline/<card>`;
+- `head_sha ==` the candidate;
+- `created_at` no earlier than the intent less a 120-second clock margin (GitHub's clock against the
+  dispatcher's).
+
+The lookup waits until that window has settled: until the intent + the margin + a settle period of 3
+minutes (`SECRETARY_E2E_RECOVERY_SETTLE_SECONDS`). Before then even a single visible match is not
+attached. After it:
+- exactly one match is attached as `recovered`: the entry records `identified_by: recovery` and the
+  rule it matched, and a dispatcher comment says the run was identified by recovery, not by GitHub's
+  answer (so does the green comment);
+- two or more matches are ambiguous and never guessed: the card is Blocked with every candidate listed;
+- no match within 15 minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`) Blocks the card.
+
+With `dispatch_id_input` declared, the dispatch id is sent in that input, and recovery requires it in
+the run's title as well. That is exact for a workflow that puts the input in its `run-name`, and a run
+without it is never attached.
+
+The residual case is a POST that GitHub never executed, together with a foreign dispatch of the same
+workflow on `pipeline/<card>` at the same SHA inside the window. Recovery would then attach the foreign
+run. The branch is the dispatcher's own and a foreign dispatch on it is unsupported; an adapter that
+needs exactness declares `dispatch_id_input`.
+
+A run whose SHA could not be read within the same 15 minutes, a run on another SHA, and a dispatch
+GitHub refused (no workflow, no `workflow_dispatch` trigger, an input the workflow does not take, no
+access) Block the card with the reason, not rework.
 
 **Wait.** Once the run is identified, the dispatcher creates a `wait` card for it: target the run,
 the adapter's deadline, the code card's sprint (none if it has none), return address
@@ -1375,10 +1412,11 @@ copying it into the entry.
   the wait card, `blocked_reason: infrastructure`. No worker round is opened or charged.
 
 Every Blocked the stage causes records its request id (`dispatcher-e2e-blocked-<dispatch id>`) and
-reason on the entry before the move, so a repeat moves once. Once that move is committed, the run's
-pass is over: a card brought back on the same SHA (unblocked, re-claimed and reported again) may
-dispatch a new run. A `success` stands for its SHA, and so does a `failure` that sent the card to
-rework.
+reason on the entry before the move, so a repeat moves once. Every result is marked `acted` on the
+entry when the stage acts on it, so a later round never acts on it again. Once a Blocked move is
+committed, the run's pass is over: a card brought back on the same SHA (unblocked, re-claimed and
+reported again) may dispatch a new run. A `success` stands for its SHA (and for a SHA reconciled to it),
+and so does a `failure` that sent the card to rework.
 
 **Interim cap.** Until the sprint e2e budget exists, a card dispatches at most 3 runs across all its
 SHAs: every entry whose dispatch GitHub did not refuse counts. At the cap the stage dispatches nothing,
@@ -1387,7 +1425,8 @@ e2e infrastructure failing). A declaration the stage cannot read Blocks the card
 
 **`task show`.** A card with entries carries `e2e`: `runs_dispatched`, `run_cap`, and per run `sha`,
 `dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wait_card_pending`, `waiting`, the
-conclusion, the wait outcome, or `dispatch_refused`), `run`, `wait_card`, `dispatched_at`, `result`.
+conclusion, the wait outcome, or `dispatch_refused`), `run`, `identified_by` (`answer` or `recovery`,
+with `recovery_rule`), `reconciled_to`, `wait_card`, `dispatched_at`, `result`.
 
 ## Products and issues
 

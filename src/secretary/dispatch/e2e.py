@@ -21,14 +21,15 @@ The run is identified by **GitHub's own answer**: the dispatch is sent with `ret
 (REST, explicitly, so it does not depend on the host's `gh` version), and the 200 answer names the
 run (`workflow_run_id`, `html_url`). The workflow needs no contract for that.
 
-A dispatcher that died after the POST and before it recorded the answer finds the run again among the
-workflow's runs by all of: `event == workflow_dispatch`, branch `pipeline/<ref>`, `head_sha ==` the
-candidate, and `created_at` at or after the intent less :data:`E2E_CLOCK_MARGIN_SECONDS` (GitHub's clock
-against the dispatcher's). One dispatch per SHA is already guaranteed, so one match is the run; more
-than one is ambiguous and is never guessed (:func:`matching_runs` returns them all). When the adapter
-declares `dispatch_id_input`, that input carries the dispatch id and a match whose title carries it
-breaks such a tie; that asks the workflow to put the input in its `run-name`. Without it no extra input
-is sent.
+A dispatcher that lost that answer (it died after the POST, or the POST got no answer) finds the run
+again among the workflow's runs by all of: `event == workflow_dispatch`, branch `pipeline/<ref>`,
+`head_sha ==` the candidate, and `created_at` at or after the intent less
+:data:`E2E_CLOCK_MARGIN_SECONDS` (GitHub's clock against the dispatcher's). The stage looks only once
+the window has settled (:data:`E2E_RECOVERY_SETTLE_SECONDS` after that), and takes a match only when it
+is the only one; more than one is ambiguous and is never guessed (:func:`matching_runs` returns them
+all). When the adapter declares `dispatch_id_input`, that input carries the dispatch id and recovery
+takes only a run whose title carries it, which is exact for a workflow that puts the input in its
+`run-name`. Without it no extra input is sent.
 
 Everything here is host I/O through the gate's `_backend_call`/`_gh_api`, so a question that got no
 answer is a `GateTransportError`, never a verdict. The stage (`dispatch/e2e_stage.py`) decides what
@@ -53,6 +54,11 @@ from secretary.dispatch.types import GateTransportError, HostError
 DEFAULT_DEADLINE = "6h"
 #: How far before the intent a recovered run's `created_at` may lie: GitHub's clock against ours.
 E2E_CLOCK_MARGIN_SECONDS = 120
+#: How long after the margin recovery waits before it takes a match, so a second run in the window
+#: has appeared in the listing by then.
+E2E_RECOVERY_SETTLE_SECONDS = max(
+    0, int(os.environ.get("SECRETARY_E2E_RECOVERY_SETTLE_SECONDS", str(3 * 60)))
+)
 #: How long after its intent a dispatched run may stay unidentified before the card is Blocked.
 E2E_IDENTIFY_SECONDS = max(60, int(os.environ.get("SECRETARY_E2E_IDENTIFY_SECONDS", str(15 * 60))))
 
@@ -250,7 +256,7 @@ def matching_runs(
 
     A match is a `workflow_dispatch` run on `branch` at `head_sha == sha`, created at or after `since`
     less :data:`E2E_CLOCK_MARGIN_SECONDS`. `dispatch_id` (only when the adapter declares a
-    `dispatch_id_input`) narrows several matches to the ones whose title carries it, when any does.
+    `dispatch_id_input`) is required in the run's title too: a run without it is never a match.
     `GateTransportError` when GitHub did not answer; `HostError` when it answered with an error.
     """
     path = (
@@ -278,12 +284,10 @@ def matching_runs(
             continue
         if created >= earliest:
             found.append(run)
-    if dispatch_id and len(found) > 1:
-        titled = [
+    if dispatch_id:
+        found = [
             run for run in found if dispatch_id in f"{run.get('display_title') or ''} {run.get('name') or ''}"
         ]
-        if titled:
-            found = titled
     return found
 
 
@@ -329,6 +333,7 @@ __all__ = [
     "DEFAULT_DEADLINE",
     "E2E_CLOCK_MARGIN_SECONDS",
     "E2E_IDENTIFY_SECONDS",
+    "E2E_RECOVERY_SETTLE_SECONDS",
     "AdapterE2eDeclarationError",
     "DispatchRefused",
     "DispatchedRun",

@@ -1,7 +1,8 @@
 """The e2e stage: an adapter-declared GitHub workflow run on a code card's candidate (secretary-1795).
 
 Placement. For a `code` card of a project whose adapter declares `validation.e2e` (`dispatch/e2e.py`),
-the stage runs on the exact SHA that just passed the merge gate, and before the card becomes
+the stage runs on the exact SHA that the merge gate's green receipt validated (`validated_sha`; the
+stage never reads HEAD itself, and the gate read may refresh the base), and before the card becomes
 releasable: in `review_verdict.park_green_verdict`, after the green review verdict (or right after
 green CI when the card's review is `skipped`) and before the park in Assessment or the release; and
 again in the release audit (`release_lifecycle.release_parked`), where a SHA that already has a green
@@ -12,9 +13,14 @@ stage's record. A run record is written as an intent (card, SHA, dispatch id) be
 `workflow_dispatch` call, which asks GitHub for the run it starts (`return_run_details`); the run id in
 the answer is recorded right after it, and the run's `head_sha` is checked against the candidate. A
 record that exists for the SHA is continued, never dispatched again: after a crash between the call and
-that record the run is looked up by event, branch, SHA and creation time (`e2e.matching_runs`); several
-matches Block the card with the candidates listed, and none within the identification window Blocks
-it too. A dispatch GitHub refuses Blocks the card with GitHub's answer.
+that record the run is looked up by event, branch, SHA and creation time (`e2e.matching_runs`), once
+the window has settled: exactly one match is attached as `recovered`, several Block the card with the
+candidates listed, and none within the identification window Blocks it too. A dispatch GitHub refuses
+Blocks the card with GitHub's answer.
+
+Carrying a green run. A green run authorizes its own SHA, and a SHA that `reconcile_reviewed_base_move`
+(the rule that carries a review) reconciles it to: base history only, the card's own paths unchanged.
+The reconciliation is recorded on the run and in the attestation. Any other SHA runs the stage again.
 
 Wait. Once the run is identified the dispatcher creates a `wait` card for it (`dispatch/wait_cards.py`),
 in the code card's sprint, with the adapter's deadline and the return address `card:<ref>`, under a
@@ -42,6 +48,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,7 +57,9 @@ from secretary.board.completion_evidence import has_candidate
 from secretary.board.e2e_record import E2E_RUN_CAP, FAILURE, REFUSED, SENT, SUCCESS, E2eRun, E2eState
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.e2e import (
+    E2E_CLOCK_MARGIN_SECONDS,
     E2E_IDENTIFY_SECONDS,
+    E2E_RECOVERY_SETTLE_SECONDS,
     DispatchRefused,
     E2eDeclaration,
     declared_e2e,
@@ -61,6 +70,7 @@ from secretary.dispatch.e2e import (
 )
 from secretary.dispatch.gate import GateResult, _name_with_owner
 from secretary.dispatch.gate import _fingerprint as _gate_fingerprint
+from secretary.dispatch.gate_receipt import is_exact_sha
 from secretary.dispatch.helpers import _legacy_worker_branch, safe_one_line, scrub_host_output
 from secretary.dispatch.state import DispatcherRecord, request_token
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
@@ -71,6 +81,9 @@ from secretary.tasks import TaskError
 #: charges it as the red CI it is.
 E2E_PHASE = "e2e-gate"
 E2E_FAILURE_REASON = "e2e-failure"
+#: How a run was named: GitHub's dispatch answer, or the lookup after that answer was lost.
+IDENTIFIED_BY_ANSWER = "answer"
+IDENTIFIED_BY_RECOVERY = "recovery"
 
 
 def utcnow() -> datetime:
@@ -89,6 +102,18 @@ def stage_request_id(action: str, dispatch_id: str) -> str:
     return "-".join(request_token(part) for part in ("dispatcher", action, dispatch_id))
 
 
+@dataclass(frozen=True)
+class E2eProceed:
+    """The stage is green for the SHA the gate validated: accept `result` once, and proceed.
+
+    `reconciliation` is the base-only move that carried a green run from the SHA it ran on to this one,
+    for the attestation; None when the run ran on this very SHA.
+    """
+
+    result: GateResult
+    reconciliation: dict[str, Any] | None = None
+
+
 def run_stage(
     runtime: Any,
     task: dict[str, Any],
@@ -98,15 +123,15 @@ def run_stage(
     attempt_id: str,
     *,
     step: str,
-    gate: Callable[[], dict[str, Any] | None] | None = None,
-) -> dict[str, Any] | None:
-    """None when this card may proceed (no e2e declared, or a green run on this SHA), else the outcome.
+    gate: Callable[[], tuple[dict[str, Any] | None, GateResult | None]],
+) -> dict[str, Any] | E2eProceed | None:
+    """The e2e stage for one tick: None when the card has no e2e (the caller reads and accepts the gate
+    as before), the tick's outcome, or :class:`E2eProceed` with the green gate result to accept.
 
-    `gate` reads the merge gate without accepting it (None when it is green); it is asked once, before
-    a new run is dispatched, so the run is dispatched on a SHA that passed it. A run already underway
-    for this SHA is advanced without asking it: the SHA passed it at the dispatch, and the caller
-    accepts the gate once, after the stage is green. The release audit passes none: the parked SHA
-    passed it before the park, and the release reads it after the stage.
+    The stage never reads HEAD itself. `gate` is the merge gate read (the path that may refresh the
+    base), without accepting it: `(outcome, None)` unless green, `(None, result)` on green. The SHA its
+    receipt validated is the one the stage dispatches on, records, identifies and judges. A run still
+    underway (or a result not yet acted on) is dealt with first, without reading the gate.
     """
     if not applies(task):
         return None
@@ -129,45 +154,76 @@ def run_stage(
         )
     if declaration is None:
         return None
-    sha = runtime.host.head_commit(record)
     state = e2e_record.e2e_state(task)
-    green = state.green(sha)
-    if green is not None:
-        _comment_green(runtime, task, state, green)
-        return None
-    run = state.latest(sha)
-    if run is not None and run.closing and runtime.audit.committed_event(run.closing) is not None:
-        # That run's pass ended Blocked, and the card is back on the same SHA: a new run may be spent.
-        run = None
-    if run is None:
-        if gate is not None:
-            gated = gate()
-            if gated is not None:
-                return gated
-        if state.dispatched >= E2E_RUN_CAP:
-            return _block(
-                runtime,
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-cap-blocked", ref, sha),
-                reason=(
-                    f"e2e run cap reached ({E2E_RUN_CAP}): this card has dispatched {state.dispatched} e2e "
-                    f"runs across its candidates, so none is dispatched for `{sha[:12]}`. Until the sprint "
-                    "e2e budget exists, a card spends at most "
-                    f"{E2E_RUN_CAP}; `task show` lists the runs."
-                ),
-                step=step,
-                outcome=f"e2e run cap reached ({E2E_RUN_CAP})",
-                blocked_reason="other",
+    last = state.runs[-1] if state.runs else None
+    if last is not None:
+        if last.closing and runtime.audit.committed_event(last.closing) is None:
+            # Its Blocked move did not commit: repeat it, with the same id and words.
+            return _block_run(runtime, task, record, records, payload, attempt_id, last, step=step)
+        if not last.closing and not last.acted:
+            settled = _settle_run(
+                runtime, task, record, records, payload, attempt_id, state, last, declaration, step=step
             )
-        started = _dispatch(runtime, task, record, attempt_id, state, declaration, sha, step=step)
-        if isinstance(started, dict):
-            return started
-        run = started
-    return _advance(runtime, task, record, records, payload, attempt_id, state, run, declaration, step=step)
+            if settled is not None:
+                return settled
+    outcome, result = gate()
+    if outcome is not None:
+        return outcome
+    assert result is not None
+    sha = _validated_sha(result)
+    if not sha:
+        # No exact-SHA receipt to bind to: the caller's acceptance refuses the result, so this never
+        # proceeds on the stage's account.
+        return E2eProceed(result)
+    if state.green(sha) is not None:
+        return E2eProceed(result)
+    latest = state.latest(sha)
+    if latest is not None and latest.conclusion == FAILURE and not latest.closing:
+        # A red run stands for its SHA: the card goes back to rework again, no run is spent.
+        return _act(runtime, task, record, records, payload, attempt_id, state, latest, step=step)
+    carried = state.last_green()
+    if carried is not None:
+        # The rule that carries a review across a base-only move carries the e2e result too.
+        reconciliation = runtime.host.reconcile_reviewed_base_move(task, record, carried.sha, sha)
+        if reconciliation is not None:
+            entry = dict(reconciliation)
+            if entry not in carried.reconciled:
+                carried.reconciled.append(entry)
+                _persist(runtime, ref, state)
+            return E2eProceed(result, entry)
+    if state.dispatched >= E2E_RUN_CAP:
+        return _block(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-cap-blocked", ref, sha),
+            reason=(
+                f"e2e run cap reached ({E2E_RUN_CAP}): this card has dispatched {state.dispatched} e2e "
+                f"runs across its candidates, so none is dispatched for `{sha[:12]}`. Until the sprint "
+                "e2e budget exists, a card spends at most "
+                f"{E2E_RUN_CAP}; `task show` lists the runs."
+            ),
+            step=step,
+            outcome=f"e2e run cap reached ({E2E_RUN_CAP})",
+            blocked_reason="other",
+        )
+    started = _dispatch(runtime, task, record, attempt_id, state, declaration, sha, step=step)
+    if isinstance(started, dict):
+        return started
+    settled = _settle_run(
+        runtime, task, record, records, payload, attempt_id, state, started, declaration, step=step
+    )
+    return settled or _outcome(ref, attempt_id, "e2e-dispatching", step=step, sha=sha)
+
+
+def _validated_sha(result: GateResult) -> str:
+    """The SHA the green gate's receipt validated, or `""` when it carries no exact one."""
+    attestation = result.attestation if isinstance(result.attestation, dict) else {}
+    sha = str(attestation.get("validated_sha") or "")
+    return sha if is_exact_sha(sha) else ""
 
 
 # --- dispatch and identification -----------------------------------------------------------------
@@ -234,6 +290,7 @@ def _dispatch(
         if dispatched.run_id:
             run.run_id = dispatched.run_id
             run.run_url = f"https://github.com/{repo}/actions/runs/{dispatched.run_id}"
+            run.identified_by = IDENTIFIED_BY_ANSWER
     _persist(runtime, ref, state)
     return run
 
@@ -250,24 +307,36 @@ def _identify(
 ) -> dict[str, Any] | None:
     """Name the run and check its SHA; None once both are on the record, else the tick's outcome.
 
-    A run GitHub's dispatch answer named is only checked (`head_sha`). One that no answer named (a crash
-    after the POST, no answer, an answer without details) is looked up by event, branch, SHA and
-    creation time. More than one match is never guessed: the card is Blocked with every candidate.
+    A run GitHub's dispatch answer named is only checked (`head_sha`). One whose answer was lost is
+    recovered by event, branch, SHA and creation time (plus the dispatch id in its title when the
+    adapter declares `dispatch_id_input`), and only once the window has settled: then exactly one match
+    is attached as `recovered`, several Block the card with every candidate listed, and none keeps the
+    lookup going until the identification window Blocks it.
     """
     ref = task["ref"]
+    intent = wait_card.parse_utc(run.intent_at, "intent_at")
     error = ""
+    head_sha = ""
     try:
         if run.run_id:
             head_sha = run_head_sha(runtime.host, run.repo, run.run_id)
         else:
+            settle_at = intent + timedelta(seconds=E2E_CLOCK_MARGIN_SECONDS + E2E_RECOVERY_SETTLE_SECONDS)
+            if utcnow() < settle_at:
+                return {
+                    **_outcome(ref, attempt_id, "e2e-identifying", step=step, sha=run.sha),
+                    "dispatch_id": run.dispatch_id,
+                    "recovery_settles_at": wait_card.utc_text(settle_at),
+                }
+            titled = bool(declaration.dispatch_id_input)
             found = matching_runs(
                 runtime.host,
                 run.repo,
                 run.workflow,
                 branch=run.branch,
                 sha=run.sha,
-                since=wait_card.parse_utc(run.intent_at, "intent_at"),
-                dispatch_id=run.dispatch_id if declaration.dispatch_id_input else "",
+                since=intent,
+                dispatch_id=run.dispatch_id if titled else "",
             )
             if len(found) > 1:
                 listed = ", ".join(
@@ -278,19 +347,37 @@ def _identify(
                     run,
                     f"The e2e run dispatched at {run.intent_at} for `{run.sha[:12]}` cannot be told apart: "
                     f"{len(found)} `{run.workflow}` workflow_dispatch runs on `{run.branch}` at that SHA "
-                    f"were created since: {listed}. None is taken as this candidate's e2e result, and "
-                    "nothing is dispatched again.",
+                    f"were created since: {listed}. GitHub's answer naming the run was lost, so none is "
+                    "taken as this candidate's e2e result, and nothing is dispatched again.",
                 )
                 _persist(runtime, ref, state)
                 return None
             if found:
                 run.run_id = int(found[0]["id"])
                 run.run_url = f"https://github.com/{run.repo}/actions/runs/{run.run_id}"
-            head_sha = str(found[0].get("head_sha") or "") if found else ""
+                run.identified_by = IDENTIFIED_BY_RECOVERY
+                run.recovery_rule = (
+                    f"the only workflow_dispatch run of {run.workflow} on {run.branch} at {run.sha} created "
+                    f"at or after {wait_card.utc_text(intent - timedelta(seconds=E2E_CLOCK_MARGIN_SECONDS))}"
+                    + (f", its title carrying {run.dispatch_id}" if titled else "")
+                    + f", looked up at {wait_card.utc_text(utcnow())}"
+                )
+                head_sha = str(found[0].get("head_sha") or "")
+                _persist(runtime, ref, state)
+                runtime.writer.comment(
+                    role="dispatcher",
+                    actor=runtime.owner,
+                    reference=ref,
+                    body=(
+                        f"E2E run {run.run_url} was identified by recovery, not by GitHub's dispatch answer "
+                        f"(that answer was lost): {run.recovery_rule}."
+                    ),
+                    request_id=stage_request_id("e2e-recovered", run.dispatch_id),
+                )
     except HostError as exc:
         head_sha, error = "", safe_one_line(scrub_host_output(str(exc)), limit=500)
     if not head_sha:
-        window_end = wait_card.parse_utc(run.intent_at, "intent_at") + timedelta(seconds=E2E_IDENTIFY_SECONDS)
+        window_end = intent + timedelta(seconds=E2E_IDENTIFY_SECONDS)
         if utcnow() < window_end:
             return {
                 **_outcome(ref, attempt_id, "e2e-identifying", step=step, sha=run.sha),
@@ -352,7 +439,7 @@ def _create_wait(runtime: Any, task: dict[str, Any], state: E2eState, run: E2eRu
     _persist(runtime, ref, state)
 
 
-def _advance(
+def _settle_run(
     runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
@@ -365,6 +452,8 @@ def _advance(
     *,
     step: str,
 ) -> dict[str, Any] | None:
+    """Take a run no result was acted on as far as it goes this tick: identify it, wait for it, act on
+    its result. None once it is green (the stage goes on to the gate), else the tick's outcome."""
     ref = task["ref"]
     if not run.closing and run.result is None:
         if not run.run_id or not run.head_sha:
@@ -422,13 +511,16 @@ def _act(
     *,
     step: str,
 ) -> dict[str, Any] | None:
-    """What the wait's frozen result does to the card."""
+    """What the wait's frozen result does to the card; the result is marked acted on first."""
     ref = task["ref"]
     result = run.result or {}
     outcome = result.get("outcome") or ""
     conclusion = run.conclusion
     if outcome == wait_card.TARGET_REACHED and conclusion == SUCCESS:
         _comment_green(runtime, task, state, run)
+        if not run.acted:
+            run.acted = True
+            _persist(runtime, ref, state)
         return None
     if outcome == wait_card.TARGET_REACHED and conclusion == FAILURE:
         summary, log, fingerprint = _red_evidence(runtime, run)
@@ -441,6 +533,9 @@ def _act(
             )
             _persist(runtime, ref, state)
             return _block_run(runtime, task, record, records, payload, attempt_id, run, step=step)
+        if not run.acted:
+            run.acted = True
+            _persist(runtime, ref, state)
         from secretary.dispatch.gate_lifecycle import gate_red_to_worker
 
         return gate_red_to_worker(
@@ -512,7 +607,12 @@ def _comment_green(runtime: Any, task: dict[str, Any], state: E2eState, run: E2e
             "## E2E — green\n\n"
             f"The e2e workflow `{run.workflow}` run {run.run_url} concluded success on the candidate "
             f"`{run.sha}` (`{run.branch}`, dispatch id `{run.dispatch_id}`, wait card {run.wait_ref}). "
-            f"Runs dispatched for this card: {state.dispatched} of {E2E_RUN_CAP}."
+            f"Runs dispatched for this card: {state.dispatched} of {E2E_RUN_CAP}. The run was identified "
+            + (
+                "by recovery, not by GitHub's dispatch answer: " + run.recovery_rule + "."
+                if run.identified_by == IDENTIFIED_BY_RECOVERY
+                else "by GitHub's dispatch answer."
+            )
         ),
         request_id=stage_request_id("e2e-green", run.dispatch_id),
     )
@@ -521,6 +621,7 @@ def _comment_green(runtime: Any, task: dict[str, Any], state: E2eState, run: E2e
 def _close(run: E2eRun, reason: str) -> None:
     run.closing = stage_request_id("e2e-blocked", run.dispatch_id)
     run.closing_reason = reason
+    run.acted = True
 
 
 def _block_run(
@@ -626,6 +727,7 @@ def _outcome(ref: str, attempt_id: str, action: str, *, step: str, sha: str) -> 
 __all__ = [
     "E2E_FAILURE_REASON",
     "E2E_PHASE",
+    "E2eProceed",
     "applies",
     "run_stage",
     "stage_request_id",

@@ -226,7 +226,6 @@ def release_parked(
     """Perform a release decision: re-check the mechanical state, then merge."""
     from secretary.dispatch import gate_lifecycle
 
-    ref = task["ref"]
     if not has_candidate(task):
         # Nothing to re-check or merge: the release goes to the completion evidence check. A
         # research card parked by a red verdict reaches here without a transfer, and one parked
@@ -247,12 +246,70 @@ def release_parked(
             decision="release",
             verdict=released_verdict(record),
         )
-    # The release audit's e2e stage, before the gate is read: a SHA with a green run is not dispatched
-    # again, and one without (a card parked by a red review never ran one) waits for its run first. The
-    # parked SHA passed the merge gate before the park, and the gate is read and accepted after this.
-    e2e = e2e_stage.run_stage(runtime, task, record, records, payload, attempt_id, step="assessment")
-    if e2e is not None:
+    # The release audit's e2e stage reads the gate itself and binds to the SHA it validated: a SHA with
+    # a green run (or one reconciled to it by a base-only move) is not dispatched again, and one without
+    # waits for its own run first. The gate result it read is accepted below, once.
+    e2e = e2e_stage.run_stage(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        step="assessment",
+        gate=lambda: read_release_gate(runtime, task, record, records, payload, attempt_id),
+    )
+    if isinstance(e2e, dict):
         return e2e
+    if e2e is None:
+        outcome, result = read_release_gate(runtime, task, record, records, payload, attempt_id)
+        if outcome is not None:
+            return outcome
+        reconciliation = None
+    else:
+        result, reconciliation = e2e.result, e2e.reconciliation
+    assert result is not None
+    blocked = gate_lifecycle.accept_green_gate(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        result,
+        stage="release",
+        e2e_reconciliation=reconciliation,
+    )
+    if blocked is not None:
+        return blocked
+    return release_effect(runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        step="assessment",
+        move_reason=f"Observer decision: release. {reason}".strip(),
+        decision="release",
+        verdict=released_verdict(record),
+    )
+
+
+def read_release_gate(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> tuple[dict[str, Any] | None, GateResult | None]:
+    """The release's merge gate read: `(outcome, None)` for anything but green, `(None, result)` on green.
+
+    Nothing is accepted or attested here; the release accepts the green result once.
+    """
+    from secretary.dispatch import gate_lifecycle
+
+    ref = task["ref"]
     kind, result, detail = merge_readiness(runtime, task, record)
     if kind == "transport":
         # A release that could not ask the gate is not a release that was refused.
@@ -266,7 +323,7 @@ def release_parked(
             step="assessment",
         )
         if retry is not None:
-            return retry
+            return retry, None
         return gate_lifecycle.block_gate_transport(runtime, 
             task,
             record,
@@ -276,7 +333,7 @@ def release_parked(
             step="assessment",
             action="release-gate-transport-blocked",
             prefix="Observer decision: release. ",
-        )
+        ), None
     if kind != "drift":
         # Only a result handed back to this path clears the transport retry budget.
         gate_lifecycle.gate_answered(runtime, ref, record, records, payload)
@@ -292,7 +349,7 @@ def release_parked(
                 reason="merge gate returned pending without a result payload",
                 step="assessment",
                 outcome="merge gate result unavailable",
-            )
+            ), None
         return gate_lifecycle.gate_pending(runtime, 
             task,
             record,
@@ -302,7 +359,7 @@ def release_parked(
             result,
             step="assessment",
             action="merge-gate-pending",
-        )
+        ), None
     if kind != "green":
         summary = {
             "drift": f"the release cannot land: {detail}",
@@ -318,7 +375,7 @@ def release_parked(
             reason=f"Observer decision: release. {summary}",
             step="assessment",
             outcome=f"release {kind}",
-        )
+        ), None
     if result is None:
         return block_merge_path(runtime,
             task,
@@ -330,21 +387,8 @@ def release_parked(
             reason="merge gate returned green without a result payload",
             step="assessment",
             outcome="merge gate result unavailable",
-        )
-    blocked = gate_lifecycle.accept_green_gate(runtime, task, record, records, payload, attempt_id, result, stage="release")
-    if blocked is not None:
-        return blocked
-    return release_effect(runtime,
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        step="assessment",
-        move_reason=f"Observer decision: release. {reason}".strip(),
-        decision="release",
-        verdict=released_verdict(record),
-    )
+        ), None
+    return None, result
 
 
 def release_effect(

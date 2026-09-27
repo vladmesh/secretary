@@ -92,7 +92,7 @@
             "dispatch_id_input": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
-              "description": "Optional: the workflow_dispatch input that receives the dispatcher's dispatch id. When declared, a run whose run-name carries it breaks a tie in crash recovery. No static input and not candidate_input may share its name."
+              "description": "Optional: the workflow_dispatch input that receives the dispatcher's dispatch id. When declared, crash recovery attaches only a run whose run-name carries it. No static input and not candidate_input may share its name."
             }
           }
         }

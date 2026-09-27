@@ -124,8 +124,13 @@ def accept_green_gate(
     result: GateResult,
     *,
     stage: str,
+    e2e_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Validate and persist every green gate through one exact-SHA policy boundary."""
+    """Validate and persist every green gate through one exact-SHA policy boundary.
+
+    `e2e_reconciliation` is the base-only move that carries a green e2e run from the SHA it ran on
+    to this one (`dispatch/e2e_stage.py`); the attestation records it beside the review's.
+    """
     ref = task["ref"]
     accepted = AcceptedGreenGate.accept(
         result.attestation,
@@ -180,6 +185,16 @@ def accept_green_gate(
                     f"{record.review_reconciliation['reviewed_paths']} reviewed paths; "
                     "reviewed paths unchanged."
                     if stage == "release" and record.review_reconciliation is not None
+                    else ""
+                )
+                + (
+                    "\n\nE2E/base reconciliation: "
+                    f"e2e-green SHA `{e2e_reconciliation['reviewed_sha']}`; "
+                    f"HEAD `{e2e_reconciliation['head_sha']}`; "
+                    f"base SHA `{e2e_reconciliation['base_sha']}`; "
+                    f"{e2e_reconciliation['reviewed_paths']} card paths; "
+                    "card paths unchanged, so the e2e result carries to this SHA."
+                    if e2e_reconciliation is not None
                     else ""
                 )
                 + f"\n\n{closing}"

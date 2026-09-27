@@ -192,8 +192,8 @@ def park_green_verdict(
         runtime._record_verdict_routing(ref, record, "green")
         attempt_accounting.record_attempt_usage(runtime, ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
     if has_candidate(task):
-        # The e2e stage, on a SHA the merge gate passed, before the card may park or release. The gate
-        # is accepted below, once, after the stage is green.
+        # The e2e stage reads the merge gate itself and binds to the SHA that gate validated, before the
+        # card may park or release; the green result it read is accepted here, once.
         e2e = e2e_stage.run_stage(
             runtime,
             task,
@@ -202,11 +202,16 @@ def park_green_verdict(
             payload,
             attempt_id,
             step="review",
-            gate=lambda: merge_ready_for_park(runtime, task, record, records, payload, attempt_id, accept=False),
+            gate=lambda: read_merge_gate(runtime, task, record, records, payload, attempt_id),
         )
-        if e2e is not None:
+        if isinstance(e2e, dict):
             return e2e
-        gated = merge_ready_for_park(runtime, task, record, records, payload, attempt_id)
+        if e2e is None:
+            gated = merge_ready_for_park(runtime, task, record, records, payload, attempt_id)
+        else:
+            gated = accept_merge_gate(
+                runtime, task, record, records, payload, attempt_id, e2e.result, e2e_reconciliation=e2e.reconciliation
+            )
         if gated is not None:
             return gated
     else:
@@ -272,14 +277,50 @@ def merge_ready_for_park(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
-    *,
-    accept: bool = True,
 ) -> dict[str, Any] | None:
-    """Re-read the merge gate before a candidate is parked or released; None when it is green.
+    """Re-read the merge gate before a candidate is parked or released; None when it is green."""
+    outcome, result = read_merge_gate(runtime, task, record, records, payload, attempt_id)
+    if outcome is not None:
+        return outcome
+    assert result is not None
+    return accept_merge_gate(runtime, task, record, records, payload, attempt_id, result)
 
-    `accept=False` reads it for the e2e stage's dispatch and stops at green: the receipt is accepted
-    (and attested on the card) once, when the park or the release that follows the stage reads it.
-    """
+
+def accept_merge_gate(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    result: GateResult,
+    *,
+    e2e_reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Accept a green merge gate result once, for the park or the release that follows it."""
+    return _accept_green_gate(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        result,
+        stage="assessment" if parks_for_decision(runtime, task) else "release",
+        e2e_reconciliation=e2e_reconciliation,
+    )
+
+
+def read_merge_gate(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> tuple[dict[str, Any] | None, GateResult | None]:
+    """The merge gate read before a park or a release: `(outcome, None)` unless it is green, then
+    `(None, result)`. Nothing is accepted or attested here."""
     ref = task["ref"]
     kind, result, detail = release_lifecycle.merge_readiness(runtime, task, record)
     if kind == "transport":
@@ -293,7 +334,7 @@ def merge_ready_for_park(
             step="review",
         )
         if retry is not None:
-            return retry
+            return retry, None
         return _block_gate_transport(runtime, 
             task,
             record,
@@ -302,12 +343,12 @@ def merge_ready_for_park(
             attempt_id,
             step="review",
             action="merge-gate-transport-blocked",
-        )
+        ), None
     if kind == "drift":
         # The bounce clears the record's gate state itself.
         return _gate_red_to_worker(runtime, 
             task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
-        )
+        ), None
     _gate_answered(runtime, ref, record, records, payload)
     if kind == "failed":
         return release_lifecycle.block_merge_path(runtime,
@@ -320,7 +361,7 @@ def merge_ready_for_park(
             reason=f"merge gate failed: {detail}",
             step="review",
             outcome="merge gate failed",
-        )
+        ), None
     if kind == "pending":
         if result is None:
             return release_lifecycle.block_merge_path(runtime,
@@ -333,7 +374,7 @@ def merge_ready_for_park(
                 reason="merge gate returned pending without a result payload",
                 step="review",
                 outcome="merge gate result unavailable",
-            )
+            ), None
         return _gate_pending(runtime, 
             task,
             record,
@@ -343,7 +384,7 @@ def merge_ready_for_park(
             result,
             step="review",
             action="merge-gate-pending",
-        )
+        ), None
     if kind != "green":
         if result is None:
             return release_lifecycle.block_merge_path(runtime,
@@ -356,10 +397,10 @@ def merge_ready_for_park(
                 reason="merge gate returned a non-green state without a result payload",
                 step="review",
                 outcome="merge gate result unavailable",
-            )
+            ), None
         return _gate_red_to_worker(runtime, 
             task, record, records, payload, attempt_id, result, phase="merge-gate"
-        )
+        ), None
     if result is None:
         return release_lifecycle.block_merge_path(runtime,
             task,
@@ -371,18 +412,8 @@ def merge_ready_for_park(
             reason="merge gate returned green without a result payload",
             step="review",
             outcome="merge gate result unavailable",
-        )
-    if not accept:
-        return None
-    return _accept_green_gate(runtime, 
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        result,
-        stage="assessment" if parks_for_decision(runtime, task) else "release",
-    )
+        ), None
+    return None, result
 
 
 def begin_park(

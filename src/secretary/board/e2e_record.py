@@ -65,6 +65,10 @@ class E2eRun:
     run_url: str = ""
     # The SHA GitHub says the run ran on, once checked against `sha`; empty until then.
     head_sha: str = ""
+    # How the run was named: `answer` (GitHub's dispatch answer) or `recovery` (the lookup after the
+    # answer was lost), and for `recovery` the rule it matched.
+    identified_by: str = ""
+    recovery_rule: str = ""
     wait_ref: str = ""
     # {outcome, conclusion, summary, evidence, key}: the wait card's frozen result, copied once.
     result: dict[str, str] | None = None
@@ -72,6 +76,10 @@ class E2eRun:
     # written before the move so a repeat after a crash moves with the same id and the same words.
     closing: str = ""
     closing_reason: str = ""
+    # The result was acted on (the card proceeded, went to rework or was Blocked on it).
+    acted: bool = False
+    # Base-only moves this green run was carried across (`reconcile_reviewed_base_move`'s record).
+    reconciled: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def conclusion(self) -> str:
@@ -114,6 +122,8 @@ class E2eRun:
                 "dispatch_detail",
                 "run_url",
                 "head_sha",
+                "identified_by",
+                "recovery_rule",
                 "wait_ref",
                 "closing",
                 "closing_reason",
@@ -123,8 +133,13 @@ class E2eRun:
             return None
         run_id = payload.get("run_id")
         result = payload.get("result")
+        reconciled = payload.get("reconciled")
         return cls(
             **texts,
+            acted=payload.get("acted") is True,
+            reconciled=[dict(item) for item in reconciled if isinstance(item, Mapping)]
+            if isinstance(reconciled, list)
+            else [],
             run_id=run_id if isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0 else 0,
             result=(
                 {str(key): str(value) for key, value in result.items()}
@@ -152,6 +167,10 @@ class E2eState:
     def green(self, sha: str) -> E2eRun | None:
         """A run that concluded `success` on exactly this SHA, or None."""
         return next((run for run in reversed(self.runs) if run.sha == sha and run.green), None)
+
+    def last_green(self) -> E2eRun | None:
+        """The newest run that concluded `success`, on whatever SHA, or None."""
+        return next((run for run in reversed(self.runs) if run.green), None)
 
     def to_json(self) -> dict[str, Any]:
         return {"runs": [asdict(run) for run in self.runs]}
@@ -198,6 +217,13 @@ def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
                 "workflow": run.workflow,
                 "state": run.status(),
                 "run": run.run_url or None,
+                "identified_by": run.identified_by or None,
+                **({"recovery_rule": run.recovery_rule} if run.recovery_rule else {}),
+                **(
+                    {"reconciled_to": [item.get("head_sha") for item in run.reconciled]}
+                    if run.reconciled
+                    else {}
+                ),
                 "wait_card": run.wait_ref or None,
                 "dispatched_at": run.intent_at,
                 "result": (

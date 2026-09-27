@@ -693,8 +693,10 @@ def render_card_comment(reference: str, result: dict[str, Any]) -> str:
     lines = [
         f"[wait:{result.get('outcome')}] {reference}",
         "",
-        f"The wait card {reference} this card named as its e2e wait ended {result.get('outcome')}: "
-        f"{result.get('summary') or ''}",
+        (
+            f"The wait card {reference} this card named as its e2e wait ended {result.get('outcome')}: "
+            f"{result.get('summary') or ''}"
+        ),
     ]
     if result.get("evidence"):
         lines.append(f"Evidence: {result['evidence']}")

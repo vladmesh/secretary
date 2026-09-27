@@ -83,6 +83,12 @@ class E2eGitHubHost(FakeHost):
         self.failed_log = FAILED_LOG
         self.gh_calls: list[list[str]] = []
         self.run_listings = 0
+        # The title a dispatched run gets; None: `e2e <the dispatch id input>`.
+        self.run_title: str | None = None
+        # The HEAD each coming gate read moves the checkout to first, as `_recover_base` does when it
+        # merges a newer base; and the SHA pairs `reconcile_reviewed_base_move` accepts as base-only.
+        self.move_on_gate: list[str] = []
+        self.base_only: set[tuple[str, str]] = set()
 
     # the github gate, green with an exact-SHA receipt unless a test scripts it
     def gate_check(self, task: dict, record) -> GateResult:
@@ -90,6 +96,8 @@ class E2eGitHubHost(FakeHost):
             return super().gate_check(task, record)
         self.calls.append("gate_check")
         self.gate_calls.append(task["ref"])
+        if self.move_on_gate:
+            self.commit = self.move_on_gate.pop(0)
         receipt = mint_gate_receipt(
             validated_sha=self.commit,
             base_sha="b" * 40,
@@ -98,6 +106,20 @@ class E2eGitHubHost(FakeHost):
             check_set_identity='{"required":["test"]}',
         )
         return GateResult("green", f"CI green @ {self.commit[:12]}", attestation=receipt)
+
+    def reconcile_reviewed_base_move(
+        self, task: dict, record, reviewed_commit: str, current_commit: str
+    ) -> dict[str, str | int] | None:
+        """The real rule's answer, scripted: only a declared pair is a base-only move."""
+        self.calls.append("reconcile_reviewed_base_move")
+        if (reviewed_commit, current_commit) not in self.base_only:
+            return None
+        return {
+            "reviewed_sha": reviewed_commit,
+            "head_sha": current_commit,
+            "base_sha": "b" * 40,
+            "reviewed_paths": 2,
+        }
 
     # GitHub
     def run_capture(self, args: list[str], label: str, *, cwd: Any = None) -> subprocess.CompletedProcess:
@@ -137,7 +159,9 @@ class E2eGitHubHost(FakeHost):
             return subprocess.CompletedProcess(args, 1, "", self.dispatch_answer[1])
         if self.dispatch_answer == "hidden":
             return self._ok(args, "")
-        run_id = self.add_run(f"e2e {inputs.get('sid', '')}".strip())
+        run_id = self.add_run(
+            self.run_title if self.run_title is not None else f"e2e {inputs.get('sid', '')}".strip()
+        )
         if self.dispatch_answer == "crash":
             raise SimulatedCrash("the dispatcher died after GitHub took the dispatch")
         if self.dispatch_answer == "bare":
@@ -266,6 +290,13 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         ended = self.tick_wait()
         self.assertIn(ended["action"], {"wait-target-reached", "wait-ended"}, ended)
         return ended
+
+    @staticmethod
+    def settled(minutes: float = 6) -> Any:
+        """The stage's clock past the recovery settle time (margin 2 min + settle 3 min) of a fresh intent."""
+        return mock.patch.object(
+            e2e_stage, "utcnow", return_value=datetime.now(UTC) + timedelta(minutes=minutes)
+        )
 
     def comments(self, needle: str) -> list[str]:
         return [comment["body"] for comment in self.card()["comments"] if needle in comment["body"]]
@@ -404,6 +435,73 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.dispatches, [])
         self.assertEqual(self.wait_cards(), [])
 
+    # --- one SHA, from the gate ------------------------------------------------------------------------
+
+    def test_the_gate_moving_head_at_the_stage_read_dispatches_on_the_new_sha(self) -> None:
+        """`_recover_base` merges a newer base at the stage's own gate read: that SHA is the candidate."""
+        self.arrange()
+        self.to_green_review()
+        self.host.move_on_gate = [SECOND_SHA]
+        self.host.base_only = {(SHA, SECOND_SHA)}
+
+        waiting = self.tick()
+
+        self.assertEqual((waiting["action"], waiting["sha"]), ("e2e-waiting", SECOND_SHA), waiting)
+        [dispatch] = self.host.dispatches
+        self.assertEqual(dispatch["inputs"]["sha"], SECOND_SHA)
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual((run.sha, run.head_sha), (SECOND_SHA, SECOND_SHA))
+
+    def test_a_base_only_move_during_the_wait_carries_the_green_run_and_is_recorded(self) -> None:
+        self.to_waiting()
+        self.conclude("success")
+        self.host.move_on_gate = [SECOND_SHA]
+        self.host.base_only = {(SHA, SECOND_SHA)}
+
+        parked = self.tick()
+
+        self.assertEqual(parked["to"], "assessment", parked)
+        self.assertEqual(len(self.host.dispatches), 1)
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual(run.sha, SHA)
+        self.assertEqual([item["head_sha"] for item in run.reconciled], [SECOND_SHA])
+        self.assertEqual(self.card()["e2e"]["runs"][0]["reconciled_to"], [SECOND_SHA])
+        [attested] = self.comments("E2E/base reconciliation")
+        self.assertIn(f"e2e-green SHA `{SHA}`; HEAD `{SECOND_SHA}`", attested)
+
+    def test_a_change_to_the_card_s_own_paths_runs_the_stage_again(self) -> None:
+        """No review commit to drift from (review skipped), so only the e2e rule decides: it refuses."""
+        self.arrange(review="skipped", observed=False)
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "e2e-waiting")
+        self.conclude("success")
+        self.host.move_on_gate = [SECOND_SHA]
+
+        again = self.tick()
+
+        self.assertEqual((again["action"], again["sha"]), ("e2e-waiting", SECOND_SHA), again)
+        self.assertEqual(self.card()["state"], "validate")
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual([dispatch["inputs"]["sha"] for dispatch in self.host.dispatches], [SHA, SECOND_SHA])
+        self.assertEqual(self.card()["e2e"]["runs_dispatched"], 2)
+
+    def test_the_release_audit_carries_a_green_run_across_a_base_only_move(self) -> None:
+        self.to_waiting()
+        self.conclude("success")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        self.host.move_on_gate = [SECOND_SHA]
+        self.host.base_only = {(SHA, SECOND_SHA)}
+
+        released = self.tick()
+
+        self.assertEqual(released["to"], "done", released)
+        self.assertEqual(len(self.host.dispatches), 1)
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual([item["head_sha"] for item in run.reconciled], [SECOND_SHA])
+        attested = [body for body in self.comments("release audit") if "E2E/base reconciliation" in body]
+        self.assertEqual(len(attested), 1, self.comments("Mechanical gate attestation"))
+
     # --- crash and restart ---------------------------------------------------------------------------
 
     def test_a_crash_after_the_dispatch_finds_the_run_by_sha_branch_event_and_time(self) -> None:
@@ -417,13 +515,26 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.host.dispatch_answer = "ok"
         recovered = self._runtime()
-        waiting = self.tick(recovered)
+        # Before the window has settled, one visible match is not attached.
+        early = self.tick(recovered)
+        self.assertEqual(early["action"], "e2e-identifying", early)
+        self.assertIn("recovery_settles_at", early)
+        self.assertEqual(self.host.run_listings, 0)
+        self.assertEqual(e2e_state(self.card()).runs[0].run_id, 0)
+
+        with self.settled():
+            waiting = self.tick(recovered)
 
         self.assertEqual(waiting["action"], "e2e-waiting", waiting)
         self.assertEqual(len(self.host.dispatches), 1, "recovery never dispatches again")
         self.assertEqual(self.host.run_listings, 1)
         [run] = e2e_state(self.card()).runs
         self.assertEqual((run.dispatch_id, run.run_id, run.head_sha), (intent.dispatch_id, FIRST_RUN, SHA))
+        self.assertEqual(run.identified_by, "recovery")
+        self.assertIn(f"workflow_dispatch run of e2e.yml on {BRANCH} at {SHA}", run.recovery_rule)
+        self.assertEqual(self.card()["e2e"]["runs"][0]["identified_by"], "recovery")
+        [said] = self.comments("was identified by recovery, not by GitHub's dispatch answer")
+        self.assertIn(RUN_URL, said)
         self.assertTrue(run.wait_ref)
 
     def test_recovery_ignores_runs_of_another_sha_branch_event_or_time(self) -> None:
@@ -442,21 +553,24 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         elsewhere = self.host.add_run()
         self.host.runs[elsewhere]["head_sha"] = SECOND_SHA
 
-        self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
+        with self.settled():
+            self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
 
         [run] = e2e_state(self.card()).runs
         self.assertEqual(run.run_id, FIRST_RUN)
         self.assertEqual(len(self.host.dispatches), 1)
 
-    def test_two_matching_runs_block_the_card_and_none_is_guessed(self) -> None:
+    def test_a_second_run_appearing_during_the_settle_blocks_the_card_and_none_is_guessed(self) -> None:
         self.arrange()
         self.to_green_review()
         self.host.dispatch_answer = "crash"
         with self.assertRaises(SimulatedCrash):
             self.tick()
+        self.assertEqual(self.tick(self._runtime())["action"], "e2e-identifying")
         second = self.host.add_run()
 
-        blocked = self.tick(self._runtime())
+        with self.settled():
+            blocked = self.tick(self._runtime())
 
         self.assertBlockedAsInfrastructure(
             blocked, "cannot be told apart", RUN_URL, f"https://github.com/{REPO}/actions/runs/{second}"
@@ -466,7 +580,7 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.wait_cards(), [])
         self.assertEqual(len(self.host.dispatches), 1)
 
-    def test_a_declared_dispatch_id_input_is_sent_and_breaks_a_tie_in_recovery(self) -> None:
+    def test_a_declared_dispatch_id_input_is_sent_and_recovery_requires_it_in_the_title(self) -> None:
         self.arrange(e2e={**E2E, "dispatch_id_input": "sid"})
         self.to_green_review()
         self.host.dispatch_answer = "crash"
@@ -477,10 +591,31 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(dispatch["inputs"], {"suite": "mega", "sha": SHA, "sid": intent.dispatch_id})
         self.host.add_run("e2e someone else's dispatch")
 
-        self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
+        with self.settled():
+            self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
 
         [run] = e2e_state(self.card()).runs
         self.assertEqual(run.run_id, FIRST_RUN)
+        self.assertIn(f"its title carrying {intent.dispatch_id}", run.recovery_rule)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_with_a_dispatch_id_input_a_run_without_it_in_the_title_is_never_attached(self) -> None:
+        self.arrange(e2e={**E2E, "dispatch_id_input": "sid"})
+        self.to_green_review()
+        self.host.run_title = "Stand e2e mega"
+        self.host.dispatch_answer = "crash"
+        with self.assertRaises(SimulatedCrash):
+            self.tick()
+
+        with self.settled():
+            self.assertEqual(self.tick(self._runtime())["action"], "e2e-identifying")
+        self.assertEqual(e2e_state(self.card()).runs[0].run_id, 0)
+        with self.settled(minutes=16):
+            blocked = self.tick(self._runtime())
+
+        self.assertBlockedAsInfrastructure(blocked, "could not be identified")
+        self.assertEqual(e2e_state(self.card()).runs[0].run_id, 0)
+        self.assertEqual(self.wait_cards(), [])
         self.assertEqual(len(self.host.dispatches), 1)
 
     def test_an_answer_without_run_details_is_looked_up(self) -> None:
@@ -488,7 +623,9 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.to_green_review()
         self.host.dispatch_answer = "bare"
 
-        self.assertEqual(self.tick()["action"], "e2e-waiting")
+        self.assertEqual(self.tick()["action"], "e2e-identifying")
+        with self.settled():
+            self.assertEqual(self.tick()["action"], "e2e-waiting")
 
         [run] = e2e_state(self.card()).runs
         self.assertEqual((run.run_id, run.dispatch), (FIRST_RUN, "sent"))
@@ -652,6 +789,8 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
                     "run_id": 8000 + n,
                     "run_url": f"https://github.com/{REPO}/actions/runs/{8000 + n}",
                     "result": {"outcome": "target_reached", "conclusion": "failure", "summary": "red"},
+                    # Each was acted on in its own round (the card went to rework, then was reworked).
+                    "acted": True,
                 }
                 for n, sha in ((1, "1" * 40), (2, "2" * 40), (3, SECOND_SHA))
             ]
