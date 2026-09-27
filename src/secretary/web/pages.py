@@ -209,11 +209,18 @@ details.drain[open] > summary { display: none; }
 .po-list .side .empty { font-size:.85rem; }
 .po-list .po-close button { padding:.2rem .6rem; font-weight:400; border-color:var(--line-strong); color:var(--muted); }
 .po-list .po-close button:hover { border-color:var(--warn); color:var(--warn); filter:none; }
+.po-list li.titled .title { font-weight:600; }
+.po-list li.titled .side { grid-row:1 / span 3; }
+.po-list .first { grid-column:1; font-size:.9rem; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lead h1 .id { font-family:var(--mono); font-size:.8rem; font-weight:400; color:var(--faint); }
+.po-title { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin:-.5rem 0 1rem; }
+.po-title input { flex:0 1 24rem; min-width:0; }
+.po-title button { font-weight:400; }
 @media (max-width: 600px) {
   .po-bar select { flex:1 1 7rem; }
   .po-bar button { margin-left:0; flex-basis:100%; }
   .po-list li { grid-template-columns:minmax(0,1fr); }
-  .po-list .side { grid-column:1; grid-row:auto; }
+  .po-list .side, .po-list li.titled .side { grid-column:1; grid-row:auto; }
 }
 .po-controls { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-top:.6rem; }
 .po-controls .aside { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-left:auto; }
@@ -3909,6 +3916,12 @@ def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
         return ""
     code = str(refusal.get("code") or "")
     message = str(refusal.get("message") or "")
+    if refused == "title":
+        # A rename carries no request id: it sets a value, so saving the same title again is safe.
+        return (
+            f'<p class="refused"><b>title not saved ({escape(code)}).</b> '
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
     if (refusal.get("data") or {}).get("reason") == "outcome_unknown":
         return (
             '<p class="refused"><b>no answer from the PO service: it may have done this.</b> '
@@ -3986,7 +3999,10 @@ def po_page(
 
 
 def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str:
-    """One session: its first message, then CLI · model · effort ("not set" when none was chosen) · when · id."""
+    """One session: its title when set, its first message, then CLI · model · effort ("not set" when none was chosen) · when · id.
+
+    An untitled session's first line is its first message, as before titles existed.
+    """
     session_id = str(item.get("session_id") or "")
     name, said = _head_model(_po_head(item))
     meta = [
@@ -4003,8 +4019,16 @@ def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str
     else:
         state = _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>'
         side = f'<div class="side">{state}{_po_close_form(session_id)}</div>'
+    href = f"/po/sessions/{quote(session_id)}"
+    title = str(item.get("title") or "")
+    if title:
+        return (
+            f'<li class="titled"><a class="title" href="{href}">{escape(title)}</a>'
+            f'<div class="first">{_po_first_message(item.get("first_message"))}</div>'
+            f'<div class="meta">{"".join(meta)}</div>{side}</li>'
+        )
     return (
-        f'<li><a class="title" href="/po/sessions/{quote(session_id)}">'
+        f'<li><a class="title" href="{href}">'
         f"{_po_first_message(item.get('first_message'))}</a>"
         f'<div class="meta">{"".join(meta)}</div>{side}</li>'
     )
@@ -4082,6 +4106,8 @@ def _po_new_session_form_for(
 
 #: How many characters of a session's first owner message its row on `/po` shows, ellipsis included.
 PO_FIRST_MESSAGE_CHARS = 80
+#: The title input's length; the store's `MAX_TITLE_LENGTH` is the rule, this only stops typing past it.
+PO_TITLE_MAX_CHARS = 120
 
 
 def _po_first_message(text: Any) -> str:
@@ -4177,8 +4203,12 @@ def po_session(
     draft: str = "",
     refusal: dict[str, Any] | None = None,
     refused: str = "send",
+    title_draft: str | None = None,
 ) -> str:
     """One session: its newest-first feed, the message box, turn state, stop while running, close otherwise.
+
+    Its title, when set, heads the page, and a small form under the header renames it (an empty one
+    clears it), open or closed. `title_draft` is what a refused rename submitted, kept in that form.
 
     The feed runs newest first and the message box sits above it, so every control the owner needs
     belongs to the box and not to the end of the feed: `send`, and at the far end of the same row
@@ -4259,14 +4289,28 @@ def po_session(
         f'data-turns="{len(turns)}" data-last="{escape(str(last.get("state") or ""))}" '
         f'data-queued="{len(queued)}" data-running="{"true" if running else "false"}"'
     )
+    title = str(session.get("title") or "")
+    heading = (
+        f'{escape(title)} <span class="id">{escape(session_id[:8])}</span>'
+        if title
+        else f"PO session {escape(session_id[:8])}"
+    )
+    # Outside `po-head`, so a turn's end swapping the header never drops a title being typed.
+    rename = (
+        f'<form class="po-title" id="po-title" method="post" action="{base}/title">'
+        f'<input type="text" name="title" maxlength="{PO_TITLE_MAX_CHARS}" aria-label="session title" '
+        f'placeholder="untitled" value="{escape(title if title_draft is None else title_draft)}">'
+        '<button class="quiet" type="submit">rename</button></form>'
+    )
     body = "\n".join(
         [
             (
-                f'<div class="lead" id="po-head"><h1>PO session {escape(session_id[:8])}</h1>'
+                f'<div class="lead" id="po-head"><h1>{heading}</h1>'
                 f"{_head('PO · ' + str(session.get('cli') or ''), _po_head(session), compact=True, unset_effort=PO_EFFORT_UNSET)}"
                 f'<span class="head-chip" id="po-turn-state" {polled}>{turn_state}</span>'
                 f'<span class="age">{head}</span></div>'
             ),
+            rename,
             _po_refusal(refusal, refused),
             (
                 f'<p class="po-closed">closed {escape(str(session.get("closed_at") or ""))} '
@@ -4285,7 +4329,7 @@ def po_session(
         "__BLOCKS__", "[" + ", ".join(f"'{block}'" for block in PO_SESSION_BLOCKS) + "]"
     )
     return _page(
-        f"PO session {session_id[:8]}",
+        title or f"PO session {session_id[:8]}",
         body,
         script=script,
         nav="po",

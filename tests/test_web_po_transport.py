@@ -36,6 +36,7 @@ PO_ROUTES = {
     ("POST", "/po/sessions/{session}/messages"),
     ("POST", "/po/sessions/{session}/stop"),
     ("POST", "/po/sessions/{session}/close"),
+    ("POST", "/po/sessions/{session}/title"),
     ("GET", "/po/api/sessions/{session}"),
 }
 #: A form body carrying every field any /po POST takes; the gate answers before any field is read.

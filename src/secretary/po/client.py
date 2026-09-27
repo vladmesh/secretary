@@ -125,6 +125,9 @@ class PoServiceClient:
     def close_session(self, *, session_id: str, actor: str) -> dict[str, Any]:
         return self.call("close_session", session_id=session_id, actor=actor)
 
+    def rename_session(self, *, session_id: str, title: str) -> dict[str, Any]:
+        return self.call("rename_session", session_id=session_id, title=title)
+
     def status(self) -> dict[str, Any]:
         return self.call("status")
 

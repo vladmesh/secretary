@@ -809,6 +809,8 @@ class PoSession(Base):
     closed_by = sa.Column(sa.Text)
     # The reasoning effort chosen at creation (0015); `default` passes the CLI no effort flag.
     effort = sa.Column(sa.Text, nullable=False, server_default=sa.text("'default'"))
+    # A readable name the owner or the PO sets (0019); null is untitled. A sprint's session is `sprint:<N>`.
+    title = sa.Column(sa.Text)
 
     __table_args__ = (
         sa.CheckConstraint("cli IN ('claude','codex')", name="po_session_cli_in_vocabulary"),

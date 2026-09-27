@@ -707,7 +707,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0015_po_effort_resolved_model` | `po_sessions.effort` (text, not null, default `'default'`: every existing session ran at the CLI's own effort) and `po_turns.resolved_model` (nullable text: the model the CLI reported for that turn); no downgrade |
 | `0016_sprint_po_session` | `sprints.po_session` (nullable text: the PO session that opened the sprint, or the one the PO service's resolver opened for it) and `sprints.allowed_productions` (text[], not null, default `'{}'`: registered projects whose production the sprint's operations may touch); every existing sprint loads with neither; `po_request_operation_in_vocabulary` re-created to admit `po_sprint_session` beside `po_session_create` and `po_send` (`po_request_seq_only_for_a_send` unchanged); no downgrade |
 | `0017_po_card_kinds` | `decision` and `operation` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row of `code`, `research`, `infra` or no type loads unchanged; no column; no downgrade |
-| `0018_owner_events` | `owner_events` (`id` identity, `kind`, `class`, `subject_ref`, `text`, `created_at`, `read_at`, `dedup_key` unique as `owner_event_dedup_key_is_unique`; index `owner_events_by_subject`), with `owner_event_kind_in_vocabulary`, `owner_event_class_in_vocabulary` and `owner_event_class_follows_kind`; one new table, every existing row loads unchanged; no downgrade (head) |
+| `0018_owner_events` | `owner_events` (`id` identity, `kind`, `class`, `subject_ref`, `text`, `created_at`, `read_at`, `dedup_key` unique as `owner_event_dedup_key_is_unique`; index `owner_events_by_subject`), with `owner_event_kind_in_vocabulary`, `owner_event_class_in_vocabulary` and `owner_event_class_follows_kind`; one new table, every existing row loads unchanged; no downgrade |
+| `0019_po_session_title` | `po_sessions.title` (nullable text: a readable name the owner or the PO sets); every existing session loads untitled, then each session a `sprints.po_session` names and whose title is null takes that sprint's ref (the first created, if two sprints name it); the downgrade drops the column (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1064,7 +1065,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0018_owner_events`). PostgreSQL restore compares against `head_revision()`.
+  (`0019_po_session_title`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

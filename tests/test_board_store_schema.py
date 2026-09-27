@@ -95,6 +95,7 @@ REVISIONS = (
     "0016_sprint_po_session",
     "0017_po_card_kinds",
     "0018_owner_events",
+    "0019_po_session_title",
 )
 
 
@@ -472,6 +473,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -726,6 +728,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
 
@@ -1102,6 +1105,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1139,6 +1143,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
 
@@ -1216,6 +1221,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
 
@@ -1231,6 +1237,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0016_sprint_po_session",
                 "0017_po_card_kinds",
                 "0018_owner_events",
+                "0019_po_session_title",
             ),
         )
 
@@ -1331,7 +1338,10 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-5", task_type="decision")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0017_po_card_kinds", "0018_owner_events"))
+        self.assertEqual(
+            self.run_migrations(connection),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title"),
+        )
 
         self.assertEqual(
             connection.exec_driver_sql(
@@ -1383,7 +1393,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events",))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title"))
 
         self.assertEqual(
             (
@@ -1430,6 +1440,73 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaises(OwnerEventsUnavailable):
             reader.mark_all_read()
 
+
+    # --- 0019: a PO session's title -------------------------------------------------------------
+
+    def test_0019_titles_each_sprint_linked_session_once_and_drops_the_column_on_downgrade(self) -> None:
+        """secretary-1782: existing sessions load untitled; a sprint's session takes its sprint's ref."""
+        from alembic import command
+
+        connection = self.owner_connection()
+        config = migrate.alembic_config(connection=connection, passwords=self.passwords)
+        command.upgrade(config, "0018_owner_events")
+        connection.commit()
+        for session_id in ("linked", "unlinked", "twice"):
+            connection.exec_driver_sql(
+                "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state, effort) "
+                "VALUES (%s, 'claude', 'opus', '/po', now(), 'open', 'high')",
+                (session_id,),
+            )
+        for ref, number, session, created in (
+            ("sprint:1467", 1467, "linked", "2026-09-20T10:00:00Z"),
+            ("sprint:12", 12, None, "2026-09-20T10:00:00Z"),
+            ("sprint:5", 5, "twice", "2026-09-21T10:00:00Z"),
+            ("sprint:40", 40, "twice", "2026-09-20T10:00:00Z"),
+        ):
+            self.sprint(connection, ref, number)
+            connection.exec_driver_sql(
+                "UPDATE sprints SET po_session = %s, created_at = %s WHERE ref = %s", (session, created, ref)
+            )
+        connection.commit()
+        before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
+
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title",))
+
+        rows = connection.exec_driver_sql(
+            "SELECT session_id, title FROM po_sessions ORDER BY session_id"
+        ).fetchall()
+        # A session that opened two sprints: the first it opened, whatever the scan order.
+        self.assertEqual(rows, [("linked", "sprint:1467"), ("twice", "sprint:40"), ("unlinked", None)])
+        # Every other column is what it was.
+        after = connection.exec_driver_sql(
+            "SELECT session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by, "
+            "effort FROM po_sessions ORDER BY session_id"
+        ).fetchall()
+        self.assertEqual(after, before)
+        # A title a person set is never overwritten: the backfill takes only null titles.
+        connection.exec_driver_sql("UPDATE po_sessions SET title = 'mine' WHERE session_id = 'linked'")
+        connection.commit()
+
+        command.downgrade(config, "0018_owner_events")
+        connection.commit()
+        self.assertEqual(migrate.current_revision(connection), "0018_owner_events")
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'po_sessions' AND column_name = 'title'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall(), before
+        )
+
+        # Up again: the backfill runs on what is there, the null titles.
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title",))
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
+            [("sprint:1467",), ("sprint:40",), (None,)],
+        )
 
 if __name__ == "__main__":
     unittest.main()

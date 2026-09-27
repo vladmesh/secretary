@@ -1,5 +1,5 @@
 """PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`,
-`0010_po_session_close`, `0015_po_effort_resolved_model`).
+`0010_po_session_close`, `0015_po_effort_resolved_model`, `0019_po_session_title`).
 
 One short connection per operation: the runner's waiter threads settle turns concurrently, and a
 connection shared between them would serialize exactly what must not be serialized. Every state
@@ -75,6 +75,10 @@ class RequestConflict(PoStoreError):
     """The request id already belongs to another operation or other inputs; nothing was written."""
 
 
+class TitleRefused(PoStoreError):
+    """The title is not one a session may carry (:func:`session_title`); nothing was written."""
+
+
 @dataclass(frozen=True)
 class Session:
     session_id: str
@@ -89,6 +93,8 @@ class Session:
     closed_by: str | None = None
     # Chosen at creation (0015); every session opened before it is `default`.
     effort: str = DEFAULT_EFFORT
+    # Set by the owner or the PO (0019, :meth:`PoStore.set_title`); None is untitled.
+    title: str | None = None
     # Only :meth:`PoStore.sessions` fills these two; a single-session read leaves them None.
     first_message: str | None = None
     last_activity_at: datetime | None = None
@@ -132,7 +138,7 @@ class PoRequest:
 
 
 _SESSION_COLUMNS = (
-    "session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by, effort"
+    "session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by, effort, title"
 )
 _TURN_COLUMNS = "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason, resolved_model"
 # The latest model a turn of session `s` reported, for the two session reads.
@@ -142,6 +148,27 @@ _RESOLVED_MODEL = (
 )
 _FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
 _REQUEST_COLUMNS = "request_id, operation, fingerprint, session_id, seq, created_at"
+
+
+# The longest title a session carries, in characters after trimming.
+MAX_TITLE_LENGTH = 120
+
+
+def session_title(title: str | None) -> str | None:
+    """The title as stored: trimmed, None when nothing is left; refused with control characters or too long.
+
+    The one rule for a session's title, whoever sets it. Control characters are C0 and C1 (so a
+    newline, a tab and DEL too): a title is one line.
+    """
+    text = (title or "").strip()
+    if not text:
+        return None
+    bad = next((c for c in text if ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F), None)
+    if bad is not None:
+        raise TitleRefused(f"a PO session title is one line of text; it may not contain {bad!r}")
+    if len(text) > MAX_TITLE_LENGTH:
+        raise TitleRefused(f"a PO session title is at most {MAX_TITLE_LENGTH} characters, not {len(text)}")
+    return text
 
 
 def session_fingerprint(cli: str, model: str, effort: str = DEFAULT_EFFORT) -> str:
@@ -263,13 +290,16 @@ class PoStore:
         effort: str = DEFAULT_EFFORT,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
+        title: str | None = None,
     ) -> tuple[Session, bool]:
         """The new session, or the one `request_id` already created; the flag is True when this call did.
 
         `operation` and `fingerprint` bind the request id to something other than a plain create
         (the resolver's `SPRINT_SESSION`); by default they are a create of this CLI, model and effort.
+        `title` is the new session's (:func:`session_title`); it is not part of the fingerprint.
         """
         fingerprint = fingerprint or session_fingerprint(cli, model, effort)
+        title = session_title(title)
         with self._transaction() as connection:
             if request_id is not None:
                 known = self._known_request(connection, request_id, operation, fingerprint)
@@ -279,9 +309,10 @@ class PoStore:
                     ).fetchone()
                     return Session(*row), False
             row = connection.execute(
-                "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state, cli_session_id, effort) "
-                f"VALUES (%s, %s, %s, %s, now(), %s, %s, %s) RETURNING {_SESSION_COLUMNS}",
-                (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id, effort),
+                "INSERT INTO po_sessions "
+                "(session_id, cli, model, cwd, created_at, state, cli_session_id, effort, title) "
+                f"VALUES (%s, %s, %s, %s, now(), %s, %s, %s, %s) RETURNING {_SESSION_COLUMNS}",
+                (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id, effort, title),
             ).fetchone()
             if request_id is not None:
                 self._record_request(connection, request_id, operation, fingerprint, session_id, None)
@@ -361,6 +392,21 @@ class PoStore:
                 f"WHERE session_id = %s RETURNING {_SESSION_COLUMNS}",
                 (SESSION_CLOSED, actor, session_id),
             ).fetchone()
+        return Session(*row)
+
+    def set_title(self, session_id: str, title: str | None) -> Session:
+        """Set the session's title (:func:`session_title`; nothing left clears it), open or closed.
+
+        A repeat with the same title writes the same value: the answer is the same session.
+        """
+        title = session_title(title)
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"UPDATE po_sessions SET title = %s WHERE session_id = %s RETURNING {_SESSION_COLUMNS}",
+                (title, session_id),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound(f"there is no PO session {session_id}")
         return Session(*row)
 
     def set_cli_session_id(self, session_id: str, cli_session_id: str) -> bool:

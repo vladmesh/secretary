@@ -40,6 +40,7 @@ from secretary.po.store import (
     TurnInProgress,
     send_fingerprint,
     session_fingerprint,
+    session_title,
 )
 from secretary.tasks import admit_role
 
@@ -116,16 +117,26 @@ class FakePoStore:
         effort: str = DEFAULT_EFFORT,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
+        title: str | None = None,
     ) -> tuple[Session, bool]:
         board = self._open()
         fingerprint = fingerprint or session_fingerprint(cli, model, effort)
+        title = session_title(title)
         with board.lock:
             known = self._known(board, request_id, operation, fingerprint)
             if known is not None:
                 return board.sessions[known.session_id], False
             self._check_operation(request_id, operation)
             session = Session(
-                session_id, cli, model, cwd, board.now(), SESSION_OPEN, cli_session_id, effort=effort
+                session_id,
+                cli,
+                model,
+                cwd,
+                board.now(),
+                SESSION_OPEN,
+                cli_session_id,
+                effort=effort,
+                title=title,
             )
             board.sessions[session_id] = session
             if request_id is not None:
@@ -169,6 +180,14 @@ class FakePoStore:
             closed = replace(session, state=SESSION_CLOSED, closed_at=board.now(), closed_by=actor)
             board.sessions[session_id] = closed
             return closed
+
+    def set_title(self, session_id: str, title: str | None) -> Session:
+        board = self._open()
+        title = session_title(title)
+        with board.lock:
+            session = replace(self.session(session_id), title=title)
+            board.sessions[session_id] = session
+            return session
 
     def set_cli_session_id(self, session_id: str, cli_session_id: str) -> bool:
         board = self._open()

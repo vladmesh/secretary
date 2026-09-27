@@ -137,6 +137,7 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/po/sessions/{session}/messages", "po_send", "po.po_send", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/stop", "po_stop", "po.po_stop", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/close", "po_close", "po.po_close", body=FORM_BODY, page=True),
+    Route("POST", "/po/sessions/{session}/title", "po_rename", "po.po_rename", body=FORM_BODY, page=True),
     Route("GET", "/po/api/sessions/{session}", "po_session_json", "po.po_session"),
     # The owner's bell (secretary-1770): the list behind the header's count, a click that marks one
     # event read, and "mark all read", which takes notices only. Each is one call of the owner events
@@ -161,6 +162,7 @@ PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model", "effort"})
 PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
 PO_CLOSE_FIELDS: frozenset[str] = frozenset()
+PO_RENAME_FIELDS = frozenset({"title"})
 #: The form fields of every /po POST, by handler. A field set with `request_id` marks a route whose
 #: operation takes the id into `PoStore`'s request transaction; `tests.test_web_po_transport` holds
 #: the route table to this.
@@ -170,6 +172,7 @@ PO_FORM_FIELDS = {
     "po_send": PO_SEND_FIELDS,
     "po_stop": PO_STOP_FIELDS,
     "po_close": PO_CLOSE_FIELDS,
+    "po_rename": PO_RENAME_FIELDS,
 }
 #: How long a browser keeps the PO cookie. Replacing the token file ends it sooner.
 PO_COOKIE_MAX_AGE = 30 * 24 * 3600
@@ -935,6 +938,27 @@ class WebApp:
                 ),
             )
         return _redirect("/po", what="the session is closed")
+
+    def _po_rename(self, params, _query, body) -> Response:
+        """Set the title, open or closed; an empty one clears it. A refusal renders the session with the text kept."""
+        _fields(body, PO_RENAME_FIELDS, "PO title")
+        session_id, title = params["session"], _first(body, "title")
+        try:
+            self.po.po_rename(session_id=session_id, title=title)
+        except ReadError as exc:
+            if exc.code == "not_found":
+                raise
+            return _html(
+                status_for(exc.code),
+                pages.po_session(
+                    self.po.po_session(session_id),
+                    request_id=_po_request_id(),
+                    refusal=exc.to_json(),
+                    refused="title",
+                    title_draft=title,
+                ),
+            )
+        return _redirect(f"/po/sessions/{quote(session_id)}", what="the title is saved")
 
     # -- failures --------------------------------------------------------------------------
 

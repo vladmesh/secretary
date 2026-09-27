@@ -526,6 +526,7 @@ class RouteTableTests(TransportFixture):
         ("POST", "/po/sessions/{session}/messages"),
         ("POST", "/po/sessions/{session}/stop"),
         ("POST", "/po/sessions/{session}/close"),
+        ("POST", "/po/sessions/{session}/title"),
         ("GET", "/po/api/sessions/{session}"),
         ("GET", "/owner-events"),
         ("POST", "/owner-events/read-all"),

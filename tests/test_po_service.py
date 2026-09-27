@@ -62,8 +62,10 @@ from secretary.webproto.errors import (
     PoOutcomeUnknown,
     PoRequestConflict,
     PoSessionClosed,
+    PoSessionNotFound,
     PoTurnInProgress,
     RuntimeUnavailable,
+    ValidationRefused,
 )
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
@@ -1747,6 +1749,121 @@ class SprintSessionTests(ServiceFixture):
             second = client.sprint_session(sprint_ref="sprint:1", request_id="r-1")
         self.assertTrue(first["created"])
         self.assertEqual((second["session_id"], second["repeated"]), (first["session_id"], True))
+
+    def test_a_sprints_new_session_is_titled_with_the_sprint_ref(self) -> None:
+        """secretary-1782: the resolver's session reads as its sprint on `/po`."""
+        sprints = FakeSprints({"sprint:1467": None})
+        service = self.resolver(sprints)
+
+        answer = service.sprint_session(sprint_ref="sprint:1467", request_id="r-1")
+
+        self.assertEqual(self.store().session(answer["session_id"]).title, "sprint:1467")
+        self.settled(answer["session_id"], 1)
+
+    def test_a_replacement_for_a_closed_sprint_session_gets_the_same_title(self) -> None:
+        sprints = FakeSprints({})
+        service = self.resolver(sprints)
+        old = service.create_session(cli="claude", model="opus", effort="high", request_id="c-old")
+        service.rename_session(session_id=old["session_id"], title="the owner's name for it")
+        service.close_session(session_id=old["session_id"], actor="owner")
+        sprints.records["sprint:1467"] = SprintRecord("sprint:1467", "open", old["session_id"])
+
+        answer = service.sprint_session(sprint_ref="sprint:1467", request_id="r-1")
+
+        self.assertNotEqual(answer["session_id"], old["session_id"])
+        self.assertEqual(self.store().session(answer["session_id"]).title, "sprint:1467")
+        # The closed session keeps what it was called.
+        self.assertEqual(self.store().session(old["session_id"]).title, "the owner's name for it")
+        self.settled(answer["session_id"], 1)
+
+
+class RenameSessionTests(ServiceFixture):
+    """`rename_session`: the one write of a session's title, for the web and the CLI (secretary-1782)."""
+
+    def test_a_title_is_set_trimmed_repeated_and_cleared_through_the_socket(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        with listening(service):
+            client = PoServiceClient(self.data)
+            self.assertEqual(
+                client.rename_session(session_id=session_id, title="  Sprint planning  "),
+                {"session_id": session_id, "title": "Sprint planning"},
+            )
+            # Idempotent by value: a repeat answers the same and changes nothing.
+            self.assertEqual(
+                client.rename_session(session_id=session_id, title="Sprint planning"),
+                {"session_id": session_id, "title": "Sprint planning"},
+            )
+            self.assertEqual(self.store().session(session_id).title, "Sprint planning")
+            self.assertEqual(
+                client.rename_session(session_id=session_id, title="   "),
+                {"session_id": session_id, "title": None},
+            )
+        self.assertIsNone(self.store().session(session_id).title)
+        # No request id and no `po_requests` row: only the create's.
+        self.assertEqual(len(self.board.requests), 1)
+
+    def test_a_refused_title_and_an_unknown_session_answer_with_their_reason_and_write_nothing(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        service.rename_session(session_id=session_id, title="kept")
+        for fields, code, fragment in (
+            ({"session_id": session_id, "title": "two\nlines"}, "validation", "one line"),
+            ({"session_id": session_id, "title": "x" * 121}, "validation", "at most 120"),
+            ({"session_id": session_id, "title": 7}, "validation", "title is text"),
+            ({"session_id": "no-such", "title": "t"}, "session_not_found", "no-such"),
+            ({"session_id": session_id}, "validation", "title"),
+        ):
+            with self.subTest(fields=fields):
+                answer = service.handle({"op": "rename_session", **fields})
+                self.assertFalse(answer["ok"])
+                self.assertEqual(answer["error"]["code"], code)
+                self.assertIn(fragment, answer["error"]["message"])
+        self.assertEqual(self.store().session(session_id).title, "kept")
+
+    def test_a_closed_session_may_be_renamed(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        service.close_session(session_id=session_id, actor="owner")
+
+        answer = service.handle({"op": "rename_session", "session_id": session_id, "title": "done"})
+
+        self.assertEqual(answer, {"ok": True, "result": {"session_id": session_id, "title": "done"}})
+        self.assertEqual(self.store().session(session_id).state, po_store.SESSION_CLOSED)
+
+    def test_the_layer_turns_a_refusal_into_a_validation_refusal_with_the_reason(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        with listening(service):
+            layer = PoLayer(self.root, data_dir=self.data, store=self.store(), models=MODELS)
+            self.assertEqual(
+                layer.po_rename(session_id=session_id, title="Roadmap"),
+                {"kind": "po_session_renamed", "session_id": session_id, "title": "Roadmap"},
+            )
+            with self.assertRaisesRegex(ValidationRefused, "at most 120"):
+                layer.po_rename(session_id=session_id, title="y" * 121)
+            with self.assertRaises(PoSessionNotFound):
+                layer.po_rename(session_id="no-such", title="t")
+
+
+class SessionTitleRuleTests(unittest.TestCase):
+    """`session_title`: the one rule, whoever sets the title."""
+
+    def test_the_rule(self) -> None:
+        for given, stored in (
+            ("  Roadmap  ", "Roadmap"),
+            ("", None),
+            ("   ", None),
+            (None, None),
+            ("Спринт 1467 · план", "Спринт 1467 · план"),
+            ("x" * 120, "x" * 120),
+            ("  " + "x" * 120 + "  ", "x" * 120),
+        ):
+            with self.subTest(given=given):
+                self.assertEqual(po_store.session_title(given), stored)
+        for given in ("a\nb", "a\rb", "a\tb", "a\x00b", "a\x7fb", "a\x85b", "a\x9fb", "x" * 121):
+            with self.subTest(given=given), self.assertRaises(po_store.TitleRefused):
+                po_store.session_title(given)
 
 
 class FakeStoreVocabularyTests(unittest.TestCase):

@@ -1,7 +1,7 @@
-"""The PO head's sessions for the dashboard: list, read, create, send, stop, close.
+"""The PO head's sessions for the dashboard: list, read, create, send, stop, close, rename.
 
 A thin client. Reads are direct board-store reads (`secretary.po.store`) plus the PO service's queue
-directory for messages not yet taken; every write — create, send, stop, close — goes to the PO service
+directory for messages not yet taken; every write — create, send, stop, close, rename — goes to the PO service
 over its local socket (`secretary.po.client`). The web holds no runner and starts no turn process, so
 restarting it touches no turn. Every rule about turns — one running per session, the queue, how a stop
 settles, what reaches the feed — and about request ids stays in the service, the runner and the store;
@@ -264,6 +264,19 @@ class PoLayer(ProtocolBoundary):
         session = self._store(lambda: store.session(session_id))
         return {"kind": "po_session_closed", "session": _session(session, running=False)}
 
+    def po_rename(self, *, session_id: str, title: str) -> dict[str, Any]:
+        """Set the session's title (`PoStore.set_title`), open or closed; an empty title clears it.
+
+        No request id: a rename repeated sets the same value. A title the store refuses is a
+        validation refusal carrying its reason.
+        """
+        client = self._client_or_refuse()
+        renamed = self._store(
+            lambda: client.rename_session(session_id=session_id, title=str(title or "")),
+            unknown="the PO service may have renamed this session; renaming it again is safe",
+        )
+        return {"kind": "po_session_renamed", "session_id": renamed["session_id"], "title": renamed["title"]}
+
     # --- inside the boundary ----------------------------------------------------------------
 
     def _store_or_refuse(self) -> PoStore:
@@ -359,6 +372,8 @@ def _time(value: Any) -> str | None:
 def _session(session: Session, *, running: bool) -> dict[str, Any]:
     return {
         "session_id": session.session_id,
+        # Set by the owner or the PO; null for an untitled session.
+        "title": session.title,
         "cli": session.cli,
         "model": session.model,
         "effort": session.effort,

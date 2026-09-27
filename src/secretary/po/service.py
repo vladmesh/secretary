@@ -113,6 +113,7 @@ from secretary.po.store import (
     Session,
     SessionClosed,
     SessionNotFound,
+    TitleRefused,
     TurnInProgress,
     send_fingerprint,
     session_fingerprint,
@@ -524,11 +525,11 @@ class PoService:
         recorded session's CLI, model and effort (or the new-session form's defaults when there is no
         row); a recorded effort that is `default` (or no longer offered) gives way to the first effort
         offered for that CLI, as does a session with no row, since a new session never opens on
-        `default`. And then, in this order: its seeding message is queued as its first input, the sprint
-        gets a comment saying so, and the sprint records the new session. The request id binds the
-        sprint (`_reserve`), and each later step has its own id derived from it, so a repeat of a
-        request that failed part-way finishes it and opens nothing, and a repeat of a finished one
-        answers the same session. Resolves of one installation are serialized under the service lock
+        `default`. The new session is titled with the sprint's ref (`sprint:<N>`). And then, in this
+        order: its seeding message is queued as its first input, the sprint gets a comment saying so,
+        and the sprint records the new session. The request id binds the sprint (`_reserve`), and each
+        later step has its own id derived from it, so a repeat of a request that failed part-way
+        finishes it and opens nothing, and a repeat of a finished one answers the same session. Resolves of one installation are serialized under the service lock
         and read the sprint's session inside it, so two resolves for one sprint open one session.
 
         Accepted from the session's claim on; it is answered only once the sprint records the session,
@@ -577,6 +578,7 @@ class PoService:
                 efforts=efforts,
                 operation=SPRINT_SESSION,
                 fingerprint=fingerprint,
+                title=sprint.ref,
             )
             self._reseed(sprints, sprint, session.session_id, request_id)
             answer = {"session_id": session.session_id, "created": True, "repeated": False}
@@ -690,6 +692,16 @@ class PoService:
                 )
             session = self.store.close_session(session_id, _required(actor, "actor"))
         return {"session_id": session.session_id, "state": session.state}
+
+    def rename_session(self, *, session_id: str, title: str) -> dict[str, Any]:
+        """Set a session's title, open or closed; an empty one clears it. A repeat sets the same value.
+
+        No request id: the write is idempotent by its value. The rule is the store's (`session_title`).
+        """
+        if not isinstance(title, str):
+            raise Refused("validation", "title is text; an empty one clears it")
+        session = self.store.set_title(_required(session_id, "session_id"), title)
+        return {"session_id": session.session_id, "title": session.title}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -841,6 +853,8 @@ def _refusal(exc: Exception, *, nothing_written: bool) -> dict[str, Any]:
         code = exc.code
     elif isinstance(exc, SessionNotFound):
         code = "session_not_found"
+    elif isinstance(exc, TitleRefused):
+        code = "validation"
     elif isinstance(exc, SessionClosed):
         code = "session_closed"
     elif isinstance(exc, RequestConflict):
@@ -861,6 +875,7 @@ _OPERATIONS = {
     "submit": "submit",
     "stop_turn": "stop_turn",
     "close_session": "close_session",
+    "rename_session": "rename_session",
     "sprint_session": "sprint_session",
     "status": "status",
     "restart": "request_restart",

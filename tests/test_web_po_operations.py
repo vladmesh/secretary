@@ -733,6 +733,7 @@ class PoWebOperationTests(unittest.TestCase):
             set(first),
             {
                 "session_id",
+                "title",
                 "cli",
                 "model",
                 "created_at",
@@ -1159,6 +1160,150 @@ class PoWebOperationTests(unittest.TestCase):
         opened = self.post("/po/sessions", self.new_session_form(page))
         self.assertEqual(opened.status, 303)
         self.assertNotEqual(opened.headers["Location"].rsplit("/", 1)[1], session_id)
+
+    # --- the session title (secretary-1782) ---------------------------------------------------
+
+    def rename(self, session_id: str, title: str):
+        return self.post(f"/po/sessions/{session_id}/title", [("title", title)])
+
+    def test_the_store_sets_a_title_by_one_rule(self) -> None:
+        session_id = self.create()
+        for given, stored in (("  Roadmap  ", "Roadmap"), ("Roadmap", "Roadmap"), ("   ", None)):
+            with self.subTest(given=given):
+                self.assertEqual(self.store.set_title(session_id, given).title, stored)
+                self.assertEqual(self.store.session(session_id).title, stored)
+        self.store.set_title(session_id, "kept")
+        for given in ("two\nlines", "x" * 121):
+            with self.subTest(given=given), self.assertRaises(po_store.TitleRefused):
+                self.store.set_title(session_id, given)
+        self.assertEqual(self.store.session(session_id).title, "kept")
+        with self.assertRaises(po_store.SessionNotFound):
+            self.store.set_title("no-such", "t")
+        self.assertEqual(self.close(session_id).status, 303)
+        self.assertEqual(self.store.set_title(session_id, "after close").title, "after close")
+        self.assertEqual(self.store.sessions(po_store.SESSION_CLOSED)[0].title, "after close")
+
+    def test_the_title_form_renames_the_session_and_every_read_shows_it(self) -> None:
+        titled = self.create(request_id="create-titled")
+        untitled = self.create(request_id="create-untitled")
+        self.assertEqual(self.send(titled, "the first thing I said", "m-1").status, 303)
+        self.settle(titled)
+        page = self.page(titled)
+        self.assertIn(f'action="/po/sessions/{titled}/title"', page)
+        self.assertIn('name="title"', page)
+
+        response = self.rename(titled, "  Sprint <planning>  ")
+
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.headers["Location"], f"/po/sessions/{titled}")
+        self.assertEqual(self.document(titled)["session"]["title"], "Sprint <planning>")
+        self.assertIsNone(self.document(untitled)["session"]["title"])
+        page = self.page(titled)
+        self.assertIn(f'<h1>Sprint &lt;planning&gt; <span class="id">{titled[:8]}</span></h1>', page)
+        self.assertIn('value="Sprint &lt;planning&gt;"', page)
+        self.assertIn(f"<h1>PO session {untitled[:8]}</h1>", self.page(untitled))
+        listing = self.get("/po").body.decode()
+        self.assertIn(
+            f'<li class="titled"><a class="title" href="/po/sessions/{titled}">Sprint &lt;planning&gt;</a>'
+            '<div class="first">the first thing I said</div><div class="meta">',
+            listing,
+        )
+        # An untitled row is as it was: the first message is its link.
+        self.assertIn(
+            f'<li><a class="title" href="/po/sessions/{untitled}"><span class="empty">no message yet</span></a>',
+            listing,
+        )
+        self.assertEqual(self.layer.po_overview()["sessions"][0]["title"], "Sprint <planning>")
+
+        # A repeat is the same answer; an empty title clears it.
+        self.assertEqual(self.rename(titled, "Sprint <planning>").status, 303)
+        self.assertEqual(self.rename(titled, "").status, 303)
+        self.assertIsNone(self.document(titled)["session"]["title"])
+        self.assertIn(f"<h1>PO session {titled[:8]}</h1>", self.page(titled))
+
+    def test_a_refused_title_renders_the_session_with_the_reason_and_the_text_kept(self) -> None:
+        session_id = self.create()
+        self.rename(session_id, "kept")
+
+        response = self.rename(session_id, "z" * 121)
+
+        self.assertEqual(response.status, 400)
+        page = response.body.decode()
+        self.assertIn("title not saved (validation).", page)
+        self.assertIn("at most 120 characters", page)
+        self.assertIn(f'value="{"z" * 121}"', page)
+        self.assertEqual(self.store.session(session_id).title, "kept")
+        self.assertEqual(self.rename("no-such", "t").status, 404)
+        self.assertEqual(
+            self.post(f"/po/sessions/{session_id}/title", [("title", "t"), ("seq", "1")]).status, 400
+        )
+        self.assertEqual(self.store.session(session_id).title, "kept")
+
+    def test_a_closed_session_is_renamed_from_its_page(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.close(session_id).status, 303)
+        self.assertIn(f'action="/po/sessions/{session_id}/title"', self.page(session_id))
+
+        self.assertEqual(self.rename(session_id, "archived").status, 303)
+
+        self.assertEqual(self.store.session(session_id).title, "archived")
+        listed = self.app.handle("GET", "/po", query="closed=1", headers=self.headers())
+        self.assertIn(f'href="/po/sessions/{session_id}">archived</a>', listed.body.decode())
+
+    def po_rename_cli(self, *arguments: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+        import contextlib
+        import io
+
+        from secretary.cli import main
+
+        out, err = io.StringIO(), io.StringIO()
+        environment = {key: value for key, value in os.environ.items() if key != "SECRETARY_PO_SESSION"}
+        with (
+            mock.patch.dict(os.environ, {**environment, **(env or {})}, clear=True),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            status = main(
+                ["po", "rename", "--instance", str(self.root), "--data-dir", str(self.data), *arguments]
+            )
+        return status, out.getvalue(), err.getvalue()
+
+    def test_the_cli_renames_the_named_session_or_the_turns_own(self) -> None:
+        named = self.create(request_id="create-named")
+        own = self.create(request_id="create-own")
+
+        status, out, _ = self.po_rename_cli("--title", "Named", "--session", named)
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            json.loads(out), {"kind": "po_session_renamed", "session_id": named, "title": "Named"}
+        )
+        # Inside a PO turn the session comes from the turn's environment; a repeat changes nothing.
+        for _ in range(2):
+            status, out, _ = self.po_rename_cli("--title", "Own", env={"SECRETARY_PO_SESSION": own})
+            self.assertEqual((status, json.loads(out)["session_id"]), (0, own))
+        self.assertEqual((self.store.session(named).title, self.store.session(own).title), ("Named", "Own"))
+
+    def test_the_cli_refuses_with_the_reason_and_web_runs_statuses(self) -> None:
+        session_id = self.create()
+        self.store.set_title(session_id, "kept")
+        for arguments, status, code in (
+            (("--title", "t"), 2, "validation"),
+            (("--title", "a\nb", "--session", session_id), 2, "validation"),
+            (("--title", "t", "--session", "no-such"), 2, "not_found"),
+        ):
+            with self.subTest(arguments=arguments):
+                answered, out, err = self.po_rename_cli(*arguments)
+                self.assertEqual((answered, out), (status, ""))
+                self.assertEqual(json.loads(err)["error"]["code"], code)
+        self.assertEqual(self.store.session(session_id).title, "kept")
+        # No PO service listening under this data dir: the backend status, nothing written.
+        elsewhere = self.root / "no-service"
+        elsewhere.mkdir()
+        answered, _, err = self.po_rename_cli(
+            "--title", "t", "--session", session_id, "--data-dir", str(elsewhere)
+        )
+        self.assertEqual((answered, json.loads(err)["error"]["code"]), (1, "backend_unavailable"))
+        self.assertEqual(self.store.session(session_id).title, "kept")
 
 
 if __name__ == "__main__":

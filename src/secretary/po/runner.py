@@ -317,14 +317,22 @@ class PoRunner:
         efforts: Mapping[str, tuple[str, ...]] | None = None,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
+        title: str | None = None,
     ) -> tuple[Session, bool]:
         """`create_session` under a form's request id; the flag says whether this call created it.
 
         `operation` and `fingerprint` bind the id to another operation that opens a session
-        (`PoStore.claim_session`).
+        (`PoStore.claim_session`); `title` is the new session's (the resolver's `sprint:<N>`).
         """
         return self._create(
-            cli, model, effort, request_id, efforts=efforts, operation=operation, fingerprint=fingerprint
+            cli,
+            model,
+            effort,
+            request_id,
+            efforts=efforts,
+            operation=operation,
+            fingerprint=fingerprint,
+            title=title,
         )
 
     def _create(
@@ -337,6 +345,7 @@ class PoRunner:
         efforts: Mapping[str, tuple[str, ...]] | None = None,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
+        title: str | None = None,
     ) -> tuple[Session, bool]:
         if cli not in CLIS:
             raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
@@ -356,6 +365,7 @@ class PoRunner:
             effort=effort,
             operation=operation,
             fingerprint=fingerprint,
+            title=title,
         )
 
     def files(self, session_id: str, seq: int) -> TurnFiles:
