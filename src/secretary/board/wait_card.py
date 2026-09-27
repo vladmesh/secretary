@@ -64,9 +64,8 @@ WAITING = "waiting"
 RESULT_READY = "result_ready"
 DELIVERED = "delivered"
 
-#: A delivery record's status: the receiving side took it, or refused it for good (a closed session).
+#: A delivery record's one status: the receiving side took it. Nothing is recorded before that.
 ACCEPTED = "accepted"
-REFUSED = "refused"
 
 #: How long consecutive transient source errors (network, 5xx, rate limit) may last before the wait
 #: ends as `source_unreachable`. Never past the deadline, which ends it first.
@@ -393,8 +392,11 @@ class WaitState:
     error_at: str = ""
     # {outcome, fact, summary, evidence, frozen_at, key}; None until the first terminal fact.
     result: dict[str, Any] | None = None
-    # address -> {status, at, detail}
+    # address -> {status, at, detail[, session]}; `session` is the PO session that took it.
     deliveries: dict[str, dict[str, str]] = field(default_factory=dict)
+    # po-session address -> {replaces, via, session}: the successor of a closed or missing session,
+    # its route recorded before it is opened and its id right after, so a repeat opens no second one.
+    successors: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -406,6 +408,7 @@ class WaitState:
             "error_at": self.error_at,
             "result": self.result,
             "deliveries": self.deliveries,
+            "successors": self.successors,
         }
 
     def text(self) -> str:
@@ -419,6 +422,7 @@ class WaitState:
         if not (isinstance(result, Mapping) and result.get("outcome") in OUTCOMES and result.get("key")):
             result = None
         deliveries = payload.get("deliveries")
+        successors = payload.get("successors")
         return cls(
             **{key: str(payload.get(key) or "") for key in ("since", "observed_at", "observation", "error")},
             error_since=str(payload.get("error_since") or ""),
@@ -427,7 +431,12 @@ class WaitState:
             deliveries={
                 str(address): {key: str(value) for key, value in record.items()}
                 for address, record in (deliveries.items() if isinstance(deliveries, Mapping) else ())
-                if isinstance(record, Mapping) and record.get("status") in (ACCEPTED, REFUSED)
+                if isinstance(record, Mapping) and record.get("status") == ACCEPTED
+            },
+            successors={
+                str(address): {key: str(value) for key, value in record.items()}
+                for address, record in (successors.items() if isinstance(successors, Mapping) else ())
+                if isinstance(record, Mapping) and record.get("replaces") and record.get("via")
             },
         )
 
@@ -487,6 +496,16 @@ def wait_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         ),
         "delivery": "pending" if any(status == "pending" for status in deliveries.values()) else "complete",
         "deliveries": deliveries,
+        # Each PO address: the session it names, and the one that took the result (its successor
+        # when the named one was closed or missing), or None while it has not been taken.
+        "po_sessions": {
+            address: {
+                "addressed": address[len(PO_SESSION_PREFIX) :],
+                "received_by": (state.deliveries.get(address) or {}).get("session") or None,
+            }
+            for address in spec.returns
+            if address.startswith(PO_SESSION_PREFIX)
+        },
         "cancel": wait_cancel(task),
     }
 
@@ -501,7 +520,6 @@ __all__ = [
     "OBSERVER",
     "OUTCOMES",
     "PO_SESSION_PREFIX",
-    "REFUSED",
     "RESULT_READY",
     "SOURCE_UNREACHABLE",
     "TARGET_CARD",

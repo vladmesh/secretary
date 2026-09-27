@@ -467,9 +467,20 @@ of the outcome and the fact), before anything is delivered, and it is never over
 - `source_unreachable`: GitHub answered 404, 410, or 403 that is not a rate limit (no access); or the
   named card does not exist. Transient errors (no answer, 5xx, 429, a 403 rate limit, a card read that
   failed) do not end the wait: each is recorded as the last error and retried next tick, and once
-  consecutive errors have lasted the transient window, the wait ends `source_unreachable`. A deadline
-  that comes first ends it `deadline_passed` instead: the window never runs past the deadline;
+  consecutive errors have lasted the transient window, the wait ends `source_unreachable`;
 - `deadline_passed`: the deadline passed with no result.
+
+The deadline is the cutoff, enforced in one place, the function that freezes a result
+(`_settle` in `dispatch/wait_cards.py`); every observation (the cancel, the run, the card, the time,
+a definitive answer and an expired transient window) reaches it as a candidate. Before the deadline the
+first candidate is frozen as it is. At or past the deadline the only outcome frozen is
+`deadline_passed`, with one exception: a `target_reached` whose own source time puts it at or before
+the deadline. That time is the completed run's `updated_at` (a completed run is not updated again
+unless it is rerun, which makes it not completed), the `occurred_at` of the card's latest audited
+transition into the state it reached, or the target time itself. A cancel, a 404/410/403 or a transient
+window that ran out, observed after the deadline, is `deadline_passed`, never its own outcome; so is a
+run that completed after the deadline however long the dispatcher was away. The result then records
+what was seen after the deadline (`seen_after_deadline`).
 
 **Delivery.** Every delivery is keyed by (card, address, frozen result key) and recorded in
 `wait_state.deliveries` only after the receiving side accepted it. A crash in between repeats it under
@@ -479,9 +490,21 @@ the same key, and the receiving side makes the repeat a no-op:
   id `dispatcher-wait-po-<card>-po-session-<id>-<key>`, carrying the card ref, the target, the outcome,
   the result and the evidence link, with the facts `{card_ref, kind: wait, touches_production: null,
   sprint_ref, input: wait_outcome}` (a wait may belong to no sprint, and it gets no rights section). A
-  service that does not answer postpones the delivery to the next tick (`wait-delivery-postponed`,
-  degraded) and never loses or duplicates it; a closed or unknown session refuses it for good, which is
-  recorded as `refused` and named in the card's completion comment;
+  service that does not answer, or refuses, postpones the delivery to the next tick
+  (`wait-delivery-postponed`, degraded); it is never lost or duplicated, and the only delivery status is
+  `accepted`. A session that is **closed or missing** never swallows the result: the dispatcher opens one
+  successor and delivers there, under the same delivery request id (a submit to a closed session
+  reserves nothing). The sprint's own session (the wait card is in a sprint whose recorded, open
+  `po_session` is the one addressed) is succeeded through `sprint_session`, which opens the successor,
+  seeds it and records it on the sprint. Any other session is succeeded through `create_session` with
+  the closed session's CLI, model and effort; an effort no longer offered gives way to the first one
+  offered for that CLI, and a missing session takes the new-session form's defaults, the rule
+  `sprint_session` applies (`po.models.successor_choice`). The route is written to
+  `wait_state.successors` before the call and the successor's id right after it, and the call's request
+  id is `dispatcher-wait-po-successor-<card>-<closed session>-<key>`, so a repeat after a crash takes the
+  same route and opens no second successor. A successor that is itself closed before it takes the
+  input gets its own successor the same way. The delivery record names the session that took the
+  result (`session`), and the completion comment says `taken by PO session <id>`;
 - `dependents`: every card whose `blocked_by` names the wait card gets one dispatcher comment
   `[wait:<outcome>] <wait card>` with the result (request id `dispatcher-wait-dependent-comment-<wait
   card>-<card>-<key>`). On `target_reached` that is all: the card becomes claimable. On any other
@@ -517,7 +540,9 @@ a wait with a frozen result `already_settled` (that result stands).
 **`task show`.** A wait card carries one block, `wait`, in `task show` and `task list`: `state`, the
 `target` (with `link` for a run), `waiting_since`, `deadline`, `return_to`, `last_observation` (`at`,
 `text`), `last_error` (`at`, `since`, `text`), the `result`, `delivery` (`pending`/`complete`), per-address
-`deliveries` and `cancel`. `state` is `waiting` (nothing frozen), `result_ready` (`target_reached`
+`deliveries`, `po_sessions` (per PO address: the `addressed` session and the one that took the result,
+`received_by`, which is a successor when the addressed one was closed or missing, or `null` until
+taken) and `cancel`. `state` is `waiting` (nothing frozen), `result_ready` (`target_reached`
 frozen, delivery not complete), `delivered` (every address accepted), or the outcome itself:
 `cancelled`, `deadline_passed`, `source_unreachable`.
 

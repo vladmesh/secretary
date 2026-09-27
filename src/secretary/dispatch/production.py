@@ -930,13 +930,16 @@ class _ProbeHost:
 
 
 class _ProbePo:
-    """Stands in for the PO channel. Reading the PO store passes; a resolve or a submit aborts."""
+    """Stands in for the PO channel. Reading the PO store passes; a resolve, a create or a submit aborts."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
 
     def sprint_session(self, **kwargs: Any) -> Any:
         raise ProbeAbort("po-sprint-session", {"sprint": kwargs.get("sprint_ref", "")})
+
+    def create_session(self, **kwargs: Any) -> Any:
+        raise ProbeAbort("po-create-session", {"request": kwargs.get("request_id", "")})
 
     def submit(self, **kwargs: Any) -> Any:
         raise ProbeAbort("po-submit", {"session": kwargs.get("session_id", "")})

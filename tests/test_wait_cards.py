@@ -54,7 +54,7 @@ from secretary.dispatch.types import HostError
 from secretary.dispatch.wait_cards import advance_wait_card, delivery_request_id, pending_wait_blockers
 from secretary.po import store as po_store
 from secretary.po.client import ServiceUnavailable
-from secretary.po.store import RequestConflict, SessionClosed
+from secretary.po.store import RequestConflict, SessionClosed, SessionNotFound
 from secretary.tasks import TaskError, TaskWriter
 from tests.po_card_fakes import DispatcherFixture, Forbidden, SprintView
 from tests.po_fake_store import FakePoStore
@@ -219,6 +219,20 @@ class WaitBoard:
             "2026-09-27T12:05:00Z", by, by, reason
         )
 
+    def transition(self, reference: str, column: str, at: str) -> None:
+        """Another writer moves a card; the audit records when (a released `moved` event)."""
+        self.log.append(
+            {
+                "request_id": f"move-{reference}-{column}-{at}",
+                "ref": reference,
+                "kind": "moved",
+                "outcome": "success",
+                "payload": {"from": self.cards[reference]["state"], "to": column},
+                "occurred_at": at,
+            }
+        )
+        self.cards[reference]["state"] = column
+
     def moves(self, reference: str) -> list[dict[str, Any]]:
         return [event for event in self.log if event["kind"] == "move" and event["ref"] == reference]
 
@@ -260,13 +274,24 @@ class ReadOnlyGitHub:
 
 
 class FakePo:
-    """The PO channel, deduplicating inputs by request id as `PoService.submit` does."""
+    """The PO channel as `PoService` answers it: inputs, sessions and the sprint resolver, by request id.
 
-    def __init__(self, *, down: int = 0, closed: tuple[str, ...] = ()) -> None:
+    `submit` deduplicates inputs by request id, and a closed or missing session refuses one before
+    anything is reserved; `create_session` and `sprint_session` answer a repeated request id with the
+    session it already made. `rows` are the sessions' CLI, model and effort.
+    """
+
+    def __init__(self, *, down: int = 0, closed: tuple[str, ...] = (), missing: tuple[str, ...] = ()) -> None:
         self.inputs: dict[str, dict[str, Any]] = {}
         self.submits: list[str] = []
         self.down = down
-        self.closed = set(closed)
+        self.sessions = {SESSION: "open", **{session: "closed" for session in closed}}
+        for session in missing:
+            self.sessions.pop(session, None)
+        self.rows = {session: ("codex", "gpt-6-sol", "xhigh") for session in self.sessions}
+        self.opened: dict[str, str] = {}
+        self.creates: list[dict[str, str]] = []
+        self.resolves: list[dict[str, str]] = []
 
     def submit(
         self, *, session_id: str, text: str, request_id: str, source: str, card: dict
@@ -275,16 +300,39 @@ class FakePo:
         if self.down:
             self.down -= 1
             raise ServiceUnavailable("the PO service is not running (secretary-po.service)")
-        if session_id in self.closed:
-            raise SessionClosed(f"PO session {session_id} is closed")
-        assert not facts_problem(card), facts_problem(card)
         known = self.inputs.get(request_id)
         if known is not None:
             if (known["session_id"], known["text"], known["card"]) != (session_id, text, card):
                 raise RequestConflict(f"request id {request_id} is bound to another input")
             return {"session_id": session_id, "queued": True, "repeated": True}
+        if session_id not in self.sessions:
+            raise SessionNotFound(f"there is no PO session {session_id}")
+        if self.sessions[session_id] == "closed":
+            raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
+        assert not facts_problem(card), facts_problem(card)
         self.inputs[request_id] = {"session_id": session_id, "text": text, "source": source, "card": card}
         return {"session_id": session_id, "queued": True, "repeated": False}
+
+    def _open(self, request_id: str) -> dict[str, Any]:
+        if request_id in self.opened:
+            return {"session_id": self.opened[request_id], "created": True, "repeated": True}
+        session = f"successor-{len(self.opened) + 1}"
+        self.sessions[session] = "open"
+        self.opened[request_id] = session
+        return {"session_id": session, "created": True, "repeated": False}
+
+    def create_session(self, *, cli: str, model: str, effort: str, request_id: str) -> dict[str, Any]:
+        self.creates.append({"cli": cli, "model": model, "effort": effort, "request_id": request_id})
+        answer = self._open(request_id)
+        self.rows[answer["session_id"]] = (cli, model, effort)
+        return answer
+
+    def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
+        self.resolves.append({"sprint_ref": sprint_ref, "request_id": request_id})
+        return self._open(request_id)
+
+    def successor_choice(self, session_id: str) -> tuple[str, str, str] | None:
+        return self.rows.get(session_id) or ("claude", "fable", "high")
 
     def request(self, request_id: str) -> None:
         return None
@@ -742,9 +790,12 @@ class TargetReachedTests(DispatcherCase):
         )
         self.claim()
         self.assertEqual(self.board.wait_state().observation, "secretary-7 is validate")
-        self.board.cards["secretary-7"]["state"] = "blocked"
+        self.board.transition("secretary-7", "blocked", "2026-09-27T12:10:00Z")
         self.assertEqual(self.tick()["action"], "wait-target-reached")
-        self.assertEqual(self.board.wait_state().result["fact"], {"ref": "secretary-7", "state": "blocked"})
+        self.assertEqual(
+            self.board.wait_state().result["fact"],
+            {"ref": "secretary-7", "state": "blocked", "entered_at": "2026-09-27T12:10:00Z"},
+        )
 
         self.arrange(spec(until="2026-09-27T12:30:00Z"))
         self.assertEqual(self.claim()["action"], "wait-waiting")
@@ -892,6 +943,40 @@ class RealPoServiceDeliveryTests(DispatcherFixture):
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 1)
         [call] = [call for call in self.calls() if "Wait card" in json.dumps(call)]
         self.assertIn("Conclusion: failure", json.dumps(call))
+
+    def test_a_closed_session_is_succeeded_and_the_successor_takes_the_same_delivery_id(self) -> None:
+        service = self.start()
+        closed = self.session(service)
+        service.close_session(session_id=closed, actor="owner")
+        self.enterContext(mock.patch("secretary.dispatch.wait_cards.utcnow", Clock()))
+        from secretary.dispatch.po_cards import ServicePoChannel
+
+        channel = ServicePoChannel(self.data, None)
+        channel._store = FakePoStore(self.board)
+        board = WaitBoard(wait_doc(spec(returns=(f"po-session:{closed}",), until="2026-09-27T12:00:00Z")))
+        runtime = SimpleNamespace(
+            owner="d",
+            reader=board,
+            writer=board,
+            audit=board,
+            po=channel,
+            host=Forbidden("host"),
+            save_records=None,
+            sprints=SimpleNamespace(show=lambda ref, **_: {"ref": ref, "status": "open", "po_session": None}),
+        )
+
+        outcome = claim_ready_task(runtime, board.show(WAIT), {}, {}, new_attempt_id())
+
+        self.assertEqual(outcome["action"], "wait-target-reached")
+        record = wait_card.wait_state(board.cards[WAIT]).deliveries[f"po-session:{closed}"]
+        successor = record["session"]
+        self.assertNotEqual(successor, closed)
+        store = FakePoStore(self.board)
+        before, after = store.session(closed), store.session(successor)
+        self.assertEqual((after.cli, after.model, after.effort), (before.cli, before.model, before.effort))
+        self.settled(successor, 1)
+        self.assertEqual((len(store.turns(closed)), len(store.turns(successor))), (0, 1))
+        self.assertEqual(store.request(record["detail"]).session_id, successor)
 
 
 class OtherOutcomeTests(DispatcherCase):
@@ -1060,16 +1145,195 @@ class OtherOutcomeTests(DispatcherCase):
         self.assertEqual(len(set(self.po.submits)), 1)
         self.assertEqual(len(self.po.inputs), 1)
 
-    def test_a_closed_session_refuses_it_for_good_and_the_card_still_ends(self) -> None:
+
+class DeadlineTests(DispatcherCase):
+    """The deadline is the cutoff: past it, only `deadline_passed`, unless the source proves otherwise."""
+
+    def run_seen_late(self, updated_at: str) -> None:
+        completed = {**run("completed", "failure"), "updated_at": updated_at}
+        self.arrange(spec(deadline="30m"), github=ReadOnlyGitHub(run("in_progress"), completed))
+        self.claim()
+        # The dispatcher did not tick again until an hour later.
+        self.clock.at(hours=1)
+        self.tick()
+
+    def test_a_run_that_completed_after_the_deadline_is_deadline_passed(self) -> None:
+        self.run_seen_late("2026-09-27T12:45:00Z")
+        self.assertEndedBlocked(DEADLINE_PASSED)
+        result = self.board.wait_state().result
+        self.assertEqual(result["fact"]["seen_after_deadline"], TARGET_REACHED)
+        self.assertIn("seen after it: run", result["summary"])
+
+    def test_a_run_whose_completion_time_is_before_the_deadline_is_target_reached(self) -> None:
+        for updated_at in ("2026-09-27T12:20:00Z", "2026-09-27T12:30:00Z"):
+            with self.subTest(updated_at=updated_at):
+                self.clock.at()
+                self.run_seen_late(updated_at)
+                self.assertEqual(self.board.wait_state().result["outcome"], TARGET_REACHED)
+                self.assertEqual([move["to"] for move in self.board.moves(WAIT)], ["done"])
+
+    def test_a_404_first_seen_after_the_deadline_is_deadline_passed(self) -> None:
         self.arrange(
-            spec(returns=(f"po-session:{SESSION}",), until="2026-09-27T12:00:00Z"),
-            po=FakePo(closed=(SESSION,)),
+            spec(deadline="30m"), github=ReadOnlyGitHub(run("queued"), ("http", "gh: Not Found (HTTP 404)"))
         )
         self.claim()
-        record = self.board.wait_state().deliveries[f"po-session:{SESSION}"]
-        self.assertEqual(record["status"], "refused")
+        self.clock.at(minutes=31)
+        self.tick()
+        self.assertEndedBlocked(DEADLINE_PASSED)
+
+    def test_a_transient_window_or_a_cancel_seen_after_the_deadline_is_deadline_passed(self) -> None:
+        self.arrange(
+            build_wait_spec(
+                run=RUN_URL,
+                deadline="30m",
+                returns=["observer"],
+                transient_window="10m",
+                sprint=SPRINT,
+                now=T0,
+            ),
+            github=ReadOnlyGitHub(("down", "reset")),
+        )
+        self.claim()
+        self.clock.at(minutes=45)
+        self.tick()
+        self.assertEndedBlocked(DEADLINE_PASSED)
+
+        self.arrange(spec(deadline="30m"))
+        self.claim()
+        self.board.cancel(WAIT, "withdrawn")
+        self.clock.at(minutes=40)
+        self.tick()
+        self.assertEndedBlocked(DEADLINE_PASSED)
+
+    def test_a_card_event_counts_by_the_time_the_audit_gives_its_transition(self) -> None:
+        for entered, outcome in (
+            ("2026-09-27T12:25:00Z", TARGET_REACHED),
+            ("2026-09-27T12:35:00Z", DEADLINE_PASSED),
+        ):
+            with self.subTest(entered=entered):
+                self.clock.at()
+                self.arrange(
+                    spec(card="secretary-7", states="done", deadline="30m"), plain_doc("secretary-7")
+                )
+                self.claim()
+                self.board.transition("secretary-7", "done", entered)
+                self.clock.at(hours=1)
+                self.tick()
+                self.assertEqual(self.board.wait_state().result["outcome"], outcome)
+
+    def test_a_time_target_at_or_before_the_deadline_is_reached_however_late_it_is_seen(self) -> None:
+        self.arrange(spec(until="2026-09-27T12:30:00Z", deadline="30m"))
+        self.clock.at(hours=2)
+        self.claim()
+        self.assertEqual(self.board.wait_state().result["outcome"], TARGET_REACHED)
+
+    def test_every_observation_goes_through_the_one_freezing_function(self) -> None:
+        from secretary.dispatch import wait_cards
+
+        cases = (
+            (spec(), ReadOnlyGitHub(run("completed", "success"))),
+            (spec(), ReadOnlyGitHub(("http", "gh: Not Found (HTTP 404)"))),
+            (spec(until="2026-09-27T12:00:00Z"), None),
+            (spec(card="secretary-77", states="done"), None),
+        )
+        for the_spec, github in cases:
+            with self.subTest(target=the_spec.target.kind):
+                self.clock.at()
+                self.arrange(the_spec, github=github)
+                with mock.patch.object(wait_cards, "_settle", wraps=wait_cards._settle) as settle:
+                    self.claim()
+                self.assertEqual(settle.call_count, 1)
+                self.assertIsNotNone(self.board.wait_state().result)
+
+
+class ClosedSessionTests(DispatcherCase):
+    """A closed or missing return session never swallows a result: it gets one successor."""
+
+    ADDRESS = f"po-session:{SESSION}"
+
+    def arrange_closed(self, **po: Any) -> None:
+        self.arrange(spec(returns=(self.ADDRESS, "observer"), until="2026-09-27T12:00:00Z"), po=FakePo(**po))
+
+    def assertTakenOnceBySuccessor(self) -> None:
+        [delivered] = self.po.inputs.values()
+        self.assertEqual(delivered["session_id"], "successor-1")
+        self.assertEqual(set(self.po.opened.values()), {"successor-1"})
+        record = self.board.wait_state().deliveries[self.ADDRESS]
+        self.assertEqual((record["status"], record["session"]), ("accepted", "successor-1"))
+        self.assertEqual(
+            wait_view(self.board.show(WAIT))["po_sessions"],
+            {self.ADDRESS: {"addressed": SESSION, "received_by": "successor-1"}},
+        )
         [move] = self.board.moves(WAIT)
-        self.assertIn(f"po-session:{SESSION}: refused", move["reason"])
+        self.assertEqual(move["to"], "done")
+        self.assertIn(f"{self.ADDRESS}: accepted", move["reason"])
+        self.assertIn("taken by PO session successor-1", move["reason"])
+
+    def test_a_closed_session_gets_a_successor_with_its_cli_model_and_effort(self) -> None:
+        for po in ({"closed": (SESSION,)}, {"missing": (SESSION,)}):
+            with self.subTest(po=po):
+                self.arrange_closed(**po)
+                self.claim()
+                self.assertTakenOnceBySuccessor()
+                [create] = self.po.creates
+                expected = ("codex", "gpt-6-sol", "xhigh") if "closed" in po else ("claude", "fable", "high")
+                self.assertEqual((create["cli"], create["model"], create["effort"]), expected)
+                self.assertEqual(self.po.resolves, [])
+
+    def test_a_crash_between_opening_the_successor_and_the_submit_repeats_nothing(self) -> None:
+        # Crash before the successor's id is on the card: the repeat asks again under the same id.
+        self.arrange_closed(closed=(SESSION,))
+        self.board.crash_before = lambda state: bool(
+            (state["successors"].get(self.ADDRESS) or {}).get("session")
+        )
+        with self.assertRaises(SimulatedCrash):
+            self.claim()
+        self.assertEqual((len(self.po.opened), self.po.inputs), (1, {}))
+        self.tick(self.runtime())
+        self.assertTakenOnceBySuccessor()
+        self.assertEqual(len({create["request_id"] for create in self.po.creates}), 1)
+
+        # Crash with the successor recorded, before the submit reached it: the repeat submits there.
+        self.clock.at()
+        self.arrange_closed(closed=(SESSION,))
+        original = self.po.submit
+
+        def dies_on_the_successor(**fields: Any) -> dict:
+            if fields["session_id"] == "successor-1":
+                self.po.submit = original
+                raise SimulatedCrash("died before the submit")
+            return original(**fields)
+
+        self.po.submit = dies_on_the_successor
+        with self.assertRaises(SimulatedCrash):
+            self.claim()
+        self.tick(self.runtime())
+        self.assertTakenOnceBySuccessor()
+        self.assertEqual(len(self.po.creates), 1)
+
+    def test_a_sprints_own_closed_session_goes_through_its_resolver(self) -> None:
+        self.arrange_closed(closed=(SESSION,))
+        runtime = self.runtime()
+        runtime.sprints = SimpleNamespace(
+            show=lambda ref, **_: {"ref": ref, "status": "open", "po_session": SESSION}
+        )
+        self.claim(runtime)
+        [resolve] = self.po.resolves
+        self.assertEqual(resolve["sprint_ref"], SPRINT)
+        self.assertEqual(self.po.creates, [])
+        self.assertEqual(self.board.wait_state().successors[self.ADDRESS]["via"], "sprint_session")
+        self.assertTakenOnceBySuccessor()
+
+    def test_a_po_service_that_cannot_open_the_successor_only_postpones(self) -> None:
+        self.arrange_closed(closed=(SESSION,))
+        self.po.create_session = mock.Mock(side_effect=ServiceUnavailable("not running"))
+        outcome = self.claim()
+        self.assertEqual((outcome["status"], outcome["action"]), ("degraded", "wait-delivery-postponed"))
+        self.assertEqual(self.board.cards[WAIT]["state"], "in_progress")
+        self.assertNotIn(self.ADDRESS, self.board.wait_state().deliveries)
+        del self.po.create_session
+        self.tick()
+        self.assertTakenOnceBySuccessor()
 
 
 class DependentsTests(DispatcherCase):
