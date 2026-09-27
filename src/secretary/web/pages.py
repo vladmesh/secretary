@@ -4252,12 +4252,19 @@ def po_session(
         turn_state = ""
     if queued:
         turn_state += " " + _chip(f"{len(queued)} queued", "accent")
+    last = turns[-1] if turns else {}
+    # What this page shows, as the session script's polling baseline: read from the page at load and
+    # from the page swapped in after that, never from the JSON that only says something changed.
+    polled = (
+        f'data-turns="{len(turns)}" data-last="{escape(str(last.get("state") or ""))}" '
+        f'data-queued="{len(queued)}" data-running="{"true" if running else "false"}"'
+    )
     body = "\n".join(
         [
             (
                 f'<div class="lead" id="po-head"><h1>PO session {escape(session_id[:8])}</h1>'
                 f"{_head('PO · ' + str(session.get('cli') or ''), _po_head(session), compact=True, unset_effort=PO_EFFORT_UNSET)}"
-                f'<span class="head-chip" id="po-turn-state">{turn_state}</span>'
+                f'<span class="head-chip" id="po-turn-state" {polled}>{turn_state}</span>'
                 f'<span class="age">{head}</span></div>'
             ),
             _po_refusal(refusal, refused),
@@ -4274,14 +4281,8 @@ def po_session(
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
-    last = turns[-1] if turns else {}
-    script = (
-        _PO_SESSION_SCRIPT.replace("__SESSION__", _js(session_id))
-        .replace("__BLOCKS__", "[" + ", ".join(f"'{block}'" for block in PO_SESSION_BLOCKS) + "]")
-        .replace("__RUNNING__", "true" if running else "false")
-        .replace("__TURNS__", str(len(turns)))
-        .replace("__LAST__", _js(str(last.get("state") or "")))
-        .replace("__QUEUED__", str(len(queued)))
+    script = _PO_SESSION_SCRIPT.replace("__SESSION__", _js(session_id)).replace(
+        "__BLOCKS__", "[" + ", ".join(f"'{block}'" for block in PO_SESSION_BLOCKS) + "]"
     )
     return _page(
         f"PO session {session_id[:8]}",
@@ -4382,33 +4383,47 @@ if (form && draft) {
   });
 }
 function say(text) { if (status) status.textContent = text; }
-// Read this page again and put its fresh blocks where the old ones are. Answers null when that worked,
-// else the reason, and then the page is left exactly as it was.
+// The polling baseline is what a page shows, carried by its #po-turn-state: the turn count, the last
+// turn's state, the queue length and whether a turn runs. Null when the page does not carry it whole.
+function shown(page) {
+  const element = page.getElementById('po-turn-state');
+  if (!element) return null;
+  const data = element.dataset;
+  const turns = Number(data.turns);
+  const queued = Number(data.queued);
+  if (data.turns === undefined || data.queued === undefined || data.last === undefined) return null;
+  if (!Number.isInteger(turns) || !Number.isInteger(queued)) return null;
+  if (data.running !== 'true' && data.running !== 'false') return null;
+  return { turns: turns, last: data.last, queued: queued, running: data.running === 'true' };
+}
+// Read this page again and put its fresh blocks where the old ones are. Answers the baseline the
+// swapped-in page shows, or the reason it could not, and then the page is left exactly as it was.
 async function swapBlocks() {
   let fresh;
   try {
     const response = await fetch(window.location.pathname, { cache: 'no-store' });
-    if (!response.ok) return String(response.status);
+    if (!response.ok) return { failed: String(response.status) };
     fresh = new DOMParser().parseFromString(await response.text(), 'text/html');
-  } catch (error) { return (error && error.message) || 'network error'; }
+  } catch (error) { return { failed: (error && error.message) || 'network error' }; }
   const pairs = BLOCKS.map((id) => [document.getElementById(id), fresh.getElementById(id), id]);
   const missing = pairs.find(([here, there]) => !here || !there);
-  if (missing) return 'the page has no #' + missing[2];
+  if (missing) return { failed: 'the page has no #' + missing[2] };
+  const state = shown(fresh);
+  if (!state) return { failed: 'the page does not say its turn state' };
   for (const [here, there] of pairs) here.outerHTML = there.outerHTML;
-  return null;
+  return { state: state };
 }
-// The baseline is what the page on screen shows: the rendered values at load, then the JSON that the
-// last in-place update answered, so a queued message whose turn starts is followed to its own end.
-let turns = __TURNS__;
-let last = '__LAST__';
-let queued = __QUEUED__;
 function waitingText(running) {
   return running
     ? 'the turn is running; this page updates when it ends'
     : 'the message is queued; this page updates when its turn starts';
 }
-if (__RUNNING__ || queued > 0) {
-  say(waitingText(__RUNNING__));
+// The JSON is only the cheap change detector. Whether to keep polling, and against what, is decided by
+// the page on screen alone: a turn that started between the JSON read and the page read is shown
+// running by the page, and is followed to its end.
+let seen = shown(document);
+if (seen && (seen.running || seen.queued > 0)) {
+  say(waitingText(seen.running));
   let busy = false;
   const timer = window.setInterval(async () => {
     if (busy) return;
@@ -4420,19 +4435,19 @@ if (__RUNNING__ || queued > 0) {
         if (!response.ok) { say('could not refresh (' + response.status + ')'); return; }
         doc = await response.json();
       } catch (error) { say('could not refresh (' + ((error && error.message) || 'network error') + ')'); return; }
-      const now = doc.last_turn ? doc.last_turn.state : '';
-      const count = (doc.turns || []).length;
-      const waiting = (doc.queued || []).length;
-      const running = Boolean(doc.running);
-      if ((running || waiting > 0) && count === turns && now === last && waiting === queued) return;
-      const failed = await swapBlocks();
+      const changed = (doc.turns || []).length !== seen.turns
+        || (doc.last_turn ? doc.last_turn.state : '') !== seen.last
+        || (doc.queued || []).length !== seen.queued
+        || Boolean(doc.running) !== seen.running;
+      if (!changed) return;
+      const swapped = await swapBlocks();
       // A failed read leaves the old baseline, so the next tick sees the same change and tries again.
-      if (failed) { say('could not refresh the answer (' + failed + ')'); return; }
-      turns = count; last = now; queued = waiting;
+      if (swapped.failed) { say('could not refresh the answer (' + swapped.failed + ')'); return; }
+      seen = swapped.state;
       // The turn a send started is over or under way, so the composer sends the next message again.
       submitted = false;
       if (button) button.disabled = false;
-      if (running || waiting > 0) { say('the page is up to date; ' + waitingText(running)); return; }
+      if (seen.running || seen.queued > 0) { say('the page is up to date; ' + waitingText(seen.running)); return; }
       window.clearInterval(timer);
       say('the answer arrived');
     } catch (error) {
