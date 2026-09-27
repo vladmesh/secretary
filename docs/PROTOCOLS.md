@@ -414,6 +414,116 @@ when it carries the mark, or `<card> (<kind>) is with the PO` otherwise. The Pip
 it, before the dispatcher's record, since no head runs such a card; every other answer of the section
 carries `card` as well (the sprint's current card, or null).
 
+### Wait cards
+
+A `wait` card (secretary-1790) waits for one external or board fact with no head and delivers its
+outcome to the return addresses its creator named, exactly once. The dispatcher advances it once per
+tick; there is no watcher process, background job or queue, and everything the wait knows is on the
+card, so a restarted dispatcher (or PO service) continues where the last one stopped. It is a
+no-candidate kind: no workspace, branch, pull request, CI, reviewer or broad check.
+
+**Create.** The PO, or the observer for its own sprint (`--sprint` required for the observer), runs
+`task create --type wait` with exactly one target, a deadline and at least one return address:
+
+| Flag | Meaning |
+| --- | --- |
+| `--wait-run <owner/repo> --wait-run-id <id>` or `--wait-run <run URL>` | a GitHub Actions run concluding (`https://github.com/<owner>/<repo>/actions/runs/<id>`) |
+| `--wait-card <ref> --wait-states <state>[,<state>]` | another card reaching one of the named states |
+| `--wait-until <UTC>` | a point in time, ISO-8601 with its zone; not after the deadline |
+| `--wait-deadline <UTC>\|<duration>` | required: an absolute time with its zone, or a duration from creation (`90m`, `2h`, `1d12h`); it must lie in the future |
+| `--wait-return <address>` | required, repeatable: `observer` (a card with `--sprint` only), `po-session:<id>` (a session the PO store holds and that is open), `dependents` |
+| `--wait-transient-window <duration>` | how long consecutive transient source errors may last before `source_unreachable`; default `30m` |
+
+A missing or malformed target, two targets, a missing deadline or one already past, an unknown or
+closed PO session and `observer` without a sprint are refused as `validation` (a PO store that cannot
+answer the session question as `po_store_unavailable`) with nothing written. As for decision and
+operation cards, a wait card refuses `--head`, `--review-head`, `--review required`, `--live-impact`,
+`--seed-ref` and `--base-branch`; its review is `skipped`, a sprint's executor pins do not apply, and
+every other kind refuses the `--wait-*` flags. It touches no repository, so no project reservation
+admits or refuses it, at create or at claim, and it takes no claim capacity. The create's request id
+binds the flags as given (`wait_request`), so a retry is a replay whatever the clock says.
+
+The spec is one typed field of the card's extension bag, `extensions.extra.wait` (JSON text: target,
+deadline, return addresses, `created_at`, `transient_window_seconds`), written once at create. Two more
+fields sit beside it: `wait_state`, written only by the dispatcher, and `wait_cancel`, written only by
+`task cancel`. No column; migration `0020_wait_card_kind` admits the kind in `task_type`'s CHECK.
+
+**Run.** Claiming a Ready wait card creates no workspace, launches no head and runs no broad check or
+Git preflight; the card moves to In progress, and every tick after that observes the target once. The
+dispatcher keeps no record for it. A GitHub run is only read, `GET repos/<repo>/actions/runs/<id>`
+through the gate's `gh api` (the CI gate's one read per tick); the wait never starts, reruns or
+dispatches a workflow, recovery included. `wait_state` holds when the wait started (`since`), the last
+observation and when it was first seen, the last error with the start of its run of consecutive
+failures (`error_since`), the frozen result, and one delivery record per address. It is rewritten only
+when one of those changes.
+
+**Result.** The first terminal fact observed is frozen into `wait_state.result`, with its key (a digest
+of the outcome and the fact), before anything is delivered, and it is never overwritten:
+
+- `target_reached`: the run completed, whatever its conclusion; a run concluding `failure` is still
+  `target_reached`, and the result carries the conclusion, `html_url` and timestamps. For a card, the
+  state it reached; for a time, the time;
+- `cancelled`: the card carries a cancel (below);
+- `source_unreachable`: GitHub answered 404, 410, or 403 that is not a rate limit (no access); or the
+  named card does not exist. Transient errors (no answer, 5xx, 429, a 403 rate limit, a card read that
+  failed) do not end the wait: each is recorded as the last error and retried next tick, and once
+  consecutive errors have lasted the transient window, the wait ends `source_unreachable`. A deadline
+  that comes first ends it `deadline_passed` instead: the window never runs past the deadline;
+- `deadline_passed`: the deadline passed with no result.
+
+**Delivery.** Every delivery is keyed by (card, address, frozen result key) and recorded in
+`wait_state.deliveries` only after the receiving side accepted it. A crash in between repeats it under
+the same key, and the receiving side makes the repeat a no-op:
+
+- `po-session:<id>`: one input to that session through `PoService.submit`, `source: dispatcher`, request
+  id `dispatcher-wait-po-<card>-po-session-<id>-<key>`, carrying the card ref, the target, the outcome,
+  the result and the evidence link, with the facts `{card_ref, kind: wait, touches_production: null,
+  sprint_ref, input: wait_outcome}` (a wait may belong to no sprint, and it gets no rights section). A
+  service that does not answer postpones the delivery to the next tick (`wait-delivery-postponed`,
+  degraded) and never loses or duplicates it; a closed or unknown session refuses it for good, which is
+  recorded as `refused` and named in the card's completion comment;
+- `dependents`: every card whose `blocked_by` names the wait card gets one dispatcher comment
+  `[wait:<outcome>] <wait card>` with the result (request id `dispatcher-wait-dependent-comment-<wait
+  card>-<card>-<key>`). On `target_reached` that is all: the card becomes claimable. On any other
+  outcome a Ready dependent is also moved to Blocked with the outcome as its reason. Until the wait
+  delivers, the claim pass leaves a Ready card whose `blocked_by` names a Ready or In progress wait card
+  in Ready (`blocked by pending wait <ref>`). Blockers of any other kind behave as before: the claim's
+  own predecessor rule;
+- `observer`: the wait card's terminal move, last, after every other address: Done for
+  `target_reached`, Blocked for every other outcome, with the result as the move's comment
+  (`[wait:<outcome>]`, the target, result, evidence and each address's delivery). The observer's wake on
+  a sprint card's Done or Blocked is the delivery. No outcome leaves the card In progress with nothing
+  happening, and only `target_reached` reaches Done.
+
+The dispatcher takes two edges for these cards only, and `task move` refuses them anywhere else: In
+progress → Done for a wait card whose frozen result is `target_reached`, and Ready → Blocked for a card
+whose `blocked_by` names a wait card. Both moves, like a wait card's Blocked, carry `wait_outcome` in
+their transition data: the outcome of a wait, not a pipeline restart, so the sprint budget does not
+charge them, and they do not close the sprint or the project to claims for the tick.
+
+**Cancel.**
+
+```text
+task cancel --ref <wait card> --role po|observer --reason <text>|--reason-file <file> [--request-id <id>]
+```
+
+The PO, or the observer of the card's own sprint, cancels a Ready or In progress wait card whose result
+is not frozen yet; the reason must be non-empty. One write: the `wait_cancel` field (when, who, the
+role, the reason) and a `[wait:cancel]` comment, in the transaction of one `wait_cancelled` audit record;
+idempotent under the request id. The card does not move there: the dispatcher's next tick freezes
+`cancelled` and delivers it like any other outcome. A second cancel is `already_cancelled`, a cancel of
+a wait with a frozen result `already_settled` (that result stands).
+
+**`task show`.** A wait card carries one block, `wait`, in `task show` and `task list`: `state`, the
+`target` (with `link` for a run), `waiting_since`, `deadline`, `return_to`, `last_observation` (`at`,
+`text`), `last_error` (`at`, `since`, `text`), the `result`, `delivery` (`pending`/`complete`), per-address
+`deliveries` and `cancel`. `state` is `waiting` (nothing frozen), `result_ready` (`target_reached`
+frozen, delivery not complete), `delivered` (every address accepted), or the outcome itself:
+`cancelled`, `deadline_passed`, `source_unreachable`.
+
+A wait card moved back to Ready by hand is claimed again, keeps its frozen result and its delivery
+records, and ends the same way at once: a wait is not restarted; cut a new one.
+
 ### Owner events and the bell
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`

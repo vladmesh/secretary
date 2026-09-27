@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from secretary.board.completion_evidence import has_candidate, is_po_executed, review_required
+from secretary.board.completion_evidence import has_candidate, is_po_executed, is_wait, review_required
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
@@ -161,6 +161,7 @@ from secretary.dispatch.types import (
     HostError,
 )
 from secretary.dispatch.types import DispatcherError as DispatcherError
+from secretary.dispatch.wait_cards import advance_wait_card as _advance_wait_card
 from secretary.dispatch.wait_vitality import wait_watchdog as _wait_watchdog
 from secretary.dispatch.watchdog import (
     head_process_status as _head_process_status,
@@ -460,6 +461,10 @@ class DispatcherRuntime:
             # A decision/operation card has no head, workspace or launch intent to settle: the PO
             # service executes it, and the dispatcher only submits it and watches the turn.
             return _advance_po_card(self, task, records, payload, attempt_id)
+        if is_wait(task):
+            # A wait card has no head either: the dispatcher observes its target and delivers its
+            # outcome itself (dispatch/wait_cards.py).
+            return _advance_wait_card(self, task, records, payload, attempt_id)
         # Staged usage obligations are deliberately not settled here: a card can finish its last
         # phase and leave `ACTIVE_STATES` in the same tick, so no per-card pass can be the site that
         # guarantees publication. `publish_pending_attempt_usage` owns that, over the whole pending

@@ -40,6 +40,7 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
 from secretary.dispatch.po_cards import completion_state
+from secretary.dispatch.wait_cards import pending_wait_blockers
 from secretary.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from secretary.dispatch.state import (
     DispatcherRecord,
@@ -56,7 +57,7 @@ from secretary.dispatch.state import (
 )
 from secretary.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.sprints import SprintWriter, budget_thresholds
-from secretary.tasks import ACTIVE_STATES, TaskError
+from secretary.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
 
 # Tick telemetry records terminal health for pipeline and steward readers.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
@@ -872,6 +873,9 @@ class _ProbeWriter:
     def routing(self, *args: Any, **kwargs: Any) -> None:
         raise ProbeAbort("routing", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
 
+    def record_wait_state(self, *args: Any, **kwargs: Any) -> None:
+        raise ProbeAbort("wait-state", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -1548,9 +1552,14 @@ def _production_claim_ready(
     skipped: list[dict[str, str]] = []
     sprint_cache: dict[str, dict[str, Any]] = {}
     sprint_errors: dict[str, str] = {}
+    blockers: dict[str, Any] = {}
     for task in _production_tasks(runtime, {"ready"}):
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
+            continue
+        # A card held by a wait card stays in Ready until the wait delivers its outcome to it.
+        if waits := pending_wait_blockers(runtime, task, blockers):
+            skipped.append({"ref": task["ref"], "reason": "blocked by pending wait " + ", ".join(waits)})
             continue
         if fenced_task(fence, task):
             skipped.append(
@@ -1834,6 +1843,9 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
         source = str(payload.get("from") or "")
     else:
         target = source = ""
+    if target and payload.get(WAIT_OUTCOME_KEY):
+        # A wait card's outcome, or a dependent it Blocked: not a pipeline restart (secretary-1790).
+        return None
     if target:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":

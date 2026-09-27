@@ -155,6 +155,7 @@ def add_task_subcommands(subparsers) -> None:
         help="operation only, and required there: the registered project whose production the card "
         "touches, or none; the PO service runs it only when the sprint allows that production",
     )
+    _add_wait_create_args(task_create)
     task_create.add_argument("--slug", default="")
     task_create.add_argument(
         "--base-branch",
@@ -274,6 +275,20 @@ def add_task_subcommands(subparsers) -> None:
     reason.add_argument("--reason", help="what the owner has to decide or do")
     reason.add_argument("--reason-file")
     task_handover.set_defaults(handler=run_task_handover)
+    task_cancel = task_subcommands.add_parser(
+        "cancel",
+        help="PO, or the observer of its own sprint: cancel a pending wait card; the dispatcher delivers "
+        "`cancelled` to its return addresses and Blocks it",
+    )
+    task_cancel.add_argument("--ref", required=True)
+    task_cancel.add_argument("--role", required=True, choices=(Role.PO.value, Role.OBSERVER.value))
+    task_cancel.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_cancel)
+    task_cancel.add_argument("--request-id")
+    cancel_reason = task_cancel.add_mutually_exclusive_group(required=True)
+    cancel_reason.add_argument("--reason", help="why the wait is cancelled")
+    cancel_reason.add_argument("--reason-file")
+    task_cancel.set_defaults(handler=run_task_cancel)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
     task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
@@ -307,6 +322,56 @@ def add_task_subcommands(subparsers) -> None:
     _add_data_dir_args(verify_audit)
     verify_audit.set_defaults(handler=run_task_verify_audit)
     task.set_defaults(handler=not_implemented_task)
+
+
+def _add_wait_create_args(parser) -> None:
+    """A wait card's create flags (docs/PROTOCOLS.md, "Wait cards"); every other kind refuses them."""
+    group = parser.add_argument_group("wait card (--type wait)")
+    group.add_argument(
+        "--wait-run",
+        default="",
+        metavar="OWNER/REPO|URL",
+        help="target: a GitHub Actions run, as owner/repo with --wait-run-id, or as the run's URL",
+    )
+    group.add_argument("--wait-run-id", default="", help="the run id when --wait-run names owner/repo")
+    group.add_argument("--wait-card", default="", metavar="REF", help="target: another card reaching a state")
+    group.add_argument(
+        "--wait-states", default="", metavar="STATE[,STATE]", help="the states --wait-card waits for, e.g. done,blocked"
+    )
+    group.add_argument("--wait-until", default="", metavar="UTC", help="target: a point in time, ISO-8601 with its zone")
+    group.add_argument(
+        "--wait-deadline",
+        default="",
+        metavar="UTC|DURATION",
+        help="required: when the wait ends as deadline_passed; an ISO-8601 UTC time or a duration from now (90m, 2h, 1d)",
+    )
+    group.add_argument(
+        "--wait-return",
+        action="append",
+        default=[],
+        metavar="ADDRESS",
+        help="required, repeatable: observer (a sprint's card only), po-session:<id> or dependents",
+    )
+    group.add_argument(
+        "--wait-transient-window",
+        default="",
+        metavar="DURATION",
+        help="how long consecutive transient source errors may last before source_unreachable (default 30m)",
+    )
+
+
+def _wait_args(args: argparse.Namespace) -> dict[str, object] | None:
+    wait = {
+        "run": args.wait_run,
+        "run_id": args.wait_run_id,
+        "card": args.wait_card,
+        "states": args.wait_states,
+        "until": args.wait_until,
+        "deadline": args.wait_deadline,
+        "returns": list(args.wait_return or ()),
+        "transient_window": args.wait_transient_window,
+    }
+    return wait if any(wait.values()) else None
 
 
 def _add_sprint_override_args(parser) -> None:
@@ -433,6 +498,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             review=args.review,
             live_impact=args.live_impact,
             touches_production=args.touches_production,
+            wait=_wait_args(args),
             request_id=args.request_id,
         )
 
@@ -469,6 +535,19 @@ def run_task_report(args: argparse.Namespace) -> int:
             kind=args.kind,
             body=body,
             classification=args.classification,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_task_cancel(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.cancel(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
         ),
     )

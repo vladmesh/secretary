@@ -96,6 +96,7 @@ REVISIONS = (
     "0017_po_card_kinds",
     "0018_owner_events",
     "0019_po_session_title",
+    "0020_wait_card_kind",
 )
 
 
@@ -474,6 +475,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -729,6 +731,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
 
@@ -1106,6 +1109,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1144,6 +1148,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
 
@@ -1222,6 +1227,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
 
@@ -1238,6 +1244,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0017_po_card_kinds",
                 "0018_owner_events",
                 "0019_po_session_title",
+                "0020_wait_card_kind",
             ),
         )
 
@@ -1340,7 +1347,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind"),
         )
 
         self.assertEqual(
@@ -1393,7 +1400,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind"))
 
         self.assertEqual(
             (
@@ -1470,7 +1477,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title",))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -1502,11 +1509,55 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title",))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
         )
+
+    # --- 0020: the wait card kind ----------------------------------------------------------------
+
+    def test_0020_keeps_every_existing_card_and_admits_wait(self) -> None:
+        """secretary-1790: every existing kind loads unchanged; `wait` is admitted, and nothing else new."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        connection = self.owner_connection()
+        config = migrate.alembic_config(connection=connection, passwords=self.passwords)
+        command.upgrade(config, "0019_po_session_title")
+        connection.commit()
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        kinds = ("code", "research", "infra", "decision", "operation", None)
+        for number, kind in enumerate(kinds, start=1):
+            self.card(connection, f"secretary-{number}", task_type=kind)
+        connection.commit()
+        before = connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall()
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.card(connection, "secretary-7", task_type="wait")
+        connection.rollback()
+
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind",))
+
+        self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
+        self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
+        connection.commit()
+        with self.assertRaisesRegex(Exception, "task_type_is_a_known_type_or_nothing"):
+            self.card(connection, "secretary-8", task_type="chore")
+        connection.rollback()
+
+        # The downgrade restores 0017's vocabulary, which a wait card does not fit.
+        with self.assertRaises(sa.exc.IntegrityError):
+            command.downgrade(config, "0019_po_session_title")
+        connection.rollback()
+        connection.exec_driver_sql("DELETE FROM tasks WHERE task_ref = 'secretary-7'")
+        connection.commit()
+        command.downgrade(config, "0019_po_session_title")
+        connection.commit()
+        self.assertEqual(migrate.current_revision(connection), "0019_po_session_title")
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.card(connection, "secretary-7", task_type="wait")
+        connection.rollback()
+
 
 if __name__ == "__main__":
     unittest.main()

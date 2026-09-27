@@ -73,6 +73,10 @@ OWNER_ANSWER_INPUT = "owner_answer"
 INPUTS = (CARD_INPUT, OWNER_ANSWER_INPUT)
 #: The kinds a dispatcher input may be about.
 PO_CARD_KINDS = ("decision", OPERATION_KIND)
+#: A wait card's outcome delivered to a PO session its creator named (secretary-1790). The session
+#: may belong to no sprint, and the wait touches no production, so neither is asked of it.
+WAIT_KIND = "wait"
+WAIT_OUTCOME_INPUT = "wait_outcome"
 
 
 def card_facts(
@@ -92,6 +96,12 @@ def facts_problem(card: Any) -> str:
     """What is missing or malformed in a dispatcher input's card facts, or `""` when nothing is."""
     if not isinstance(card, Mapping):
         return "the input carries no card facts"
+    if card.get("kind") == WAIT_KIND:
+        if not isinstance(card.get("card_ref"), str) or not card["card_ref"].strip():
+            return "the card facts name no card_ref"
+        if card.get("input") != WAIT_OUTCOME_INPUT:
+            return f"a wait card's input is its {WAIT_OUTCOME_INPUT}, not {card.get('input')!r}"
+        return "" if card.get("touches_production") is None else "a wait card names no production"
     for field in ("card_ref", "sprint_ref"):
         if not isinstance(card.get(field), str) or not card[field].strip():
             return f"the card facts name no {field}"
@@ -178,6 +188,8 @@ __all__ = [
     "PO_CARD_KINDS",
     "RIGHTS_HEADING",
     "TOUCHES_PRODUCTION",
+    "WAIT_KIND",
+    "WAIT_OUTCOME_INPUT",
     "allow_production_command",
     "card_facts",
     "create_refusal",

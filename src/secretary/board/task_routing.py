@@ -24,6 +24,8 @@ class TaskType(StrEnum):
     # Executed by the PO service inside a turn of the sprint's PO session, never by a head.
     DECISION = "decision"
     OPERATION = "operation"
+    # A durable wait for one external or board fact, advanced by the dispatcher with no head.
+    WAIT = "wait"
 
 
 #: The kinds the dispatcher submits to the sprint's PO session instead of launching a head for.

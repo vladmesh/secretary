@@ -2573,6 +2573,158 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         event = self.writer.audit.committed_event("owner-468")
         self.assertEqual((event["kind"], event["actor"], event["payload"]["marker"]), ("commented", {"role": "owner", "id": "owner"}, "owner"))
 
+    # --- wait cards (secretary-1790) ------------------------------------------------------------
+
+    RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/4242"
+
+    def create_wait(self, reference: str, **wait: object) -> dict:
+        request = {"run": self.RUN_URL, "deadline": "2h", "returns": ["observer", "dependents"], **wait}
+        return self.create_kind(reference, "wait", wait=request)
+
+    def freeze(self, reference: str, outcome: str = "target_reached") -> None:
+        """What the dispatcher writes when it freezes the wait's first terminal fact."""
+        from secretary.board.wait_card import WaitState, result_key
+
+        result = {"outcome": outcome, "fact": {"conclusion": "failure"}, "summary": "s", "evidence": "", "frozen_at": "t"}
+        result["key"] = result_key(result)
+        self.set_card_metadata(reference, wait_state=WaitState(since="t", result=result).text())
+
+    def test_a_wait_card_stores_its_spec_and_show_and_list_carry_its_wait_block(self) -> None:
+        with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
+            created = self.create_wait("secretary-610", returns=["observer", "dependents", "po-session:s-1"])
+        self.create_wait("secretary-611", run="", card="secretary-468", states="done,blocked", deadline="1d")
+        self.create_wait("secretary-612", run="", until="2099-01-01T00:00:00Z", deadline="2099-01-02T00:00:00Z")
+
+        card = self.card("secretary-610")
+        self.assertEqual((card["type"], card["review"], card["state"]), ("wait", "skipped", "ready"))
+        stored = json.loads(self.card_extension("secretary-610", "wait"))
+        self.assertEqual(stored["target"], {"kind": "github_run", "repo": "vladmesh/secretary", "run_id": 4242, "url": self.RUN_URL})
+        self.assertEqual(stored["return"], ["observer", "dependents", "po-session:s-1"])
+        block = card["wait"]
+        self.assertEqual((block["state"], block["target"]["link"], block["deadline"]), ("waiting", self.RUN_URL, stored["deadline"]))
+        self.assertEqual(created["task"]["wait"], block)
+        self.assertEqual(self.card("secretary-611")["wait"]["target"], {"kind": "card", "ref": "secretary-468", "states": ["done", "blocked"]})
+        self.assertEqual(self.card("secretary-612")["wait"]["target"], {"kind": "time", "at": "2099-01-01T00:00:00Z"})
+        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "secretary-610"]
+        self.assertEqual(listed["wait"], block)
+        self.assertNotIn("wait", self.card("secretary-468"))
+        # The request id binds the flags as given, so a retry is a replay whatever the clock says.
+        payload = self.writer.audit.events("secretary-610")[0]["payload"]
+        self.assertEqual(payload["wait_request"]["returns"], ["observer", "dependents", "po-session:s-1"])
+        after = self.board_snapshot()
+        with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
+            again = self.create_wait("secretary-610", returns=["observer", "dependents", "po-session:s-1"])
+        self.assertTrue(again["replayed"])
+        self.assertBoardUnchanged(after)
+
+    def test_a_wait_card_needs_no_project_reservation_and_a_refused_one_writes_nothing(self) -> None:
+        with self.open_sprint():
+            self.writer.create(
+                role="po", actor="po", project="relay", task_type="wait", title="Wait", reference="secretary-614",
+                sprint="sprint:test", wait={"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z",
+                                            "returns": ["observer"]},
+            )
+        self.assertEqual((self.card("secretary-614")["project"], self.card("secretary-614")["sprint"]), ("relay", "sprint:test"))
+        before = self.board_snapshot()
+        with (
+            mock.patch.object(TaskWriter, "_po_session_state", return_value=""),
+            self.assertRaisesRegex(TaskError, "names no PO session") as raised,
+        ):
+            self.create_wait("secretary-615", returns=["po-session:ghost"])
+        self.assertEqual(raised.exception.code, "validation")
+        with self.assertRaisesRegex(TaskError, "has already passed"):
+            self.create_wait("secretary-615", deadline="2020-01-01T00:00:00Z")
+        self.assertBoardUnchanged(before)
+
+    def test_cancel_marks_and_comments_once_and_refuses_what_it_cannot_cancel(self) -> None:
+        self.create_wait("secretary-616")
+        self.place_card("secretary-616", "in_progress")
+
+        first = self.writer.cancel(
+            role="po", actor="po", reference="secretary-616", reason="The release was withdrawn.", request_id="cancel-616"
+        )
+        after = self.board_snapshot()
+        again = self.writer.cancel(
+            role="po", actor="po", reference="secretary-616", reason="The release was withdrawn.", request_id="cancel-616"
+        )
+
+        self.assertEqual((first["replayed"], again["replayed"]), (False, True))
+        self.assertBoardUnchanged(after)
+        card = self.card("secretary-616")
+        self.assertEqual(card["state"], "in_progress")
+        self.assertEqual((card["wait"]["cancel"]["reason"], card["wait"]["cancel"]["role"]), ("The release was withdrawn.", "po"))
+        [comment] = [body for body in self.card_comments("secretary-616") if "[wait:cancel]" in body]
+        self.assertTrue(comment.startswith("[po]\n[wait:cancel]\n"))
+        self.assertEqual(self.writer.audit.committed_event("cancel-616")["kind"], "wait_cancelled")
+        for reference, fields, code in (
+            ("secretary-616", {"reason": "Again."}, "already_cancelled"),
+            ("secretary-468", {"reason": "Not a wait."}, "validation"),
+            ("secretary-616", {"reason": "  "}, "validation"),
+        ):
+            with self.subTest(reference=reference, fields=fields), self.assertRaises(TaskError) as raised:
+                self.writer.cancel(role="po", actor="po", reference=reference, **fields)
+            self.assertEqual(raised.exception.code, code)
+        self.assertBoardUnchanged(after)
+
+        self.create_wait("secretary-617")
+        self.freeze("secretary-617", "deadline_passed")
+        with self.assertRaises(TaskError) as raised:
+            self.writer.cancel(role="po", actor="po", reference="secretary-617", reason="Too late.")
+        self.assertEqual(raised.exception.code, "already_settled")
+        with as_observer("sprint:other"), self.assertRaises(TaskError):
+            self.writer.cancel(role="observer", actor="observer", reference="secretary-617", reason="Not mine.")
+        self.assertIsNone(self.card("secretary-617")["wait"]["cancel"])
+
+        self.create_wait("secretary-618")
+        with as_observer("sprint:test"):
+            self.writer.cancel(role="observer", actor="observer", reference="secretary-618", reason="Mine.")
+        self.assertEqual(self.card("secretary-618")["wait"]["cancel"]["role"], "observer")
+
+    def test_the_dispatcher_takes_its_two_wait_edges_only_for_waits_and_neither_is_charged(self) -> None:
+        from secretary.dispatch.production import _budget_event_type
+
+        self.create_kind("secretary-620", "research")
+        self.place_card("secretary-620", "in_progress")
+        self.create_wait("secretary-621")
+        self.place_card("secretary-621", "in_progress")
+        self.create_kind("secretary-622", "code", blocked_by="secretary-621")
+        self.create_kind("secretary-623", "code", blocked_by="secretary-620")
+        before = self.board_snapshot()
+        for reference, target in (("secretary-620", "done"), ("secretary-621", "done"), ("secretary-623", "blocked")):
+            with self.subTest(reference=reference), self.assertRaises(TaskError) as raised:
+                self.writer.move(role="dispatcher", actor="d", reference=reference, target=target, reason="r")
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertBoardUnchanged(before)
+
+        self.freeze("secretary-621")
+        self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-621", target="done", reason="[wait:target_reached]",
+            request_id="wait-done-621", wait_outcome="target_reached",
+        )
+        self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-622", target="blocked", reason="the wait ended",
+            request_id="wait-dependent-622", wait_outcome="cancelled",
+            terminal_taxonomy={"version": 2, "disposition": "blocked", "blocked_reason": "other",
+                               "source_evidence": "other", "budget_class": "blocked", "provenance": "forward"},
+        )
+        self.writer.move(role="dispatcher", actor="d", reference="secretary-620", target="blocked", reason="other",
+                         request_id="plain-blocked-620")
+
+        self.assertEqual((self.card_state("secretary-621"), self.card_state("secretary-622")), ("done", "blocked"))
+        self.assertIn("[dispatcher]\n[wait:target_reached]", self.card_comments("secretary-621"))
+        for request_id, charged in (("wait-done-621", None), ("wait-dependent-622", None), ("plain-blocked-620", "blocked")):
+            event = self.writer.audit.committed_event(request_id)
+            self.assertEqual(_budget_event_type(event), charged, request_id)
+
+    def test_only_the_dispatcher_records_a_wait_state_and_only_on_a_wait_card(self) -> None:
+        self.create_wait("secretary-624")
+        self.writer.record_wait_state(role="dispatcher", actor="d", reference="secretary-624", state='{"since":"t"}')
+        self.assertEqual(self.card_extension("secretary-624", "wait_state"), '{"since":"t"}')
+        with self.assertRaises(TaskError):
+            self.writer.record_wait_state(role="po", actor="po", reference="secretary-624", state="{}")
+        with self.assertRaisesRegex(TaskError, "not a wait card"):
+            self.writer.record_wait_state(role="dispatcher", actor="d", reference="secretary-468", state="{}")
+
 
 class DoneRetentionTests(CardStoreCase):
     def setUp(self) -> None:
@@ -2750,6 +2902,11 @@ class AssessmentStateTests(CardStoreCase):
             CARD_TRANSITIONS["dispatcher"],
             {
                 (CardState.READY, CardState.IN_PROGRESS),
+                # secretary-1790, widened deliberately: a wait card's target_reached, and a Ready
+                # card a wait card holds, Blocked by the wait's other outcome. `TaskWriter.move`
+                # admits the two edges for those cards only.
+                (CardState.IN_PROGRESS, CardState.DONE),
+                (CardState.READY, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.VALIDATE),
                 (CardState.IN_PROGRESS, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.READY),

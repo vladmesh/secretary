@@ -20,6 +20,9 @@ its sprint's PO session, and the PO completes it inside that turn with `task com
 one `[completion:decision]` (`## Decision`, `## How to verify`) or `[completion:operation]`
 (`## What was done`, `## How to verify`) comment and moves the card to Done in one transition. That
 record is read only from comments the PO wrote, the same way.
+
+A `wait` card (secretary-1790, `board/wait_card.py`) has no candidate, no head and no completion
+record to prove: the dispatcher advances it, and its terminal move carries its outcome.
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ from secretary.board.task_routing import PO_EXECUTED_TYPES, TaskReview, TaskType
 
 #: The kinds the PO service executes (`decision`, `operation`); they are no-candidate kinds too.
 PO_EXECUTED_KINDS = frozenset(kind.value for kind in PO_EXECUTED_TYPES)
-NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value}) | PO_EXECUTED_KINDS
+WAIT_KIND = TaskType.WAIT.value
+NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value, WAIT_KIND}) | PO_EXECUTED_KINDS
 
 INFRA_COMPLETION_MARKER = "completion:infra"
 RESEARCH_COMPLETION_MARKER = "completion:research"
@@ -59,6 +63,16 @@ _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
 def is_po_executed(task: Mapping[str, Any]) -> bool:
     """Whether the PO service executes this card (`decision`, `operation`) instead of a head."""
     return str(task.get("type") or "") in PO_EXECUTED_KINDS
+
+
+def is_wait(task: Mapping[str, Any]) -> bool:
+    """Whether this is a `wait` card, which the dispatcher advances itself with no head."""
+    return str(task.get("type") or "") == WAIT_KIND
+
+
+def is_headless(task: Mapping[str, Any]) -> bool:
+    """Whether no head ever runs this card: it takes no claim capacity and no head or reviewer."""
+    return is_po_executed(task) or is_wait(task)
 
 
 def has_candidate(task: Mapping[str, Any]) -> bool:
