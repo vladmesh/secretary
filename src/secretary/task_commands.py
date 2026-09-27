@@ -290,6 +290,29 @@ def add_task_subcommands(subparsers) -> None:
     cancel_reason.add_argument("--reason", help="why the wait is cancelled")
     cancel_reason.add_argument("--reason-file")
     task_cancel.set_defaults(handler=run_task_cancel)
+    task_e2e = task_subcommands.add_parser(
+        "e2e-budget",
+        help="PO only: raise the e2e cap of a code card outside every sprint by the runs the owner granted, "
+        "on the owner's comment on its budget decision card",
+    )
+    task_e2e.add_argument("--ref", required=True)
+    # Every board role parses: the writer admits `po` only and answers the others with `role_forbidden`.
+    task_e2e.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    task_e2e.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_e2e)
+    task_e2e.add_argument("--request-id")
+    task_e2e.add_argument(
+        "--add",
+        type=int,
+        help="the runs the owner's comment raises by (`e2e budget: raise <N>`); optional, and refused unless it "
+        "equals that N",
+    )
+    task_e2e.add_argument(
+        "--authorized-by",
+        required=True,
+        help="the event id of the owner's comment on this card's e2e budget decision card, made after its handover",
+    )
+    task_e2e.set_defaults(handler=run_task_e2e_budget)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
     task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
@@ -574,6 +597,20 @@ def run_task_cancel(args: argparse.Namespace) -> int:
             actor=actor,
             reference=args.ref,
             reason=args.reason if args.reason is not None else body,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_task_e2e_budget(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, _body, actor: writer.raise_e2e_cap(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            add=args.add,
+            authorized_by=args.authorized_by,
             request_id=args.request_id,
         ),
     )

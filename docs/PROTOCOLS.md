@@ -183,8 +183,11 @@ executed by the PO service in a turn of the sprint's PO session, never by a head
 no-candidate kinds: no workspace, branch, pull request, CI or reviewer.
 
 **Create.** The observer or the PO creates one (`task create --type decision|operation`, no other
-role). It must carry `--sprint`, except when the PO cuts it inside a PO turn: such a card carries its
-[origin](#po-delegation) and may name no sprint, and the session of that turn executes it (below).
+role). The one exception is the dispatcher's own `decision` card for a spent e2e budget
+([The e2e run budget](#the-e2e-run-budget)); it cuts no operation card. It must carry `--sprint`, except
+when the PO cuts it inside a PO turn: such a card carries its
+[origin](#po-delegation) and may name no sprint, and the session of that turn executes it (below). The
+dispatcher's budget decision for a card outside every sprint carries that card's origin the same way.
 With no sprint and no origin it is refused (`validation`) as before. It refuses, each with its reason, `--head`, `--review-head`,
 `--review required`, `--live-impact`, `--seed-ref` and `--base-branch`. Its review is `skipped`, and
 a sprint's executor pins do not apply to it. The PO needs no `--sprint-override` to create one in its
@@ -406,8 +409,9 @@ carry the mark as a top-level `waiting_owner: {since, reason, by}`, and the card
 
 On a marked card the dispatcher reads the card's audit each tick. When an owner comment follows the
 latest handover, it submits one follow-up input to the same PO session, `source: dispatcher`, carrying
-the card ref, the handover reason, the owner's comments since the handover in board order and the
-completion command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
+the card ref, the handover reason, the owner's comments since the handover in board order, the event
+id of the latest one (which a raise of an e2e budget names as `--authorized-by`) and the completion
+command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
 comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
 rebuilt record never makes a second input for the same comment. It carries the card's facts with
 `input: owner_answer`, which the service does not check against the sprint's productions. A later
@@ -699,7 +703,7 @@ refused at create; a legacy one is Blocked at claim.
 ### Owner events and the bell
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
-(revision `0018_owner_events`; `0021_delegated_card_settled` adds a kind), written and read only through
+(revision `0018_owner_events`; `0021_delegated_card_settled` and `0023_sprint_e2e_budget` add a kind), written and read only through
 `secretary.board.owner_events`. A row is
 `id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
 `created_at`, `read_at` (null while unread) and `dedup_key` (unique).
@@ -711,6 +715,7 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | --- | --- | --- | --- | --- |
 | `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), after the handover commits | the card | `card_handed_to_owner:<card>:<handover event id>` |
 | `steward_needs_human` | `needs_owner` | `TaskWriter.move` of a steward report card to Blocked by role `steward` whose reason carries a non-empty "Needs a human" section | the report card | `steward_needs_human:<card>:<move event id>` |
+| `e2e_budget_spent` | `needs_owner` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason | the card | `e2e_budget_spent:<card>:<cap>` |
 | `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
 | `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
 | `budget_signal` | `notice` | `SprintWriter.record_budget` once the sprint's budget reaches its signal threshold | the sprint | `budget_signal:<sprint>` |
@@ -1341,7 +1346,7 @@ The stage proceeds only on a SHA with a green run of its own, or one reconciled 
   entry (`reconciled`, shown in `task show` as `reconciled_to`) and in the attestation of the park or the
   release audit (`E2E/base reconciliation: ...`);
 - otherwise, the green run does not authorize this SHA: the stage runs again for it, which counts
-  against the run cap.
+  against the e2e run budget ([below](#the-e2e-run-budget)).
 
 A base-only move does not invalidate an e2e result for the card's own change, as it does not invalidate
 a review; CI still gates the new SHA. This avoids re-paying a long run for every base move on an active
@@ -1401,7 +1406,7 @@ copying it into the entry.
 **Outcomes.**
 
 - conclusion `success`: a `## E2E — green` dispatcher comment (run, SHA, dispatch id, wait card, runs
-  dispatched), and the card proceeds: Assessment for a card that parks, the release otherwise;
+  dispatched and the budget they were charged to), and the card proceeds: Assessment for a card that parks, the release otherwise;
 - conclusion `failure`: rework, as a red gate (`gate_red_to_worker`, phase `e2e-gate`, so the red CI
   is charged as one): the worker's TASK.md carries, under "Mechanical gate failure to address", the
   run URL, the conclusion, each failed job with its failed steps, and the gate's bounded
@@ -1418,15 +1423,114 @@ committed, the run's pass is over: a card brought back on the same SHA (unblocke
 reported again) may dispatch a new run. A `success` stands for its SHA (and for a SHA reconciled to it),
 and so does a `failure` that sent the card to rework.
 
-**Interim cap.** Until the sprint e2e budget exists, a card dispatches at most 3 runs across all its
-SHAs: every entry whose dispatch GitHub did not refuse counts. At the cap the stage dispatches nothing,
-and the card is Blocked with `e2e run cap reached (3)` (`blocked_reason: other`: the cap is not the
-e2e infrastructure failing). A declaration the stage cannot read Blocks the card as `gate`.
+A declaration the stage cannot read Blocks the card as `gate`.
 
-**`task show`.** A card with entries carries `e2e`: `runs_dispatched`, `run_cap`, and per run `sha`,
-`dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wait_card_pending`, `waiting`, the
-conclusion, the wait outcome, or `dispatch_refused`), `run`, `identified_by` (`answer` or `recovery`,
-with `recovery_rule`), `reconciled_to`, `wait_card`, `dispatched_at`, `result`.
+### The e2e run budget
+
+Every e2e run pays for stands (BitLaunch machines), `mega-noop` included, so runs are budgeted
+(secretary-1796; `board/e2e_budget.py`). The budget replaces the interim per-card cap of 3 for every
+card of a sprint.
+
+**The budget.** A sprint carries `e2e_budget`, the runs it may dispatch (`sprint create --e2e-budget N`,
+an integer 0 or more, default 3), and `e2e_used`, the runs it dispatched: two columns of `sprints`
+(revision `0023_sprint_e2e_budget`, which gave every existing sprint, open ones included, 3 and 0). Each
+charged run is one row of `sprint_e2e_charges` (dispatch id, the key; card; sprint; when). `sprint
+show` and `sprint status` carry `e2e`: `budget`, `used`, `summary` (`e2e: <used> of <budget>`), `cards`
+(the cards that spent runs, first charge first) and `charges` (`card`, `dispatch_id`, `at`).
+
+**Counting.** Every run the stage dispatches counts, at any level. A run is charged when its dispatch
+intent is written, before the POST: a dispatch whose outcome is unknown has been paid for, and so has
+one GitHub refused. The check and the increment are one statement on the sprint row, in the transaction
+that writes the intent on the card (`TaskWriter.record_e2e_intent`): `UPDATE sprints SET e2e_used =
+e2e_used + 1 WHERE ref = <sprint> AND e2e_used < e2e_budget ...`, then the charge row. Two cards of one
+sprint can never together exceed the budget: PostgreSQL serializes the two UPDATEs, and the second finds
+nothing left. An intent that is not charged is not written, and nothing is dispatched. A recovered run
+(after a crash between the intent and the POST, or a lost answer) continues its entry and writes no
+second intent, so it is never charged twice; a dispatch id is charged at most once.
+
+A card outside every sprint keeps its own cap of 3 runs across its SHAs (`run_cap`), plus every raise
+recorded on it. Its runs are counted the same way: every entry whose intent was persisted counts,
+whatever GitHub answered, a refused dispatch included (`E2eState.dispatched`, which `task show` shows as
+`runs_dispatched`).
+
+**Budget spent, a card of a sprint.** The stage does not start and nothing is dispatched. The dispatcher
+cuts one `decision` card on the sprint, in the waiting card's project, under request id
+`dispatcher-e2e-budget-<sprint>-<budget>`: one card per (sprint, budget generation), the generation
+being the budget the runs were spent against. Its body carries the card waiting for e2e and its SHA,
+every run spent (card, SHA, run link, state and result summary, when), the question ("raise the e2e
+budget of <sprint> by N runs, or no?") with the two exact answer lines below, the instruction to hand
+it to the owner quoting them (a money decision; the PO does not raise the budget on its own authority),
+and the exact raise command. It is executed like
+every decision card ([Decision and operation cards](#decision-and-operation-cards)): the sprint's PO
+session takes it, and the PO hands it to the owner with `task handover`.
+
+The waiting card is not Blocked. It stays in its column (Validate, or Assessment in the release audit)
+and its entry records `budget_wait` (`decision`, `generation`, `scope`, `since`); `task show` carries
+`e2e.mark`: `e2e: budget spent, waiting on <decision>`, and the tick outcome is `e2e-budget-waiting`
+with `decision` and `mark`. A card that reaches the stage while the budget is still spent joins the
+same decision with one dispatcher comment on it (`dispatcher-e2e-budget-join-<decision>-<card>`); no
+second decision is cut. Each tick the stage re-checks a waiting card first, without reading the gate:
+
+- a run is available again (the budget was raised): the mark is cleared, and the stage reads the gate
+  and charges the next run as usual. When a raise was spent by other cards first, the card's next
+  attempt finds the budget spent again and waits on the decision of the new generation;
+- the decision is Done and the budget was not raised (the owner said no): the mark is cleared and the
+  card is Blocked with the decision's completion text (`blocked_reason: other`, request id
+  `dispatcher-e2e-budget-declined-<card>-<decision>`): the owner's money decision, not a defect of the
+  card's code, so no worker round is charged;
+- otherwise it keeps waiting.
+
+**The owner's answer.** The owner answers on the decision card with a comment (`task comment --role
+owner`) holding exactly one answer line, parsed in one place (`e2e_budget.owner_answer`):
+
+```text
+e2e budget: raise <N>
+e2e budget: no
+```
+
+`<N>` is a positive integer. Matching is case-insensitive and ignores the whitespace around the line;
+the rest of the comment is free prose. A comment with neither line, with both, or with two raise lines
+answers nothing. An `e2e budget: no` comment moves nothing by itself: the PO completes the decision card.
+
+**Raising the budget.** Only on the owner's recorded word, and by the owner's recorded number:
+
+```bash
+python3 -P -m secretary sprint e2e-budget --ref <sprint> --role po --authorized-by <event id> [--add <N>]
+```
+
+`--role po` only (every other role is refused, `role_forbidden`), and `--authorized-by` the event id of
+an owner-role comment on one of this sprint's e2e budget decision cards, made after that card was
+handed to the owner, whose answer line is `e2e budget: raise <N>`. The raise is that N: `--add` is
+optional, and when given it has to equal N. The owner's answer input the dispatcher sends the PO names
+that event id. A missing, unknown or non-comment event, a comment that is not the owner's, a comment on
+any other card (another sprint's decision included), one made before the handover, an `e2e budget: no`
+comment, a comment with no single answer line, and an `--add` other than the owner's N are refused
+(`authorization_refused`, exit status 3), and nothing is written. One owner comment raises once: the default request id is `e2e-budget-raise-<event id>`, a
+repeat of it is the same raise, and another request id naming the same event is refused. The raise adds
+`N` to `e2e_budget` in place, in the transaction of one `e2e_budget_raised` sprint audit record whose
+payload names `add` (the owner's N), `authorized_by` (the comment's event id) and `decision`; a closed
+or stopped sprint refuses it. The waiting
+cards dispatch on the next tick, and the PO completes the decision card as usual.
+
+**Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
+
+- a card with a PO origin ([PO delegation](#po-delegation)) gets the same decision card, cut with that
+  origin (the dispatcher carries the card's `po_origin` onto it; no other role but the PO records an
+  origin) and no sprint, under `dispatcher-e2e-cap-<card>-<cap>`, so it goes to the card's origin line.
+  The raise is `task e2e-budget --ref <card> --role po --authorized-by <event id> [--add <N>]`, authorized
+  the same way, by the same answer line and to the same N, by an owner comment on that card's decision after its handover; it is recorded on the
+  card (bag field `e2e_cap`, `{raises: [{add, authorized_by, decision, at}]}`, one `e2e_cap_raised`
+  audit record each) and raises that card's cap. The wait, the re-check and the decline are as above;
+- a card with no origin has nobody to hand the decision to: it is Blocked with `e2e run cap reached
+  (<cap>)` (`blocked_reason: other`) and one `e2e_budget_spent` bell event
+  ([Owner events and the bell](#owner-events-and-the-bell)).
+
+**`task show`.** A card that reached the stage carries `e2e`: `runs_dispatched`; `run_cap` (a card
+outside every sprint: 3 plus its raises; null for a card of a sprint) and `budget` (the sprint whose
+budget the card spends, or null); `mark` and `waiting_on` while it waits on a budget decision; and per
+run `sha`, `dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wait_card_pending`,
+`waiting`, the conclusion, the wait outcome, or `dispatch_refused`), `run`, `identified_by` (`answer` or
+`recovery`, with `recovery_rule`), `reconciled_to`, `wait_card`, `dispatched_at`, `result`.
 
 ## Products and issues
 
@@ -1543,7 +1647,7 @@ python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID \
   [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE] \
-  [--po-session SESSION_ID] [--allow-production PROJECT_ID ...]
+  [--po-session SESSION_ID] [--allow-production PROJECT_ID ...] [--e2e-budget N]
 python3 -P -m secretary sprint list --status open
 python3 -P -m secretary sprint show --ref sprint:ID
 python3 -P -m secretary sprint status --ref sprint:ID
@@ -1553,6 +1657,7 @@ python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type r
 python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
 python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
 python3 -P -m secretary sprint allow-production --role po --ref sprint:ID --project PROJECT_ID --reason WHY
+python3 -P -m secretary sprint e2e-budget --role po --ref sprint:ID --authorized-by EVENT_ID [--add N]
 python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
@@ -1567,6 +1672,7 @@ The roles each sprint write admits:
 | `sprint current-task`, `sprint resume` | `po`, `dispatcher`, `observer`, `steward` |
 | `sprint budget` | `po`, `dispatcher`, `steward` |
 | `sprint reopen` | `po` |
+| `sprint e2e-budget` | `po`, with the owner's comment as `--authorized-by` ([The e2e run budget](#the-e2e-run-budget)) |
 | `sprint close` | `po` (any sprint), `observer` (its own sprint) |
 
 A write of role `observer` passes the [identity guard](#the-sprint-guard) first: it must name the sprint
@@ -1761,6 +1867,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |
 | `restored` | `accepted` |
@@ -1782,6 +1889,9 @@ event carrying the hard limit and the triggering card-event identity. `show` ret
 and does not stop work. At the hard limit the dispatcher marks the sprint `stopped`, stops its
 observer and skips new linked claims; active cards continue their cycle. Only
 `sprint reopen --role po` clears the stop.
+
+This budget counts restarts. The e2e run budget, which counts paid e2e runs, is separate:
+[The e2e run budget](#the-e2e-run-budget).
 
 ### Resume and observer wakes
 

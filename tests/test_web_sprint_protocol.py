@@ -1476,6 +1476,24 @@ class SprintReadCommandTests(SprintProtocolFixture):
         self.assertEqual(document["kind"], "sprint_list")
         self.assertEqual([item["ref"] for item in document["sprints"]["items"]], [reference])
 
+    def test_sprint_status_renders_the_e2e_runs_used_of_the_budget(self) -> None:
+        """secretary-1796: the watched sprint's value carries `e2e: <used> of <budget>` and who spent it."""
+        reference = self.reference_of(self.create())
+        with self.board.transaction():
+            self.board.call(
+                "chargeSprintE2e",
+                sprint_ref=reference,
+                task_ref="secretary-90",
+                dispatch_id="secretary-90-e2e-1-00000001",
+                at="2026-09-27T10:00:00Z",
+            )
+
+        code, output, errors = self._run(["sprint", "status", "--ref", reference])
+
+        self.assertEqual(code, 0, errors)
+        e2e = json.loads(output)["sprint"]["value"]["e2e"]
+        self.assertEqual((e2e["summary"], e2e["cards"]), ("e2e: 1 of 3", ["secretary-90"]))
+
     def test_sprint_list_passes_its_filter_through_and_decides_nothing(self) -> None:
         self.create()
         self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
@@ -3269,7 +3287,8 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
             if not line.startswith("|"):
                 break
             cells = [cell.strip() for cell in line.split("|")]
-            kind = re.fullmatch(r"`([a-z_]+)`", cells[1])
+            # A kind may carry a digit (`e2e_budget_raised`, secretary-1796).
+            kind = re.fullmatch(r"`([a-z0-9_]+)`", cells[1])
             self.assertIsNotNone(kind, f"unreadable row in the terminal-write table: {line}")
             assert kind is not None
             rows[kind.group(1)] = tuple(re.findall(r"`([a-z_0-9]+)`", cells[2]))

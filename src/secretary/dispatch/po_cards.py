@@ -408,6 +408,10 @@ def render_owner_answer_input(
     ]
     for answer in answers:
         lines += [f"### {answer['created_at'] or 'undated'}", "", answer["body"] or "(empty)", ""]
+    if submission.owner_event_id:
+        # A command that applies the owner's answer on the owner's authority names it (`--authorized-by`
+        # of `sprint e2e-budget`, secretary-1796).
+        lines += [f"The owner's latest comment is event `{submission.owner_event_id}`.", ""]
     lines += [
         "",
         "## Complete the card",

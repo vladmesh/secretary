@@ -284,6 +284,9 @@ class SqlAdapterTests(unittest.TestCase):
                 None,
                 po_session,
                 productions,
+                # `e2e_budget` and `e2e_used`, as 0023 gave every sprint (secretary-1796).
+                3,
+                0,
             )
             self.executed: list[tuple[str, tuple]] = []
 

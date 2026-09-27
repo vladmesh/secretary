@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from secretary.board import e2e_budget as sprint_e2e
 from secretary.board import owner_events
 from secretary.board.backend import (
     BoardIdentityError,
@@ -21,6 +22,7 @@ from secretary.board.backend import (
     sprint_reference_number,
 )
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
+from secretary.board.e2e_budget import DEFAULT_E2E_BUDGET
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
@@ -115,6 +117,9 @@ SPRINT_METADATA = {
     *EXECUTOR_FIELDS.values(),
     PO_SESSION_FIELD,
     ALLOWED_PRODUCTIONS_FIELD,
+    sprint_e2e.SPRINT_E2E_BUDGET,
+    sprint_e2e.SPRINT_E2E_USED,
+    sprint_e2e.SPRINT_E2E_CHARGES,
 }
 DEFAULT_OPEN_SPRINT_LIMIT = 1
 MAX_OPEN_SPRINT_LIMIT = 2
@@ -672,6 +677,8 @@ class SprintReader:
             # Null and empty for a sprint opened before either was recorded, never inferred.
             "po_session": meta.get(PO_SESSION_FIELD) or None,
             "allowed_productions": _json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)),
+            # The e2e run budget (0023): `e2e: <used> of <budget>`, and the cards that spent the runs.
+            "e2e": sprint_e2e.sprint_budget(meta),
             "status": read.state.value,
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -805,6 +812,8 @@ class SprintReader:
             # The PO session this sprint answers to and the productions it may touch.
             "po_session": sprint.get("po_session"),
             "allowed_productions": list(sprint.get("allowed_productions") or []),
+            # The e2e run budget: runs used of the budget, and the cards that spent them.
+            "e2e": sprint.get("e2e") or sprint_e2e.sprint_budget({}),
             # This sprint's own cards that owe a worker no dispatcher record can name
             # (secretary-1544). Any column of this sprint, not only In progress: the column is what
             # cannot say it, and a sprint whose only visible signal is "3 in progress" reads as
@@ -1016,6 +1025,7 @@ class SprintWriter:
         reviewer: str | None = None,
         po_session: str | None = None,
         allowed_productions: list[str] | None = None,
+        e2e_budget: int | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -1034,6 +1044,7 @@ class SprintWriter:
             reviewer=reviewer,
             po_session=po_session,
             allowed_productions=allowed_productions or [],
+            e2e_budget=e2e_budget,
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -1139,6 +1150,7 @@ class SprintWriter:
         canonical_repositories: bool = True,
         po_session: str | None = None,
         allowed_productions: list[str] | None = None,
+        e2e_budget: int | None = None,
     ) -> SprintCreateIntent:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -1166,6 +1178,10 @@ class SprintWriter:
         except ValueError:
             raise TaskError("validation", f"unknown sprint status {status!r}", 2) from None
         pins = self._executor_intent(worker=worker, reviewer=reviewer)
+        if e2e_budget is None:
+            e2e_budget = DEFAULT_E2E_BUDGET
+        if isinstance(e2e_budget, bool) or not isinstance(e2e_budget, int) or e2e_budget < 0:
+            raise TaskError("validation", f"--e2e-budget is a whole number of runs, 0 or more; not {e2e_budget!r}", 2)
         return SprintCreateIntent(
             role=Role(role),
             actor=actor,
@@ -1186,6 +1202,7 @@ class SprintWriter:
             reviewer=pins["reviewer"],
             po_session=str(po_session or "").strip() or None,
             allowed_productions=self._productions_intent(allowed_productions or []),
+            e2e_budget=e2e_budget,
         )
 
     @staticmethod
@@ -1592,6 +1609,9 @@ class SprintWriter:
             values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(
                 list(intent.allowed_productions), separators=(",", ":")
             )
+        # Only a budget other than the column's default: the read names it only then.
+        if intent.e2e_budget != DEFAULT_E2E_BUDGET:
+            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:
@@ -1927,6 +1947,93 @@ class SprintWriter:
             reference,
             request_id,
             {"project": project, "reason": reason},
+            mutation,
+        )
+
+    def raise_e2e_budget(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        authorized_by: str,
+        add: int | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Raise the sprint's e2e run budget by the runs the owner recorded (secretary-1796).
+
+        Role `po` only, on an open sprint, and only with `authorized_by`: the event id of an owner-role
+        comment on one of this sprint's e2e budget decision cards, made after that card was handed to
+        the owner, whose one answer line is `e2e budget: raise <N>` (`e2e_budget.authorized_raise`).
+        The raise is that N: `add`, when given, has to equal it. The PO applies the owner's answer; it
+        has no path to raise the budget on its own authority, and `e2e budget: no` authorizes nothing.
+        One authorizing comment raises once. Everything is refused before anything is written. The
+        request id defaults to one derived from the authorizing event, so a repeat is the same raise;
+        the audit record names the event and N.
+        """
+        self._role(role, {"po"}, actor=actor)
+        if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
+            raise TaskError("validation", f"--add is a whole number of runs, 1 or more; not {add!r}", 2)
+        authorized_by = str(authorized_by or "").strip()
+        decision, runs = sprint_e2e.authorized_raise(self.audit, TaskReader(self.client), authorized_by, reference, add)
+        return self._raise_e2e_budget_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            add=runs,
+            authorized_by=authorized_by,
+            decision=decision,
+            request_id=request_id or f"e2e-budget-raise-{authorized_by}",
+        )
+
+    @_sql_atomic
+    def _raise_e2e_budget_atomic(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        add: int,
+        authorized_by: str,
+        decision: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        identity = (sprint_e2e.SPRINT_BUDGET_RAISED, reference, add, authorized_by)
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("add"), payload.get("authorized_by")) != identity:
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a raise is repeated "
+                    "only with the same sprint, --add and --authorized-by",
+                    2,
+                )
+        else:
+            for event in self.audit.events(reference, kind=sprint_e2e.SPRINT_BUDGET_RAISED):
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                if payload.get("authorized_by") == authorized_by:
+                    raise TaskError(
+                        "authorization_refused",
+                        f"the owner's comment {authorized_by} already authorized a raise of {reference} "
+                        f"({event.get('request_id')}); each answer raises once",
+                        3,
+                    )
+
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={sprint_e2e.SPRINT_E2E_BUDGET_ADD: str(add)},
+            )
+
+        return self._write(
+            "e2e_budget_raised",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"add": add, "authorized_by": authorized_by, "decision": decision},
             mutation,
         )
 
@@ -3247,6 +3354,7 @@ class SprintWriter:
         sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
         if sprint.state in {SprintState.CLOSED, SprintState.STOPPED} and kind in {
             "current_task_set",
+            "e2e_budget_raised",
             "production_allowed",
             "resume_recorded",
         }:

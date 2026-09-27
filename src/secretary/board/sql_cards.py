@@ -1203,6 +1203,14 @@ class SqlCardClient:
                     (ref, issue_id),
                 )
 
+    # --- the sprint e2e run budget (0023, secretary-1796) ----------------------------------
+
+    def _rpc_getSprintE2eBudget(self, *, sprint_ref: str) -> dict[str, Any] | None:
+        return self.sprints.e2e_budget(sprint_ref)
+
+    def _rpc_chargeSprintE2e(self, *, sprint_ref: str, task_ref: str, dispatch_id: str, at: str) -> dict[str, Any]:
+        return self.sprints.charge_e2e(sprint_ref, task_ref=task_ref, dispatch_id=dispatch_id, at=at)
+
     # --- comments --------------------------------------------------------------------
 
     def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:

@@ -111,7 +111,7 @@ from secretary.board.protocol_artifacts import (
 )
 from secretary.board.transitions import BoardProtocolError
 from secretary.board import po_origin as origin_field
-from secretary.board import e2e_record
+from secretary.board import e2e_budget, e2e_record
 from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
@@ -371,8 +371,10 @@ def _po_card_create_refusal(
     reviewer, a checkout or a live impact of its own to declare.
     """
     waits = kind == TaskType.WAIT.value
-    if role == Role.DISPATCHER.value and not waits:
-        return f"the dispatcher cuts only a wait card, not a {kind} card"
+    # The dispatcher cuts a code card's e2e wait, and the decision a spent e2e budget needs
+    # (secretary-1796); nothing else.
+    if role == Role.DISPATCHER.value and kind not in {TaskType.WAIT.value, TaskType.DECISION.value}:
+        return f"the dispatcher cuts only a wait or a decision card, not a {kind} card"
     if role not in {Role.OBSERVER.value, Role.PO.value, Role.DISPATCHER.value}:
         return f"a {kind} card is cut by the observer or the PO, not by {role}"
     if not sprint and not waits and not origin:
@@ -925,6 +927,10 @@ class TaskReader:
         card = project_card_by_reference(self.client, project_id, reference)
         return self._show_card(card, columns, swimlanes)
 
+    def sprint_e2e_budget(self, sprint_ref: str) -> dict[str, Any] | None:
+        """`{budget, used, charges}` of a sprint's e2e run budget (secretary-1796), or None for no sprint."""
+        return self.client.call("getSprintE2eBudget", sprint_ref=sprint_ref)
+
     def show_id(self, task_id: int) -> dict[str, Any]:
         """Return one row by board id, without resolving a duplicate reference."""
         project_id, columns, swimlanes = self._board()
@@ -1240,7 +1246,9 @@ class TaskWriter:
         task_type = task_type.strip()
         role = self._role(
             role,
-            CREATE_ROLES | {Role.DISPATCHER} if task_type == TaskType.WAIT.value else CREATE_ROLES,
+            CREATE_ROLES | {Role.DISPATCHER}
+            if task_type in {TaskType.WAIT.value, TaskType.DECISION.value}
+            else CREATE_ROLES,
             actor=actor,
         )
         project = project.strip()
@@ -1290,7 +1298,10 @@ class TaskWriter:
         review = review_value.value
         # The PO turn this create runs in: only the PO has one, and only its environment names it.
         origin_record = _origin_request(origin)
-        if origin_record and role != Role.PO.value:
+        # The dispatcher carries a card's origin onto the decision its spent e2e cap needs, so the
+        # decision goes to the PO session that cut the card (secretary-1796); it originates nothing else.
+        carried_origin = role == Role.DISPATCHER.value and task_type == TaskType.DECISION.value
+        if origin_record and role != Role.PO.value and not carried_origin:
             raise TaskError(
                 "validation", f"only the PO records the PO session a card came from; {role} cannot", 2
             )
@@ -2280,6 +2291,105 @@ class TaskWriter:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={e2e_record.E2E_FIELD: state}
             )
+
+    def record_e2e_intent(
+        self, *, role: str, actor: str, reference: str, state: str, sprint: str, dispatch_id: str
+    ) -> dict[str, Any]:
+        """Write a dispatch intent, charging the run to the card's sprint first (secretary-1796).
+
+        One transaction: the conditional charge on the sprint row (`e2e_used = e2e_used + 1` only while
+        `e2e_used < e2e_budget`) and the card's `e2e` field with the intent in it. When the budget has
+        no run left nothing is written, and the answer says so (`charged: false`, with the budget and
+        the runs used). A card outside every sprint (`sprint` empty) is not charged here: its per-card
+        cap is counted from its own records, and the intent is written as by `record_e2e_state`.
+        """
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        task = self.reader.show(reference)
+        if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
+            raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
+        with self._mutation():
+            charge: dict[str, Any] = {"charged": True}
+            if sprint:
+                charge = self.client.call(
+                    "chargeSprintE2e",
+                    sprint_ref=sprint,
+                    task_ref=reference,
+                    dispatch_id=dispatch_id,
+                    at=datetime.now(UTC).isoformat(),
+                )
+                if not charge.get("charged"):
+                    return charge
+            self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values={e2e_record.E2E_FIELD: state}
+            )
+            return charge
+
+    def raise_e2e_cap(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        authorized_by: str,
+        add: int | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Raise the e2e cap of one code card outside every sprint, on the owner's word (secretary-1796).
+
+        The sprint's `sprint e2e-budget`, for a card no sprint budgets: role `po` only, and only with
+        `authorized_by`, the event id of an owner-role comment on this card's e2e budget decision card
+        made after its handover whose one answer line is `e2e budget: raise <N>`
+        (`e2e_budget.authorized_raise`): the raise is that N, and `add`, when given, has to equal it. It
+        is appended to the
+        card's `e2e_cap` field in the transaction of one `e2e_cap_raised` audit record naming that
+        event. One authorizing comment raises once; everything is refused before anything is written.
+        """
+        role = self._role(role, {Role.PO}, actor=actor)
+        if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
+            raise TaskError("validation", f"--add is a whole number of runs, 1 or more; not {add!r}", 2)
+        authorized_by = str(authorized_by or "").strip()
+        current = self.reader.show(reference)
+        if str(current.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
+            raise TaskError("validation", f"{reference} is not a code card; it has no e2e cap", 2)
+        if str(current.get("sprint") or ""):
+            raise TaskError(
+                "validation",
+                f"{reference} belongs to {current['sprint']}, whose e2e budget it spends: raise that with "
+                "`sprint e2e-budget`",
+                2,
+            )
+        decision, add = e2e_budget.authorized_raise(self.audit, self.reader, authorized_by, reference, add)
+        request_id = request_id or f"e2e-cap-raise-{authorized_by}"
+        identity = {"add": add, "authorized_by": authorized_by}
+        if self.audit.event(request_id) is None:
+            for event in self.audit.events(reference, kind=e2e_budget.CARD_CAP_RAISED):
+                if (event.get("payload") or {}).get("authorized_by") == authorized_by:
+                    raise TaskError(
+                        "authorization_refused",
+                        f"the owner's comment {authorized_by} already authorized a raise of {reference}'s e2e "
+                        f"cap ({event.get('request_id')}); each answer raises once",
+                        3,
+                    )
+        at = _now()
+
+        def payload(task: dict[str, Any]) -> dict[str, Any]:
+            _check_execution_record(task)
+            return {**identity, "decision": decision, "cap": e2e_budget.card_cap(task) + add}
+
+        def mutation(task: dict[str, Any]) -> None:
+            raises = [
+                *e2e_budget.cap_raises(task),
+                {"add": add, "authorized_by": authorized_by, "decision": decision, "at": at},
+            ]
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_task_number(task),
+                values={e2e_budget.E2E_CAP_FIELD: e2e_budget.cap_text(raises)},
+            )
+
+        return self._write(
+            e2e_budget.CARD_CAP_RAISED, role, actor, reference, request_id, payload, mutation, identity=identity
+        )
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None

@@ -63,7 +63,8 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(set(CLASSES), {NEEDS_OWNER, NOTICE})
         self.assertEqual(
             {kind for kind in KINDS if class_of(kind) == NEEDS_OWNER},
-            {"card_handed_to_owner", "steward_needs_human"},
+            # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise.
+            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
                      "po_turn_failed", "provider_red", "delegated_card_settled"):
@@ -72,7 +73,7 @@ class EntityTests(unittest.TestCase):
             class_of("card_moved")
 
     def test_the_schema_and_the_revision_spell_the_same_vocabularies(self) -> None:
-        """The CHECKs of `board/schema.py`, 0018 and 0021 are the lists this module derives classes from."""
+        """The CHECKs of `board/schema.py`, 0018 and 0023 are the lists this module derives classes from."""
         table = schema.metadata.tables["owner_events"]
         import sqlalchemy as sa
 
@@ -81,26 +82,29 @@ class EntityTests(unittest.TestCase):
             for constraint in table.constraints
             if isinstance(constraint, sa.CheckConstraint)
         }
-        spelled = set(re.findall(r"'([a-z_]+)'", checks["owner_event_kind_in_vocabulary"]))
+        # A kind may carry a digit (`e2e_budget_spent`, secretary-1796).
+        spelled = set(re.findall(r"'([a-z0-9_]+)'", checks["owner_event_kind_in_vocabulary"]))
         self.assertEqual(spelled, set(KINDS))
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", checks["owner_event_class_in_vocabulary"])), set(CLASSES))
         needs = re.search(r"kind IN \(([^)]*)\)", checks["owner_event_class_follows_kind"]).group(1)
-        self.assertEqual(set(re.findall(r"'([a-z_]+)'", needs)), set(owner_events.NEEDS_OWNER_KINDS))
+        self.assertEqual(set(re.findall(r"'([a-z0-9_]+)'", needs)), set(owner_events.NEEDS_OWNER_KINDS))
         revision = importlib.import_module("secretary.board.migrations.versions.0018_owner_events")
         source = Path(revision.__file__).read_text(encoding="utf-8")
-        # 0021 restates the kind vocabulary with `delegated_card_settled` (secretary-1792); the two
-        # class CHECKs are still the ones 0018 created.
-        restated = importlib.import_module("secretary.board.migrations.versions.0021_delegated_card_settled")
+        # 0021 restated the kind vocabulary with `delegated_card_settled` (secretary-1792); 0023 restates
+        # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796). The class
+        # vocabulary is still the one 0018 created.
+        restated = importlib.import_module("secretary.board.migrations.versions.0023_sprint_e2e_budget")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
+        restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
-            spelled_in = restated_source if name == "owner_event_kind_in_vocabulary" else source
+            spelled_in = restated_source if name in restated_names else source
             self.assertIn(
                 text.replace("\n", ""),
                 spelled_in.replace('"\n            "', "").replace('"\n        "', ""),
                 name,
             )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
-        self.assertEqual(restated.down_revision, "0020_wait_card_kind")
+        self.assertEqual(restated.down_revision, "0022_origin_returns")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()

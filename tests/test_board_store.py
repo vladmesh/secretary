@@ -315,6 +315,7 @@ class SchemaModelTests(unittest.TestCase):
                 "sprint_budget_events",
                 "sprint_comments",
                 "sprint_decisions",
+                "sprint_e2e_charges",
                 "sprint_issues",
                 "sprint_projects",
                 "sprint_repositories",
@@ -355,8 +356,9 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        # 56 since `0022` added `origin_returns` with three (secretary-1792).
-        self.assertEqual(len(checks), 56, "§3.13 counts 56 CHECK constraints at the head revision")
+        # 56 since `0022` added `origin_returns` with three (secretary-1792); 57 since `0023` added the
+        # sprint's e2e counts (secretary-1796).
+        self.assertEqual(len(checks), 57, "§3.13 counts 57 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -482,6 +484,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0023_sprint_e2e_budget",
                 "0022_origin_returns",
                 "0021_delegated_card_settled",
                 "0020_wait_card_kind",

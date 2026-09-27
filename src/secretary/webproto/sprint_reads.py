@@ -2502,6 +2502,8 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
         # a sprint opened before either was recorded.
         "po_session": sprint.get("po_session"),
         "allowed_productions": list(sprint.get("allowed_productions") or []),
+        # The e2e run budget: `e2e: <used> of <budget>` and the cards that spent the runs (secretary-1796).
+        "e2e": sprint.get("e2e"),
         "resume": sprint.get("resume"),
         "budget": sprint.get("budget"),
         "audit": sprint.get("audit"),
