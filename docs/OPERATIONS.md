@@ -1128,6 +1128,12 @@ when only base history came in and the card's own paths are unchanged: the attes
 is then Blocked. A Blocked card brought back on the same SHA dispatches a new run, charged like any
 other.
 
+`.github/workflows/e2e-synthetic.yml` is a synthetic e2e workflow kept for the sprint:1469 live proof:
+it runs only on `workflow_dispatch`, checks out the dispatched ref, sleeps `minutes` minutes (1–110,
+default 61) and concludes as its `outcome` input says. An adapter would declare it as
+`validation.e2e: {workflow: e2e-synthetic.yml, inputs: {minutes: "61", outcome: success}, candidate_input: candidate, deadline: 3h}`.
+Declaring it makes every code card of that project wait about an hour and spend one budgeted run.
+
 ### When the e2e run budget is spent
 
 Every e2e run pays for stands, so each sprint has an e2e run budget: 3 runs unless `sprint create
