@@ -17,7 +17,6 @@ import io
 import json
 import os
 import tempfile
-import time
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -50,6 +49,7 @@ from secretary.dispatch.origin_returns import (
 from secretary.po.client import ServiceUnavailable
 from secretary.po.store import RequestConflict, SessionClosed, SessionNotFound
 from secretary.tasks import TaskError, _po_card_create_refusal
+from tests.origin_outbox_fakes import FakeOriginOutbox, SimulatedCrash
 from tests.owner_event_fakes import FakeOwnerEvents
 from tests.po_card_fakes import DECISION_BODY, DispatcherFixture, Forbidden, card
 from tests.po_fake_store import FakePoStore
@@ -60,10 +60,6 @@ REQUEST = "web-owner-7"
 REF = "secretary-1950"
 PR = "https://github.com/vladmesh/secretary/pull/590"
 RUN = "https://github.com/vladmesh/secretary/actions/runs/4242"
-
-
-class SimulatedCrash(Exception):
-    """The dispatcher process died here."""
 
 
 def delegated(
@@ -102,11 +98,8 @@ class DelegationBoard:
         self.cards = {task["ref"]: task for task in cards}
         self.log: list[dict[str, Any]] = []
         self.returns: list[dict[str, Any]] = []
-        #: When set, the next `po_return` write for which it answers true raises `SimulatedCrash`.
-        self.crash_before: Any = None
-        self.client = SimpleNamespace(owner_events=FakeOwnerEvents())
-        #: Each card's `date_moved`, as epoch seconds: every move sets it, nothing else does.
-        self.moved_at: dict[str, int] = {}
+        self.outbox = FakeOriginOutbox()
+        self.client = SimpleNamespace(owner_events=FakeOwnerEvents(), origin_outbox=self.outbox)
         self.audit_reads: list[str] = []
 
     # reader
@@ -118,21 +111,10 @@ class DelegationBoard:
     def list(self, states: set[str] | None = None, **_: Any) -> list[dict[str, Any]]:
         return [copy.deepcopy(task) for task in self.cards.values() if not states or task["state"] in states]
 
-    def delegated_cards(self) -> list[dict[str, Any]]:
-        """`TaskReader.delegated_cards`: every card with an origin, any column, with its `moved_at`."""
-        return [
-            {**copy.deepcopy(task), "moved_at": self.moved_at.get(task["ref"])}
-            for task in self.cards.values()
-            if origin_field.po_origin(task) is not None
-        ]
-
     # writer
     def record_po_return(self, *, role: str, reference: str, state: str, **_: Any) -> None:
         assert role == "dispatcher", role
         assert origin_field.po_origin(self.cards[reference]) is not None, reference
-        if self.crash_before is not None and self.crash_before(json.loads(state)):
-            self.crash_before = None
-            raise SimulatedCrash(f"crashed before recording {state}")
         self.cards[reference]["extensions"]["extra"][origin_field.PO_RETURN] = state
         self.returns.append(json.loads(state))
 
@@ -169,8 +151,13 @@ class DelegationBoard:
             reference, "card.moved", reason, data, transition={"source": source, "target": target}
         )
         self.cards[reference]["state"] = target
-        self.moved_at[reference] = 1_790_000_000 + len(self.log)
+        # The store's commit of the transition writes the row it owes, in the same transaction.
+        self.outbox.enqueue(self.cards[reference], event["request_id"], event)
         return event["event_id"]
+
+    def archive(self, reference: str) -> None:
+        """An authorized archive: the card leaves every listing; its audit and outbox rows stay."""
+        self.cards[reference]["closed"] = True
 
     def report(self, reference: str, kind: str, body: str, classification: str | None = None) -> None:
         self._event(
@@ -180,8 +167,8 @@ class DelegationBoard:
             {"marker": f"report:{kind}", "status": kind, "body": body, "classification": classification},
         )
 
-    def delivered(self, reference: str = REF) -> dict[str, dict[str, str]]:
-        return return_state(self.cards[reference]).deliveries
+    def delivered(self, reference: str = REF) -> dict[str, dict[str, Any]]:
+        return self.outbox.delivered(reference)
 
     def notices(self) -> list[Any]:
         return self.client.owner_events.events()
@@ -343,17 +330,18 @@ class DeliveryTests(ReturnCase):
         )
         self.assertIn("settled Done", notice.text)
         self.assertIn(f"PO session {SESSION}", notice.text)
+        delivered = self.board.delivered()[event_id]
         self.assertEqual(
-            self.board.delivered()[event_id],
+            {name: delivered[name] for name in ("state", "status", "notice", "session", "request_id")},
             {
                 "state": "done",
-                "status": "accepted",
+                "status": "delivered",
                 "notice": "written",
-                "at": "2026-09-27T12:04:00Z",
                 "session": SESSION,
                 "request_id": request_id,
             },
         )
+        self.assertIsNotNone(delivered["delivered_at"])
 
         # The next ticks send nothing: that transition is delivered.
         self.assertEqual(self.tick(), [])
@@ -408,7 +396,7 @@ class DeliveryTests(ReturnCase):
     def test_with_no_board_store_at_all_there_is_no_bell_to_wait_for(self) -> None:
         self.arrange(delegated())
         event_id = self.done_code_card()
-        self.board.client = SimpleNamespace()
+        self.board.client = SimpleNamespace(origin_outbox=self.board.outbox)
 
         with self.assertLogs("secretary.board.owner_events", level="INFO"):
             [outcome] = self.tick()
@@ -458,7 +446,7 @@ class DeliveryTests(ReturnCase):
             with self.subTest(column=column):
                 self.arrange(delegated(kind="code" if column == "done" else "research"))
                 event_id = self.done_code_card() if column == "done" else self.blocked_research_card()
-                self.board.crash_before = lambda state: bool(state["deliveries"])
+                self.board.outbox.crash_before = lambda row: True
 
                 with self.assertRaises(SimulatedCrash):
                     self.tick()
@@ -471,7 +459,7 @@ class DeliveryTests(ReturnCase):
                 # The submit was repeated under the same id and the service took it as the earlier one.
                 self.assertEqual(self.po.submits, [return_request_id(REF, event_id)] * 2)
                 self.assertEqual((len(self.po.inputs), len(self.board.notices())), (1, 1))
-                self.assertEqual(self.board.delivered()[event_id]["status"], "accepted")
+                self.assertEqual(self.board.delivered()[event_id]["status"], "delivered")
                 self.assertEqual(self.tick(), [])
 
     def test_a_closed_origin_session_gets_one_successor_that_takes_every_later_result(self) -> None:
@@ -499,7 +487,7 @@ class DeliveryTests(ReturnCase):
             state.successors,
             {SESSION: {"replaces": SESSION, "via": "create_session", "session": "successor-1"}},
         )
-        self.assertEqual(state.deliveries[first]["session"], "successor-1")
+        self.assertEqual(self.board.delivered()[first]["session"], "successor-1")
         [notice] = self.board.notices()
         self.assertIn(f"PO session successor-1, the successor of its origin session {SESSION}", notice.text)
         self.assertEqual(origin_view(self.board.cards[REF])["current_session"], "successor-1")
@@ -548,7 +536,7 @@ class DeliveryTests(ReturnCase):
     def test_the_same_transition_always_renders_the_same_input(self) -> None:
         self.arrange(delegated())
         self.done_code_card()
-        self.board.crash_before = lambda state: True
+        self.board.outbox.crash_before = lambda row: True
         with self.assertRaises(SimulatedCrash):
             self.tick()
         # A comment added in between changes nothing: the input is the card and its audit up to Done.
@@ -567,15 +555,7 @@ class BacklogTests(ReturnCase):
         self.board.move(REF, "ready", "reopened before the dispatcher saw the Done")
         second = self.done_code_card()
 
-        self.assertEqual(
-            [
-                p.key
-                for p in pending_returns(
-                    self.board.cards[REF], self.board.log, return_state(self.board.cards[REF])
-                )
-            ],
-            [first, second],
-        )
+        self.assertEqual([row.event_id for row in pending_returns(self.board.outbox)], [first, second])
         outcomes = self.tick()
 
         self.assertEqual(
@@ -659,7 +639,7 @@ class BacklogTests(ReturnCase):
 
     def test_a_crash_on_the_first_leaves_both_for_the_next_tick_with_no_duplicate(self) -> None:
         first, second = self.arrange_backlog()
-        self.board.crash_before = lambda state: bool(state["deliveries"])
+        self.board.outbox.crash_before = lambda row: True
 
         with self.assertRaises(SimulatedCrash):
             self.tick()
@@ -676,39 +656,41 @@ class BacklogTests(ReturnCase):
         self.assertEqual(len(self.board.notices()), 2)
         self.assertEqual(self.tick(), [])
 
-    def test_a_card_that_has_not_moved_since_its_last_complete_pass_is_not_read(self) -> None:
+    def test_a_card_archived_before_any_pass_still_returns_its_done(self) -> None:
+        """BLOCKER-ARCHIVED-ORIGIN-RETURN-LOSS: the obligation was written with the move, not inferred later."""
+        self.arrange(delegated())
+        event_id = self.done_code_card()
+        self.board.archive(REF)
+
+        [outcome] = self.tick()
+
+        self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", event_id))
+        self.assertEqual((len(self.po.inputs), len(self.board.notices())), (1, 1))
+        self.assertEqual(self.tick(), [])
+
+    def test_a_delivered_row_is_never_selected_again_and_the_pass_reads_no_card_list(self) -> None:
         self.arrange(delegated(), delegated("secretary-1951", origin=None))
         event_id = self.done_code_card()
-        cursors: dict[str, Any] = {}
+        self.board.list = mock.Mock(side_effect=AssertionError("the pass scans no card listing"))
 
-        reconcile_origin_returns(self.runtime(), cursors)
-
-        self.assertEqual(list(self.board.delivered()), [event_id])
-        self.assertEqual(cursors, {REF: {"moved_at": self.board.moved_at[REF]}})
+        self.tick()
         self.board.audit_reads.clear()
-        self.assertEqual(reconcile_origin_returns(self.runtime(), cursors), [])
+
+        self.assertEqual(self.tick(), [])
         self.assertEqual(self.board.audit_reads, [])
+        self.assertEqual([row.event_id for row in self.board.outbox.rows if row.delivered_at], [event_id])
+        self.assertEqual(pending_returns(self.board.outbox), [])
 
-        # It moves: read again, and its new transition is returned.
-        self.board.move(REF, "ready", "reopened")
-        second = self.done_code_card()
-        [outcome] = reconcile_origin_returns(self.runtime(), cursors)
-        self.assertEqual((outcome["event_id"], self.board.audit_reads), (second, [REF]))
-
-    def test_a_pass_that_did_not_complete_or_ran_just_after_a_move_keeps_no_cursor(self) -> None:
-        self.arrange(delegated(), po=FakePo(down=1))
-        self.done_code_card()
-        cursors: dict[str, Any] = {}
-
-        [postponed] = reconcile_origin_returns(self.runtime(), cursors)
-
-        self.assertEqual(postponed["status"], "degraded")
-        self.assertEqual(cursors, {})
-        # A move within the margin of the pass's start is not trusted to be the last one.
-        self.board.moved_at[REF] = int(time.time())
-        reconcile_origin_returns(self.runtime(), cursors)
-        self.assertEqual(len(self.po.inputs), 1)
-        self.assertEqual(cursors, {})
+    def test_the_store_owes_nothing_for_a_card_with_no_origin_a_wait_card_or_a_move_out(self) -> None:
+        self.arrange(
+            delegated(), delegated("secretary-1951", origin=None), delegated("secretary-1952", kind="wait")
+        )
+        for ref in ("secretary-1951", "secretary-1952"):
+            self.board.move(ref, "in_progress", "claimed")
+            self.board.move(ref, "done", "done")
+        self.board.move(REF, "in_progress", "claimed")
+        self.board.move(REF, "validate", "report:done")
+        self.assertEqual(self.board.outbox.rows, [])
 
 
 class ExceptionTests(ReturnCase):
@@ -762,7 +744,7 @@ class ExceptionTests(ReturnCase):
                 self.assertEqual((outcome["action"], outcome["session"]), ("origin-returned", SESSION))
                 self.assertEqual(list(self.po.inputs), [return_request_id(REF, event_id)])
                 self.assertEqual(len(self.board.notices()), 1)
-                self.assertEqual(self.board.delivered()[event_id]["status"], "accepted")
+                self.assertEqual(self.board.delivered()[event_id]["status"], "delivered")
 
     def test_its_blocked_is_sent_back_and_a_done_in_another_session_is_too(self) -> None:
         state = origin_field.ReturnState(executor=SESSION)
@@ -827,21 +809,23 @@ class OutOfSprintCardTests(DispatcherFixture):
         self.cards.complete_as_po("decision", DECISION_BODY)
         self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
         # Its Done, in the audit, is not sent back: the session that completed it has the result.
-        self.cards.log.append(
-            {
-                "record_type": "board.protocol_event",
-                "event_id": "evt_done",
-                "request_id": "complete-1",
-                "ref": "secretary-1900",
-                "kind": "card.moved",
-                "reason": "[completion:decision]",
-                "transition": {"source": "in_progress", "target": "done"},
-                # What `task complete` records when the origin session's turn runs it.
-                "data": {"po_session": session},
-                "occurred_at": "2026-09-27T13:00:00Z",
-            }
-        )
-        runtime.reader.client = SimpleNamespace(owner_events=FakeOwnerEvents())
+        done = {
+            "record_type": "board.protocol_event",
+            "event_id": "evt_done",
+            "request_id": "complete-1",
+            "ref": "secretary-1900",
+            "kind": "card.moved",
+            "reason": "[completion:decision]",
+            "transition": {"source": "in_progress", "target": "done"},
+            # What `task complete` records when the origin session's turn runs it.
+            "data": {"po_session": session},
+            "occurred_at": "2026-09-27T13:00:00Z",
+        }
+        # The completion's commit, as the store makes it: the audit event and the row it owes.
+        self.cards.log.append(done)
+        outbox = FakeOriginOutbox()
+        self.assertTrue(outbox.enqueue(self.cards.card, "complete-1", done))
+        runtime.reader.client = SimpleNamespace(owner_events=FakeOwnerEvents(), origin_outbox=outbox)
         [returned] = reconcile_origin_returns(runtime)
         self.assertEqual(returned["action"], "origin-return-skipped")
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 1)

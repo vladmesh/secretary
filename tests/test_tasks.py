@@ -2767,23 +2767,164 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.create_as_po("secretary-630", origin={"session": "po-s-2", "request": "other"})
         self.assertBoardUnchanged(after)
 
-    def test_the_delegated_card_view_lists_every_card_with_an_origin_in_any_column_with_its_move(self) -> None:
-        self.create_as_po("secretary-640", origin=self.ORIGIN)
-        self.create_as_po("secretary-641")
-        self.create_as_po("secretary-642", origin=self.ORIGIN)
-        self.place_card("secretary-642", "in_progress")
+    # --- the origin-return outbox (secretary-1792) ----------------------------------------------
 
-        cards = self.writer.reader.delegated_cards()
+    def outbox(self, reference: str | None = None) -> list[tuple]:
+        """`origin_returns` as the store holds it: (card, event id, column, status, session), in id order."""
+        rows = self.client._query(
+            "SELECT task_ref, event_id, target_state, status, session FROM origin_returns ORDER BY id"
+        )
+        return [tuple(row) for row in rows if reference is None or row[0] == reference]
 
-        self.assertEqual([card["ref"] for card in cards], ["secretary-640", "secretary-642"])
-        self.assertEqual([card["state"] for card in cards], ["ready", "in_progress"])
-        for card in cards:
-            self.assertEqual(card["origin"]["po_session"], "po-s-1")
-            self.assertIsInstance(card["moved_at"], int)
-        # A metadata write is not a move: `moved_at` stays; a move sets it again.
-        before = cards[0]["moved_at"]
-        self.writer.record_po_return(role="dispatcher", actor="d", reference="secretary-640", state="{}")
-        self.assertEqual(self.writer.reader.delegated_cards()[0]["moved_at"], before)
+    def event_id_of(self, request_id: str) -> str:
+        return str(self.writer.audit.committed_event(request_id)["event_id"])
+
+    def test_every_writer_of_a_terminal_transition_writes_its_outbox_row_in_the_same_commit(self) -> None:
+        wait = {"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z"}
+        self.create_as_po("secretary-650", origin=self.ORIGIN)
+        self.create_as_po("secretary-651", origin=self.ORIGIN)
+        self.create_as_po("secretary-652", "decision", origin=self.ORIGIN)
+        with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
+            self.create_as_po("secretary-653", "wait", origin=self.ORIGIN, wait=wait)
+        self.create_as_po("secretary-654")
+        for reference in ("secretary-651", "secretary-652", "secretary-653", "secretary-654"):
+            self.place_card(reference, "in_progress")
+
+        with self.open_sprint():
+            # The PO's move, by hand.
+            self.writer.move(role="po", actor="po", reference="secretary-650", target="done", reason="done", request_id="m-650")
+            # A dispatcher edge.
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-651", target="blocked",
+                             reason="the worker stalled", request_id="m-651")
+            # `task complete`.
+            self.writer.complete(role="po", actor="po", reference="secretary-652", kind="decision",
+                                 body=self.DECISION_BODY, request_id="m-652", po_session="po-s-1")
+            # The dispatcher's wait edge: a wait card owes no return; it has its own addresses.
+            self.freeze("secretary-653")
+            self.writer.move(role="dispatcher", actor="d", reference="secretary-653", target="done",
+                             reason="[wait:target_reached]", request_id="m-653", wait_outcome="target_reached")
+            # A card with no origin owes nothing.
+            self.writer.move(role="po", actor="po", reference="secretary-654", target="blocked", reason="x",
+                             request_id="m-654")
+
+        expected = [
+            ("secretary-650", self.event_id_of("m-650"), "done", None, None),
+            ("secretary-651", self.event_id_of("m-651"), "blocked", None, None),
+            ("secretary-652", self.event_id_of("m-652"), "done", None, None),
+        ]
+        self.assertEqual(self.outbox(), expected)
+        [(event_id, request_id)] = self.client._query(
+            "SELECT event_id, request_id FROM origin_returns WHERE task_ref = 'secretary-650'"
+        )
+        self.assertEqual((event_id, request_id), (self.event_id_of("m-650"), "m-650"))
+
+        # Reopen, a later move and archive write no row and touch none; a replay writes nothing.
+        with self.open_sprint():
+            self.writer.move(role="po", actor="po", reference="secretary-650", target="ready", reason="reopen",
+                             request_id="r-650")
+            self.writer.move(role="po", actor="po", reference="secretary-650", target="done", reason="done",
+                             request_id="m-650")
+            self.writer.archive(role="po", actor="po", reference="secretary-651", reason="parked for good")
+        self.assertEqual(self.outbox(), expected)
+        # `task show` reads the card's rows for its origin block.
+        [shown] = self.card("secretary-652")["origin"]["returns"]
+        self.assertEqual((shown["event_id"], shown["state"], shown["status"]), (self.event_id_of("m-652"), "done", None))
+
+    def test_a_transition_and_its_outbox_row_commit_together_or_not_at_all(self) -> None:
+        self.create_as_po("secretary-655", origin=self.ORIGIN)
+        before = self.board_snapshot()
+
+        with (
+            self.open_sprint(),
+            mock.patch.object(SqlTaskAudit, "_write_board_event", side_effect=RuntimeError("injected before commit")),
+            self.assertRaises((RuntimeError, TaskError)),
+        ):
+            self.writer.move(role="po", actor="po", reference="secretary-655", target="done", reason="done",
+                             request_id="m-655")
+
+        self.assertEqual(self.card_state("secretary-655"), "ready")
+        self.assertIsNone(self.writer.audit.committed_event("m-655"))
+        self.assertEqual(self.outbox("secretary-655"), [])
+        self.assertBoardUnchanged(before)
+
+    def test_no_writer_bypasses_the_outbox_because_every_committed_record_goes_through_append(self) -> None:
+        """The bypass guard: over the store's one commit entry point, not over each caller."""
+        # 1. The code: a committed audit record is written in one place, `SqlTaskAudit.append`.
+        source_root = Path(tasks.__file__).resolve().parent
+        inserts = [
+            str(path.relative_to(source_root))
+            for path in sorted(source_root.rglob("*.py"))
+            if "migrations" not in path.parts and "INSERT INTO requests" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(inserts, ["board/sql_audit.py"])
+        audit_source = inspect.getsource(SqlTaskAudit)
+        self.assertEqual(audit_source.count('status="committed"'), 1)
+        self.assertIn("origin_outbox.enqueue(self, request_id, event)", inspect.getsource(SqlTaskAudit.append))
+
+        # 2. The entry point: whatever writer commits a transition into Done or Blocked, of either
+        # record shape, on a delegated card, the row is written; nothing else writes one.
+        self.create_as_po("secretary-656", origin=self.ORIGIN)
+        self.create_as_po("secretary-657")
+        records = {
+            "typed-656": {"record_type": "board.protocol_event", "event_id": "evt_typed_656", "ref": "secretary-656",
+                          "kind": "card.blocked", "transition": {"source": "ready", "target": "blocked"}},
+            "legacy-656": {"event_id": "evt_legacy_656", "ref": "secretary-656", "kind": "moved", "outcome": "success",
+                           "payload": {"from": "blocked", "to": "done"}},
+            "out-656": {"record_type": "board.protocol_event", "event_id": "evt_out_656", "ref": "secretary-656",
+                        "kind": "card.moved", "transition": {"source": "done", "target": "validate"}},
+            "plain-657": {"record_type": "board.protocol_event", "event_id": "evt_plain_657", "ref": "secretary-657",
+                          "kind": "card.blocked", "transition": {"source": "ready", "target": "blocked"}},
+        }
+        # The normalized-board restore replays history: an old transition owes no new return.
+        restored = {"record_type": "board.protocol_event", "event_id": "evt_restored_656", "ref": "secretary-656",
+                    "kind": "card.moved", "transition": {"source": "in_progress", "target": "done"}}
+        with mock.patch.object(SqlTaskAudit, "_write_board_event"):
+            for request_id, record in records.items():
+                self.writer.audit.append(request_id, record)
+            self.writer.audit.append("restored-656", restored, restoring=True)
+        self.assertEqual(
+            [(row[0], row[1], row[2]) for row in self.outbox()],
+            [("secretary-656", "evt_typed_656", "blocked"), ("secretary-656", "evt_legacy_656", "done")],
+        )
+
+    def test_a_card_archived_before_any_pass_returns_its_done_once_with_one_notice(self) -> None:
+        """BLOCKER-ARCHIVED-ORIGIN-RETURN-LOSS, over PostgreSQL."""
+        from secretary.dispatch.origin_returns import reconcile_origin_returns, return_request_id
+
+        self.create_as_po("secretary-658", origin=self.ORIGIN)
+        with self.open_sprint():
+            self.writer.move(role="po", actor="po", reference="secretary-658", target="done", reason="shipped",
+                             request_id="m-658")
+            self.writer.archive(role="po", actor="po", reference="secretary-658", reason="archived at once")
+        self.assertNotIn("secretary-658", [card["ref"] for card in self.writer.reader.list()])
+
+        class Po:
+            def __init__(self) -> None:
+                self.inputs: dict[str, dict] = {}
+
+            def submit(self, *, session_id: str, text: str, request_id: str, source: str, card: dict) -> dict:
+                self.inputs.setdefault(request_id, {"session_id": session_id, "text": text, "card": card})
+                return {"session_id": session_id, "queued": True}
+
+        po = Po()
+        runtime = mock.Mock(owner="d", reader=self.writer.reader, writer=self.writer, audit=self.writer.audit, po=po)
+
+        [outcome] = reconcile_origin_returns(runtime)
+
+        event_id = self.event_id_of("m-658")
+        self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", event_id))
+        self.assertEqual(list(po.inputs), [return_request_id("secretary-658", event_id)])
+        self.assertEqual(po.inputs[return_request_id("secretary-658", event_id)]["session_id"], "po-s-1")
+        self.assertIn("settled Done", po.inputs[return_request_id("secretary-658", event_id)]["text"])
+        notices = self.client._query(
+            "SELECT subject_ref, dedup_key FROM owner_events WHERE kind = 'delegated_card_settled'"
+        )
+        self.assertEqual([tuple(row) for row in notices],
+                         [("secretary-658", f"delegated_card_settled:secretary-658:{event_id}")])
+        self.assertEqual(self.outbox("secretary-658"), [("secretary-658", event_id, "done", "delivered", "po-s-1")])
+        # A delivered row is never selected again.
+        self.assertEqual(reconcile_origin_returns(runtime), [])
+        self.assertEqual(len(po.inputs), 1)
 
     def test_an_origin_is_the_pos_alone_and_nothing_after_create_rewrites_it(self) -> None:
         before = self.board_snapshot()

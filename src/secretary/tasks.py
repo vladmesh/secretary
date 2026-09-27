@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from secretary.board.audit_contract import is_protocol_event
+from secretary.board.audit_contract import card_transition_of, is_protocol_event
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.completion_evidence import (
@@ -485,27 +485,8 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
 
 
 def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
-    """The board-state transition one audit event records, or `None` when it records none.
-
-    History holds two shapes of the same fact and a reader of the journal has to know both: a typed
-    protocol event carries `transition.source` and `transition.target`, and a legacy one is
-    `moved` with `payload.from` and `payload.to`. They are read in one place so that a caller asking
-    "did this event move the card, and where to" cannot learn only one of them.
-
-    Nothing about *who* moved the card or *why* is decided here: this is the shape and no filter.
-    The one thing it does refuse is a legacy event whose outcome is not `success`, because an event
-    recording a move that did not happen is not a transition at all -- which is the same reason
-    :func:`is_significant_card_event`, the caller this shape was lifted out of, has always asked.
-    """
-    if is_protocol_event(event):
-        typed = event.get("transition") if isinstance(event.get("transition"), dict) else {}
-        target = str(typed.get("target") or "")
-        return (str(typed.get("source") or ""), target) if target else None
-    if str(event.get("kind") or "") != "moved" or str(event.get("outcome") or "") != "success":
-        return None
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    target = str(payload.get("to") or "")
-    return (str(payload.get("from") or ""), target) if target else None
+    """The board-state transition one audit event records, or `None` (`audit_contract.card_transition_of`)."""
+    return card_transition_of(event)
 
 
 #: The data key a dispatcher release puts on the Done transition when its release merged a commit
@@ -694,31 +675,26 @@ class TaskReader:
             if sprint is not None and normalized["sprint"] != sprint:
                 continue
             result.append(normalized)
+        self._attach_origin_returns(result)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
 
-    def delegated_cards(self) -> list[dict[str, Any]]:
-        """Every live card that carries a PO origin, in any column, with its `moved_at` (secretary-1792).
+    def _attach_origin_returns(self, cards: list[dict[str, Any]]) -> None:
+        """Fill each delegated card's `origin.returns` from its outbox rows, in one read (secretary-1792).
 
-        The result return's candidate view (`dispatch/origin_returns.py`): the normalized card, plus
-        `moved_at`, the epoch seconds of its `date_moved`, which every column move sets and nothing else
-        writes (None when the row carries none). One board read and one batched metadata read; a card
-        without the `po_origin` field is not normalized at all.
+        The outbox (`board/origin_outbox.py`) is the one record of what a card owes its origin session
+        and what was delivered. A client with no outbox, or a store before 0022, leaves them empty.
         """
-        project_id, columns, swimlanes = self._board()
-        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
-        if not isinstance(raw, list):
-            raise TaskError("backend_error", "board store returned an invalid task list", 1)
-        rows = [card for card in raw if isinstance(card, dict)]
-        metadata = self._metadata_of(rows)
-        cards: list[dict[str, Any]] = []
-        for card in rows:
-            meta = metadata[_task_number(card)]
-            if not meta.get(origin_field.PO_ORIGIN):
-                continue
-            normalized = self._normalize(card, columns, swimlanes, meta, comments=None)
-            normalized["moved_at"] = _positive_int(card.get("date_moved"))
-            cards.append(normalized)
-        return sorted(cards, key=lambda task: task["ref"])
+        delegated = [card for card in cards if isinstance(card.get("origin"), dict)]
+        if not delegated:
+            return
+        from secretary.board.origin_outbox import outbox_for
+
+        outbox = outbox_for(self.client)
+        if outbox is None:
+            return
+        rows = outbox.rows_for(card["ref"] for card in delegated)
+        for card in delegated:
+            card["origin"]["returns"] = [row.to_json() for row in rows.get(card["ref"], [])]
 
     def steward_reports_in_progress(self, project: str) -> list[dict[str, Any]]:
         """Return the small, durable report view a steward dispatch needs.
@@ -964,13 +940,15 @@ class TaskReader:
             raise TaskError("backend_error", "board store returned an invalid task", 1)
         raw_comments = self.client.call("getAllComments", task_id=task_id) or []
         comments = [_normalize_comment(comment) for comment in raw_comments if isinstance(comment, dict)]
-        return self._normalize(
+        shown = self._normalize(
             card,
             columns,
             swimlanes,
             _task_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
             comments=comments,
         )
+        self._attach_origin_returns([shown])
+        return shown
 
     def _metadata_of(self, cards: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
         """The task metadata of every given row, keyed by board task id, in one batched read."""

@@ -87,11 +87,6 @@ class OneCardBoard:
     def list(self, states: set[str] | None = None, **_: Any) -> list[dict[str, Any]]:
         return [copy.deepcopy(self.card)] if not states or self.card["state"] in states else []
 
-    def delegated_cards(self) -> list[dict[str, Any]]:
-        """`TaskReader.delegated_cards`: the card when it carries an origin (no `date_moved` here)."""
-        extra = (self.card.get("extensions") or {}).get("extra") or {}
-        return [{**copy.deepcopy(self.card), "moved_at": None}] if extra.get("po_origin") else []
-
     def record_po_return(self, *, role: str, reference: str, state: str, **_: Any) -> None:
         """The dispatcher's `po_return` of a delegated card (secretary-1792)."""
         assert role == "dispatcher" and reference == self.card["ref"], (role, reference)

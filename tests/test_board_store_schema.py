@@ -72,8 +72,9 @@ SELECT
 #: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
 #: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves. `0017`
 #: restates the `task_type` CHECK again, one for one. `0018` adds `owner_events`: three `CHECK`, one
-#: primary key, one `UNIQUE`.
-DOCUMENTED_COUNTS = (29, 53, 44, 29, 18, 5)
+#: primary key, one `UNIQUE`. `0022` adds `origin_returns`: three `CHECK`, one primary key, one
+#: `UNIQUE` (its partial index is not unique).
+DOCUMENTED_COUNTS = (30, 56, 44, 30, 19, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -98,6 +99,7 @@ REVISIONS = (
     "0019_po_session_title",
     "0020_wait_card_kind",
     "0021_delegated_card_settled",
+    "0022_origin_returns",
 )
 
 
@@ -478,6 +480,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -735,6 +738,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1114,6 +1118,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1154,6 +1159,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1234,6 +1240,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1252,6 +1259,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0019_po_session_title",
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1354,7 +1362,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"),
         )
 
         self.assertEqual(
@@ -1407,7 +1415,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         self.assertEqual(
             (
@@ -1484,7 +1492,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -1516,7 +1524,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
@@ -1543,7 +1551,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-7", task_type="wait")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled"))
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
         self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
@@ -1592,7 +1600,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             insert(DELEGATED_CARD_SETTLED, "notice", "k-3")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled",))
+        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))

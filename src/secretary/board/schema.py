@@ -952,6 +952,43 @@ class OwnerEvent(Base):
         sa.Index("owner_events_by_subject", "subject_ref"),
     )
 
+class OriginReturn(Base):
+    """What a delegated card owes its PO session (revision 0022, `board.origin_outbox`).
+
+    One row per transition into Done or Blocked of a card with a PO origin, written by
+    `SqlTaskAudit.append` in the transaction that commits the transition; its delivery is recorded
+    once by the dispatcher (`dispatch/origin_returns.py`).
+    """
+
+    __tablename__ = "origin_returns"
+
+    id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
+    task_ref = sa.Column(sa.Text, nullable=False)
+    event_id = sa.Column(sa.Text, nullable=False)
+    # The audit record (`requests.request_id`) that committed the transition.
+    request_id = sa.Column(sa.Text, nullable=False)
+    target_state = sa.Column(sa.Text, nullable=False)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    delivered_at = sa.Column(TIMESTAMPTZ)
+    status = sa.Column(sa.Text)
+    notice = sa.Column(sa.Text)
+    session = sa.Column(sa.Text)
+    po_request_id = sa.Column(sa.Text)
+
+    __table_args__ = (
+        sa.CheckConstraint("target_state IN ('done','blocked')", name="origin_return_target_is_terminal"),
+        sa.CheckConstraint(
+            "status IS NULL OR status IN ('delivered','skipped')", name="origin_return_status_in_vocabulary"
+        ),
+        sa.CheckConstraint(
+            "(delivered_at IS NULL) = (status IS NULL)", name="origin_return_status_with_its_delivery"
+        ),
+        sa.UniqueConstraint("event_id", name="origin_return_event_is_unique"),
+        sa.Index("origin_returns_undelivered", "id", postgresql_where=sa.text("delivered_at IS NULL")),
+        sa.Index("origin_returns_by_card", "task_ref"),
+    )
+
+
 #: The three §5.5 role names.  They are literals of the design, not of one installation:
 #: `board-store.env` carries the *passwords*, which is what the revision takes as parameters.
 OWNER_ROLE = "secretary_owner"

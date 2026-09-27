@@ -39,7 +39,6 @@ from secretary.dispatch.observer import (
 )
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
-from secretary.dispatch.origin_returns import CURSORS_KEY as ORIGIN_RETURN_CURSORS
 from secretary.dispatch.origin_returns import reconcile_origin_returns
 from secretary.dispatch.po_cards import completion_state
 from secretary.dispatch.wait_cards import pending_wait_blockers
@@ -467,12 +466,10 @@ def _production_tick_work(
         else:
             if ready_outcome is not None:
                 outcomes.append(ready_outcome)
-    # Last, after every move this tick made (a claim can Block a decision/operation card): each
-    # delegated card that settled returns its result to the PO session that cut it, once.
+    # Last, after every move this tick made (a claim can Block a decision/operation card): every
+    # return the origin-return outbox holds undelivered goes to the PO session that cut its card.
     try:
-        if not isinstance(payload.get(ORIGIN_RETURN_CURSORS), dict):
-            payload[ORIGIN_RETURN_CURSORS] = {}
-        outcomes += reconcile_origin_returns(runtime, payload[ORIGIN_RETURN_CURSORS])
+        outcomes += reconcile_origin_returns(runtime)
     except Exception as exc:  # noqa: BLE001 - a return that cannot be read must not stop the tick
         errors.append(_unexpected_error("", exc))
 

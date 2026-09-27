@@ -1,53 +1,47 @@
 """Delegated cards: a card returns its result to the PO session that cut it (secretary-1792).
 
-A card created inside a PO turn carries its origin (`board/po_origin.py`). When it settles in Done or
-Blocked, the dispatcher's tick delivers one input to that session, through the path every dispatcher
-result takes to a PO session (`dispatch/po_delivery.py`): a closed or missing origin session gets a
-successor, a service that does not answer postpones the delivery to the next tick, and nothing is given
-up. Each delivery also rings the owner's bell once (`delegated_card_settled`, a notice).
+A card created inside a PO turn carries its origin (`board/po_origin.py`). Each of its transitions into
+Done or Blocked owes that session one input, and the owner's bell one notice, through the path every
+dispatcher result takes to a PO session (`dispatch/po_delivery.py`): a closed or missing origin session
+gets a successor, a service that does not answer postpones the delivery to the next tick, and nothing is
+given up.
 
-Exactly once per terminal transition. :func:`pending_returns` is the one rule and the only place that
-decides what is returned: every audited transition into Done or Blocked whose event id is not in
-`po_return.deliveries`, in audit order. Nothing reads the card's current column or "the latest" event to
-choose one. Every card with an origin is a candidate, whatever its column, so a card reopened before the
-dispatcher saw its Done still returns that Done. Pending returns are made oldest first, each its own
-submit (idempotent by request id), notice through the bell's strict writer (`owner_events.record_strict`)
-and, only when both were accepted, record on the card; each is keyed by its own event id and rendered
-from that event (the column it entered, when, its result), never from the card's present state. The
-first that does not complete stops that card's pass for the tick, and the later ones wait for the next;
-none is skipped because a later one exists. A notice that failed records nothing, and the next tick
+What is owed is written down when it becomes owed. The store writes one row of the origin-return
+outbox (`board/origin_outbox.py`, table `origin_returns`) in the transaction that commits the
+transition's audit event (`SqlTaskAudit.append`): the move, its event and the obligation stand or fall
+together, whoever made the move, and archive, reopen or any later move touch no row. Nothing here scans
+cards or infers from a card's present column what it owes.
+
+:func:`pending_returns` is the one rule and the only thing that decides what is returned: the
+undelivered outbox rows, oldest first, one indexed query per tick. Each row is made on its own: its
+event is fetched from the card's audit by its event id (an archived card's audit included) and rendered
+from that event (the column it entered, when, its result), never from the card's present state; then
+the submit (idempotent by request id), the notice through the bell's strict writer
+(`owner_events.record_strict`) and, only when both were accepted, the row is marked delivered. The row
+is the only delivery record. The first row of a card that does not complete stops that card for the
+tick, and its later rows wait; other cards go on. A notice that failed marks nothing, and the next tick
 repeats both under the same keys: the submit is the earlier input to the service, the notice a no-op on
 its key. A crash anywhere in between is repaired the same way. An installation with no board store at
-all has no bell to wait for, and the delivery completes without it.
+all has no bell to wait for, and the delivery completes without it. A marked row is never selected
+again.
 
-The cursor. A tick reads the audit of a candidate only when it may have changed: the dispatcher keeps,
-in its own state (`CURSORS_KEY`), the card's `moved_at` (its `date_moved`, which every column move sets
-and nothing else writes) as of its last complete pass, and a card whose `moved_at` is unchanged is not
-read. A new transition into Done or Blocked is always a move. The cursor is kept only for a pass that
-started `CURSOR_MARGIN_SECONDS` after that move's second, so a move during or after the pass is seen. It
-is a cache: lost with the dispatcher's state, every candidate is read once more, and
-`po_return.deliveries` alone decides what is owed.
-
-Two exceptions, both decided per event. A wait card delivers through its own return addresses and
-never here (:func:`pending_returns` owes it nothing). A Done whose completion transition records the PO
-session that ran `task complete` (`po_session`, from that turn's `SECRETARY_PO_SESSION`), where that
-session is the origin or one of its recorded successors, was completed in a turn of the origin's line,
-which already has the result: it is recorded as `skipped`, with no input and no notice, so it is never
-pending again. Anything else is delivered: a completion by another session, one that ran outside a PO
-turn, any other Done, and every Blocked. The session the dispatcher handed the card to
-(`po_return.executor`) proves nothing and is not asked.
+Two exceptions. A wait card owes no row (the store does not write one): it delivers through its own
+return addresses. A Done whose completion transition records the PO session that ran `task complete`
+(`po_session`, from that turn's `SECRETARY_PO_SESSION`), where that session is the origin or one of its
+recorded successors, was completed in a turn of the origin's line, which already has the result: its row
+is marked `skipped`, with no input and no notice. Anything else is delivered: a completion by another
+session, one that ran outside a PO turn, any other Done, and every Blocked. The session the dispatcher
+handed the card to (`po_return.executor`) proves nothing and is not asked.
 """
 
 from __future__ import annotations
 
 import re
-import time
-from dataclasses import dataclass
 from typing import Any
 
 from secretary.board import owner_events
 from secretary.board import po_origin as origin_field
-from secretary.board.completion_evidence import is_wait
+from secretary.board.origin_outbox import DELIVERED, SKIPPED, OutboxRow, outbox_for
 from secretary.board.production_rights import DELEGATED_RESULT_INPUT, card_facts
 from secretary.dispatch.po_delivery import deliver, open_successor
 from secretary.dispatch.state import request_token
@@ -62,10 +56,6 @@ SUCCESSOR_ACTION = "origin-successor"
 RESULT_LIMIT = 6000
 _LINK_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/(?:pull/\d+|actions/runs/\d+(?:/job/\d+)?)")
 _REPORT_MARKERS = ("report:done", "report:blocked")
-#: The dispatcher state key of the per-card cursors (`reconcile_origin_returns`).
-CURSORS_KEY = "origin_return_cursors"
-#: How long after a card's last move a pass must start before its cursor is kept (`_cursor_holds`).
-CURSOR_MARGIN_SECONDS = 2
 
 
 def return_request_id(reference: str, event_id: str) -> str:
@@ -113,152 +103,81 @@ def succeed_origin(
     return session, why
 
 
-@dataclass(frozen=True)
-class PendingReturn:
-    """One audited transition into Done or Blocked whose result the origin session is still owed."""
-
-    index: int  # its position in the card's audit, which is the order returns are made in
-    event: dict[str, Any]
-    key: str  # its event id: the input's request id and the notice's dedup key are derived from it
-    column: str  # the column it entered, `done` or `blocked`, whatever the card's column is now
-
-
 def event_key(event: dict[str, Any]) -> str:
     """The key of one audited transition: its event id (its request id for a record that names none)."""
     return str(event.get("event_id") or event.get("request_id") or "")
 
 
-def pending_returns(
-    card: dict[str, Any], events: list[dict[str, Any]], state: origin_field.ReturnState
-) -> list[PendingReturn]:
-    """Every audited transition into Done or Blocked not yet in `po_return.deliveries`, in audit order.
+def pending_returns(outbox: Any) -> list[OutboxRow]:
+    """The undelivered outbox rows, oldest first: the one rule, and the only thing that decides what is returned."""
+    return list(outbox.pending())
 
-    The one rule, and the only code that decides what is returned: nothing reads the card's current
-    column or picks "the latest" event. A card with no origin, and a wait card (it returns through its
-    own addresses), owes nothing. Pure: no reads, no writes.
-    """
-    if origin_field.po_origin(card) is None or is_wait(card):
+
+def reconcile_origin_returns(runtime: Any) -> list[dict[str, Any]]:
+    """Make every owed origin return, oldest first; one tick's pass over the outbox, with no card scan."""
+    outbox = outbox_for(getattr(runtime.reader, "client", None))
+    if outbox is None:
         return []
-    pending: list[PendingReturn] = []
-    for index, event in enumerate(events):
-        moved = recorded_card_transition(event)
-        if moved is None or moved[1] not in origin_field.TERMINAL_STATES:
-            continue
-        key = event_key(event)
-        if key and key not in state.deliveries:
-            pending.append(PendingReturn(index, event, key, moved[1]))
-    return pending
-
-
-def reconcile_origin_returns(runtime: Any, cursors: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Return every delegated card's owed results to its origin session, oldest first; one tick's pass.
-
-    Every card with an origin is a candidate, whatever its column: a card in Ready, In progress or
-    Validate may still owe the return of an earlier Done or Blocked. `cursors` (the dispatcher's own
-    state, `CURSORS_KEY`) keeps, per card, the `moved_at` of its last complete pass: a card that has
-    not moved since is not read again (see `_cursor_holds`). It is a cache only: without it every
-    candidate's audit is read, and `po_return.deliveries` alone decides what is owed.
-    """
     outcomes: list[dict[str, Any]] = []
-    cards = sorted(runtime.reader.delegated_cards(), key=lambda task: str(task.get("ref") or ""))
-    if cursors is not None:
-        listed = {str(task.get("ref") or "") for task in cards}
-        for ref in [ref for ref in cursors if ref not in listed]:
-            del cursors[ref]
-    for task in cards:
-        ref = str(task.get("ref") or "")
-        origin = origin_field.po_origin(task)
-        if origin is None or is_wait(task):
+    stopped: set[str] = set()
+    cards: dict[str, tuple[dict[str, Any], origin_field.ReturnState, list[dict[str, Any]]]] = {}
+    for row in pending_returns(outbox):
+        if row.task_ref in stopped:
             continue
-        moved_at = task.get("moved_at")
-        if cursors is not None and _cursor_holds(cursors.get(ref), moved_at):
-            continue
-        started = time.time()
         try:
-            returned, complete = _return_card(runtime, task, origin)
+            outcome = _return_row(runtime, outbox, row, cards)
         except TaskError as exc:
-            returned, complete = (
-                [
-                    _outcome(
-                        ref, "origin-return-unread", status="degraded", reason=f"{exc.code}: {exc.message}"
-                    )
-                ],
-                False,
+            outcome = _outcome(
+                row.task_ref,
+                "origin-return-unread",
+                status="degraded",
+                event_id=row.event_id,
+                reason=f"{exc.code}: {exc.message}",
             )
-        outcomes += returned
-        if cursors is None:
-            continue
-        if complete and isinstance(moved_at, int) and started >= moved_at + CURSOR_MARGIN_SECONDS:
-            cursors[ref] = {"moved_at": moved_at}
-        else:
-            cursors.pop(ref, None)
+        outcomes.append(outcome)
+        if outcome["status"] != "ok":
+            # The card's later rows wait for the next tick; none is made ahead of this one.
+            stopped.add(row.task_ref)
     return outcomes
 
 
-def _cursor_holds(cursor: Any, moved_at: Any) -> bool:
-    """Whether the card is unchanged since its last complete pass: it has not moved since.
-
-    `moved_at` is the card's `date_moved` (epoch seconds), which every column move sets and nothing
-    else writes; a new transition into Done or Blocked is always a move. The cursor is kept only for a
-    pass that started at least `CURSOR_MARGIN_SECONDS` after that second, so a move landing during or
-    after the pass has a later `moved_at` and is read on the next tick.
-    """
-    return (
-        isinstance(cursor, dict)
-        and isinstance(moved_at, int)
-        and not isinstance(moved_at, bool)
-        and cursor.get("moved_at") == moved_at
-    )
-
-
-def _return_card(
-    runtime: Any, task: dict[str, Any], origin: dict[str, str]
-) -> tuple[list[dict[str, Any]], bool]:
-    """Every pending return of one card, oldest first: `(outcomes, complete)`.
-
-    Each is its own submit, strict notice and record. The first that does not complete stops the
-    card's pass for the tick; the later ones wait for the next, and none is skipped for a later one.
-    """
-    events = runtime.audit.events(task["ref"])
-    state = origin_field.return_state(task)
-    outcomes: list[dict[str, Any]] = []
-    for pending in pending_returns(task, events, state):
-        outcome = _return_event(runtime, task, origin, state, events, pending)
-        outcomes.append(outcome)
-        if outcome["status"] != "ok":
-            return outcomes, False
-    return outcomes, True
-
-
-def _return_event(
+def _return_row(
     runtime: Any,
-    task: dict[str, Any],
-    origin: dict[str, str],
-    state: origin_field.ReturnState,
-    events: list[dict[str, Any]],
-    pending: PendingReturn,
+    outbox: Any,
+    row: OutboxRow,
+    cards: dict[str, tuple[dict[str, Any], origin_field.ReturnState, list[dict[str, Any]]]],
 ) -> dict[str, Any]:
-    ref = task["ref"]
-    column, key, terminal = pending.column, pending.key, pending.event
-    at = str(terminal.get("occurred_at") or "")
+    """One owed return: the skip, or the submit, the strict notice and the mark, in that order."""
+    ref, key, column = row.task_ref, row.event_id, row.target_state
+    if ref not in cards:
+        # Read once a tick per card: `show` finds an archived card, `events` its whole audit.
+        task = runtime.reader.show(ref)
+        cards[ref] = (task, origin_field.return_state(task), runtime.audit.events(ref))
+    task, state, events = cards[ref]
+    origin = origin_field.po_origin(task)
+    index = next((position for position, event in enumerate(events) if event_key(event) == key), None)
+    if origin is None or index is None:
+        return _outcome(
+            ref,
+            "origin-return-unreadable",
+            status="degraded",
+            state=column,
+            event_id=key,
+            reason="the card carries no origin"
+            if origin is None
+            else "the card's audit does not hold the event",
+        )
+    terminal = events[index]
     # Evaluated on this event: the PO session whose turn ran `task complete`, as the event records it.
     completer = str(_data(terminal).get(PO_SESSION_KEY) or "") if column == "done" else ""
     if completer and origin_field.in_line(completer, origin["session"], state):
-        state.deliveries[key] = {
-            "state": column,
-            "status": origin_field.SKIPPED,
-            "at": at,
-            "session": completer,
-            "detail": "completed in a turn of its origin session's line, which has the result",
-        }
-        record_return_state(runtime, ref, state)
+        outbox.mark(row.id, status=SKIPPED, notice="", session=completer, po_request_id="")
         return _outcome(ref, "origin-return-skipped", state=column, event_id=key, session=completer)
     request_id = return_request_id(ref, key)
-    text = render_origin_input(task, origin, events, pending.index)
     status, detail, received = deliver(
         runtime,
         session_id=origin_field.line_head(origin["session"], state),
-        text=text,
+        text=render_origin_input(task, origin, events, index),
         request_id=request_id,
         card=card_facts(
             card_ref=ref,
@@ -287,7 +206,7 @@ def _return_event(
         to=getattr(getattr(runtime, "reader", None), "client", None),
     )
     if notice == owner_events.FAILED:
-        # Half a delivery is none: nothing is recorded, and the next tick repeats the submit (the
+        # Half a delivery is none: nothing is marked, and the next tick repeats the submit (the
         # service's no-op on its request id) and the notice (a no-op on its dedup key).
         return _outcome(
             ref,
@@ -299,17 +218,9 @@ def _return_event(
             reason="the origin session took the card's result but the owner's notice was not written; both "
             "are repeated next tick under the same keys",
         )
-    # Recorded only after the session took it and the bell has it: a crash before this line repeats
+    # Marked only after the session took it and the bell has it: a crash before this line repeats
     # both under the same keys, and each receiving side makes the repeat a no-op.
-    state.deliveries[key] = {
-        "state": column,
-        "status": status,
-        "notice": notice,
-        "at": at,
-        "session": received,
-        "request_id": request_id,
-    }
-    record_return_state(runtime, ref, state)
+    outbox.mark(row.id, status=DELIVERED, notice=notice, session=received, po_request_id=request_id)
     return _outcome(
         ref, "origin-returned", state=column, event_id=key, session=received, po_request_id=request_id
     )
@@ -456,12 +367,9 @@ def _outcome(ref: str, action: str, *, status: str = "ok", **fields: Any) -> dic
 
 
 __all__ = [
-    "CURSORS_KEY",
-    "CURSOR_MARGIN_SECONDS",
     "RETURN_ACTION",
     "STEP",
     "SUCCESSOR_ACTION",
-    "PendingReturn",
     "event_column",
     "event_key",
     "notice_key",

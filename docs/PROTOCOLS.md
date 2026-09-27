@@ -599,46 +599,60 @@ field of the extension bag, `extensions.extra.po_origin` (JSON `{session, reques
 create and part of its request identity (`po_origin` in the create payload: the same turn's retry
 replays, another turn's is a conflict); nothing writes it afterwards. `task show` and `task list` carry
 an `origin` block: `po_session`, `request_id`, `current_session` (the session a result goes to now: the
-origin, or the successor that replaced it), `executor` (below) and `returns`, one entry per terminal
-transition returned (`event_id`, `state`, `status`, `at`, `session`, `request_id`). The dispatcher's
-side is a second bag field, `po_return` (`executor`, `successors`, `deliveries`), written only by the
-dispatcher (`TaskWriter.record_po_return`).
+origin, or the successor that replaced it), `executor` (below) and `returns`, the card's outbox rows
+(below), oldest first (`event_id`, `state`, `created_at`, `delivered_at`, `status`, `notice`, `session`,
+`request_id`). The dispatcher's side is a second bag field, `po_return` (`executor`, `successors`),
+written only by the dispatcher (`TaskWriter.record_po_return`).
 
-**Return of the result.** Each tick, after the claim pass, the dispatcher reads every card that carries
-an origin, in any column (`TaskReader.delegated_cards`, `dispatch/origin_returns.py`). One pure function
-decides what is owed, and nothing else chooses a delivery: `pending_returns(card, audit events,
-po_return)` answers every audited transition into Done or Blocked whose event id is not in
-`po_return.deliveries`, in audit order. Neither the card's current column nor "the latest" event is
-asked. Every entry into Done or Blocked is therefore its own delivery, keyed by its own event id: a card
-reopened and settled again returns each result, and a card that was Done or Blocked and has since moved
-on (Ready, In progress, Validate) before the dispatcher saw it still returns that result. Pending
-returns are made oldest first, each completely (submit, notice, record) before the next; the first that
-does not complete stops that card's pass for the tick, and the later ones wait for the next tick. None
-is skipped because a later one exists. For each, the dispatcher submits one input to the origin
-session through `PoService.submit`, `source: dispatcher`, request id
+**The outbox.** What a delegated card owes is written down when it becomes owed. The board store keeps
+one table, `origin_returns` (revision `0022_origin_returns`, `board/origin_outbox.py`): one row per
+transition into Done or Blocked of a card that carries an origin and is not a wait card, with the card
+ref, the transition's event id (unique) and audit request id, the column it entered, when, and its
+delivery (`delivered_at`, `status` `delivered` or `skipped`, the notice result, the session that took
+it, the input's request id). The row is written by `SqlTaskAudit.append`, the one place a committed
+audit record is written, in the same transaction as the record, and a card transition's move and its
+event commit in one transaction (`TaskWriter._transition_card`): the move, its event and its row stand
+or fall together, and no writer can commit one without the other. Every writer of a transition into
+Done or Blocked reaches it: `task move` of any role (the dispatcher's edges, a release's Done, the wait
+edges, which owe nothing since a wait card writes no row), `task complete`, and a pending transition
+finished by repair. Archive, reopen and any later move write no row and touch none. The
+normalized-board restore replays history through `append(..., restoring=True)` and owes nothing for it:
+those returns were owed, and made, when the transitions first committed (a PostgreSQL-level recovery
+restores the table itself).
+
+**Return of the result.** Each tick, after the claim pass, the dispatcher reads the undelivered
+outbox rows in id order, one indexed query, and scans no card (`dispatch/origin_returns.py`).
+`pending_returns` is that query, and it is the only thing that decides what is returned: nothing reads
+a card's present column or picks "the latest" event. A card that was Done or Blocked and was since
+reopened, moved on or archived before any pass still has its row. Rows are made oldest first; the
+first row of a card that does not complete stops that card for the tick, and its later rows wait for
+the next; no row is skipped because a later one exists. For each row, the dispatcher reads the card
+(`task show` finds an archived card) and its audit, finds the row's event by its event id, and submits
+one input to the origin session through `PoService.submit`, `source: dispatcher`, request id
 `dispatcher-origin-return-<card>-<event id>`, with the facts `{card_ref, kind: <the card's kind>,
 touches_production: null, sprint_ref, input: delegated_result}` (any kind, in a sprint or not; no rights
 section). The input carries the card ref, kind and title, the terminal state and when, the sprint, and
-the result: for Done the completion record when the Done move carries one (`[completion:...]`), else the
-worker's done report of that round, else the Done move's reason; for Blocked the Blocked move's reason
-and a classification (the round's `report:blocked` classification, else `board: <blocked_reason>` of the
-move's terminal taxonomy, else `unclassified`), with the worker's blocked report when it differs. The
-links are every GitHub pull request and Actions run URL in the card's audit up to that move, and the
-merge a release recorded. It is built from the card and its audit up to the transition, so a repeat
-renders the same text. Everything about the state is the event's: the column it entered and when, and
-its result; the card's present column is never read for it.
+the result: for Done the completion record when the Done move carries one (`[completion:...]`, with the
+decision the move names), else the worker's done report of that round, else the Done move's reason; for
+Blocked the Blocked move's reason and a classification (the round's `report:blocked` classification,
+else `board: <blocked_reason>` of the move's terminal taxonomy, else `unclassified`), with the worker's
+blocked report when it differs. The links are every GitHub pull request and Actions run URL in the
+card's audit up to that move, and the merge a release recorded. Everything about the state is the
+event's: the column it entered and when, and its result; the card's present column is never read, so
+the same row always renders the same text.
 
 The delivery is complete only when both its halves are, in this order: (1) the PO submit, idempotent by
 its request id; (2) the `delegated_card_settled` notice (below), written through the bell's strict
 writer `owner_events.record_strict`, which answers `written`, `already_present` (under the dedup key)
 or `failed` (the store raised or did not answer) instead of swallowing the failure as `record` does for
-every other producer; (3) the record `po_return.deliveries[<event id>]`, written only after (1) and
-(2) were accepted. A notice that failed records nothing (`origin-return-notice-failed`, degraded), and
+every other producer; (3) the row marked delivered, only after (1) and (2) were accepted. The row is the
+only delivery record. A notice that failed marks nothing (`origin-return-notice-failed`, degraded), and
 the next tick repeats both steps under the same keys: the submit is the earlier input to the service (a
 `request_conflict` on an id the service holds for the session is taken as it), the notice a no-op on its
 dedup key. A crash between any two steps is repaired the same way: no second input, no second notice.
 An installation with no board store configured at all has no bell: the strict writer answers
-`not_applicable` (logged), which does not hold the delivery, and the record says so (`notice`).
+`not_applicable` (logged), which does not hold the delivery, and the row says so (`notice`). A marked
+row is never selected again.
 
 The PO delivery is the one the wait cards use (`dispatch/po_delivery.py`). A service that does not
 answer, or refuses, postpones it to the next tick (`origin-return-postponed`, degraded). A closed or
@@ -649,19 +663,10 @@ with its CLI, model and effort otherwise (`po.models.successor_choice`), under r
 the call, session after it). The successor is the card's origin line from then on: later results, and
 an out-of-sprint card's execution, go to it, and a successor closed in turn gets its own.
 
-**The cursor.** A tick reads a candidate's audit only when the card may have changed. The dispatcher
-keeps, in its own production state (`origin_return_cursors`), each card's `moved_at` as of its last
-complete pass: the card's `date_moved` (epoch seconds), which every column move sets and no other write
-touches, and a new transition into Done or Blocked is always a move. A card whose `moved_at` equals its
-cursor is not read. The cursor is written only after a pass that returned everything owed and that
-started at least two seconds after that `moved_at`, so a move during or after the pass carries a later
-`moved_at`; a pass that stopped keeps none. It is a cache and decides nothing: lost with the dispatcher's
-state, every candidate is read once more, and `po_return.deliveries` alone says what is owed.
-
 **Exceptions.**
 
-- A `wait` card delivers only through its own return addresses (above); the return pass skips it, so
-  its origin session never gets the outcome twice. Inside a PO turn `--wait-return` may be omitted and
+- A `wait` card delivers only through its own return addresses (above); its transitions write no
+  outbox row, so its origin session never gets the outcome twice. Inside a PO turn `--wait-return` may be omitted and
   then names the origin session.
 - A Done is skipped only on proof, carried by that Done's own transition, that the origin's line already
   has the result; it is decided per event.
@@ -669,7 +674,7 @@ state, every candidate is read once more, and `po_return.deliveries` alone says 
   turn; no flag) in the completion transition's data as `po_session`; `task handover` records it in the
   handover record's payload the same way. Neither restricts who may run the command. When the Done's
   recorded `po_session` is the origin session or one of its recorded successors (`po_return.successors`),
-  the Done is recorded as `skipped`, with no input and no notice, so it is never pending again. Anything else is delivered normally,
+  the Done's row is marked `skipped`, with no input and no notice, so it is never pending again. Anything else is delivered normally,
   with input and notice: a completion that ran outside a PO turn (no session recorded), one by another
   session, any Done not made by `task complete`, and every Blocked. The session the dispatcher handed the
   card to (`po_return.executor`) proves nothing and is not asked.

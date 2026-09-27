@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0021` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0022` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
@@ -710,7 +710,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0018_owner_events` | `owner_events` (`id` identity, `kind`, `class`, `subject_ref`, `text`, `created_at`, `read_at`, `dedup_key` unique as `owner_event_dedup_key_is_unique`; index `owner_events_by_subject`), with `owner_event_kind_in_vocabulary`, `owner_event_class_in_vocabulary` and `owner_event_class_follows_kind`; one new table, every existing row loads unchanged; no downgrade |
 | `0019_po_session_title` | `po_sessions.title` (nullable text: a readable name the owner or the PO sets); every existing session loads untitled, then each session a `sprints.po_session` names and whose title is null takes that sprint's ref (the first created, if two sprints name it); the downgrade drops the column |
 | `0020_wait_card_kind` | `wait` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row loads unchanged; no column (the spec and state are extension-bag keys, §8.2); the downgrade restores `0017`'s vocabulary and fails while a `wait` card exists |
-| `0021_delegated_card_settled` | `delegated_card_settled` in `owner_event_kind_in_vocabulary`, restated one for one (a notice; `owner_event_class_follows_kind` unchanged); every existing event loads unchanged; no column (a card's origin and return state are extension-bag keys, §8.2); the downgrade restores `0018`'s vocabulary and fails while such an event exists (head) |
+| `0021_delegated_card_settled` | `delegated_card_settled` in `owner_event_kind_in_vocabulary`, restated one for one (a notice; `owner_event_class_follows_kind` unchanged); every existing event loads unchanged; no column (a card's origin and return state are extension-bag keys, §8.2); the downgrade restores `0018`'s vocabulary and fails while such an event exists |
+| `0022_origin_returns` | `origin_returns`, the origin-return outbox (`board/origin_outbox.py`): `id` identity, `task_ref`, `event_id` unique as `origin_return_event_is_unique`, `request_id`, `target_state` (`origin_return_target_is_terminal`: done or blocked), `created_at`, and the delivery `delivered_at`, `status` (`origin_return_status_in_vocabulary`: delivered or skipped; `origin_return_status_with_its_delivery`: set exactly with `delivered_at`), `notice`, `session`, `po_request_id`; the partial index `origin_returns_undelivered` (`id` where `delivered_at IS NULL`) and `origin_returns_by_card`; one new table, every existing row loads unchanged; the downgrade drops it (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -722,7 +723,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 29 tables, 53 `CHECK`, 44 foreign keys, 29 primary keys, 18 `UNIQUE`,
+(including `alembic_version`): 30 tables, 56 `CHECK`, 44 foreign keys, 30 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1067,7 +1068,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0021_delegated_card_settled`). PostgreSQL restore compares against `head_revision()`.
+  (`0022_origin_returns`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1119,8 +1120,9 @@ dispatcher; and `wait_cancel`, written only by `task cancel`. Each is read throu
 A delegated card's two keys (`board/po_origin.py`, [Protocols](PROTOCOLS.md#po-delegation)), each JSON
 text: `po_origin`, `{session, request}` of the PO turn that created the card, written once by `task
 create --role po` inside a PO turn and never again; and `po_return`, the dispatcher's `executor`,
-`successors` and `deliveries`, written only by the dispatcher. Each is read through its own reader
-(`po_origin`, `return_state`), which treats a field that does not parse as absent.
+and `successors`, written only by the dispatcher. Each is read through its own reader (`po_origin`,
+`return_state`), which treats a field that does not parse as absent. What the card owes its origin
+session is not a bag key: it is the card's rows of `origin_returns` (`0022`).
 
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that

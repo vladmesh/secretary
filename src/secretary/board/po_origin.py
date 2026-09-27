@@ -13,7 +13,11 @@ column:
   `executor`, the session the dispatcher handed a decision/operation card to (shown, never a proof of
   who completed it: the completion records its own `po_session`); `successors`, per closed
   or missing session of the origin's line the session that succeeded it (route recorded before it is
-  opened, id right after); `deliveries`, per terminal transition event the result was returned for.
+  opened, id right after).
+
+What the card owes its origin session, and what was delivered, is not here: it is the card's rows of
+the origin-return outbox (`board/origin_outbox.py`), written in the transaction of each transition
+into Done or Blocked. `task show` attaches them to the `origin` block as `returns`.
 
 The origin's **line** is the origin session followed through `successors`: the session a result or
 an out-of-sprint decision/operation card goes to now (:func:`line_head`).
@@ -30,11 +34,6 @@ from secretary.board.extension_bag import EXTENSION_BAG
 
 PO_ORIGIN = "po_origin"
 PO_RETURN = "po_return"
-#: A delivery the origin session took, and one there was no need for (the session has the result).
-ACCEPTED = "accepted"
-SKIPPED = "skipped"
-#: The terminal columns a delegated card returns its result from.
-TERMINAL_STATES = ("done", "blocked")
 
 
 def origin_text(session: str, request: str) -> str:
@@ -81,11 +80,9 @@ class ReturnState:
     executor: str = ""
     # closed or missing session -> {replaces, via, session}
     successors: dict[str, dict[str, str]] = field(default_factory=dict)
-    # terminal transition event id -> {state, status, at, session, request_id, detail}
-    deliveries: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return {"executor": self.executor, "successors": self.successors, "deliveries": self.deliveries}
+        return {"executor": self.executor, "successors": self.successors}
 
     def text(self) -> str:
         return json.dumps(self.to_json(), sort_keys=True, separators=(",", ":"))
@@ -97,7 +94,6 @@ class ReturnState:
         return cls(
             executor=str(payload.get("executor") or ""),
             successors=_records(payload.get("successors"), ("replaces", "via")),
-            deliveries=_records(payload.get("deliveries"), ("state", "status")),
         )
 
 
@@ -126,7 +122,10 @@ def in_line(session: str, origin_session: str, state: ReturnState) -> bool:
 
 
 def origin_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The `origin` block `task show` and `task list` carry, or None for a card with no origin."""
+    """The `origin` block `task show` and `task list` carry, or None for a card with no origin.
+
+    `returns` is filled by the reader from the card's outbox rows (`TaskReader`), empty here.
+    """
     origin = po_origin(task)
     if origin is None:
         return None
@@ -136,21 +135,13 @@ def origin_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         "request_id": origin["request"] or None,
         "current_session": line_head(origin["session"], state),
         "executor": state.executor or None,
-        "returns": [
-            {"event_id": event_id, **record}
-            for event_id, record in sorted(
-                state.deliveries.items(), key=lambda item: (item[1].get("at", ""), item[0])
-            )
-        ],
+        "returns": [],
     }
 
 
 __all__ = [
-    "ACCEPTED",
     "PO_ORIGIN",
     "PO_RETURN",
-    "SKIPPED",
-    "TERMINAL_STATES",
     "ReturnState",
     "in_line",
     "line_head",

@@ -66,7 +66,8 @@ class MemoryAudit:
             self._pending[request_id] = copy.deepcopy(event)
             return None
 
-    def append(self, request_id: str, event: dict[str, Any]) -> str:
+    def append(self, request_id: str, event: dict[str, Any], *, restoring: bool = False) -> str:
+        # `restoring` is `SqlTaskAudit.append`'s: this audit keeps no origin-return outbox.
         with self._lock:
             owner = self._committed.get(request_id) or self._pending.get(request_id)
             if owner is not None and owner != event:

@@ -300,6 +300,7 @@ class SchemaModelTests(unittest.TestCase):
                 "board_events",
                 "issue_comments",
                 "issues",
+                "origin_returns",
                 "owner_events",
                 "po_feed",
                 "po_requests",
@@ -354,13 +355,15 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        self.assertEqual(len(checks), 53, "§3.13 counts 53 CHECK constraints at the head revision")
+        # 56 since `0022` added `origin_returns` with three (secretary-1792).
+        self.assertEqual(len(checks), 56, "§3.13 counts 56 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
             "task_type IN ('code','research','infra','decision','operation','wait')",
             "review IN ('required','skipped')",
             "status IN ('staged','committed','discarded')",
+            "target_state IN ('done','blocked')",
         ):
             self.assertTrue(
                 any(vocabulary in text for text in checks), f"{vocabulary} is not a CHECK anywhere"
@@ -479,6 +482,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0022_origin_returns",
                 "0021_delegated_card_settled",
                 "0020_wait_card_kind",
                 "0019_po_session_title",
