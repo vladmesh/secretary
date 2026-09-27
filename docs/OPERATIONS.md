@@ -1148,20 +1148,30 @@ Blocked. What you see:
   it; there is one decision per spent budget.
 
 What you do: answer on the decision card as the owner (the card page's comment form, or `secretary task
-comment --ref <decision card> --role owner --body-file ANSWER.md`), either "raise by N" or "no". Your
-comment reaches the PO session with its event id, and:
+comment --ref <decision card> --role owner --body-file ANSWER.md`) holding exactly one of these two
+lines, in any case, with anything else you want to say around it:
 
-- on "raise by N" the PO runs `secretary sprint e2e-budget --ref sprint:<N> --role po --add N
-  --authorized-by <your comment's event id>` and completes the decision card. The waiting cards dispatch
-  on the next tick. The PO cannot raise the budget without your comment: the command refuses any
-  authorization but an owner comment on that sprint's budget decision card made after its handover,
-  and each of your comments raises once. `sprint show` then reads `e2e: <used> of <budget + N>`;
-- on "no" the PO completes the decision card without a raise, and every card waiting on it goes to
+```text
+e2e budget: raise <N>
+e2e budget: no
+```
+
+A comment with neither line, with both, or with two raise lines is not an answer. Your comment reaches
+the PO session with its event id, and:
+
+- on `e2e budget: raise <N>` the PO runs `secretary sprint e2e-budget --ref sprint:<N> --role po
+  --authorized-by <your comment's event id>` and completes the decision card. The raise is your N and
+  nothing else: an `--add` other than it is refused. The waiting cards dispatch on the next tick. The
+  PO cannot raise the budget without your comment: the command refuses any authorization but your
+  raise line on that sprint's budget decision card after its handover, and each of your comments
+  raises once. `sprint show` then reads `e2e: <used> of <budget + N>`;
+- on `e2e budget: no` the PO completes the decision card without a raise, and every card waiting on it goes to
   Blocked with the PO's completion text (not charged to the card as a code defect).
 
-A card outside every sprint has its own cap of 3 runs. If a PO session cut it, the same decision card
-goes to that session, and the raise is `secretary task e2e-budget --ref <card> --role po --add N
---authorized-by <event id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
+A card outside every sprint has its own cap of 3 runs; every dispatch attempt counts, one GitHub
+refused included. If a PO session cut it, the same decision card goes to that session, answered the
+same way, and the raise is `secretary task e2e-budget --ref <card> --role po --authorized-by <event
+id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
 reached (3)` and the bell shows `e2e_budget_spent`.
 
 ## What was commanded, and what became of a request

@@ -2330,20 +2330,22 @@ class TaskWriter:
         role: str,
         actor: str,
         reference: str,
-        add: int,
         authorized_by: str,
+        add: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Raise the e2e cap of one code card outside every sprint, on the owner's word (secretary-1796).
 
         The sprint's `sprint e2e-budget`, for a card no sprint budgets: role `po` only, and only with
         `authorized_by`, the event id of an owner-role comment on this card's e2e budget decision card
-        made after its handover (`e2e_budget.authorizing_decision`). The raise is appended to the
+        made after its handover whose one answer line is `e2e budget: raise <N>`
+        (`e2e_budget.authorized_raise`): the raise is that N, and `add`, when given, has to equal it. It
+        is appended to the
         card's `e2e_cap` field in the transaction of one `e2e_cap_raised` audit record naming that
         event. One authorizing comment raises once; everything is refused before anything is written.
         """
         role = self._role(role, {Role.PO}, actor=actor)
-        if isinstance(add, bool) or not isinstance(add, int) or add < 1:
+        if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
             raise TaskError("validation", f"--add is a whole number of runs, 1 or more; not {add!r}", 2)
         authorized_by = str(authorized_by or "").strip()
         current = self.reader.show(reference)
@@ -2356,7 +2358,7 @@ class TaskWriter:
                 "`sprint e2e-budget`",
                 2,
             )
-        decision = e2e_budget.authorizing_decision(self.audit, authorized_by, reference)
+        decision, add = e2e_budget.authorized_raise(self.audit, self.reader, authorized_by, reference, add)
         request_id = request_id or f"e2e-cap-raise-{authorized_by}"
         identity = {"add": add, "authorized_by": authorized_by}
         if self.audit.event(request_id) is None:

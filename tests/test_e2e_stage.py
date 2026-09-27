@@ -474,7 +474,8 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
 
         self.assertBlockedAsInfrastructure(blocked, "does not have 'workflow_dispatch' trigger", "e2e.yml")
         view = self.card()["e2e"]
-        self.assertEqual(view["runs_dispatched"], 0)
+        # A run counts when its intent is persisted, whatever GitHub answered (secretary-1796).
+        self.assertEqual(view["runs_dispatched"], 1)
         self.assertEqual(view["runs"][0]["state"], "dispatch_refused")
         self.assertEqual(self.wait_cards(), [])
 

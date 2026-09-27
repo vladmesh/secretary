@@ -54,12 +54,12 @@ def _sha(digit: str) -> str:
 class BudgetStageFixture(E2eStageFixture):
     """The e2e stage over the sprint's real budget, with a second card of the sprint beside the pilot."""
 
-    def add_code_card(self, ref: str, *, sprint: str = SPRINT) -> None:
+    def add_code_card(self, ref: str, *, sprint: str = SPRINT, state: str = "ready") -> None:
         self.board.add_card(
             self.board.next_key(),
             ref,
-            # Not claimed: the pilot holds the project's one claim; the stage reads no column.
-            state="ready",
+            # Ready by default: the pilot holds the project's one claim, and the stage reads no column.
+            state=state,
             metadata={"task_type": "code", "review": "skipped", **({"sprint_ref": sprint} if sprint else {})},
         )
 
@@ -181,7 +181,9 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.assertIn("(failure: red)", body)
         self.assertIn("Raise the e2e budget of sprint:1031 by N runs, or no?", body)
         self.assertIn("task handover", body)
-        self.assertIn("sprint e2e-budget --ref sprint:1031 --role po --add <N> --authorized-by <event id>", body)
+        self.assertIn("sprint e2e-budget --ref sprint:1031 --role po --authorized-by <event id>", body)
+        # The two exact answer lines the owner is asked for.
+        self.assertIn("\n    e2e budget: raise <N>\n    e2e budget: no\n", body)
         [joined] = [c["body"] for c in shown["comments"] if OTHER in c["body"]]
         self.assertIn("joins this decision", joined)
         # The pilot is not Blocked: it waits where it is, with the mark on `task show`.
@@ -205,7 +207,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
     def test_a_raise_on_the_owner_s_answer_lets_the_waiting_cards_dispatch_next_tick(self) -> None:
         decision = self.spent_with_a_pending_decision()
         self.hand_to_owner(decision)
-        answer = self.owner_says(decision, "raise by 2", "owner-raise")
+        answer = self.owner_says(decision, "Fine, two more.\n  E2E Budget: Raise 2  \nNo more after that.", "owner-raise")
 
         raised = self.sprint_writer().raise_e2e_budget(
             role="po", actor="po", reference=SPRINT, add=2, authorized_by=answer
@@ -236,15 +238,15 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
 
     def test_a_raise_the_owner_did_not_authorize_is_refused_and_writes_nothing(self) -> None:
         decision = self.spent_with_a_pending_decision()
-        early = self.owner_says(decision, "raise by 1", "owner-before-handover")
+        early = self.owner_says(decision, "e2e budget: raise 1", "owner-before-handover")
         self.hand_to_owner(decision)
-        answer = self.owner_says(decision, "raise by 1", "owner-raise")
+        answer = self.owner_says(decision, "e2e budget: raise 1", "owner-raise")
         po_comment = str(
-            self.writer.comment(role="po", actor="po", reference=decision, body="raise by 1", request_id="po-says")[
-                "event_id"
-            ]
+            self.writer.comment(
+                role="po", actor="po", reference=decision, body="e2e budget: raise 1", request_id="po-says"
+            )["event_id"]
         )
-        elsewhere = self.owner_says(CARD_REF, "raise by 1", "owner-elsewhere")
+        elsewhere = self.owner_says(CARD_REF, "e2e budget: raise 1", "owner-elsewhere")
         refusals = {
             "no authorization": ("po", ""),
             "an unknown event": ("po", "evt_nothing"),
@@ -272,10 +274,43 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
             )
         self.assertIn(refused.exception.code, {"authorization_refused", "not_found"})
 
+    def test_the_raise_is_the_owner_s_recorded_number_and_nothing_else(self) -> None:
+        decision = self.spent_with_a_pending_decision()
+        self.hand_to_owner(decision)
+        refused_answers = {
+            "no": "e2e budget: no",
+            "unparseable": "raise by 2, I suppose",
+            "two raise lines": "e2e budget: raise 1\ne2e budget: raise 2",
+            "both forms": "e2e budget: raise 1\ne2e budget: no",
+            "not a positive N": "e2e budget: raise 0",
+            "not the whole line": "ok, e2e budget: raise 2 then",
+        }
+        for label, body in refused_answers.items():
+            said = self.owner_says(decision, body, f"owner-{label.replace(' ', '-')}")
+            with self.subTest(label), self.assertRaises(TaskError) as refused:
+                self.sprint_writer().raise_e2e_budget(role="po", actor="po", reference=SPRINT, authorized_by=said)
+            self.assertEqual(refused.exception.code, "authorization_refused")
+        answer = self.owner_says(decision, "e2e budget: raise 2", "owner-two")
+        # An --add other than the owner's N is refused, and writes nothing.
+        with self.assertRaises(TaskError) as refused:
+            self.sprint_writer().raise_e2e_budget(
+                role="po", actor="po", reference=SPRINT, add=100, authorized_by=answer
+            )
+        self.assertEqual(refused.exception.code, "authorization_refused")
+        self.assertEqual(self.budget()["budget"], 3)
+        self.assertEqual(self.writer.audit.events(SPRINT, kind="e2e_budget_raised"), [])
+
+        # With no --add, N is the owner's.
+        self.sprint_writer().raise_e2e_budget(role="po", actor="po", reference=SPRINT, authorized_by=answer)
+
+        self.assertEqual(self.budget()["budget"], 5)
+        [event] = self.writer.audit.events(SPRINT, kind="e2e_budget_raised")
+        self.assertEqual(event["payload"], {"add": 2, "authorized_by": answer, "decision": decision})
+
     def test_the_decision_done_without_a_raise_sends_the_waiting_cards_to_blocked(self) -> None:
         decision = self.spent_with_a_pending_decision()
         self.hand_to_owner(decision)
-        self.owner_says(decision, "no: the stands budget is gone for this month", "owner-no")
+        self.owner_says(decision, "e2e budget: no\nThe stands budget is gone for this month.", "owner-no")
         self.writer.complete(
             role="po",
             actor="po",
@@ -420,16 +455,49 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
 
         # The owner's answer raises the card's own cap, and the stage dispatches on the next tick.
         self.hand_to_owner(decision["ref"])
-        answer = self.owner_says(decision["ref"], "raise by 1", "owner-cap")
+        answer = self.owner_says(decision["ref"], "e2e budget: raise 1", "owner-cap")
         with self.assertRaises(TaskError):
             self.writer.raise_e2e_cap(role="observer", actor="observer", reference=CARD_REF, add=1, authorized_by=answer)
-        self.writer.raise_e2e_cap(role="po", actor="po", reference=CARD_REF, add=1, authorized_by=answer)
+        with self.assertRaises(TaskError) as refused:
+            self.writer.raise_e2e_cap(role="po", actor="po", reference=CARD_REF, add=5, authorized_by=answer)
+        self.assertEqual(refused.exception.code, "authorization_refused")
+        self.assertEqual(self.card()["e2e"]["run_cap"], 3)
+        # No --add: the owner's N.
+        self.writer.raise_e2e_cap(role="po", actor="po", reference=CARD_REF, authorized_by=answer)
         [event] = self.writer.audit.events(CARD_REF, kind="e2e_cap_raised")
-        self.assertEqual(event["payload"]["authorized_by"], answer)
+        self.assertEqual((event["payload"]["authorized_by"], event["payload"]["add"]), (answer, 1))
         self.assertEqual(self.card()["e2e"]["run_cap"], 4)
 
         self.assertEqual(self.tick()["action"], "e2e-waiting")
         self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_refused_dispatches_count_and_the_fourth_entry_cuts_the_decision_without_a_post(self) -> None:
+        """Out of a sprint a run counts when its intent is persisted, exactly as in a sprint: refused too."""
+        self.arrange(review="skipped", observed=False)
+        # In Validate, where a card reaching the stage is (the pilot is never claimed in this test).
+        self.add_code_card(OTHER, sprint="", state="validate")
+        self.board.save_metadata(
+            self.board.key_of(OTHER), {"po_origin": origin_field.origin_text("po-session-7", "po-request-7")}
+        )
+        self.host.dispatch_answer = ("http", "gh: Workflow does not have 'workflow_dispatch' trigger (HTTP 422)")
+        for digit in ("1", "2", "3"):
+            self.assertEqual(self.stage(OTHER, _sha(digit))["status"], "blocked")
+            # Unblocked and back at the stage, as a card brought back for another round is.
+            self.board.move(self.board.key_of(OTHER), "validate")
+        view = self.reader.show(OTHER)["e2e"]
+        self.assertEqual((view["runs_dispatched"], view["run_cap"]), (3, 3))
+        self.assertEqual(len(self.host.dispatches), 3)
+
+        waiting = self.stage(OTHER, _sha("4"))
+
+        self.assertEqual(waiting["action"], "e2e-budget-waiting", waiting)
+        self.assertEqual(len(self.host.dispatches), 3, "the fourth entry does not POST")
+        [decision] = self.decisions()
+        self.assertEqual(
+            origin_field.po_origin(self.reader.show(decision["ref"])),
+            {"session": "po-session-7", "request": "po-request-7"},
+        )
+        self.assertEqual(len(e2e_state(self.reader.show(OTHER)).runs), 3)
 
     def test_a_card_with_no_origin_is_blocked_and_rings_the_bell(self) -> None:
         self.spent_cap(origin=False)
@@ -516,7 +584,7 @@ class SprintBudgetEntityTests(SprintFixture):
     def test_the_raise_verb_refuses_a_po_call_without_the_owner_s_authorization(self) -> None:
         self._create(goal="raise", reference="sprint:13")
         code, _output, errors = self.cli(
-            "sprint", "e2e-budget", "--ref", "sprint:13", "--role", "po", "--add", "1", "--authorized-by", "evt_x"
+            "sprint", "e2e-budget", "--ref", "sprint:13", "--role", "po", "--authorized-by", "evt_x"
         )
         self.assertNotEqual(code, 0)
         self.assertIn("authorization_refused", errors)

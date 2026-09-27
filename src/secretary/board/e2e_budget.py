@@ -16,11 +16,13 @@ A spent budget is a money decision. The dispatcher cuts a `decision` card for it
 generation (:func:`decision_request_id`; the generation is the budget, or the card's cap, the runs were
 spent against), and the PO hands it to the owner. The budget is raised only on the owner's recorded
 word: `sprint e2e-budget` / `task e2e-budget` with `--authorized-by`, the event id of an owner comment
-on that decision card made after its handover (:func:`authorizing_decision`).
+on that decision card made after its handover whose one answer line is `e2e budget: raise <N>`; the
+raise is that N and nothing else (:func:`authorized_raise`, :func:`owner_answer`).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -152,12 +154,56 @@ def owner_answers_after_handover(events: Iterable[Mapping[str, Any]]) -> list[st
     return found
 
 
-def authorizing_decision(audit: Any, event_id: str, scope_ref: str) -> str:
-    """The budget decision card of `scope_ref` that the owner answered with event `event_id`.
+#: The owner's answer on a budget decision card: exactly one line, `e2e budget: raise <N>` or
+#: `e2e budget: no`, case-insensitive, surrounding whitespace ignored; the rest is free prose.
+ANSWER_RAISE_LINE = "e2e budget: raise <N>"
+ANSWER_NO_LINE = "e2e budget: no"
+_RAISE = re.compile(r"e2e budget:\s*raise\s+([0-9]+)", re.IGNORECASE)
+_NO = re.compile(r"e2e budget:\s*no", re.IGNORECASE)
+#: What :func:`owner_answer` answers for `e2e budget: no`.
+NO = "no"
+
+
+def owner_answer(body: str) -> int | str | None:
+    """The owner's recorded answer in one comment: `N` to raise by, :data:`NO`, or None.
+
+    A comment answers only with exactly one answer line: a positive `e2e budget: raise <N>` or
+    `e2e budget: no`, the whole line, in any case and with any surrounding whitespace. A comment with
+    neither, with both, or with two answer lines answers nothing.
+    """
+    answers: list[int | str] = []
+    for line in str(body or "").splitlines():
+        text = line.strip()
+        if raised := _RAISE.fullmatch(text):
+            answers.append(int(raised.group(1)))
+        elif _NO.fullmatch(text):
+            answers.append(NO)
+    if len(answers) != 1:
+        return None
+    [answer] = answers
+    return answer if answer == NO or int(answer) > 0 else None
+
+
+def _comment_body(reader: Any, decision: str, digest: str) -> str | None:
+    """The body of the owner's comment on `decision` whose recorded digest is `digest`."""
+    for comment in reader.show(decision).get("comments") or []:
+        if not isinstance(comment, Mapping) or comment.get("marker") != OWNER_ROLE:
+            continue
+        lines = str(comment.get("body") or "").split("\n", 1)
+        body = lines[1] if len(lines) == 2 and lines[0].strip() == f"[{OWNER_ROLE}]" else ""
+        if hashlib.sha256(body.encode("utf-8")).hexdigest() == digest:
+            return body
+    return None
+
+
+def authorized_raise(audit: Any, reader: Any, event_id: str, scope_ref: str, add: int | None) -> tuple[str, int]:
+    """`(decision card, N)`: the raise of `scope_ref` the owner's comment `event_id` authorizes.
 
     The event has to be a committed owner-role comment on a decision card the dispatcher cut for this
-    sprint's (or this card's) spent budget, made after that card was handed to the owner. Anything else
-    is refused (`authorization_refused`), before anything is written.
+    sprint's (or this card's) spent budget, made after that card was handed to the owner, whose text
+    carries exactly one answer line (:func:`owner_answer`) and that line `e2e budget: raise <N>`. `add`,
+    when given, has to be that N. Anything else is refused (`authorization_refused`) before anything is
+    written.
     """
     event_id = str(event_id or "").strip()
     if not event_id:
@@ -184,26 +230,44 @@ def authorizing_decision(audit: Any, event_id: str, scope_ref: str) -> str:
         raise _refused(
             f"--authorized-by {event_id} was not made after {decision} was handed to the owner (`task handover`)"
         )
-    return decision
+    body = _comment_body(reader, decision, str(payload.get("body_sha256") or ""))
+    answer = owner_answer(body) if body is not None else None
+    if answer is None:
+        raise _refused(
+            f"the owner's comment {event_id} carries no single answer line (`{ANSWER_RAISE_LINE}` or "
+            f"`{ANSWER_NO_LINE}`), so it authorizes nothing"
+        )
+    if answer == NO:
+        raise _refused(f"the owner's comment {event_id} answers `{ANSWER_NO_LINE}`: it authorizes no raise")
+    runs = int(answer)
+    if add is not None and add != runs:
+        raise _refused(
+            f"--add {add} is not what the owner recorded: the comment {event_id} says `e2e budget: raise {runs}`"
+        )
+    return decision, runs
 
 
 __all__ = [
+    "ANSWER_NO_LINE",
+    "ANSWER_RAISE_LINE",
     "CARD_CAP_RAISED",
     "CARD_E2E_CAP",
     "DEFAULT_E2E_BUDGET",
     "E2E_CAP_FIELD",
+    "NO",
     "SPRINT_BUDGET_RAISED",
     "SPRINT_E2E_BUDGET",
     "SPRINT_E2E_BUDGET_ADD",
     "SPRINT_E2E_CHARGES",
     "SPRINT_E2E_USED",
-    "authorizing_decision",
+    "authorized_raise",
     "budget_view",
     "cap_raises",
     "cap_text",
     "card_cap",
     "decision_prefix",
     "decision_request_id",
+    "owner_answer",
     "owner_answers_after_handover",
     "sprint_budget",
 ]

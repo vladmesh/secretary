@@ -301,7 +301,12 @@ def add_task_subcommands(subparsers) -> None:
     task_e2e.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_e2e)
     task_e2e.add_argument("--request-id")
-    task_e2e.add_argument("--add", required=True, type=int, help="runs to add to the card's cap, 1 or more")
+    task_e2e.add_argument(
+        "--add",
+        type=int,
+        help="the runs the owner's comment raises by (`e2e budget: raise <N>`); optional, and refused unless it "
+        "equals that N",
+    )
     task_e2e.add_argument(
         "--authorized-by",
         required=True,

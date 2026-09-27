@@ -197,12 +197,17 @@ def add_sprint_subcommands(subparsers) -> None:
     raised.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
     raised.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     # A plain int: the writer refuses fewer than 1, after the role check every verb makes first.
-    raised.add_argument("--add", required=True, type=int, help="runs to add to the budget, 1 or more")
+    raised.add_argument(
+        "--add",
+        type=int,
+        help="the runs the owner's comment raises by (`e2e budget: raise <N>`); optional, and refused unless it "
+        "equals that N",
+    )
     raised.add_argument(
         "--authorized-by",
         required=True,
         help="the event id of the owner's comment on this sprint's e2e budget decision card, made after "
-        "its handover",
+        "its handover, whose one answer line is `e2e budget: raise <N>`",
     )
     _add_data_dir_args(raised)
     raised.add_argument("--request-id")

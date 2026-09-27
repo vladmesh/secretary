@@ -1448,16 +1448,19 @@ nothing left. An intent that is not charged is not written, and nothing is dispa
 (after a crash between the intent and the POST, or a lost answer) continues its entry and writes no
 second intent, so it is never charged twice; a dispatch id is charged at most once.
 
-A card outside every sprint keeps its own cap of 3 runs across its SHAs (`run_cap`), counted from its
-entries as before (every entry whose dispatch GitHub did not refuse), plus every raise recorded on it.
+A card outside every sprint keeps its own cap of 3 runs across its SHAs (`run_cap`), plus every raise
+recorded on it. Its runs are counted the same way: every entry whose intent was persisted counts,
+whatever GitHub answered, a refused dispatch included (`E2eState.dispatched`, which `task show` shows as
+`runs_dispatched`).
 
 **Budget spent, a card of a sprint.** The stage does not start and nothing is dispatched. The dispatcher
 cuts one `decision` card on the sprint, in the waiting card's project, under request id
 `dispatcher-e2e-budget-<sprint>-<budget>`: one card per (sprint, budget generation), the generation
 being the budget the runs were spent against. Its body carries the card waiting for e2e and its SHA,
 every run spent (card, SHA, run link, state and result summary, when), the question ("raise the e2e
-budget of <sprint> by N runs, or no?"), the instruction to hand it to the owner (a money decision; the
-PO does not raise the budget on its own authority), and the exact raise command. It is executed like
+budget of <sprint> by N runs, or no?") with the two exact answer lines below, the instruction to hand
+it to the owner quoting them (a money decision; the PO does not raise the budget on its own authority),
+and the exact raise command. It is executed like
 every decision card ([Decision and operation cards](#decision-and-operation-cards)): the sprint's PO
 session takes it, and the PO hands it to the owner with `task handover`.
 
@@ -1477,22 +1480,36 @@ second decision is cut. Each tick the stage re-checks a waiting card first, with
   card's code, so no worker round is charged;
 - otherwise it keeps waiting.
 
-**Raising the budget.** Only on the owner's recorded word:
+**The owner's answer.** The owner answers on the decision card with a comment (`task comment --role
+owner`) holding exactly one answer line, parsed in one place (`e2e_budget.owner_answer`):
 
-```bash
-python3 -P -m secretary sprint e2e-budget --ref <sprint> --role po --add <N> --authorized-by <event id>
+```text
+e2e budget: raise <N>
+e2e budget: no
 ```
 
-`--role po` only (every other role is refused, `role_forbidden`), `--add` 1 or more, and
-`--authorized-by` the event id of an owner-role comment (`task comment --role owner`) on one of this
-sprint's e2e budget decision cards, made after that card was handed to the owner. The owner's answer
-input the dispatcher sends the PO names that event id. A missing, unknown or non-comment event, a
-comment that is not the owner's, a comment on any other card (another sprint's decision included),
-and one made before the handover are refused (`authorization_refused`, exit status 3), and nothing is
-written. One owner comment raises once: the default request id is `e2e-budget-raise-<event id>`, a
+`<N>` is a positive integer. Matching is case-insensitive and ignores the whitespace around the line;
+the rest of the comment is free prose. A comment with neither line, with both, or with two raise lines
+answers nothing. An `e2e budget: no` comment moves nothing by itself: the PO completes the decision card.
+
+**Raising the budget.** Only on the owner's recorded word, and by the owner's recorded number:
+
+```bash
+python3 -P -m secretary sprint e2e-budget --ref <sprint> --role po --authorized-by <event id> [--add <N>]
+```
+
+`--role po` only (every other role is refused, `role_forbidden`), and `--authorized-by` the event id of
+an owner-role comment on one of this sprint's e2e budget decision cards, made after that card was
+handed to the owner, whose answer line is `e2e budget: raise <N>`. The raise is that N: `--add` is
+optional, and when given it has to equal N. The owner's answer input the dispatcher sends the PO names
+that event id. A missing, unknown or non-comment event, a comment that is not the owner's, a comment on
+any other card (another sprint's decision included), one made before the handover, an `e2e budget: no`
+comment, a comment with no single answer line, and an `--add` other than the owner's N are refused
+(`authorization_refused`, exit status 3), and nothing is written. One owner comment raises once: the default request id is `e2e-budget-raise-<event id>`, a
 repeat of it is the same raise, and another request id naming the same event is refused. The raise adds
 `N` to `e2e_budget` in place, in the transaction of one `e2e_budget_raised` sprint audit record whose
-payload names `add`, `authorized_by` and `decision`; a closed or stopped sprint refuses it. The waiting
+payload names `add` (the owner's N), `authorized_by` (the comment's event id) and `decision`; a closed
+or stopped sprint refuses it. The waiting
 cards dispatch on the next tick, and the PO completes the decision card as usual.
 
 **Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
@@ -1500,8 +1517,8 @@ cards dispatch on the next tick, and the PO completes the decision card as usual
 - a card with a PO origin ([PO delegation](#po-delegation)) gets the same decision card, cut with that
   origin (the dispatcher carries the card's `po_origin` onto it; no other role but the PO records an
   origin) and no sprint, under `dispatcher-e2e-cap-<card>-<cap>`, so it goes to the card's origin line.
-  The raise is `task e2e-budget --ref <card> --role po --add <N> --authorized-by <event id>`, authorized
-  the same way by an owner comment on that card's decision after its handover; it is recorded on the
+  The raise is `task e2e-budget --ref <card> --role po --authorized-by <event id> [--add <N>]`, authorized
+  the same way, by the same answer line and to the same N, by an owner comment on that card's decision after its handover; it is recorded on the
   card (bag field `e2e_cap`, `{raises: [{add, authorized_by, decision, at}]}`, one `e2e_cap_raised`
   audit record each) and raises that card's cap. The wait, the re-check and the decline are as above;
 - a card with no origin has nobody to hand the decision to: it is Blocked with `e2e run cap reached
@@ -1640,7 +1657,7 @@ python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type r
 python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
 python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
 python3 -P -m secretary sprint allow-production --role po --ref sprint:ID --project PROJECT_ID --reason WHY
-python3 -P -m secretary sprint e2e-budget --role po --ref sprint:ID --add N --authorized-by EVENT_ID
+python3 -P -m secretary sprint e2e-budget --role po --ref sprint:ID --authorized-by EVENT_ID [--add N]
 python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID

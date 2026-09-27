@@ -735,8 +735,8 @@ def _block(
 
 #: The owner's answer is applied with one of these; the decision card's body names the exact command.
 _RAISE_COMMANDS = {
-    "sprint": "python3 -P -m secretary sprint e2e-budget --ref {scope} --role po --add <N> --authorized-by <event id>",
-    "card": "python3 -P -m secretary task e2e-budget --ref {scope} --role po --add <N> --authorized-by <event id>",
+    "sprint": "python3 -P -m secretary sprint e2e-budget --ref {scope} --role po --authorized-by <event id>",
+    "card": "python3 -P -m secretary task e2e-budget --ref {scope} --role po --authorized-by <event id>",
 }
 
 
@@ -818,11 +818,7 @@ def _cap_spent(
             outcome=f"e2e run cap reached ({cap})",
             blocked_reason="other",
         )
-    charges = [
-        {"card": ref, "dispatch_id": run.dispatch_id, "at": run.intent_at}
-        for run in state.runs
-        if run.dispatch != REFUSED
-    ]
+    charges = [{"card": ref, "dispatch_id": run.dispatch_id, "at": run.intent_at} for run in state.runs]
     return _await_decision(
         runtime,
         task,
@@ -992,8 +988,9 @@ def _decision_description(
         [
             (
                 f"{spent_line} Every e2e run pays for BitLaunch stands, so more runs are a money decision: "
-                "hand this card to the owner (`task handover`). The budget is raised only on the owner's "
-                "recorded word, never on the PO's own authority."
+                "hand this card to the owner (`task handover`), quoting the two answer lines below in the "
+                "handover reason. The budget is raised only on the owner's recorded word, never on the PO's "
+                "own authority."
             ),
             "",
             "## Waiting for e2e",
@@ -1008,21 +1005,30 @@ def _decision_description(
             "",
             "## The question for the owner",
             "",
-            f"Raise the e2e budget of {scope_ref} by N runs, or no?",
+            (
+                f"Raise the e2e budget of {scope_ref} by N runs, or no? The owner answers with a comment on "
+                "this card holding exactly one of these two lines (any case; the rest of the comment is free "
+                "prose):"
+            ),
+            "",
+            f"    {e2e_budget.ANSWER_RAISE_LINE}",
+            f"    {e2e_budget.ANSWER_NO_LINE}",
+            "",
+            "A comment with neither line, with both, or with two raise lines authorizes nothing.",
             "",
             "## Applying the owner's answer",
             "",
             (
-                "- \"raise by N\": run this with the event id of the owner's comment on this card (the "
-                "owner's answer input names it), then complete this card; the waiting cards dispatch on the "
-                "next tick:"
+                f"- `{e2e_budget.ANSWER_RAISE_LINE}`: run this with the event id of that comment (the owner's "
+                "answer input names it); the raise is the owner's N, and nothing else (`--add`, if given, has "
+                "to equal it). Then complete this card; the waiting cards dispatch on the next tick:"
             ),
             "",
             f"      {command}",
             "",
             (
-                "- \"no\": complete this card without a raise; every card waiting on it goes to Blocked with "
-                "your completion text."
+                f"- `{e2e_budget.ANSWER_NO_LINE}`: complete this card without a raise; every card waiting on it "
+                "goes to Blocked with your completion text."
             ),
         ]
     )

@@ -1956,29 +1956,31 @@ class SprintWriter:
         role: str,
         actor: str,
         reference: str,
-        add: int,
         authorized_by: str,
+        add: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Raise the sprint's e2e run budget by `add` runs, on the owner's recorded word (secretary-1796).
+        """Raise the sprint's e2e run budget by the runs the owner recorded (secretary-1796).
 
         Role `po` only, on an open sprint, and only with `authorized_by`: the event id of an owner-role
         comment on one of this sprint's e2e budget decision cards, made after that card was handed to
-        the owner (`e2e_budget.authorizing_decision`). The PO applies the owner's answer; it has no path
-        to raise the budget on its own authority. One authorizing comment raises once. Everything is
-        refused before anything is written. The request id defaults to one derived from the
-        authorizing event, so a repeat is the same raise; the audit record names the event.
+        the owner, whose one answer line is `e2e budget: raise <N>` (`e2e_budget.authorized_raise`).
+        The raise is that N: `add`, when given, has to equal it. The PO applies the owner's answer; it
+        has no path to raise the budget on its own authority, and `e2e budget: no` authorizes nothing.
+        One authorizing comment raises once. Everything is refused before anything is written. The
+        request id defaults to one derived from the authorizing event, so a repeat is the same raise;
+        the audit record names the event and N.
         """
         self._role(role, {"po"}, actor=actor)
-        if isinstance(add, bool) or not isinstance(add, int) or add < 1:
+        if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
             raise TaskError("validation", f"--add is a whole number of runs, 1 or more; not {add!r}", 2)
         authorized_by = str(authorized_by or "").strip()
-        decision = sprint_e2e.authorizing_decision(self.audit, authorized_by, reference)
+        decision, runs = sprint_e2e.authorized_raise(self.audit, TaskReader(self.client), authorized_by, reference, add)
         return self._raise_e2e_budget_atomic(
             role=role,
             actor=actor,
             reference=reference,
-            add=add,
+            add=runs,
             authorized_by=authorized_by,
             decision=decision,
             request_id=request_id or f"e2e-budget-raise-{authorized_by}",

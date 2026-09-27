@@ -16,8 +16,8 @@ wait's frozen result, and, when the result Blocked the card, the request id of t
 (`closing`): once the move is committed that run's pass is over, and a card brought back to the same
 SHA after an unblock may spend a new run on it.
 
-The count of runs dispatched for a card is the number of records whose dispatch was not refused. It
-is durable because the records are. A card of a sprint spends the sprint's e2e run budget, charged at
+The count of runs dispatched for a card is the number of its records: a run counts when its intent is
+persisted, whatever GitHub answered, as a sprint charges it. It is durable because the records are. A card of a sprint spends the sprint's e2e run budget, charged at
 each intent (`board/e2e_budget.py`, secretary-1796); a card outside every sprint is bounded by its own
 cap, :data:`E2E_RUN_CAP` plus every raise the owner authorized.
 
@@ -194,8 +194,10 @@ class E2eState:
 
     @property
     def dispatched(self) -> int:
-        """Runs dispatched for this card, across all its SHAs: every intent GitHub did not refuse."""
-        return sum(1 for run in self.runs if run.dispatch != REFUSED)
+        """Runs dispatched for this card, across all its SHAs: every persisted intent, whatever GitHub
+        answered. A run counts when its intent is written, before the POST, as a sprint charges it
+        (secretary-1796); the per-card cap and `task show` read this count."""
+        return len(self.runs)
 
     def latest(self, sha: str) -> E2eRun | None:
         """The newest record for this SHA, or None."""
