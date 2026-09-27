@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.board.e2e_budget import DEFAULT_E2E_BUDGET
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission
@@ -110,6 +111,9 @@ class SprintCreateIntent:
     # before they existed still replays as the same request.
     po_session: str | None = None
     allowed_productions: tuple[str, ...] = ()
+    # The e2e run budget (secretary-1796). Left off the document at the default, so an intent staged
+    # before it existed still replays as the same request.
+    e2e_budget: int = DEFAULT_E2E_BUDGET
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> SprintCreateIntent:
@@ -129,6 +133,7 @@ class SprintCreateIntent:
             reviewer=str(document.get("reviewer")) if document.get("reviewer") is not None else None,
             po_session=str(document.get("po_session")) if document.get("po_session") else None,
             allowed_productions=_strings(document.get("allowed_productions")),
+            e2e_budget=int(document.get("e2e_budget", DEFAULT_E2E_BUDGET)),
         )
 
     def to_document(self) -> dict[str, Any]:
@@ -151,6 +156,8 @@ class SprintCreateIntent:
             document["po_session"] = self.po_session
         if self.allowed_productions:
             document["allowed_productions"] = list(self.allowed_productions)
+        if self.e2e_budget != DEFAULT_E2E_BUDGET:
+            document["e2e_budget"] = self.e2e_budget
         return document
 
     def admission(self, *, reference: str | None = None) -> SprintAdmission:

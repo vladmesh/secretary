@@ -6,7 +6,8 @@ touches it. Producers write through :func:`record`; the web reads and marks thro
 
 **Kinds and classes.** Every kind belongs to one class, and the class is derived from the kind here
 (:data:`KIND_CLASS`), never passed by a producer. `needs_owner` is a fact only the owner can move on:
-a card the PO handed to the owner, the steward's report card that needs a human. `notice` is a fact
+a card the PO handed to the owner, the steward's report card that needs a human, a card whose e2e cap
+is spent with nobody but the owner to raise it. `notice` is a fact
 the owner should know: a sprint closed or stopped, the budget signal, a dead head nobody relaunched, a
 failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
 CHECK constraints (`board/schema.py`), from the same lists.
@@ -56,13 +57,17 @@ HEAD_DEAD = "head_dead"
 PO_TURN_FAILED = "po_turn_failed"
 PROVIDER_RED = "provider_red"
 DELEGATED_CARD_SETTLED = "delegated_card_settled"
+E2E_BUDGET_SPENT = "e2e_budget_spent"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021) are these two lists. A
+#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021 and 0023) are these two lists. A
 #: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
+    # A card outside every sprint, with no PO session to hand the decision to, spent its per-card
+    # e2e cap and was Blocked (0023, secretary-1796): only the owner can pay for more runs.
+    E2E_BUDGET_SPENT: NEEDS_OWNER,
     SPRINT_CLOSED: NOTICE,
     SPRINT_STOPPED: NOTICE,
     BUDGET_SIGNAL: NOTICE,
@@ -433,6 +438,7 @@ __all__ = [
     "CARD_HANDED_TO_OWNER",
     "CLASSES",
     "DELEGATED_CARD_SETTLED",
+    "E2E_BUDGET_SPENT",
     "FAILED",
     "HEAD_DEAD",
     "KINDS",

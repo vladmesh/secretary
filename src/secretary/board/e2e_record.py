@@ -17,8 +17,13 @@ wait's frozen result, and, when the result Blocked the card, the request id of t
 SHA after an unblock may spend a new run on it.
 
 The count of runs dispatched for a card is the number of records whose dispatch was not refused. It
-is durable because the records are, and it is bounded by :data:`E2E_RUN_CAP` until the sprint e2e
-budget replaces that interim cap.
+is durable because the records are. A card of a sprint spends the sprint's e2e run budget, charged at
+each intent (`board/e2e_budget.py`, secretary-1796); a card outside every sprint is bounded by its own
+cap, :data:`E2E_RUN_CAP` plus every raise the owner authorized.
+
+A card that reached the stage with the budget spent carries `budget_wait` (`{decision, generation,
+scope, since}`): the decision card it waits on, and the budget (or cap) the runs were spent against.
+`task show` says `e2e: budget spent, waiting on <decision>`.
 """
 
 from __future__ import annotations
@@ -28,12 +33,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from secretary.board import e2e_budget
 from secretary.board.extension_bag import EXTENSION_BAG
 
 E2E_FIELD = "e2e"
 
-#: The interim bound on runs one card may dispatch across all its SHAs.
-E2E_RUN_CAP = 3
+#: The bound on runs one card outside every sprint may dispatch across all its SHAs, before a raise.
+E2E_RUN_CAP = e2e_budget.CARD_E2E_CAP
 
 #: A run record's dispatch status: the intent is on the card and the call was not confirmed (it may
 #: or may not have reached GitHub), GitHub accepted it, or GitHub refused it.
@@ -150,10 +156,41 @@ class E2eRun:
 
 
 @dataclass
+class BudgetWait:
+    """A card waiting on the decision its spent e2e budget needs."""
+
+    decision: str
+    # The budget (a sprint's) or the cap (a card's) the runs were spent against: its decision's key.
+    generation: int
+    # `sprint` or `card`: whose budget is spent.
+    scope: str
+    since: str
+
+    @property
+    def mark(self) -> str:
+        return f"e2e: budget spent, waiting on {self.decision}"
+
+    @classmethod
+    def from_json(cls, payload: Any) -> BudgetWait | None:
+        if not isinstance(payload, Mapping) or not payload.get("decision"):
+            return None
+        generation = payload.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            return None
+        return cls(
+            decision=str(payload["decision"]),
+            generation=generation,
+            scope=str(payload.get("scope") or ""),
+            since=str(payload.get("since") or ""),
+        )
+
+
+@dataclass
 class E2eState:
     """Every run record of one card, as its `e2e` field holds them."""
 
     runs: list[E2eRun] = field(default_factory=list)
+    budget_wait: BudgetWait | None = None
 
     @property
     def dispatched(self) -> int:
@@ -173,7 +210,10 @@ class E2eState:
         return next((run for run in reversed(self.runs) if run.green), None)
 
     def to_json(self) -> dict[str, Any]:
-        return {"runs": [asdict(run) for run in self.runs]}
+        document: dict[str, Any] = {"runs": [asdict(run) for run in self.runs]}
+        if self.budget_wait is not None:
+            document["budget_wait"] = asdict(self.budget_wait)
+        return document
 
     def text(self) -> str:
         return json.dumps(self.to_json(), sort_keys=True, separators=(",", ":"))
@@ -182,7 +222,8 @@ class E2eState:
     def from_json(cls, payload: Any) -> E2eState:
         runs = payload.get("runs") if isinstance(payload, Mapping) else None
         parsed = [E2eRun.from_json(run) for run in runs] if isinstance(runs, list) else []
-        return cls([run for run in parsed if run is not None])
+        waiting = BudgetWait.from_json(payload.get("budget_wait")) if isinstance(payload, Mapping) else None
+        return cls([run for run in parsed if run is not None], waiting)
 
 
 def _json_field(task: Mapping[str, Any]) -> Any:
@@ -203,13 +244,24 @@ def e2e_state(task: Mapping[str, Any]) -> E2eState:
 
 
 def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The `e2e` block `task show` carries, or None for a card that never dispatched a run."""
+    """The `e2e` block `task show` carries, or None for a card that never reached the stage.
+
+    A card of a sprint spends the sprint's budget (`budget: <sprint>`, no `run_cap`); a card outside
+    every sprint has its own cap. A card waiting on a budget decision carries `mark`.
+    """
     state = e2e_state(task)
-    if not state.runs:
+    if not state.runs and state.budget_wait is None:
         return None
+    sprint = str(task.get("sprint") or "")
     return {
         "runs_dispatched": state.dispatched,
-        "run_cap": E2E_RUN_CAP,
+        "run_cap": None if sprint else e2e_budget.card_cap(task),
+        "budget": sprint or None,
+        **(
+            {"mark": state.budget_wait.mark, "waiting_on": state.budget_wait.decision}
+            if state.budget_wait is not None
+            else {}
+        ),
         "runs": [
             {
                 "sha": run.sha,
@@ -246,6 +298,7 @@ __all__ = [
     "REFUSED",
     "SENT",
     "SUCCESS",
+    "BudgetWait",
     "E2eRun",
     "E2eState",
     "e2e_state",

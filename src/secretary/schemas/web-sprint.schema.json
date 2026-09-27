@@ -1094,6 +1094,13 @@
                   },
                   "description": "Registered projects whose production this sprint's operations may touch, fixed at create. Empty unless named."
                 },
+                "e2e": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "The sprint's e2e run budget (secretary-1796): `budget`, `used`, `summary` (`e2e: <used> of <budget>`), `cards` (the cards that spent runs) and `charges` (one `{card, dispatch_id, at}` per run)."
+                },
                 "resume": {
                   "type": [
                     "object",
@@ -1841,6 +1848,13 @@
                     "type": "string"
                   },
                   "description": "Registered projects whose production this sprint's operations may touch, fixed at create. Empty unless named."
+                },
+                "e2e": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "The sprint's e2e run budget (secretary-1796): `budget`, `used`, `summary` (`e2e: <used> of <budget>`), `cards` (the cards that spent runs) and `charges` (one `{card, dispatch_id, at}` per run)."
                 },
                 "resume": {
                   "type": [

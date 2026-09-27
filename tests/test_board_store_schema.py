@@ -73,8 +73,10 @@ SELECT
 #: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves. `0017`
 #: restates the `task_type` CHECK again, one for one. `0018` adds `owner_events`: three `CHECK`, one
 #: primary key, one `UNIQUE`. `0022` adds `origin_returns`: three `CHECK`, one primary key, one
-#: `UNIQUE` (its partial index is not unique).
-DOCUMENTED_COUNTS = (30, 56, 44, 30, 19, 5)
+#: `UNIQUE` (its partial index is not unique). `0023` adds one `CHECK` on `sprints` (the e2e counts are
+#: not negative), `sprint_e2e_charges` (one foreign key, one primary key) and restates the two
+#: owner-event CHECKs, one for one.
+DOCUMENTED_COUNTS = (31, 57, 45, 31, 19, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -100,6 +102,7 @@ REVISIONS = (
     "0020_wait_card_kind",
     "0021_delegated_card_settled",
     "0022_origin_returns",
+    "0023_sprint_e2e_budget",
 )
 
 
@@ -481,6 +484,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -739,6 +743,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
 
@@ -1119,6 +1124,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1160,6 +1166,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
 
@@ -1241,6 +1248,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
 
@@ -1260,6 +1268,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0020_wait_card_kind",
                 "0021_delegated_card_settled",
                 "0022_origin_returns",
+                "0023_sprint_e2e_budget",
             ),
         )
 
@@ -1362,7 +1371,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"),
         )
 
         self.assertEqual(
@@ -1415,15 +1424,18 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"))
 
+        # Every column a sprint had loads unchanged; 0023 appends its e2e budget columns (3 and 0).
+        sprints = connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall()
         self.assertEqual(
             (
-                connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall(),
+                [row[: len(before[0][0])] for row in sprints],
                 connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(),
             ),
             before,
         )
+        self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0)])
         self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "h-1", to=store))
         self.assertFalse(record("card_handed_to_owner", "secretary-1", "again", "h-1", to=store))
         self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))
@@ -1492,7 +1504,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -1524,7 +1536,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
@@ -1551,7 +1563,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-7", task_type="wait")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
         self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
@@ -1600,7 +1612,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             insert(DELEGATED_CARD_SETTLED, "notice", "k-3")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns"))
+        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))
@@ -1626,6 +1638,61 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaises(sa.exc.IntegrityError):
             insert(DELEGATED_CARD_SETTLED, "notice", "k-4")
         connection.rollback()
+
+
+    # --- 0023: a sprint's e2e run budget ---------------------------------------------------------
+
+    def test_0023_gives_every_existing_sprint_a_budget_of_3_and_nothing_used(self) -> None:
+        """secretary-1796: open and closed sprints alike read 3 and 0, and the counts are not negative."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        from secretary.board.owner_events import OwnerEventStore, record
+
+        connection = self.owner_connection()
+        config = migrate.alembic_config(connection=connection, passwords=self.passwords)
+        command.upgrade(config, "0022_origin_returns")
+        connection.commit()
+        self.sprint(connection, "sprint:1469", 1469)
+        self.sprint(connection, "sprint:12", 12)
+        connection.exec_driver_sql("UPDATE sprints SET status = 'closed', closed_at = now() WHERE ref = 'sprint:12'")
+        connection.commit()
+
+        self.assertEqual(self.run_migrations(connection), ("0023_sprint_e2e_budget",))
+
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT ref, e2e_budget, e2e_used FROM sprints ORDER BY ref").fetchall(),
+            [("sprint:12", 3, 0), ("sprint:1469", 3, 0)],
+        )
+        self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM sprint_e2e_charges").scalar(), 0)
+        with self.assertRaises(sa.exc.IntegrityError):
+            connection.exec_driver_sql("UPDATE sprints SET e2e_used = -1 WHERE ref = 'sprint:1469'")
+        connection.rollback()
+        # The bell takes the new `needs_owner` kind, and only as `needs_owner`.
+        store = OwnerEventStore(self.credentials("app"))
+        self.assertTrue(record("e2e_budget_spent", "secretary-1", "cap spent", "e-1", to=store))
+        with self.assertRaises(sa.exc.IntegrityError):
+            connection.exec_driver_sql(
+                "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
+                "VALUES ('e2e_budget_spent', 'notice', NULL, 'x', now(), 'e-2')"
+            )
+        connection.rollback()
+        # The downgrade refuses while such an event exists, and drops the budget once none does.
+        with self.assertRaises(RuntimeError):
+            command.downgrade(config, "0022_origin_returns")
+        connection.rollback()
+        connection.exec_driver_sql("DELETE FROM owner_events WHERE kind = 'e2e_budget_spent'")
+        connection.commit()
+        command.downgrade(config, "0022_origin_returns")
+        connection.commit()
+        self.assertEqual(migrate.current_revision(connection), "0022_origin_returns")
+        columns = {
+            name
+            for (name,) in connection.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'sprints'"
+            ).fetchall()
+        }
+        self.assertFalse({"e2e_budget", "e2e_used"} & columns)
 
 
 if __name__ == "__main__":

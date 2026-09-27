@@ -98,6 +98,19 @@ with your reason and the owner's comments since the handover. Complete the card 
 soon as the answer settles it, which takes the mark off. If it does not settle it, say on the card what
 is still missing and end the turn; the card keeps waiting.
 
+### The e2e run budget
+
+Every e2e run pays for stands, so a sprint has an e2e run budget (`sprint create --e2e-budget N`,
+default 3). When it is spent, the dispatcher cuts a decision card `E2E budget spent: ...`: that is a
+money decision. Hand it to the owner; never raise the budget on your own. When the owner answers
+"raise by N", apply exactly that, naming the owner's comment (its event id is in the input that
+carries the answer), then complete the card:
+
+    python3 -P -m secretary sprint e2e-budget --ref <sprint> --role po --add <N> --authorized-by <event id>
+
+For a card outside every sprint the card's body names `task e2e-budget --ref <card>` instead. When the
+owner says no, complete the card without a raise: the cards waiting on it are Blocked with your text.
+
 ## Memory
 
 Shared memory is the `po_memory` MCP server. Before answering or acting on context that has been

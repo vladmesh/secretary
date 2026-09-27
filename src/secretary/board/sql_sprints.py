@@ -13,6 +13,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.backend import record_key, sprint_reference_number
+from secretary.board.e2e_budget import (
+    DEFAULT_E2E_BUDGET,
+    SPRINT_E2E_BUDGET,
+    SPRINT_E2E_BUDGET_ADD,
+    SPRINT_E2E_CHARGES,
+    SPRINT_E2E_USED,
+)
 
 
 def _now() -> datetime:
@@ -154,7 +161,8 @@ class SqlSprintRecords:
         stored: dict[int, list[tuple[Any, ...]]] = {}
         for values in self.client._query(
             "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
-            "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions "
+            "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions, "
+            "e2e_budget, e2e_used "
             "FROM sprints "
             "WHERE board_key = ANY(%s::bigint[])",
             (keys,),
@@ -204,6 +212,7 @@ class SqlSprintRecords:
                 (references,),
             )
         }
+        charges = self._e2e_charges(references)
         budgets: dict[tuple[str, bool], dict[str, int]] = {}
         for reference, charged, kind, count in self.client._query(
             "SELECT sprint_ref, charged, event_type, count(*) FROM sprint_budget_events "
@@ -215,7 +224,7 @@ class SqlSprintRecords:
         for key in keys:
             (
                 reference, goal, dod, product, status, observer, worker, reviewer, current, source,
-                po_session, productions,
+                po_session, productions, e2e_budget, e2e_used,
             ) = rows[key]
             reference = str(reference)
             values: dict[str, str] = {
@@ -251,6 +260,10 @@ class SqlSprintRecords:
                 values["sprint_allowed_productions"] = json.dumps(
                     [str(project) for project in productions], separators=(",", ":")
                 )
+            # The e2e run budget (0023): every sprint has one, 3 and nothing used unless it says more.
+            values[SPRINT_E2E_BUDGET] = str(int(e2e_budget))
+            values[SPRINT_E2E_USED] = str(int(e2e_used))
+            values[SPRINT_E2E_CHARGES] = json.dumps(charges.get(reference, []), sort_keys=True, separators=(",", ":"))
             if source is not None:
                 values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
             resume = resumes.get(reference)
@@ -296,16 +309,19 @@ class SqlSprintRecords:
         self.client._execute(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, "
-            "allowed_productions, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s)",
+            "allowed_productions, e2e_budget, e2e_used, created_at, updated_at, closed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s,%s,%s)",
             (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
              meta.get("sprint_source_audit") or None, meta.get("sprint_po_session") or None,
              self._productions(meta.get("sprint_allowed_productions")),
+             int(meta.get(SPRINT_E2E_BUDGET) or DEFAULT_E2E_BUDGET), int(meta.get(SPRINT_E2E_USED) or 0),
              now, now, None if status == "open" else now),
         )
         self._replace_relations(reference, meta)
+        if SPRINT_E2E_CHARGES in meta:
+            self._restore_e2e_charges(reference, meta[SPRINT_E2E_CHARGES])
         del self.staged[key]
 
     @staticmethod
@@ -430,6 +446,16 @@ class SqlSprintRecords:
         if "sprint_allowed_productions" in values:
             assignments.append("allowed_productions = %s::text[]")
             params.append(self._productions(values["sprint_allowed_productions"]))
+        # The budget as a sprint is created or restored with it, and a raise, which adds in place.
+        if SPRINT_E2E_BUDGET in values:
+            assignments.append("e2e_budget = %s")
+            params.append(int(values[SPRINT_E2E_BUDGET]))
+        if SPRINT_E2E_BUDGET_ADD in values:
+            assignments.append("e2e_budget = e2e_budget + %s")
+            params.append(int(values[SPRINT_E2E_BUDGET_ADD]))
+        if SPRINT_E2E_USED in values:
+            assignments.append("e2e_used = %s")
+            params.append(int(values[SPRINT_E2E_USED]))
         if "sprint_source_audit" in values:
             assignments.append("source_audit = %s::jsonb")
             params.append(str(values["sprint_source_audit"]) or None)
@@ -454,6 +480,8 @@ class SqlSprintRecords:
                 f"UPDATE sprints SET {', '.join(assignments)} WHERE ref = %s", tuple(params)
             )
         self._replace_relations(reference, values)
+        if SPRINT_E2E_CHARGES in values:
+            self._restore_e2e_charges(reference, values[SPRINT_E2E_CHARGES])
         if "sprint_resume" in values and str(values["sprint_resume"]):
             entry = json.loads(str(values["sprint_resume"]))
             names = ("selected_step", "selected_why", "rejected_alternatives", "current_task", "dod_state", "next_safe_step")
@@ -514,6 +542,70 @@ class SqlSprintRecords:
                                     _now(),
                                 ),
                             )
+
+    def _e2e_charges(self, references: list[str]) -> dict[str, list[dict[str, str]]]:
+        """Every sprint's charged e2e runs, oldest first: `{card, dispatch_id, at}`."""
+        charged: dict[str, list[dict[str, str]]] = {}
+        for reference, dispatch_id, card, at in self.client._query(
+            "SELECT sprint_ref, dispatch_id, task_ref, charged_at FROM sprint_e2e_charges "
+            "WHERE sprint_ref = ANY(%s::text[]) ORDER BY sprint_ref, charged_at, dispatch_id",
+            (references,),
+        ):
+            charged.setdefault(str(reference), []).append(
+                {"card": str(card), "dispatch_id": str(dispatch_id), "at": _rfc3339(at)}
+            )
+        return charged
+
+    def _restore_e2e_charges(self, reference: str, value: Any) -> None:
+        """A restore writes back the charges its export carried, and nothing else writes them so."""
+        self.client._execute("DELETE FROM sprint_e2e_charges WHERE sprint_ref = %s", (reference,))
+        for item in json.loads(str(value or "") or "[]"):
+            self.client._execute(
+                "INSERT INTO sprint_e2e_charges (dispatch_id, sprint_ref, task_ref, charged_at) "
+                "VALUES (%s,%s,%s,%s) ON CONFLICT (dispatch_id) DO NOTHING",
+                (
+                    str(item["dispatch_id"]),
+                    reference,
+                    str(item.get("card") or ""),
+                    datetime.fromisoformat(str(item["at"])) if item.get("at") else _now(),
+                ),
+            )
+
+    def e2e_budget(self, reference: str) -> dict[str, Any] | None:
+        """`{budget, used, charges}` of one sprint's e2e run budget, or None for no such sprint."""
+        rows = self.client._query("SELECT e2e_budget, e2e_used FROM sprints WHERE ref = %s", (reference,))
+        if not rows:
+            return None
+        budget, used = rows[0]
+        return {"budget": int(budget), "used": int(used), "charges": self._e2e_charges([reference]).get(reference, [])}
+
+    def charge_e2e(self, reference: str, *, task_ref: str, dispatch_id: str, at: str) -> dict[str, Any]:
+        """Charge one e2e run to the sprint, if its budget has one left: `{charged, budget, used, charges}`.
+
+        The check and the increment are one statement on the sprint row, which PostgreSQL serializes:
+        two cards racing for the last run cannot both get it. A dispatch id already charged is not
+        charged again and answers charged.
+        """
+        rows = self.client._query(
+            "UPDATE sprints SET e2e_used = e2e_used + 1 "
+            "WHERE ref = %s AND e2e_used < e2e_budget "
+            "AND NOT EXISTS (SELECT 1 FROM sprint_e2e_charges WHERE dispatch_id = %s) "
+            "RETURNING e2e_budget, e2e_used",
+            (reference, dispatch_id),
+        )
+        if rows:
+            self.client._execute(
+                "INSERT INTO sprint_e2e_charges (dispatch_id, sprint_ref, task_ref, charged_at) VALUES (%s,%s,%s,%s)",
+                (dispatch_id, reference, task_ref, datetime.fromisoformat(at)),
+            )
+            return {"charged": True, **(self.e2e_budget(reference) or {})}
+        current = self.e2e_budget(reference)
+        if current is None:
+            raise self._error(f"no sprint {reference} to charge an e2e run to")
+        already = any(
+            isinstance(item, dict) and item.get("dispatch_id") == dispatch_id for item in current["charges"]
+        )
+        return {"charged": already, **current}
 
     def comments(self, task_id: int) -> list[dict[str, Any]]:
         return self.comments_of([int(task_id)])[int(task_id)]

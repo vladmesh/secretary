@@ -197,6 +197,10 @@ class Sprint(Base):
     # Null and empty for every sprint opened before them; both are set at create and never inferred.
     po_session = sa.Column(sa.Text)
     allowed_productions = sa.Column(ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'::text[]"))
+    # The e2e run budget (0023): runs the sprint may dispatch and runs it dispatched, one
+    # `sprint_e2e_charges` row each. Every sprint opened before it reads 3 and 0.
+    e2e_budget = sa.Column(sa.Integer, nullable=False, server_default=sa.text("3"))
+    e2e_used = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     # Both cursors are scoped to this sprint by composite foreign key, not by a bare
     # existence check.  See "Scoped relations" in §3.3.
     current_task_ref = sa.Column(sa.Text)
@@ -220,6 +224,7 @@ class Sprint(Base):
         ),
         sa.CheckConstraint("status IN ('open','closed','stopped')"),
         sa.CheckConstraint("(status = 'open') = (closed_at IS NULL)", name="sprint_closed_has_time"),
+        sa.CheckConstraint("e2e_budget >= 0 AND e2e_used >= 0", name="sprint_e2e_counts_are_not_negative"),
         # §3.13 step 2: `tasks` and `sprint_resumes` do not exist yet, and both relations are
         # mutual, so these are emitted as ALTER TABLE after every table is created.
         sa.ForeignKeyConstraint(
@@ -279,6 +284,23 @@ class SprintResume(Base):
 
 
 # --- §3.4 Budget --------------------------------------------------------------------------
+
+
+class SprintE2eCharge(Base):
+    """One e2e run charged to a sprint's e2e budget (revision 0023, `board/e2e_budget.py`).
+
+    Written with `sprints.e2e_used`'s increment, in the transaction of the run's dispatch intent; its
+    dispatch id is the key, so a run is never charged twice.
+    """
+
+    __tablename__ = "sprint_e2e_charges"
+
+    dispatch_id = sa.Column(sa.Text, primary_key=True)
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False)
+    task_ref = sa.Column(sa.Text, nullable=False)
+    charged_at = sa.Column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (sa.Index("sprint_e2e_charges_by_sprint", "sprint_ref"),)
 
 
 class SprintBudgetEvent(Base):
@@ -940,12 +962,12 @@ class OwnerEvent(Base):
         sa.CheckConstraint(
             "kind IN ('card_handed_to_owner','steward_needs_human','sprint_closed','sprint_stopped',"
             "'budget_signal','observer_dead','head_dead','po_turn_failed','provider_red',"
-            "'delegated_card_settled')",
+            "'delegated_card_settled','e2e_budget_spent')",
             name="owner_event_kind_in_vocabulary",
         ),
         sa.CheckConstraint("class IN ('needs_owner','notice')", name="owner_event_class_in_vocabulary"),
         sa.CheckConstraint(
-            "(class = 'needs_owner') = (kind IN ('card_handed_to_owner','steward_needs_human'))",
+            "(class = 'needs_owner') = (kind IN ('card_handed_to_owner','steward_needs_human','e2e_budget_spent'))",
             name="owner_event_class_follows_kind",
         ),
         sa.UniqueConstraint("dedup_key", name="owner_event_dedup_key_is_unique"),
@@ -1049,6 +1071,7 @@ __all__ = [
     "SprintBudgetEvent",
     "SprintComment",
     "SprintDecision",
+    "SprintE2eCharge",
     "SprintIssue",
     "SprintProject",
     "SprintRepository",

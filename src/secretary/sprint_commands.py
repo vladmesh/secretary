@@ -96,6 +96,13 @@ def add_sprint_subcommands(subparsers) -> None:
     _add_observer_argument(created)
     _add_executor_arguments(created)
     _add_po_channel_arguments(created)
+    created.add_argument(
+        "--e2e-budget",
+        type=_runs(0),
+        default=None,
+        help="e2e runs this sprint may dispatch (0 or more); default 3. Each run pays for stands, and a "
+        "spent budget is raised only on the owner's word (`sprint e2e-budget`)",
+    )
     created.set_defaults(handler=run_create)
     delivery = commands.add_parser(
         "comment-delivery",
@@ -180,7 +187,42 @@ def add_sprint_subcommands(subparsers) -> None:
     _add_data_dir_args(allowed)
     allowed.add_argument("--request-id")
     allowed.set_defaults(handler=run_allow_production)
+    raised = commands.add_parser(
+        "e2e-budget",
+        help="PO only: raise the sprint's e2e run budget by the runs the owner granted, on the owner's "
+        "comment on the budget decision card",
+    )
+    raised.add_argument("--ref", required=True)
+    # Every board role parses: the writer admits `po` only and answers the others with `role_forbidden`.
+    raised.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    raised.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    # A plain int: the writer refuses fewer than 1, after the role check every verb makes first.
+    raised.add_argument("--add", required=True, type=int, help="runs to add to the budget, 1 or more")
+    raised.add_argument(
+        "--authorized-by",
+        required=True,
+        help="the event id of the owner's comment on this sprint's e2e budget decision card, made after "
+        "its handover",
+    )
+    _add_data_dir_args(raised)
+    raised.add_argument("--request-id")
+    raised.set_defaults(handler=run_e2e_budget)
     sprint.set_defaults(handler=not_implemented)
+
+
+def _runs(minimum: int) -> Callable[[str], int]:
+    """An argparse type: a whole number of e2e runs, `minimum` or more."""
+
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"a whole number of runs, not {text!r}") from None
+        if value < minimum:
+            raise argparse.ArgumentTypeError(f"{minimum} or more runs, not {value}")
+        return value
+
+    return parse
 
 
 def _add_observer_argument(command: argparse.ArgumentParser) -> None:
@@ -419,6 +461,7 @@ def run_create(args: argparse.Namespace) -> int:
             reviewer=args.reviewer,
             po_session=args.po_session,
             allowed_productions=args.allow_production,
+            e2e_budget=args.e2e_budget,
         ),
     )
 
@@ -432,6 +475,20 @@ def run_allow_production(args: argparse.Namespace) -> int:
             reference=args.ref,
             project=args.project,
             reason=args.reason,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_e2e_budget(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.raise_e2e_budget(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            add=args.add,
+            authorized_by=args.authorized_by,
             request_id=args.request_id,
         ),
     )

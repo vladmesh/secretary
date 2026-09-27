@@ -2,7 +2,8 @@
 
 Unit-level: `parse_e2e` is the one reading, `InstanceCatalog.adapter` fails a read that carries a
 malformed declaration, and the adapter schema accepts exactly what the reading accepts. The last class
-is the one new create right the stage needs: the dispatcher cuts a wait card, and nothing else, and
+is the one new create right the stage needs: the dispatcher cuts a wait card (and, since secretary-1796,
+the decision a spent e2e budget needs), nothing else, and
 only it names a `card:<ref>` return address. The stage that acts on a declaration is in
 `tests/test_e2e_stage.py`.
 """
@@ -242,7 +243,8 @@ class DispatcherWaitRightsTests(unittest.TestCase):
                 parse_returns([address])
 
     def test_the_dispatcher_cuts_no_other_kind(self) -> None:
-        for kind in ("code", "research", "infra", "decision", "operation"):
+        # A decision it does cut: the one a spent e2e budget needs (secretary-1796, tests/test_e2e_budget.py).
+        for kind in ("code", "research", "infra", "operation"):
             with self.subTest(kind=kind), self.assertRaises(TaskError) as raised:
                 self.writer.create(
                     role="dispatcher",

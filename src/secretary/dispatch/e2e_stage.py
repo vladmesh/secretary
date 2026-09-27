@@ -39,9 +39,20 @@ Outcomes, read off the wait's frozen result:
   infrastructure (`blocked_reason: infrastructure`), with the outcome and the link.
 
 A run whose result Blocked the card records that move's request id; once it is committed the run's
-pass is over, and a card brought back to the same SHA may spend a new run. Every run counts towards
-the interim cap of :data:`E2E_RUN_CAP` per card; at the cap the stage does not start and the card is
-Blocked with `e2e run cap reached (3)`.
+pass is over, and a card brought back to the same SHA may spend a new run.
+
+Budget (secretary-1796, `board/e2e_budget.py`). A card of a sprint spends the sprint's e2e run budget:
+the run is charged by the write of its intent (`TaskWriter.record_e2e_intent`: one conditional UPDATE of
+the sprint row in the intent's transaction), so a run whose outcome is unknown is paid for, and a
+recovered run, which never writes a second intent, is never charged twice. When the budget has no run
+left nothing is dispatched: the dispatcher cuts one `decision` card on the sprint for that budget
+generation (request id `dispatcher-e2e-budget-<sprint>-<budget>`), cards reaching the stage later join
+it with a comment, and each waiting card records `budget_wait` and stays where it is. Each tick the
+stage re-checks the budget first: a raise (the owner's word, applied by the PO with `sprint
+e2e-budget`) lets the card dispatch; the decision Done with no raise Blocks it with the decision's text
+(`blocked_reason: other`). A card outside every sprint keeps the per-card cap of :data:`E2E_RUN_CAP`
+plus the raises on it: a spent cap gets a decision card with the card's PO origin when it has one, and
+is Blocked with an `e2e_budget_spent` bell event when it has none.
 """
 
 from __future__ import annotations
@@ -52,9 +63,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from secretary.board import e2e_record, wait_card
+from secretary.board import e2e_budget, e2e_record, owner_events, wait_card
+from secretary.board import po_origin as origin_field
 from secretary.board.completion_evidence import has_candidate
-from secretary.board.e2e_record import E2E_RUN_CAP, FAILURE, REFUSED, SENT, SUCCESS, E2eRun, E2eState
+from secretary.board.e2e_record import FAILURE, REFUSED, SENT, SUCCESS, BudgetWait, E2eRun, E2eState
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.e2e import (
     E2E_CLOCK_MARGIN_SECONDS,
@@ -166,6 +178,11 @@ def run_stage(
             )
             if settled is not None:
                 return settled
+    if state.budget_wait is not None:
+        # A spent budget is re-checked first, without reading the gate: a raise lets the card go on.
+        held = _budget_recheck(runtime, task, record, records, payload, attempt_id, state, step=step)
+        if held is not None:
+            return held
     outcome, result = gate()
     if outcome is not None:
         return outcome
@@ -191,28 +208,13 @@ def run_stage(
                 carried.reconciled.append(entry)
                 _persist(runtime, ref, state)
             return E2eProceed(result, entry)
-    if state.dispatched >= E2E_RUN_CAP:
-        return _block(
-            runtime,
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-cap-blocked", ref, sha),
-            reason=(
-                f"e2e run cap reached ({E2E_RUN_CAP}): this card has dispatched {state.dispatched} e2e "
-                f"runs across its candidates, so none is dispatched for `{sha[:12]}`. Until the sprint "
-                "e2e budget exists, a card spends at most "
-                f"{E2E_RUN_CAP}; `task show` lists the runs."
-            ),
-            step=step,
-            outcome=f"e2e run cap reached ({E2E_RUN_CAP})",
-            blocked_reason="other",
-        )
+    if not str(task.get("sprint") or "") and state.dispatched >= e2e_budget.card_cap(task):
+        return _cap_spent(runtime, task, record, records, payload, attempt_id, state, sha, step=step)
     started = _dispatch(runtime, task, record, attempt_id, state, declaration, sha, step=step)
     if isinstance(started, dict):
         return started
+    if isinstance(started, _Spent):
+        return _budget_spent(runtime, task, record, records, payload, attempt_id, state, sha, started, step=step)
     settled = _settle_run(
         runtime, task, record, records, payload, attempt_id, state, started, declaration, step=step
     )
@@ -233,6 +235,15 @@ def _persist(runtime: Any, ref: str, state: E2eState) -> None:
     runtime.writer.record_e2e_state(role="dispatcher", actor=runtime.owner, reference=ref, state=state.text())
 
 
+@dataclass(frozen=True)
+class _Spent:
+    """The sprint's e2e budget had no run left when the intent was to be charged: nothing was written."""
+
+    budget: int
+    used: int
+    charges: tuple[dict[str, Any], ...]
+
+
 def _dispatch(
     runtime: Any,
     task: dict[str, Any],
@@ -243,8 +254,12 @@ def _dispatch(
     sha: str,
     *,
     step: str,
-) -> E2eRun | dict[str, Any]:
-    """Write the intent, then dispatch once. The run record, or the outcome of a transport retry."""
+) -> E2eRun | dict[str, Any] | _Spent:
+    """Charge and write the intent, then dispatch once.
+
+    The run record, the outcome of a transport retry, or :class:`_Spent` when the card's sprint has no
+    run left (nothing written, nothing dispatched).
+    """
     ref = task["ref"]
     try:
         repo = _name_with_owner(runtime.host, record.workspace)
@@ -265,8 +280,24 @@ def _dispatch(
         deadline=declaration.deadline,
     )
     state.runs.append(run)
-    # The intent is on the card before anything reaches GitHub.
-    _persist(runtime, ref, state)
+    waiting, state.budget_wait = state.budget_wait, None
+    # The intent is on the card, and the run charged to the sprint, before anything reaches GitHub.
+    charged = runtime.writer.record_e2e_intent(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        state=state.text(),
+        sprint=str(task.get("sprint") or ""),
+        dispatch_id=run.dispatch_id,
+    )
+    if not charged.get("charged"):
+        state.runs.pop()
+        state.budget_wait = waiting
+        return _Spent(
+            int(charged.get("budget") or 0),
+            int(charged.get("used") or 0),
+            tuple(item for item in charged.get("charges") or [] if isinstance(item, dict)),
+        )
     try:
         dispatched = dispatch_workflow(
             runtime.host, repo, declaration, branch=run.branch, dispatch_id=run.dispatch_id, sha=sha
@@ -607,7 +638,13 @@ def _comment_green(runtime: Any, task: dict[str, Any], state: E2eState, run: E2e
             "## E2E — green\n\n"
             f"The e2e workflow `{run.workflow}` run {run.run_url} concluded success on the candidate "
             f"`{run.sha}` (`{run.branch}`, dispatch id `{run.dispatch_id}`, wait card {run.wait_ref}). "
-            f"Runs dispatched for this card: {state.dispatched} of {E2E_RUN_CAP}. The run was identified "
+            f"Runs dispatched for this card: {state.dispatched}"
+            + (
+                f", charged to the e2e budget of {task['sprint']}. "
+                if task.get("sprint")
+                else f" of {e2e_budget.card_cap(task)}. "
+            )
+            + "The run was identified "
             + (
                 "by recovery, not by GitHub's dispatch answer: " + run.recovery_rule + "."
                 if run.identified_by == IDENTIFIED_BY_RECOVERY
@@ -691,6 +728,389 @@ def _block(
     records.pop(ref, None)
     runtime.save_records(payload, records)
     return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
+
+
+# --- the e2e run budget (secretary-1796) -----------------------------------------------------------
+
+
+#: The owner's answer is applied with one of these; the decision card's body names the exact command.
+_RAISE_COMMANDS = {
+    "sprint": "python3 -P -m secretary sprint e2e-budget --ref {scope} --role po --add <N> --authorized-by <event id>",
+    "card": "python3 -P -m secretary task e2e-budget --ref {scope} --role po --add <N> --authorized-by <event id>",
+}
+
+
+def _budget_spent(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    state: E2eState,
+    sha: str,
+    spent: _Spent,
+    *,
+    step: str,
+) -> dict[str, Any]:
+    """The sprint's budget has no run left: wait on the decision for this budget generation."""
+    sprint = str(task.get("sprint") or "")
+    return _await_decision(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        state,
+        sha,
+        scope="sprint",
+        scope_ref=sprint,
+        generation=spent.budget,
+        spent_line=f"The e2e run budget of {sprint} is spent: {spent.used} of {spent.budget} runs.",
+        charges=list(spent.charges),
+        origin=None,
+        step=step,
+    )
+
+
+def _cap_spent(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    state: E2eState,
+    sha: str,
+    *,
+    step: str,
+) -> dict[str, Any]:
+    """A card outside every sprint spent its own cap: a decision for its PO origin, or Blocked and the bell."""
+    ref = task["ref"]
+    cap = e2e_budget.card_cap(task)
+    origin = origin_field.po_origin(task)
+    if origin is None:
+        reason = (
+            f"e2e run cap reached ({cap}): this card belongs to no sprint and has dispatched "
+            f"{state.dispatched} e2e runs across its candidates, so none is dispatched for `{sha[:12]}`. "
+            "It came from no PO session either, so there is nobody to hand the money decision to but the "
+            "owner: re-cut it in a sprint with an e2e budget, or through the PO, to spend more runs. "
+            "`task show` lists the runs."
+        )
+        owner_events.record(
+            owner_events.E2E_BUDGET_SPENT,
+            ref,
+            reason,
+            f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
+            to=getattr(getattr(runtime, "reader", None), "client", None),
+        )
+        return _block(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-cap-blocked", ref, sha),
+            reason=reason,
+            step=step,
+            outcome=f"e2e run cap reached ({cap})",
+            blocked_reason="other",
+        )
+    charges = [
+        {"card": ref, "dispatch_id": run.dispatch_id, "at": run.intent_at}
+        for run in state.runs
+        if run.dispatch != REFUSED
+    ]
+    return _await_decision(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        state,
+        sha,
+        scope="card",
+        scope_ref=ref,
+        generation=cap,
+        spent_line=(
+            f"The e2e run cap of {ref}, a card outside every sprint, is spent: {state.dispatched} of {cap} runs."
+        ),
+        charges=charges,
+        origin=origin,
+        step=step,
+    )
+
+
+def _await_decision(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    state: E2eState,
+    sha: str,
+    *,
+    scope: str,
+    scope_ref: str,
+    generation: int,
+    spent_line: str,
+    charges: list[dict[str, Any]],
+    origin: dict[str, str] | None,
+    step: str,
+) -> dict[str, Any]:
+    """Cut, or join, the one decision of this budget generation, and wait on it where the card is."""
+    ref = task["ref"]
+    try:
+        decision = _decision_card(
+            runtime,
+            task,
+            state,
+            sha,
+            scope=scope,
+            scope_ref=scope_ref,
+            generation=generation,
+            spent_line=spent_line,
+            charges=charges,
+            origin=origin,
+        )
+    except TaskError as exc:
+        return _block(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-budget-blocked", ref, sha),
+            reason=(
+                f"{spent_line} The decision card the owner has to answer could not be cut: "
+                f"{exc.code}: {exc.message}. Nothing was dispatched for `{sha[:12]}`."
+            ),
+            step=step,
+            outcome="e2e budget spent",
+            blocked_reason="other",
+        )
+    waiting = state.budget_wait
+    if waiting is None or (waiting.decision, waiting.generation) != (decision, generation):
+        state.budget_wait = BudgetWait(decision, generation, scope, wait_card.utc_text(utcnow()))
+        _persist(runtime, ref, state)
+    return _budget_waiting(task, state, attempt_id, step=step, sha=sha)
+
+
+def _decision_card(
+    runtime: Any,
+    task: dict[str, Any],
+    state: E2eState,
+    sha: str,
+    *,
+    scope: str,
+    scope_ref: str,
+    generation: int,
+    spent_line: str,
+    charges: list[dict[str, Any]],
+    origin: dict[str, str] | None,
+) -> str:
+    """The decision card of this budget generation: cut once, under a request id derived from it.
+
+    A card reaching a generation whose decision already exists joins it with one comment.
+    """
+    ref = task["ref"]
+    request_id = e2e_budget.decision_request_id(scope_ref, generation)
+    known = runtime.audit.committed_event(request_id)
+    if known is not None and known.get("ref"):
+        decision = str(known["ref"])
+        shown = runtime.reader.show(decision)
+        if f"- {ref} waits " not in str(shown.get("description") or ""):
+            runtime.writer.comment(
+                role="dispatcher",
+                actor=runtime.owner,
+                reference=decision,
+                body=(
+                    f"{ref} ({task.get('title') or ''}) also waits for its e2e run on `{sha}`, and joins this "
+                    "decision: the same answer applies to it."
+                ),
+                request_id="-".join(
+                    request_token(part) for part in ("dispatcher", "e2e-budget-join", decision, ref)
+                ),
+            )
+        return decision
+    created = runtime.writer.create(
+        role="dispatcher",
+        actor=runtime.owner,
+        project=str(task.get("project") or ""),
+        task_type="decision",
+        title=f"E2E budget spent: {scope_ref} — more runs? (money decision for the owner)",
+        description=_decision_description(
+            runtime, task, state, sha, scope=scope, scope_ref=scope_ref, spent_line=spent_line, charges=charges
+        ),
+        target="ready",
+        sprint=scope_ref if scope == "sprint" else "",
+        origin=origin,
+        request_id=request_id,
+    )
+    return str(created["task"]["ref"])
+
+
+def _decision_description(
+    runtime: Any,
+    task: dict[str, Any],
+    state: E2eState,
+    sha: str,
+    *,
+    scope: str,
+    scope_ref: str,
+    spent_line: str,
+    charges: list[dict[str, Any]],
+) -> str:
+    """What the PO and the owner read: who waits, what was spent with its links and results, the question."""
+    ref = task["ref"]
+    states: dict[str, E2eState] = {ref: state}
+    lines = []
+    for charge in charges:
+        card = str(charge.get("card") or "")
+        if card not in states:
+            try:
+                states[card] = e2e_record.e2e_state(runtime.reader.show(card))
+            except TaskError:
+                states[card] = E2eState()
+        run = next((item for item in states[card].runs if item.dispatch_id == charge.get("dispatch_id")), None)
+        if run is None:
+            lines.append(f"- {card}: dispatch `{charge.get('dispatch_id')}` at {charge.get('at')}: no run record")
+            continue
+        result = run.result or {}
+        lines.append(
+            f"- {card} @ `{run.sha[:12]}`: {run.run_url or 'run not identified'} ({run.status()}"
+            + (f": {result.get('summary')}" if result.get("summary") else "")
+            + f"), dispatched {run.intent_at}"
+        )
+    command = _RAISE_COMMANDS[scope].format(scope=scope_ref)
+    return "\n".join(
+        [
+            (
+                f"{spent_line} Every e2e run pays for BitLaunch stands, so more runs are a money decision: "
+                "hand this card to the owner (`task handover`). The budget is raised only on the owner's "
+                "recorded word, never on the PO's own authority."
+            ),
+            "",
+            "## Waiting for e2e",
+            "",
+            f"- {ref} waits ({task.get('title') or ''}) on `{sha}`",
+            "",
+            "Cards that reach the stage later while the budget is spent join this decision with a comment.",
+            "",
+            "## Runs spent",
+            "",
+            *(lines or ["- (none recorded)"]),
+            "",
+            "## The question for the owner",
+            "",
+            f"Raise the e2e budget of {scope_ref} by N runs, or no?",
+            "",
+            "## Applying the owner's answer",
+            "",
+            (
+                "- \"raise by N\": run this with the event id of the owner's comment on this card (the "
+                "owner's answer input names it), then complete this card; the waiting cards dispatch on the "
+                "next tick:"
+            ),
+            "",
+            f"      {command}",
+            "",
+            (
+                "- \"no\": complete this card without a raise; every card waiting on it goes to Blocked with "
+                "your completion text."
+            ),
+        ]
+    )
+
+
+def _budget_recheck(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    state: E2eState,
+    *,
+    step: str,
+) -> dict[str, Any] | None:
+    """A card waiting on a budget decision: None once a run is available again, else the tick's outcome."""
+    ref = task["ref"]
+    waiting = state.budget_wait
+    assert waiting is not None
+    if waiting.scope == "sprint":
+        current = runtime.reader.sprint_e2e_budget(str(task.get("sprint") or ""))
+        budget = int(current["budget"]) if current else waiting.generation
+        room = current is None or int(current["used"]) < budget
+    else:
+        budget = e2e_budget.card_cap(task)
+        room = state.dispatched < budget
+    raised = budget > waiting.generation
+    if room or raised:
+        # A run is there, or the owner raised the budget and others spent it first: the stage goes on,
+        # and a budget spent again gets the decision of its new generation.
+        state.budget_wait = None
+        _persist(runtime, ref, state)
+        return None
+    try:
+        decision = runtime.reader.show(waiting.decision)
+    except TaskError as exc:
+        if exc.code != "not_found":
+            raise
+        decision = None
+    if decision is not None and decision.get("state") != "done":
+        return _budget_waiting(task, state, attempt_id, step=step, sha="")
+    said = _decision_text(runtime, waiting.decision) if decision is not None else ""
+    state.budget_wait = None
+    _persist(runtime, ref, state)
+    return _block(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        request_id="-".join(
+            request_token(part) for part in ("dispatcher", "e2e-budget-declined", ref, waiting.decision)
+        ),
+        reason=(
+            f"No e2e run is dispatched: the e2e budget ({budget} runs) is spent, and the decision "
+            f"{waiting.decision} "
+            + ("was completed without a raise" if decision is not None else "no longer exists")
+            + ". This is the owner's money decision, not a defect of the card's code."
+            + (f"\n\nThe decision:\n\n{said}" if said else "")
+        ),
+        step=step,
+        outcome="e2e budget not raised",
+        blocked_reason="other",
+    )
+
+
+def _decision_text(runtime: Any, decision: str) -> str:
+    """The reason of the decision card's move into Done: the PO's completion record."""
+    for event in reversed(runtime.audit.events(decision)):
+        transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        if transition.get("target") == "done":
+            return str(event.get("reason") or "").strip()
+    return ""
+
+
+def _budget_waiting(
+    task: dict[str, Any], state: E2eState, attempt_id: str, *, step: str, sha: str
+) -> dict[str, Any]:
+    waiting = state.budget_wait
+    assert waiting is not None
+    return {
+        **_outcome(task["ref"], attempt_id, "e2e-budget-waiting", step=step, sha=sha),
+        "decision": waiting.decision,
+        "mark": waiting.mark,
+        "runs_dispatched": state.dispatched,
+    }
 
 
 def _waiting(

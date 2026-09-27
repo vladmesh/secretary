@@ -681,6 +681,18 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             if sprint.get("allowed_productions")
             else {}
         ),
+        # The e2e run budget as exported (secretary-1796); an export without it restores the default.
+        **(
+            {
+                "sprint_e2e_budget": str(int(sprint["e2e"]["budget"])),
+                "sprint_e2e_used": str(int(sprint["e2e"]["used"])),
+                "sprint_e2e_charges": json.dumps(
+                    list(sprint["e2e"].get("charges") or []), sort_keys=True, separators=(",", ":")
+                ),
+            }
+            if isinstance(sprint.get("e2e"), dict)
+            else {}
+        ),
     }
 
 

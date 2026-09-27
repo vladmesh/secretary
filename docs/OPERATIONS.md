@@ -724,6 +724,7 @@ What each kind means:
 | --- | --- | --- | --- |
 | `card_handed_to_owner` | needs the owner | the PO handed a `decision`/`operation` card to you with a reason | answer on the card page (the comment form posts as the owner) or in the sprint's PO session; it clears when the PO completes the card |
 | `steward_needs_human` | needs the owner | the steward's report card went Blocked with a "Needs a human" section | read the report card; mark the event read once handled |
+| `e2e_budget_spent` | needs the owner | a code card outside every sprint, cut by nobody's PO session, spent its 3 e2e runs and was Blocked | re-cut the work in a sprint with an e2e budget, or through the PO; mark the event read once handled |
 | `sprint_closed` | notice | a sprint was closed | read its closeout on the sprint page |
 | `sprint_stopped` | notice | a sprint's budget reached the hard limit and it was stopped | decide whether to reopen it |
 | `budget_signal` | notice | a sprint's budget reached its signal threshold | look at why its cards keep going round |
@@ -1107,9 +1108,10 @@ review ([Protocols](PROTOCOLS.md#the-e2e-stage)). While it does:
 
 - the code card stays in **Validate** (in **Assessment** when a release decision is waiting for a run);
   its heads are not re-launched and its gate is not re-read;
-- `task show --ref <card>` carries `e2e`: `runs_dispatched` of `run_cap` (3), and per run the SHA, the
-  dispatch id, `state` (`dispatching`, `identifying`, `waiting`, then the conclusion or the wait
-  outcome), the run link and the wait card;
+- `task show --ref <card>` carries `e2e`: `runs_dispatched`, the sprint whose e2e budget it spends
+  (`budget`) or, outside every sprint, its own `run_cap` (3 plus the owner's raises), and per run the
+  SHA, the dispatch id, `state` (`dispatching`, `identifying`, `waiting`, then the conclusion or the
+  wait outcome), the run link and the wait card;
 - a **wait card** titled `E2E run <workflow> for <card> @ <sha>` sits in Ready, then In progress, in the
   card's sprint; `task show` of it carries `wait` with the run link, the deadline, `last_observation`
   (`run <repo>#<id> is in_progress`) and `last_error`;
@@ -1123,8 +1125,44 @@ tick: Assessment or the release on `success` (with a `## E2E — green` comment)
 on `failure`, Blocked on anything else. A newer base merged in the meantime does not cost a new run
 when only base history came in and the card's own paths are unchanged: the attestation then carries an
 `E2E/base reconciliation` line. To give up on a run, `task cancel` its wait card; the code card
-is then Blocked. A Blocked card brought back on the same SHA dispatches a new run; a card at the cap is
-Blocked with `e2e run cap reached (3)`.
+is then Blocked. A Blocked card brought back on the same SHA dispatches a new run, charged like any
+other.
+
+### When the e2e run budget is spent
+
+Every e2e run pays for stands, so each sprint has an e2e run budget: 3 runs unless `sprint create
+--e2e-budget N` said otherwise (sprints opened before it have 3). `sprint show --ref sprint:<N>` and
+`sprint status --ref sprint:<N>` carry `e2e`, whose `summary` reads `e2e: <used> of <budget>`, with the
+cards that spent the runs (`cards`) and each run (`charges`). Contract in
+[Protocols](PROTOCOLS.md#the-e2e-run-budget).
+
+When a card of the sprint needs a run and none is left, nothing is dispatched and the card is not
+Blocked. What you see:
+
+- a `decision` card titled `E2E budget spent: sprint:<N> — more runs? (money decision for the owner)`
+  in the sprint, listing the card waiting for e2e, every run spent with its link and result, and the
+  question: raise the budget by how many runs, or no. The PO hands it to you (`task handover`): it
+  shows up in the bell as `card_handed_to_owner`;
+- the waiting card stays in Validate (or Assessment), and `task show` of it says `e2e: budget spent,
+  waiting on <decision card>`. Cards that need a run later join the same decision with a comment on
+  it; there is one decision per spent budget.
+
+What you do: answer on the decision card as the owner (the card page's comment form, or `secretary task
+comment --ref <decision card> --role owner --body-file ANSWER.md`), either "raise by N" or "no". Your
+comment reaches the PO session with its event id, and:
+
+- on "raise by N" the PO runs `secretary sprint e2e-budget --ref sprint:<N> --role po --add N
+  --authorized-by <your comment's event id>` and completes the decision card. The waiting cards dispatch
+  on the next tick. The PO cannot raise the budget without your comment: the command refuses any
+  authorization but an owner comment on that sprint's budget decision card made after its handover,
+  and each of your comments raises once. `sprint show` then reads `e2e: <used> of <budget + N>`;
+- on "no" the PO completes the decision card without a raise, and every card waiting on it goes to
+  Blocked with the PO's completion text (not charged to the card as a code defect).
+
+A card outside every sprint has its own cap of 3 runs. If a PO session cut it, the same decision card
+goes to that session, and the raise is `secretary task e2e-budget --ref <card> --role po --add N
+--authorized-by <event id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
+reached (3)` and the bell shows `e2e_budget_spent`.
 
 ## What was commanded, and what became of a request
 
