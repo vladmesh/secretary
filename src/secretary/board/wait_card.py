@@ -2,7 +2,7 @@
 
 A wait card names one **target** (a GitHub Actions run, another card reaching one of a named set of
 states, or a point in time), a **deadline**, and one or more **return addresses** (`observer`,
-`po-session:<id>`, `dependents`). No head runs it: the dispatcher claims it, advances it once per tick
+`po-session:<id>`, `dependents`; `card:<ref>` only on a wait the dispatcher creates itself). No head runs it: the dispatcher claims it, advances it once per tick
 and delivers its terminal outcome to every return address exactly once.
 
 Everything the wait is lives on the card, in three typed fields of its extension bag
@@ -51,6 +51,11 @@ TARGET_TIME = "time"
 OBSERVER = "observer"
 DEPENDENTS = "dependents"
 PO_SESSION_PREFIX = "po-session:"
+#: One named card (secretary-1795), and only on a wait the dispatcher creates: its e2e stage waits for
+#: a run it dispatched for a code card and names that card, which is not `blocked_by` the wait (it is in
+#: Validate or Assessment, not Ready), so `dependents` would not reach it. The writer refuses it from
+#: every other role, so it is not one of the `--wait-return` values a PO or an observer is offered.
+CARD_PREFIX = "card:"
 
 #: Terminal outcomes. Only `target_reached` ends in Done; every other one ends in Blocked.
 TARGET_REACHED = "target_reached"
@@ -235,6 +240,8 @@ def parse_returns(values: Iterable[str]) -> tuple[str, ...]:
                 pass
             elif address.startswith(PO_SESSION_PREFIX) and address[len(PO_SESSION_PREFIX) :].strip():
                 address = PO_SESSION_PREFIX + address[len(PO_SESSION_PREFIX) :].strip()
+            elif address.startswith(CARD_PREFIX) and _CARD_REF_RE.match(address[len(CARD_PREFIX) :].strip()):
+                address = CARD_PREFIX + address[len(CARD_PREFIX) :].strip()
             else:
                 raise WaitSpecError(
                     f"--wait-return {address!r} is not observer, dependents or po-session:<id>"
@@ -246,6 +253,11 @@ def parse_returns(values: Iterable[str]) -> tuple[str, ...]:
             "a wait card needs at least one --wait-return: observer, dependents or po-session:<id>"
         )
     return tuple(found)
+
+
+def returned_card(address: str) -> str:
+    """The card a `card:<ref>` address names, or `""` for any other address."""
+    return address[len(CARD_PREFIX) :] if address.startswith(CARD_PREFIX) else ""
 
 
 def po_sessions(returns: Iterable[str]) -> list[str]:
@@ -513,6 +525,7 @@ def wait_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
 __all__ = [
     "ACCEPTED",
     "CANCELLED",
+    "CARD_PREFIX",
     "DEADLINE_PASSED",
     "DEFAULT_TRANSIENT_WINDOW_SECONDS",
     "DELIVERED",
@@ -545,6 +558,7 @@ __all__ = [
     "pending_addresses",
     "po_sessions",
     "result_key",
+    "returned_card",
     "utc_text",
     "wait_cancel",
     "wait_spec",

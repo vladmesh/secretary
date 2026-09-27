@@ -111,6 +111,7 @@ from secretary.board.protocol_artifacts import (
 )
 from secretary.board.transitions import BoardProtocolError
 from secretary.board import po_origin as origin_field
+from secretary.board import e2e_record
 from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
@@ -365,12 +366,15 @@ def _po_card_create_refusal(
     The PO service executes a decision or operation card in a turn of its sprint's PO session: it
     needs that sprint, unless the PO cuts it inside a PO turn (`origin`), where the session of that turn
     executes it (secretary-1792). The dispatcher advances a wait card itself; the observer cuts one only
-    for its own sprint, the PO in a sprint or outside every sprint. None of them has a head, a reviewer,
-    a checkout or a live impact of its own to declare.
+    for its own sprint, the PO in a sprint or outside every sprint, and the dispatcher one for a code
+    card's e2e run (secretary-1795), in that card's sprint or in none. None of them has a head, a
+    reviewer, a checkout or a live impact of its own to declare.
     """
-    if role not in {Role.OBSERVER.value, Role.PO.value}:
-        return f"a {kind} card is cut by the observer or the PO, not by {role}"
     waits = kind == TaskType.WAIT.value
+    if role == Role.DISPATCHER.value and not waits:
+        return f"the dispatcher cuts only a wait card, not a {kind} card"
+    if role not in {Role.OBSERVER.value, Role.PO.value, Role.DISPATCHER.value}:
+        return f"a {kind} card is cut by the observer or the PO, not by {role}"
     if not sprint and not waits and not origin:
         return (
             f"a {kind} card needs --sprint: the PO session of that sprint executes it (cut inside a PO "
@@ -1020,6 +1024,9 @@ class TaskReader:
         # The PO session a delegated card came from, and where its results went (secretary-1792).
         if (origin := origin_field.origin_view(result)) is not None:
             result["origin"] = origin
+        # The e2e runs the dispatcher dispatched for a code card, and their wait cards (secretary-1795).
+        if (e2e := e2e_record.e2e_view(result)) is not None:
+            result["e2e"] = e2e
         if comments is not None:
             result["comments"] = comments
         return result
@@ -1227,10 +1234,16 @@ class TaskWriter:
         restoring: bool = False,
         steward_report: bool,
     ) -> dict[str, Any]:
-        # Restore bypasses new-work admission only; all other guards still apply.
-        role = self._role(role, CREATE_ROLES, actor=actor)
-        project = project.strip()
+        # Restore bypasses new-work admission only; all other guards still apply. The dispatcher creates
+        # nothing but the wait card of a code card's e2e run (secretary-1795); every other kind it names
+        # is refused below, before anything is read.
         task_type = task_type.strip()
+        role = self._role(
+            role,
+            CREATE_ROLES | {Role.DISPATCHER} if task_type == TaskType.WAIT.value else CREATE_ROLES,
+            actor=actor,
+        )
+        project = project.strip()
         title = title.strip() if restoring else self._redact_for_board(title.strip())
         description = description if restoring else self._redact_for_board(description)
         target = target.strip()
@@ -1313,6 +1326,11 @@ class TaskWriter:
                 )
             except wait_card.WaitSpecError as exc:
                 raise TaskError("validation", str(exc), 2) from None
+            # `card:<ref>` is the dispatcher's own address for the code card whose e2e run it waits for.
+            if role != Role.DISPATCHER.value and any(wait_card.returned_card(a) for a in spec.returns):
+                raise TaskError(
+                    "validation", "a card:<ref> return address is the dispatcher's own; it is not a --wait-return", 2
+                )
         elif wait_request:
             raise TaskError(
                 "validation", f"the --wait-* flags belong to a wait card; a {task_type} card takes none", 2
@@ -1453,7 +1471,14 @@ class TaskWriter:
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
         # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
-        if target == "ready" and not sprint and not restoring and not override_payload and role != "po":
+        # The dispatcher's e2e wait follows its code card, which may belong to no sprint either.
+        if (
+            target == "ready"
+            and not sprint
+            and not restoring
+            and not override_payload
+            and role not in {"po", "dispatcher"}
+        ):
             raise TaskError("validation", "task creation requires an open sprint", 2)
         payload: dict[str, Any] = {
             "project": project,
@@ -2236,6 +2261,24 @@ class TaskWriter:
         with self._mutation():
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={origin_field.PO_RETURN: state}
+            )
+
+    def record_e2e_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
+        """The dispatcher's one write of a code card's `e2e` run records (secretary-1795).
+
+        A state field like `wait_state`: the intent of each dispatch (written before the call), the
+        run it identified, its wait card and the wait's frozen result. The effects it leads to (the
+        wait card's create, the card's rework or Blocked move, the dispatcher's comments) carry their
+        own audit records.
+        """
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        task = self.reader.show(reference)
+        # A card of unknown kind reads as code, as the stage reads it.
+        if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
+            raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
+        with self._mutation():
+            self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values={e2e_record.E2E_FIELD: state}
             )
 
     def verdict(

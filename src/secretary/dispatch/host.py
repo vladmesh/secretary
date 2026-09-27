@@ -36,6 +36,7 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.config import validate_instance
+from secretary.dispatch.e2e import parse_e2e
 from secretary.dispatch.gate import (
     GateResult,
 )
@@ -422,6 +423,8 @@ class InstanceCatalog:
         loaded = self._load_optional_yaml(path)
         if not loaded:
             raise HostError(f"adapter {adapter!r} is unavailable")
+        # A malformed e2e declaration fails the read, typed, rather than reading as no e2e at all.
+        parse_e2e(loaded.get("validation"), adapter=adapter)
         return loaded
 
     def broad_check_verdict(self, project: str) -> ContractVerdict:

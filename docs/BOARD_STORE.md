@@ -1124,6 +1124,11 @@ and `successors`, written only by the dispatcher. Each is read through its own r
 `return_state`), which treats a field that does not parse as absent. What the card owes its origin
 session is not a bag key: it is the card's rows of `origin_returns` (`0022`).
 
+A code card's e2e key, with no column either (`board/e2e_record.py`, [Protocols](PROTOCOLS.md#the-e2e-stage)),
+JSON text: `e2e`, the runs the dispatcher dispatched for the card (intent, run, wait card, frozen result,
+the Blocked move a run ended in), written only by the dispatcher (`TaskWriter.record_e2e_state`) and read
+through `e2e_state`, which treats a field that does not parse as no runs.
+
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that
 revision moved current rows onto `extra`. History (`board_events`, committed `requests`) and

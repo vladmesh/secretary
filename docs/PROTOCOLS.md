@@ -444,7 +444,10 @@ no-candidate kind: no workspace, branch, pull request, CI, reviewer or broad che
 
 **Create.** The PO, or the observer for its own sprint (`--sprint` required for the observer), runs
 `task create --type wait` with exactly one target, a deadline and at least one return address (none,
-for the PO inside a PO turn):
+for the PO inside a PO turn). The dispatcher is the one other creator, of one wait only: the wait of a
+code card's [e2e run](#the-e2e-stage), returning to `card:<that card>`. It creates no other kind
+(`role_forbidden`), and no other role may name a `card:<ref>` address (`validation`); every other role
+still cannot create a wait card:
 
 | Flag | Meaning |
 | --- | --- |
@@ -545,6 +548,12 @@ the same key, and the receiving side makes the repeat a no-op:
   delivers, the claim pass leaves a Ready card whose `blocked_by` names a Ready or In progress wait card
   in Ready (`blocked by pending wait <ref>`). Blockers of any other kind behave as before: the claim's
   own predecessor rule;
+- `card:<ref>` (the dispatcher's e2e wait only): one dispatcher comment `[wait:<outcome>] <wait card>`
+  on that card (request id `dispatcher-wait-card-comment-<wait card>-card-<ref>-<key>`). The card's own
+  e2e stage reads the frozen result off the wait card and acts on it; the comment is what the card's
+  history shows. A card that no longer exists takes nothing and the delivery is given up; any other
+  board error postpones it. `dependents` would not reach that card: it is in Validate or Assessment,
+  not Ready, and names no `blocked_by`;
 - `observer`: the wait card's terminal move, last, after every other address: Done for
   `target_reached`, Blocked for every other outcome, with the result as the move's comment
   (`[wait:<outcome>]`, the target, result, evidence and each address's delivery). The observer's wake on
@@ -1278,6 +1287,101 @@ Product or Issue (use `secretary issue close`).
 Ready or Blocked (an active card goes through preempt and requeue). The `edited` audit event records
 old and new digests; past text is recoverable from the checkpoint's board export history. Comments
 are the dialogue of an attempt; the spec lives only in the description.
+
+## The e2e stage
+
+A project may declare one end-to-end check: a GitHub Actions workflow the dispatcher dispatches on a
+`code` card's candidate and waits for through a [wait card](#wait-cards) (secretary-1795). The stage
+is `dispatch/e2e_stage.py`; the declaration and the GitHub calls are `dispatch/e2e.py`.
+
+**Declaration.** In the adapter, beside the gate:
+
+```yaml
+validation:
+  ci: github              # required: only the github gate publishes the candidate branch
+  e2e:
+    workflow: e2e.yml     # the workflow file name, or its numeric id
+    inputs: {suite: mega} # optional static workflow_dispatch inputs (string, number or boolean)
+    deadline: 6h          # optional duration, default 6h: the wait card's deadline
+    candidate_input: sha  # optional: the input that receives the candidate SHA
+```
+
+It is read with the adapter (`InstanceCatalog.adapter`), and a malformed one fails that read with
+`AdapterE2eDeclarationError`, a typed adapter error naming the adapter and the problem: an unknown key,
+no or a bad `workflow`, `inputs` that is not a mapping of input names to scalars, a bad `deadline`, a bad
+`candidate_input`, an input named `secretary_dispatch_id`, or `ci` other than `github`. The card's gate
+then fails with that reason, and nothing is skipped silently. The adapter schema says the same. A
+project with no `e2e` key behaves exactly as before.
+
+The workflow must take the input `secretary_dispatch_id` and carry it in its `run-name`:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      secretary_dispatch_id: {required: true}
+run-name: e2e ${{ inputs.secretary_dispatch_id }}
+```
+
+**Placement.** For a `code` card of a declaring project, the stage runs in `park_green_verdict`: after a
+green review verdict, or right after green CI when the card's review is `skipped`, and before the park in
+Assessment or the no-observer release. The merge gate is read first, and the run is dispatched on
+the exact SHA that passed it. While that run is underway the gate is not read again; the gate is
+accepted, and its receipt attested on the card, once, after the stage is green. So a review-required
+card parks in Assessment with the e2e result on it, and a red e2e never parks. A red review never
+reaches the stage, so rework rounds spend no runs. The release audit (`release_parked`) runs the
+stage before its own gate read: a SHA that already has a green run is not dispatched again, and a
+card parked without one (a red review released by the observer) dispatches it there, waits, and
+merges only after it is green.
+
+**Dispatch identity.** The card's `e2e` field (`extensions.extra.e2e`, JSON, written only by the
+dispatcher through `TaskWriter.record_e2e_state`; no column, no migration) is the stage's record: one
+entry per dispatch. The entry is written as an intent (card, SHA, dispatch id
+`<card>-e2e-<n>-<random>`, repository, branch, workflow, deadline) before `POST
+repos/<repo>/actions/workflows/<workflow>/dispatches` on `pipeline/<card>`, with the static inputs,
+the candidate input when declared, and `secretary_dispatch_id`. The run is identified by that id: the
+dispatcher lists the workflow's `workflow_dispatch` runs on the branch and takes the one whose title
+carries it, and checks that its `head_sha` is the candidate. An entry that exists for the SHA is
+continued and never dispatched again: after a crash or a restart the run is looked up by its id. A
+dispatch that got no answer, or was rate limited, is looked up the same way. A run not found within 15
+minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`), a run on another SHA, and a dispatch GitHub
+refused (no workflow, no `workflow_dispatch` trigger, an input the workflow does not take, no access)
+Block the card with the reason, not rework.
+
+**Wait.** Once the run is identified, the dispatcher creates a `wait` card for it: target the run,
+the adapter's deadline, the code card's sprint (none if it has none), return address
+`card:<code card>`, request id `dispatcher-e2e-wait-<dispatch id>`, so a repeat after a crash is the
+same card. The entry records its ref. The wait card is on the board and in the code card's `task show`.
+No other poller exists: the wait card reads the run, and the stage reads only the wait's frozen result,
+copying it into the entry.
+
+**Outcomes.**
+
+- conclusion `success`: a `## E2E — green` dispatcher comment (run, SHA, dispatch id, wait card, runs
+  dispatched), and the card proceeds: Assessment for a card that parks, the release otherwise;
+- conclusion `failure`: rework, as a red gate (`gate_red_to_worker`, phase `e2e-gate`, so the red CI
+  is charged as one): the worker's TASK.md carries, under "Mechanical gate failure to address", the
+  run URL, the conclusion, each failed job with its failed steps, and the gate's bounded
+  `gh run view --log-failed` fragment of the first failed job. In the release audit, where no rework
+  round is open, the same evidence Blocks the card instead (`blocked_reason: gate`);
+- any other conclusion (`cancelled`, `timed_out`, `action_required`, ...) and every other wait outcome
+  (`deadline_passed`, `source_unreachable`, `cancelled`): Blocked with the outcome, the run link and
+  the wait card, `blocked_reason: infrastructure`. No worker round is opened or charged.
+
+Every Blocked the stage causes records its request id (`dispatcher-e2e-blocked-<dispatch id>`) and
+reason on the entry before the move, so a repeat moves once. Once that move is committed, the run's
+pass is over: a card brought back on the same SHA (unblocked, re-claimed and reported again) may
+dispatch a new run. A `success` stands for its SHA, and so does a `failure` that sent the card to
+rework.
+
+**Interim cap.** Until the sprint e2e budget exists, a card dispatches at most 3 runs across all its
+SHAs: every entry whose dispatch GitHub did not refuse counts. At the cap the stage dispatches nothing,
+and the card is Blocked with `e2e run cap reached (3)` (`blocked_reason: other`: the cap is not the
+e2e infrastructure failing). A declaration the stage cannot read Blocks the card as `gate`.
+
+**`task show`.** A card with entries carries `e2e`: `runs_dispatched`, `run_cap`, and per run `sha`,
+`dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wait_card_pending`, `waiting`, the
+conclusion, the wait outcome, or `dispatch_refused`), `run`, `wait_card`, `dispatched_at`, `result`.
 
 ## Products and issues
 

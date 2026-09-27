@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from secretary.board.completion_evidence import has_candidate
-from secretary.dispatch import attempt_accounting, release_lifecycle
+from secretary.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.gate_lifecycle import (
     accept_green_gate as _accept_green_gate,
@@ -181,7 +181,9 @@ def park_green_verdict(
 ) -> dict[str, Any]:
     """A green review verdict, or an accepted report with review skipped, parks the card.
 
-    It does not merge it. A card without a candidate has no gate to re-read and nothing to merge,
+    A code card of a project that declares an e2e check runs it first, on the SHA the merge gate has
+    just passed (`dispatch/e2e_stage.py`): the park carries its green result, and a red one never
+    parks. It does not merge it. A card without a candidate has no gate to re-read and nothing to merge,
     so it goes straight to the park or, with nobody to decide, to the release.
     """
     ref = task["ref"]
@@ -190,6 +192,20 @@ def park_green_verdict(
         runtime._record_verdict_routing(ref, record, "green")
         attempt_accounting.record_attempt_usage(runtime, ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
     if has_candidate(task):
+        # The e2e stage, on a SHA the merge gate passed, before the card may park or release. The gate
+        # is accepted below, once, after the stage is green.
+        e2e = e2e_stage.run_stage(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            step="review",
+            gate=lambda: merge_ready_for_park(runtime, task, record, records, payload, attempt_id, accept=False),
+        )
+        if e2e is not None:
+            return e2e
         gated = merge_ready_for_park(runtime, task, record, records, payload, attempt_id)
         if gated is not None:
             return gated
@@ -256,8 +272,14 @@ def merge_ready_for_park(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
+    *,
+    accept: bool = True,
 ) -> dict[str, Any] | None:
-    """Re-read the merge gate before a candidate is parked or released; None when it is green."""
+    """Re-read the merge gate before a candidate is parked or released; None when it is green.
+
+    `accept=False` reads it for the e2e stage's dispatch and stops at green: the receipt is accepted
+    (and attested on the card) once, when the park or the release that follows the stage reads it.
+    """
     ref = task["ref"]
     kind, result, detail = release_lifecycle.merge_readiness(runtime, task, record)
     if kind == "transport":
@@ -350,6 +372,8 @@ def merge_ready_for_park(
             step="review",
             outcome="merge gate result unavailable",
         )
+    if not accept:
+        return None
     return _accept_green_gate(runtime, 
         task,
         record,

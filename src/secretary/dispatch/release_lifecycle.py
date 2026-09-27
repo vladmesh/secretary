@@ -13,7 +13,7 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
-from secretary.dispatch import attempt_accounting, post_merge
+from secretary.dispatch import attempt_accounting, e2e_stage, post_merge
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
 from secretary.dispatch.state import DispatcherRecord
@@ -247,6 +247,12 @@ def release_parked(
             decision="release",
             verdict=released_verdict(record),
         )
+    # The release audit's e2e stage, before the gate is read: a SHA with a green run is not dispatched
+    # again, and one without (a card parked by a red review never ran one) waits for its run first. The
+    # parked SHA passed the merge gate before the park, and the gate is read and accepted after this.
+    e2e = e2e_stage.run_stage(runtime, task, record, records, payload, attempt_id, step="assessment")
+    if e2e is not None:
+        return e2e
     kind, result, detail = merge_readiness(runtime, task, record)
     if kind == "transport":
         # A release that could not ask the gate is not a release that was refused.

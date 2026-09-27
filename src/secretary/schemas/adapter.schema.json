@@ -58,9 +58,46 @@
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1},
           "description": "GitHub check names the gate judges by, e.g. ['test']. Matches an Actions check-run name or a legacy commit status context. Only meaningful when ci is 'github'; without it the gate judges by every check on the sha."
+        },
+        "e2e": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workflow"],
+          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'). Needs ci 'github'. The workflow must take the workflow_dispatch input 'secretary_dispatch_id' and carry it in its run-name.",
+          "properties": {
+            "workflow": {
+              "oneOf": [
+                {"type": "string", "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,99}\\.ya?ml|[0-9]+)$"},
+                {"type": "integer", "minimum": 1}
+              ],
+              "description": "The workflow file name (e.g. e2e.yml) or its numeric id in the project's repository."
+            },
+            "inputs": {
+              "type": "object",
+              "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$", "not": {"const": "secretary_dispatch_id"}},
+              "additionalProperties": {"type": ["string", "number", "boolean"]},
+              "description": "Static workflow_dispatch inputs sent with every dispatch."
+            },
+            "deadline": {
+              "type": "string",
+              "pattern": "^(?:[0-9]+d)?(?:[0-9]+h)?(?:[0-9]+m)?(?:[0-9]+s)?$",
+              "minLength": 2,
+              "description": "How long the run may take before the card is Blocked with deadline_passed, e.g. 90m or 6h. Default 6h."
+            },
+            "candidate_input": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
+              "not": {"const": "secretary_dispatch_id"},
+              "description": "The workflow_dispatch input that receives the candidate SHA, when the workflow takes one."
+            }
+          }
         }
       },
       "allOf": [
+        {
+          "if": {"required": ["e2e"]},
+          "then": {"properties": {"ci": {"const": "github"}}}
+        },
         {
           "if": {"required": ["ci"], "properties": {"ci": {"const": "local"}}},
           "then": {"required": ["command"]}
