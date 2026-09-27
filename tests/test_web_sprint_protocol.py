@@ -1631,7 +1631,13 @@ class ClosedSprintTruthTests(SprintProtocolFixture):
 
         listed = self._json(["sprint", "list", "--status", "closed"])[1]
         entry = next(item for item in listed["sprints"]["items"] if item["ref"] == "sprint:1001")
-        self.assertEqual(entry["current_task"], work["current_task"])
+
+        # Two reads, two wall-clock stamps: they may straddle a second (CI red on secretary-1778),
+        # so the answer is compared whole except for when each read was observed.
+        def unstamped(current: dict) -> dict:
+            return {**current, "source": {k: v for k, v in current["source"].items() if k != "observed_at"}}
+
+        self.assertEqual(unstamped(entry["current_task"]), unstamped(work["current_task"]))
 
     def test_status_prints_the_sprints_status_first(self) -> None:
         for reference, status in (("sprint:1001", "closed"), ("sprint:1002", "stopped"), ("sprint:1003", "open")):
