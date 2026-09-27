@@ -17,6 +17,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,7 @@ from secretary.board.task_routing import TaskReview
 from secretary.cli import main
 from secretary.dispatch.origin_returns import (
     notice_key,
+    pending_returns,
     reconcile_origin_returns,
     return_request_id,
     successor_request_id,
@@ -103,6 +105,9 @@ class DelegationBoard:
         #: When set, the next `po_return` write for which it answers true raises `SimulatedCrash`.
         self.crash_before: Any = None
         self.client = SimpleNamespace(owner_events=FakeOwnerEvents())
+        #: Each card's `date_moved`, as epoch seconds: every move sets it, nothing else does.
+        self.moved_at: dict[str, int] = {}
+        self.audit_reads: list[str] = []
 
     # reader
     def show(self, reference: str) -> dict[str, Any]:
@@ -112,6 +117,14 @@ class DelegationBoard:
 
     def list(self, states: set[str] | None = None, **_: Any) -> list[dict[str, Any]]:
         return [copy.deepcopy(task) for task in self.cards.values() if not states or task["state"] in states]
+
+    def delegated_cards(self) -> list[dict[str, Any]]:
+        """`TaskReader.delegated_cards`: every card with an origin, any column, with its `moved_at`."""
+        return [
+            {**copy.deepcopy(task), "moved_at": self.moved_at.get(task["ref"])}
+            for task in self.cards.values()
+            if origin_field.po_origin(task) is not None
+        ]
 
     # writer
     def record_po_return(self, *, role: str, reference: str, state: str, **_: Any) -> None:
@@ -128,6 +141,7 @@ class DelegationBoard:
         return next((event for event in self.log if event["request_id"] == request_id), None)
 
     def events(self, reference: str = "", **_: Any) -> list[dict[str, Any]]:
+        self.audit_reads.append(reference)
         return [copy.deepcopy(event) for event in self.log if not reference or event["ref"] == reference]
 
     # what the other writers leave behind
@@ -155,6 +169,7 @@ class DelegationBoard:
             reference, "card.moved", reason, data, transition={"source": source, "target": target}
         )
         self.cards[reference]["state"] = target
+        self.moved_at[reference] = 1_790_000_000 + len(self.log)
         return event["event_id"]
 
     def report(self, reference: str, kind: str, body: str, classification: str | None = None) -> None:
@@ -540,6 +555,160 @@ class DeliveryTests(ReturnCase):
         self.board.cards[REF]["comments"].append({"marker": "po", "body": "[po]\nLater thoughts."})
         self.tick()
         self.assertEqual(len(self.po.inputs), 1)
+
+
+class BacklogTests(ReturnCase):
+    """Every undelivered transition into Done or Blocked is returned, oldest first, from `pending_returns`."""
+
+    def test_a_done_reopened_and_done_again_before_any_tick_returns_both_in_order(self) -> None:
+        """BLOCKER-TERMINAL-BACKLOG-LOSS: the reviewer's reproduction."""
+        self.arrange(delegated())
+        first = self.done_code_card()
+        self.board.move(REF, "ready", "reopened before the dispatcher saw the Done")
+        second = self.done_code_card()
+
+        self.assertEqual(
+            [
+                p.key
+                for p in pending_returns(
+                    self.board.cards[REF], self.board.log, return_state(self.board.cards[REF])
+                )
+            ],
+            [first, second],
+        )
+        outcomes = self.tick()
+
+        self.assertEqual(
+            [(o["action"], o["event_id"]) for o in outcomes],
+            [("origin-returned", first), ("origin-returned", second)],
+        )
+        self.assertEqual(
+            list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
+        )
+        self.assertEqual(
+            [notice.dedup_key for notice in sorted(self.board.notices(), key=lambda n: n.id)],
+            [notice_key(REF, first), notice_key(REF, second)],
+        )
+        self.assertEqual(
+            {key: record["state"] for key, record in self.board.delivered().items()},
+            {first: "done", second: "done"},
+        )
+        self.assertEqual(self.tick(), [])
+        self.assertEqual((len(self.po.submits), len(self.board.notices())), (2, 2))
+
+    def test_a_blocked_card_moved_to_ready_before_any_tick_returns_its_blocked(self) -> None:
+        self.arrange(delegated(kind="research"))
+        event_id = self.blocked_research_card()
+        self.board.move(REF, "ready", "the owner will add the key; retry")
+
+        [outcome] = self.tick()
+
+        self.assertEqual(self.board.cards[REF]["state"], "ready")
+        self.assertEqual(
+            (outcome["action"], outcome["state"], outcome["event_id"]),
+            ("origin-returned", "blocked", event_id),
+        )
+        [sent] = self.po.inputs.values()
+        self.assertIn("settled Blocked.", sent["text"])
+        self.assertIn("State: Blocked, at 2026-09-27T12:03:00Z", sent["text"])
+        self.assertIn(
+            "## Why it is Blocked\n\nworker report:blocked: the vendor API needs a key", sent["text"]
+        )
+        self.assertIn("Classification: external_fact", sent["text"])
+        [notice] = self.board.notices()
+        self.assertIn("settled Blocked", notice.text)
+
+    def arrange_backlog(self) -> tuple[str, str]:
+        """Done at A, reopened, Blocked at B: two returns owed before any tick."""
+        self.arrange(delegated())
+        first = self.done_code_card()
+        self.board.move(REF, "ready", "reopened")
+        self.board.move(REF, "in_progress", "claimed")
+        second = self.board.move(REF, "blocked", "the second round stalled")
+        return first, second
+
+    def test_a_notice_failure_on_the_first_holds_the_second_and_the_next_tick_makes_both_once(self) -> None:
+        first, second = self.arrange_backlog()
+        self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
+
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            [failed] = self.tick()
+
+        self.assertEqual((failed["action"], failed["event_id"]), ("origin-return-notice-failed", first))
+        # The second waits: nothing of it was attempted.
+        self.assertEqual(self.po.submits, [return_request_id(REF, first)])
+        self.board.client.owner_events.failing = None
+        self.assertEqual(self.board.delivered(), {})
+
+        outcomes = self.tick()
+
+        self.assertEqual(
+            [(o["action"], o["event_id"]) for o in outcomes],
+            [("origin-returned", first), ("origin-returned", second)],
+        )
+        self.assertEqual(
+            self.po.submits,
+            [return_request_id(REF, first), return_request_id(REF, first), return_request_id(REF, second)],
+        )
+        self.assertEqual(
+            list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
+        )
+        self.assertEqual(len(self.board.notices()), 2)
+        self.assertEqual(set(self.board.delivered()), {first, second})
+        self.assertEqual(self.tick(), [])
+
+    def test_a_crash_on_the_first_leaves_both_for_the_next_tick_with_no_duplicate(self) -> None:
+        first, second = self.arrange_backlog()
+        self.board.crash_before = lambda state: bool(state["deliveries"])
+
+        with self.assertRaises(SimulatedCrash):
+            self.tick()
+        self.assertEqual(
+            (list(self.po.inputs), len(self.board.notices())), ([return_request_id(REF, first)], 1)
+        )
+
+        outcomes = self.tick()
+
+        self.assertEqual([o["event_id"] for o in outcomes], [first, second])
+        self.assertEqual(
+            list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
+        )
+        self.assertEqual(len(self.board.notices()), 2)
+        self.assertEqual(self.tick(), [])
+
+    def test_a_card_that_has_not_moved_since_its_last_complete_pass_is_not_read(self) -> None:
+        self.arrange(delegated(), delegated("secretary-1951", origin=None))
+        event_id = self.done_code_card()
+        cursors: dict[str, Any] = {}
+
+        reconcile_origin_returns(self.runtime(), cursors)
+
+        self.assertEqual(list(self.board.delivered()), [event_id])
+        self.assertEqual(cursors, {REF: {"moved_at": self.board.moved_at[REF]}})
+        self.board.audit_reads.clear()
+        self.assertEqual(reconcile_origin_returns(self.runtime(), cursors), [])
+        self.assertEqual(self.board.audit_reads, [])
+
+        # It moves: read again, and its new transition is returned.
+        self.board.move(REF, "ready", "reopened")
+        second = self.done_code_card()
+        [outcome] = reconcile_origin_returns(self.runtime(), cursors)
+        self.assertEqual((outcome["event_id"], self.board.audit_reads), (second, [REF]))
+
+    def test_a_pass_that_did_not_complete_or_ran_just_after_a_move_keeps_no_cursor(self) -> None:
+        self.arrange(delegated(), po=FakePo(down=1))
+        self.done_code_card()
+        cursors: dict[str, Any] = {}
+
+        [postponed] = reconcile_origin_returns(self.runtime(), cursors)
+
+        self.assertEqual(postponed["status"], "degraded")
+        self.assertEqual(cursors, {})
+        # A move within the margin of the pass's start is not trusted to be the last one.
+        self.board.moved_at[REF] = int(time.time())
+        reconcile_origin_returns(self.runtime(), cursors)
+        self.assertEqual(len(self.po.inputs), 1)
+        self.assertEqual(cursors, {})
 
 
 class ExceptionTests(ReturnCase):

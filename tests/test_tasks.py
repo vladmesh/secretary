@@ -2767,6 +2767,24 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.create_as_po("secretary-630", origin={"session": "po-s-2", "request": "other"})
         self.assertBoardUnchanged(after)
 
+    def test_the_delegated_card_view_lists_every_card_with_an_origin_in_any_column_with_its_move(self) -> None:
+        self.create_as_po("secretary-640", origin=self.ORIGIN)
+        self.create_as_po("secretary-641")
+        self.create_as_po("secretary-642", origin=self.ORIGIN)
+        self.place_card("secretary-642", "in_progress")
+
+        cards = self.writer.reader.delegated_cards()
+
+        self.assertEqual([card["ref"] for card in cards], ["secretary-640", "secretary-642"])
+        self.assertEqual([card["state"] for card in cards], ["ready", "in_progress"])
+        for card in cards:
+            self.assertEqual(card["origin"]["po_session"], "po-s-1")
+            self.assertIsInstance(card["moved_at"], int)
+        # A metadata write is not a move: `moved_at` stays; a move sets it again.
+        before = cards[0]["moved_at"]
+        self.writer.record_po_return(role="dispatcher", actor="d", reference="secretary-640", state="{}")
+        self.assertEqual(self.writer.reader.delegated_cards()[0]["moved_at"], before)
+
     def test_an_origin_is_the_pos_alone_and_nothing_after_create_rewrites_it(self) -> None:
         before = self.board_snapshot()
         with self.open_sprint() as sprint, self.assertRaisesRegex(TaskError, "only the PO records") as raised:

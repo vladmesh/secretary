@@ -696,6 +696,30 @@ class TaskReader:
             result.append(normalized)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
 
+    def delegated_cards(self) -> list[dict[str, Any]]:
+        """Every live card that carries a PO origin, in any column, with its `moved_at` (secretary-1792).
+
+        The result return's candidate view (`dispatch/origin_returns.py`): the normalized card, plus
+        `moved_at`, the epoch seconds of its `date_moved`, which every column move sets and nothing else
+        writes (None when the row carries none). One board read and one batched metadata read; a card
+        without the `po_origin` field is not normalized at all.
+        """
+        project_id, columns, swimlanes = self._board()
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
+        if not isinstance(raw, list):
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
+        rows = [card for card in raw if isinstance(card, dict)]
+        metadata = self._metadata_of(rows)
+        cards: list[dict[str, Any]] = []
+        for card in rows:
+            meta = metadata[_task_number(card)]
+            if not meta.get(origin_field.PO_ORIGIN):
+                continue
+            normalized = self._normalize(card, columns, swimlanes, meta, comments=None)
+            normalized["moved_at"] = _positive_int(card.get("date_moved"))
+            cards.append(normalized)
+        return sorted(cards, key=lambda task: task["ref"])
+
     def steward_reports_in_progress(self, project: str) -> list[dict[str, Any]]:
         """Return the small, durable report view a steward dispatch needs.
 
