@@ -76,7 +76,14 @@ from secretary.po.client import (
     service_dir,
     socket_path,
 )
-from secretary.po.models import default_session_choice, models_from_instance
+from secretary.po.models import (
+    EffortRefused,
+    default_session_choice,
+    efforts_from_instance,
+    first_effort,
+    models_from_instance,
+    require_explicit_effort,
+)
 from secretary.po.queue import (
     DISPATCHER_SOURCE,
     SERVICE_SOURCE,
@@ -95,7 +102,6 @@ from secretary.po.sprints import (
 )
 from secretary.po.store import (
     CLIS,
-    DEFAULT_EFFORT,
     SEND,
     SESSION_CLOSED,
     SESSION_CREATE,
@@ -147,6 +153,7 @@ class PoService:
         instance: Path | str | None = None,
         sprints: SprintSessions | None = None,
         models: dict[str, tuple[str, ...]] | None = None,
+        efforts: dict[str, tuple[str, ...]] | None = None,
         owner_events: Any = None,
     ) -> None:
         self.runner = runner
@@ -156,9 +163,12 @@ class PoService:
         self.data_dir = Path(data_dir) if data_dir is not None else runner.data_dir
         # What `sprint_session` needs: the installation's sprints, and the models a session opened
         # without a previous one takes its default from (read from instance.yaml when not given).
+        # The efforts every new session's effort is checked against, and a sprint's session takes
+        # its first from: given, else instance.yaml's, else the product's.
         self.instance = Path(instance) if instance is not None else None
         self.sprints = sprints
         self.models = models
+        self.efforts = efforts
         self.queue = queue or PoQueue(self.data_dir)
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
@@ -324,21 +334,26 @@ class PoService:
 
     # --- the endpoint's operations ----------------------------------------------------------
 
-    def create_session(
-        self, *, cli: str, model: str, effort: str = DEFAULT_EFFORT, request_id: str
-    ) -> dict[str, Any]:
+    def create_session(self, *, cli: str, model: str, effort: str = "", request_id: str) -> dict[str, Any]:
         """One session per request id, reserved through :meth:`_reserve` like a message.
+
+        `effort` must be one offered for `cli` (`require_explicit_effort`); no effort, or `default`, is
+        refused with nothing written.
 
         Accepted at the `claim_session` commit, or earlier when `_reserve` finds the id already made
         this session; from then on the answer is the session (`handle`'s acceptance rule).
         """
         request_id = _required(request_id, "request_id")
         model = str(model or "").strip()
-        effort = str(effort or "").strip() or DEFAULT_EFFORT
         if cli not in CLIS:
             raise Refused("validation", f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
         if not model:
             raise Refused("validation", "a PO session needs a model")
+        efforts = self._effort_list()
+        try:
+            effort = require_explicit_effort(cli, effort, efforts)
+        except EffortRefused as exc:
+            raise Refused("validation", str(exc)) from None
         fingerprint = session_fingerprint(cli, model, effort)
         with self._lock:
             known = self._reserve(request_id, SESSION_CREATE, fingerprint)
@@ -347,7 +362,9 @@ class PoService:
                 session = self.store.session(known.session_id)
                 return {"session_id": session.session_id, "effort": session.effort, "repeated": True}
             self._accepting()
-            session, created = self.runner.create_session_request(cli, model, request_id, effort)
+            session, created = self.runner.create_session_request(
+                cli, model, request_id, effort, efforts=efforts
+            )
             answer = {"session_id": session.session_id, "effort": session.effort, "repeated": not created}
             self._accepted(answer)
         return answer
@@ -505,7 +522,9 @@ class PoService:
         The sprint's recorded `po_session`, open, is the answer (`created: false`, nothing written).
         Null, missing from the store or closed, a fresh session is opened under `request_id` with the
         recorded session's CLI, model and effort (or the new-session form's defaults when there is no
-        row), and then, in this order: its seeding message is queued as its first input, the sprint
+        row); a recorded effort that is `default` (or no longer offered) gives way to the first effort
+        offered for that CLI, as does a session with no row, since a new session never opens on
+        `default`. And then, in this order: its seeding message is queued as its first input, the sprint
         gets a comment saying so, and the sprint records the new session. The request id binds the
         sprint (`_reserve`), and each later step has its own id derived from it, so a repeat of a
         request that failed part-way finishes it and opens nothing, and a repeat of a finished one
@@ -541,10 +560,23 @@ class PoService:
                 cli, model, effort = previous.cli, previous.model, previous.effort
             else:
                 cli, model = self._default_choice()
-                effort = DEFAULT_EFFORT
+                effort = ""
+            efforts = self._effort_list()
+            if effort not in (efforts.get(cli) or ()):
+                effort = first_effort(cli, efforts) or ""
+            try:
+                effort = require_explicit_effort(cli, effort, efforts)
+            except EffortRefused as exc:
+                raise Refused("validation", str(exc)) from None
             self._accepting()
             session, _created = self.runner.create_session_request(
-                cli, model, request_id, effort, operation=SPRINT_SESSION, fingerprint=fingerprint
+                cli,
+                model,
+                request_id,
+                effort,
+                efforts=efforts,
+                operation=SPRINT_SESSION,
+                fingerprint=fingerprint,
             )
             self._reseed(sprints, sprint, session.session_id, request_id)
             answer = {"session_id": session.session_id, "created": True, "repeated": False}
@@ -602,22 +634,29 @@ class PoService:
 
     def _default_choice(self) -> tuple[str, str]:
         """The new-session form's preselected CLI and model (`default_session_choice`)."""
-        models = self.models
-        if models is None:
-            from secretary.config import ConfigError, load_config
-
-            config = None
-            if self.instance is not None:
-                path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
-                try:
-                    config = load_config(path)
-                except ConfigError as exc:
-                    raise Refused("unavailable", f"the instance config cannot be read: {exc}") from None
-            models = models_from_instance(config)
+        models = self.models if self.models is not None else models_from_instance(self._instance_config())
         choice = default_session_choice(models)
         if choice is None:
             raise Refused("validation", "this installation offers no model for a PO session")
         return choice
+
+    def _effort_list(self) -> dict[str, tuple[str, ...]]:
+        """The efforts a new session may take, per CLI (`efforts_from_instance`)."""
+        if self.efforts is not None:
+            return self.efforts
+        return efforts_from_instance(self._instance_config())
+
+    def _instance_config(self) -> Any:
+        """instance.yaml's content, or None for a service started without an instance."""
+        if self.instance is None:
+            return None
+        from secretary.config import ConfigError, load_config
+
+        path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
+        try:
+            return load_config(path)
+        except ConfigError as exc:
+            raise Refused("unavailable", f"the instance config cannot be read: {exc}") from None
 
     def _sent(self, session_id: str, request_id: str) -> dict[str, Any]:
         """Where an acknowledged message is now: its turn, or still in the queue."""

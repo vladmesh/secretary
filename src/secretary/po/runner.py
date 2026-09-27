@@ -17,11 +17,12 @@ The CLIs own their conversation memory, addressed by their native flags:
 * Codex: turn 1 ``codex exec --json``, whose event stream names the ``thread_id`` the session then
   keeps; later turns ``codex exec resume <thread_id>``. ``-o`` writes the final answer to a file.
 
-A session's reasoning effort, unless it is ``default``, is passed on every turn: ``--effort <level>``
-to Claude, ``-c model_reasoning_effort=<level>`` to Codex. What model a turn actually ran is kept on
-the turn: Claude's result object keys ``modelUsage`` by full model id, the session's own model first
-and any subagent's after it; Codex's event stream names no model, so it is read from the
-``turn_context`` of the thread's rollout under ``$CODEX_HOME/sessions`` (``~/.codex`` by default).
+A session's reasoning effort is passed on every turn: ``--effort <level>`` to Claude,
+``-c model_reasoning_effort=<level>`` to Codex. A new session always has an explicit one; a session
+stored with the legacy ``default`` (opened before that rule) still resumes with no effort flag. What
+model a turn actually ran is kept on the turn: Claude's result object keys ``modelUsage`` by full
+model id, the session's own model first and any subagent's after it; Codex's event stream names no
+model, so it is read from the ``turn_context`` of the thread's rollout under ``$CODEX_HOME/sessions`` (``~/.codex`` by default).
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.po import PO_SESSION_ENV
+from secretary.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
 from secretary.po.store import (
     CLIS,
     COMPLETED,
@@ -266,8 +268,13 @@ class PoRunner:
         env: Mapping[str, str] | None = None,
         on_settled: Callable[[str, int], None] | None = None,
         on_failed: Callable[[str, int, str], None] | None = None,
+        efforts: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.store = store
+        # What a new session's effort is checked against unless its create passes its own list.
+        self.efforts: Mapping[str, tuple[str, ...]] = (
+            dict(efforts) if efforts is not None else DEFAULT_EFFORTS
+        )
         # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
         self.on_settled = on_settled
         # Told (session id, seq, reason) once when this runner settled a turn `failed` (`_finish`).
@@ -291,16 +298,23 @@ class PoRunner:
 
     # --- sessions ---------------------------------------------------------------------------
 
-    def create_session(self, cli: str, model: str, effort: str = DEFAULT_EFFORT) -> Session:
-        return self._create(cli, model, effort, None)[0]
+    def create_session(
+        self, cli: str, model: str, effort: str, *, efforts: Mapping[str, tuple[str, ...]] | None = None
+    ) -> Session:
+        """A new session at an explicit effort offered for `cli` (`require_explicit_effort`).
+
+        `efforts` is the offered list, this runner's own when not given; `default` is never accepted.
+        """
+        return self._create(cli, model, effort, None, efforts=efforts)[0]
 
     def create_session_request(
         self,
         cli: str,
         model: str,
         request_id: str,
-        effort: str = DEFAULT_EFFORT,
+        effort: str,
         *,
+        efforts: Mapping[str, tuple[str, ...]] | None = None,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
     ) -> tuple[Session, bool]:
@@ -309,7 +323,9 @@ class PoRunner:
         `operation` and `fingerprint` bind the id to another operation that opens a session
         (`PoStore.claim_session`).
         """
-        return self._create(cli, model, effort, request_id, operation=operation, fingerprint=fingerprint)
+        return self._create(
+            cli, model, effort, request_id, efforts=efforts, operation=operation, fingerprint=fingerprint
+        )
 
     def _create(
         self,
@@ -318,6 +334,7 @@ class PoRunner:
         effort: str,
         request_id: str | None,
         *,
+        efforts: Mapping[str, tuple[str, ...]] | None = None,
         operation: str = SESSION_CREATE,
         fingerprint: str | None = None,
     ) -> tuple[Session, bool]:
@@ -325,8 +342,10 @@ class PoRunner:
             raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
         if not model.strip():
             raise RunnerError("a PO session needs a model")
-        if not effort.strip():
-            raise RunnerError(f"a PO session needs an effort, {DEFAULT_EFFORT!r} for the CLI's own")
+        try:
+            effort = require_explicit_effort(cli, effort, self.efforts if efforts is None else efforts)
+        except EffortRefused as exc:
+            raise RunnerError(str(exc)) from None
         return self.store.claim_session(
             session_id=str(uuid.uuid4()),
             cli=cli,
@@ -334,7 +353,7 @@ class PoRunner:
             cwd=str(self.workspace),
             cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
             request_id=request_id,
-            effort=effort.strip(),
+            effort=effort,
             operation=operation,
             fingerprint=fingerprint,
         )

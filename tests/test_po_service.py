@@ -177,7 +177,7 @@ class ServiceFixture(unittest.TestCase):
         created = service.create_session(
             cli=cli,
             model=model,
-            effort="default",
+            effort="high",
             request_id=request_id or f"c-{cli}-{len(self.board.sessions)}",
         )
         return created["session_id"]
@@ -495,7 +495,7 @@ class EndpointTests(ServiceFixture):
         service = self.service()
         with listening(service):
             first_web = self.layer()
-            created = first_web.po_create_session(request_id="c-1", cli="claude", model="opus")
+            created = first_web.po_create_session(request_id="c-1", cli="claude", model="opus", effort="high")
             session_id = created["session_id"]
             sent = first_web.po_send(
                 request_id="m-1", session_id=session_id, text="GATE across a web restart"
@@ -518,9 +518,9 @@ class EndpointTests(ServiceFixture):
         service = self.service()
         with listening(service):
             layer = self.layer()
-            session_id = layer.po_create_session(request_id="c-1", cli="codex", model="gpt-5.6-sol")[
-                "session_id"
-            ]
+            session_id = layer.po_create_session(
+                request_id="c-1", cli="codex", model="gpt-5.6-sol", effort="high"
+            )["session_id"]
             layer.po_send(request_id="m-1", session_id=session_id, text="GATE first")
             queued = layer.po_send(request_id="m-2", session_id=session_id, text="second")
             self.assertEqual(
@@ -562,7 +562,7 @@ class EndpointTests(ServiceFixture):
         )
         layer = self.layer()
         for call in (
-            lambda: layer.po_create_session(request_id="c-1", cli="claude", model="opus"),
+            lambda: layer.po_create_session(request_id="c-1", cli="claude", model="opus", effort="high"),
             lambda: layer.po_send(request_id="m-1", session_id="s-1", text="hello"),
             lambda: layer.po_stop(session_id="s-1", seq=1),
             lambda: layer.po_close(session_id="s-1"),
@@ -601,7 +601,7 @@ class RequestIdReservationTests(ServiceFixture):
         self.assertTrue(queued["queued"])
 
         with self.assertRaisesRegex(po_store.RequestConflict, "queued for PO session"):
-            service.create_session(cli="claude", model="opus", effort="default", request_id="reserved")
+            service.create_session(cli="claude", model="opus", effort="high", request_id="reserved")
 
         self.assertEqual(len(self.board.sessions), 1)
         self.gate.touch()
@@ -617,7 +617,7 @@ class RequestIdReservationTests(ServiceFixture):
         service.queue.refuse(item, "there is no PO session gone")
 
         for call in (
-            lambda: service.create_session(cli="claude", model="opus", effort="default", request_id="aside"),
+            lambda: service.create_session(cli="claude", model="opus", effort="high", request_id="aside"),
             lambda: service.submit(session_id=session_id, text="lost", request_id="aside"),
         ):
             with self.subTest(), self.assertRaisesRegex(po_store.RequestConflict, "set aside"):
@@ -704,8 +704,8 @@ class OutcomeUnknownTests(EndpointTests):
                 self.lose_the_reply(),
                 self.assertRaisesRegex(PoOutcomeUnknown, "may have opened this session"),
             ):
-                layer.po_create_session(request_id="c-1", cli="claude", model="opus")
-            again = layer.po_create_session(request_id="c-1", cli="claude", model="opus")
+                layer.po_create_session(request_id="c-1", cli="claude", model="opus", effort="high")
+            again = layer.po_create_session(request_id="c-1", cli="claude", model="opus", effort="high")
             self.assertTrue(again["repeated"])
             self.assertEqual(len(self.board.sessions), 1)
             session_id = again["session_id"]
@@ -817,7 +817,7 @@ class AcceptanceAnswerTests(EndpointTests):
     def test_every_post_acceptance_failure_of_a_session_create_ends_with_one_session(self) -> None:
         service = self.service(run=False)
         app, headers = self.app(self.layer())
-        form = {"request_id": "create-once", "cli": "claude", "model": "opus"}
+        form = {"request_id": "create-once", "cli": "claude", "model": "opus", "effort": "high"}
         real_claim = FakePoStore.claim_session
 
         def commit_then_fail(store, **kwargs):
@@ -874,11 +874,23 @@ class AcceptanceAnswerTests(EndpointTests):
             ({"op": "create_session", "cli": "gemini", "model": "m", "request_id": "g"}, "validation"),
             ({"op": "create_session", "cli": "claude", "model": " ", "request_id": "g"}, "validation"),
             (
-                {"op": "create_session", "cli": "claude", "model": "opus", "request_id": "waiting"},
+                {
+                    "op": "create_session",
+                    "cli": "claude",
+                    "model": "opus",
+                    "effort": "high",
+                    "request_id": "waiting",
+                },
                 "request_conflict",
             ),
             (
-                {"op": "create_session", "cli": "codex", "model": "m", "request_id": "made"},
+                {
+                    "op": "create_session",
+                    "cli": "codex",
+                    "model": "m",
+                    "effort": "high",
+                    "request_id": "made",
+                },
                 "request_conflict",
             ),
         ]
@@ -892,7 +904,8 @@ class AcceptanceAnswerTests(EndpointTests):
                 error(op="submit", session_id=session_id, text="x", request_id="k"), ("unavailable", False)
             )
             self.assertEqual(
-                error(op="create_session", cli="claude", model="opus", request_id="k"), ("unavailable", False)
+                error(op="create_session", cli="claude", model="opus", effort="high", request_id="k"),
+                ("unavailable", False),
             )
         self.assertEqual(self.queued(), ["waiting"])
 
@@ -915,7 +928,7 @@ class KeptRequestIdTests(ServiceFixture):
         "sessions": [],
         "running": 0,
         "models": {"claude": ["opus"]},
-        "efforts": {"claude": ["default"]},
+        "efforts": {"claude": ["high"]},
     }
 
     def forms(self, failure: Exception) -> tuple[list[str], list[str]]:
@@ -1527,8 +1540,9 @@ class SprintSessionTests(ServiceFixture):
 
         self.assertEqual((answer["created"], answer["repeated"]), (True, False))
         session = self.store().session(answer["session_id"])
-        # No recorded session: the new-session form's preselection, first CLI and first model.
-        self.assertEqual((session.cli, session.model, session.effort), ("claude", "opus", "default"))
+        # No recorded session: the new-session form's preselection, first CLI and first model, at the
+        # first effort offered for that CLI, never `default`.
+        self.assertEqual((session.cli, session.model, session.effort), ("claude", "opus", "high"))
         self.assertEqual(sprints.records["sprint:1"].po_session, session.session_id)
         self.assertEqual(
             list(sprints.comments.values()),
@@ -1596,6 +1610,52 @@ class SprintSessionTests(ServiceFixture):
         self.settled(session.session_id, 1)
         self.assertIn(f"{old['session_id']} is closed", self.first_prompt(session.session_id))
         self.assertEqual(sprints.records["sprint:1"].po_session, session.session_id)
+
+    def test_a_closed_session_stored_with_default_is_replaced_at_the_first_offered_effort(self) -> None:
+        sprints = FakeSprints({})
+        service = self.resolver(sprints, efforts={"claude": ("max", "low"), "codex": ("medium",)})
+        # A session opened before an effort had to be chosen: the store keeps its legacy `default`.
+        old, _ = self.store().claim_session(
+            session_id="legacy",
+            cli="codex",
+            model="gpt-5.6-sol",
+            cwd=str(self.data / "po"),
+            cli_session_id=None,
+        )
+        self.assertEqual(old.effort, po_store.DEFAULT_EFFORT)
+        service.close_session(session_id="legacy", actor="owner")
+        sprints.records["sprint:1"] = SprintRecord("sprint:1", "open", "legacy")
+
+        answer = service.sprint_session(sprint_ref="sprint:1", request_id="r-1")
+
+        session = self.store().session(answer["session_id"])
+        self.assertEqual((session.cli, session.model, session.effort), ("codex", "gpt-5.6-sol", "medium"))
+        self.settled(session.session_id, 1)
+        self.assertEqual(sprints.records["sprint:1"].po_session, session.session_id)
+
+    def test_a_sprint_session_with_no_offered_effort_is_refused_and_opens_nothing(self) -> None:
+        sprints = FakeSprints({"sprint:1": None})
+        service = self.resolver(sprints, efforts={"claude": (), "codex": ("high",)})
+
+        refused = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "r-1"})
+
+        self.assertEqual(refused["error"]["code"], "validation")
+        self.assertIn("explicit effort", refused["error"]["message"])
+        self.assertEqual(list(self.board.sessions), [])
+        self.assertIsNone(sprints.records["sprint:1"].po_session)
+
+    def test_a_create_without_an_explicit_offered_effort_is_refused_with_nothing_written(self) -> None:
+        service = self.service(run=False)
+        for effort in (None, "", "default", "none", "turbo"):
+            request = {"op": "create_session", "cli": "claude", "model": "opus", "request_id": f"c-{effort}"}
+            if effort is not None:
+                request["effort"] = effort
+            with self.subTest(effort=effort):
+                answer = service.handle(request)
+                self.assertEqual(answer["error"]["code"], "validation")
+                self.assertTrue(answer["error"]["nothing_written"])
+                self.assertIn("high, low, medium, xhigh, max", answer["error"]["message"])
+        self.assertEqual(list(self.board.sessions), [])
 
     def test_several_why_documents_are_listed_and_none_is_quoted(self) -> None:
         documents = [

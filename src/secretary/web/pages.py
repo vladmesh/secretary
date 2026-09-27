@@ -2747,8 +2747,11 @@ EFFORT_BARS: dict[str, int] = {
 }
 #: How many bars the scale has.
 EFFORT_SCALE = 5
-#: The efforts that mean "no flag was passed": the CLI's own default decides.
+#: The efforts that mean "no flag was passed": the CLI's own default decides. A PO session stored
+#: with one of them was opened before an effort had to be chosen, and reads "not set".
 EFFORT_DEFAULT = {"", "default", "none"}
+#: What a PO session stored with no explicit effort says in place of an effort.
+PO_EFFORT_UNSET = "not set"
 
 
 def _model_name(model: Any) -> str:
@@ -2770,12 +2773,12 @@ def _model_name(model: Any) -> str:
     return value
 
 
-def _effort(effort: Any) -> str:
-    """The effort as bars and a word. No flag passed is hollow bars and says so, never zero."""
+def _effort(effort: Any, *, unset: str = "CLI default") -> str:
+    """The effort as bars and a word. No flag passed is hollow bars and `unset`, never zero."""
     word = str(effort or "").strip().lower()
     if word in EFFORT_DEFAULT:
         bars = "".join("<i></i>" for _ in range(EFFORT_SCALE))
-        return f'<span class="segs unset" aria-hidden="true">{bars}</span><span>CLI default</span>'
+        return f'<span class="segs unset" aria-hidden="true">{bars}</span><span>{escape(unset)}</span>'
     lit = EFFORT_BARS.get(word, 0)
     bars = "".join(f"<i{' class="on"' if index < lit else ''}></i>" for index in range(EFFORT_SCALE))
     shown = "xhigh" if word == "extra" else word
@@ -2811,12 +2814,14 @@ def _head_effort(head: dict[str, Any]) -> Any:
     return head.get("resolved_effort") or head.get("effort")
 
 
-def _head(role: str, head: dict[str, Any] | None, *, compact: bool = False) -> str:
+def _head(
+    role: str, head: dict[str, Any] | None, *, compact: bool = False, unset_effort: str = "CLI default"
+) -> str:
     """One head: the role, the model that runs it, its effort, and whether its process is alive.
 
     `head` carries what the read layer says about it -- `profile`, `adapter`, `model`,
     `resolved_model`, `effort`, `state` -- and nothing here fills a gap: a head with no model is
-    called an unknown model, not the likeliest one.
+    called an unknown model, not the likeliest one. `unset_effort` is what no effort reads as.
     """
     head = head or {}
     name, said = _head_model(head)
@@ -2829,7 +2834,7 @@ def _head(role: str, head: dict[str, Any] | None, *, compact: bool = False) -> s
     if compact:
         return (
             f'<span class="head-chip" title="{escape(title)}"><span class="role">{escape(role)}</span>'
-            f"<b>{escape(name)}</b>{_effort(_head_effort(head))}</span>"
+            f"<b>{escape(name)}</b>{_effort(_head_effort(head), unset=unset_effort)}</span>"
         )
     pulse = PULSE_OF.get(state, "")
     idle = "" if pulse == "live" else " idle"
@@ -2838,7 +2843,7 @@ def _head(role: str, head: dict[str, Any] | None, *, compact: bool = False) -> s
         f'<div class="head{idle}" title="{escape(title)}">'
         f'<span class="pulse {pulse}" aria-label="{escape(state or "state unknown")}"></span>'
         f'<span class="who"><span class="role">{escape(who)}</span><span class="model">{escape(name)}</span></span>'
-        f'<span class="effort">{_effort(_head_effort(head))}</span></div>'
+        f'<span class="effort">{_effort(_head_effort(head), unset=unset_effort)}</span></div>'
     )
 
 
@@ -3980,15 +3985,13 @@ def po_page(
 
 
 def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str:
-    """One session: its first message, then CLI · model · effort (unless the CLI's own) · when · id."""
+    """One session: its first message, then CLI · model · effort ("not set" when none was chosen) · when · id."""
     session_id = str(item.get("session_id") or "")
     name, said = _head_model(_po_head(item))
     meta = [
         f'<span title="{escape(said)}">{escape(str(item.get("cli") or ""))} · <b>{escape(name)}</b></span>'
     ]
-    effort = str(item.get("effort") or "").strip().lower()
-    if effort and effort not in EFFORT_DEFAULT:
-        meta.append(f"<span>effort {escape('xhigh' if effort == 'extra' else effort)}</span>")
+    meta.append(f'<span class="effort">{_effort(item.get("effort"), unset=PO_EFFORT_UNSET)}</span>')
     if closed:
         meta.append(f"<span>closed {_po_when(item.get('closed_at'), now)}</span>")
     else:
@@ -4029,7 +4032,9 @@ def _po_close_form(session_id: str) -> str:
     )
 
 
-def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str:
+def _po_new_session_form_for(
+    session: dict[str, Any], efforts: dict[str, Any] | None = None, *, request_id: str
+) -> str:
     """Open another session from the one being read, with this session's CLI, model and effort.
 
     It is the `/po` form's own route and its own fields (`POST /po/sessions` with a request id, a CLI,
@@ -4038,6 +4043,11 @@ def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str
     the pair the owner chose; an installation that no longer offers it refuses the create the way the
     `/po` form's does, on `/po`, with the list of what it does offer to pick from.
 
+    The effort is copied when the session has an explicit one. A session stored with `default` was
+    opened before an effort had to be chosen, and `default` is never sent: the new session opens at
+    the first effort `efforts` offers for that CLI, and the button says so beside it. With none
+    offered the effort is left out, and the create is refused with the reason.
+
     The request id is the page's own with a suffix. One page mints one id and an id belongs to one
     operation for good (`po_requests`), so a page whose message was sent must not offer the same id
     again for a create — that would be `request_conflict` rather than a new session.
@@ -4045,12 +4055,26 @@ def _po_new_session_form_for(session: dict[str, Any], *, request_id: str) -> str
     cli, model = str(session.get("cli") or "").strip(), str(session.get("model") or "").strip()
     if not cli or not model:
         return ""
+    effort = str(session.get("effort") or "").strip()
+    note = ""
+    if effort.lower() in EFFORT_DEFAULT:
+        effort = next(
+            (
+                str(value).strip()
+                for value in (efforts or {}).get(cli) or []
+                if str(value).strip().lower() not in EFFORT_DEFAULT
+            ),
+            "",
+        )
+        opens = f"the new one opens at {effort}" if effort else "this installation offers no effort for it"
+        note = f'<span class="hint">effort not set on this session; {escape(opens)}</span>'
+    field = f'<input type="hidden" name="effort" value="{escape(effort)}">' if effort else ""
     return (
         '<form class="po-new" method="post" action="/po/sessions">'
         f'<input type="hidden" name="request_id" value="{escape(request_id)}-new-session">'
         f'<input type="hidden" name="cli" value="{escape(cli)}">'
         f'<input type="hidden" name="model" value="{escape(model)}">'
-        f'<input type="hidden" name="effort" value="{escape(str(session.get("effort") or "default"))}">'
+        f"{field}{note}"
         '<button class="quiet" type="submit">new session</button></form>'
     )
 
@@ -4090,11 +4114,23 @@ def _po_new_session_form(
         return '<p class="po-bar empty">this installation offers no model for a PO session</p>'
     chosen_cli = str(submitted.get("cli") or offered[0][0])
     chosen_model = str(submitted.get("model") or "")
-    chosen_effort = str(submitted.get("effort") or "default")
     listed = dict(offered).get(chosen_cli) or []
     if chosen_model not in listed and listed:
         # The first model a CLI lists is its preselected one; the script does the same on a CLI change.
         chosen_model = listed[0]
+    # `default` (no effort flag) is never offered: a new session's effort is always chosen, and the
+    # first one a CLI lists is its preselected one, as with the model.
+    effort_lists = {
+        cli: [
+            str(value).strip()
+            for value in (efforts or {}).get(cli) or []
+            if str(value).strip().lower() not in EFFORT_DEFAULT
+        ]
+        for cli, _ in offered
+    }
+    chosen_effort = str(submitted.get("effort") or "")
+    if chosen_effort not in effort_lists.get(chosen_cli, []):
+        chosen_effort = next(iter(effort_lists.get(chosen_cli) or []), "")
     cli_options = "".join(
         f'<option value="{escape(cli)}"{_selected(cli == chosen_cli)}>{escape(cli)}</option>'
         for cli, _ in offered
@@ -4103,23 +4139,18 @@ def _po_new_session_form(
         f'<optgroup label="{escape(cli)}">'
         + "".join(
             f'<option value="{escape(model)}" data-cli="{escape(cli)}"'
-            f"{_selected(cli == chosen_cli and model == chosen_model)}>{escape(model)}</option>"
+            f"{_selected(cli == chosen_cli and model == chosen_model)}>{escape(_model_name(model))}</option>"
             for model in values
         )
         + "</optgroup>"
         for cli, values in offered
     )
-    # `default` passes no effort flag, so the CLI decides; it is offered whatever the list says.
     effort_groups = "".join(
         f'<optgroup label="{escape(cli)}">'
         + "".join(
             f'<option value="{escape(effort)}" data-cli="{escape(cli)}"'
-            f"{_selected(cli == chosen_cli and effort == chosen_effort)}>"
-            f"{escape('CLI default' if effort == 'default' else effort)}</option>"
-            for effort in [
-                "default",
-                *[str(value) for value in (efforts or {}).get(cli) or [] if str(value) != "default"],
-            ]
+            f"{_selected(cli == chosen_cli and effort == chosen_effort)}>{escape(effort)}</option>"
+            for effort in effort_lists[cli]
         )
         + "</optgroup>"
         for cli, _ in offered
@@ -4189,7 +4220,11 @@ def po_session(
         [
             '<div class="po-controls">',
             "" if closed else '<button type="submit" form="po-send">send</button>',
-            f'<div class="aside">{stop}{_po_new_session_form_for(session, request_id=request_id)}{close}</div>',
+            (
+                f'<div class="aside">{stop}'
+                f"{_po_new_session_form_for(session, document.get('efforts') or {}, request_id=request_id)}"
+                f"{close}</div>"
+            ),
             "</div>",
         ]
     )
@@ -4210,7 +4245,7 @@ def po_session(
         [
             (
                 f'<div class="lead"><h1>PO session {escape(session_id[:8])}</h1>'
-                f"{_head('PO · ' + str(session.get('cli') or ''), _po_head(session), compact=True)}"
+                f"{_head('PO · ' + str(session.get('cli') or ''), _po_head(session), compact=True, unset_effort=PO_EFFORT_UNSET)}"
                 f'<span class="age">{head}</span></div>'
             ),
             _po_refusal(refusal, refused),

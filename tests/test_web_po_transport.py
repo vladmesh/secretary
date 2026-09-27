@@ -246,7 +246,12 @@ class PoRequestIdCoverageTests(PoGateFixture):
         ("POST", "/po/sessions/{session}/messages"): "po.po_send",
     }
     BODIES: ClassVar[dict] = {
-        "/po/sessions": [("request_id", "form-create"), ("cli", "claude"), ("model", "opus")],
+        "/po/sessions": [
+            ("request_id", "form-create"),
+            ("cli", "claude"),
+            ("model", "opus"),
+            ("effort", "high"),
+        ],
         "/po/sessions/{session}/messages": [("request_id", "form-send"), ("text", "hello")],
     }
 
@@ -320,11 +325,12 @@ class PoModelListTests(unittest.TestCase):
     }
 
     def test_the_default_offers_the_frontier_models_first(self) -> None:
+        # The current catalogue, as the live installation's `po.models` lists it.
         self.assertEqual(
             DEFAULT_MODELS,
             {
-                "claude": ("fable", "opus", "sonnet"),
-                "codex": ("gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
+                "claude": ("fable", "claude-opus-5-5"),
+                "codex": ("gpt-6-astra", "gpt-6-sol", "gpt-5.6-terra"),
             },
         )
 
@@ -352,14 +358,17 @@ class PoModelListTests(unittest.TestCase):
 
     def test_efforts_default_per_cli_and_a_configured_list_replaces_one_cli(self) -> None:
         self.assertEqual(efforts_from_instance(self.INSTANCE), DEFAULT_EFFORTS)
-        self.assertEqual(DEFAULT_EFFORTS["claude"], ("default", "low", "medium", "high", "xhigh", "max"))
-        self.assertEqual(DEFAULT_EFFORTS["codex"], ("default", "low", "medium", "high", "xhigh"))
+        # `default` is never offered, and the first entry, the preselection, is `high`.
+        self.assertEqual(DEFAULT_EFFORTS["claude"], ("high", "low", "medium", "xhigh", "max"))
+        self.assertEqual(DEFAULT_EFFORTS["codex"], ("high", "low", "medium", "xhigh"))
         efforts = efforts_from_instance(
             {**self.INSTANCE, "po": {"efforts": {"claude": ["high"], "codex": []}}}
         )
         self.assertEqual(efforts, {"claude": ("high",), "codex": ()})
+        # An installation that still lists `default` stays valid; the offered list drops it.
         good = {**self.INSTANCE, "po": {"efforts": {"claude": ["default", "max"], "codex": ["xhigh"]}}}
         self.assertEqual(validate(good, "instance", "instance.yaml"), [])
+        self.assertEqual(efforts_from_instance(good), {"claude": ("max",), "codex": ("xhigh",)})
         for bad in (
             {"efforts": {"claude": ["turbo"]}},
             {"efforts": {"codex": ["max"]}},

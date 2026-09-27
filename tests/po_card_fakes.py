@@ -214,7 +214,7 @@ class DispatcherFixture(unittest.TestCase):
                     os.killpg(live.process.pid, signal.SIGKILL)
 
     def session(self, service: PoService) -> str:
-        return service.create_session(cli="claude", model="opus", effort="default", request_id="c-owner")[
+        return service.create_session(cli="claude", model="opus", effort="high", request_id="c-owner")[
             "session_id"
         ]
 
