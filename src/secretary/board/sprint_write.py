@@ -137,7 +137,7 @@ class SprintCreateIntent:
         )
 
     def to_document(self) -> dict[str, Any]:
-        document = {
+        document: dict[str, Any] = {
             "role": self.role.value,
             "actor": self.actor,
             "goal": self.goal,

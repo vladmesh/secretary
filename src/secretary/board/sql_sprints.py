@@ -260,10 +260,14 @@ class SqlSprintRecords:
                 values["sprint_allowed_productions"] = json.dumps(
                     [str(project) for project in productions], separators=(",", ":")
                 )
-            # The e2e run budget (0023): every sprint has one, 3 and nothing used unless it says more.
-            values[SPRINT_E2E_BUDGET] = str(int(e2e_budget))
-            values[SPRINT_E2E_USED] = str(int(e2e_used))
-            values[SPRINT_E2E_CHARGES] = json.dumps(charges.get(reference, []), sort_keys=True, separators=(",", ":"))
+            # The e2e run budget (0023), only where it is not the default a sprint reads without it (3,
+            # nothing used, no charge), as the 0016 fields: a sprint that never spent a run reads as it did.
+            if int(e2e_budget) != DEFAULT_E2E_BUDGET:
+                values[SPRINT_E2E_BUDGET] = str(int(e2e_budget))
+            if int(e2e_used):
+                values[SPRINT_E2E_USED] = str(int(e2e_used))
+            if charges.get(reference):
+                values[SPRINT_E2E_CHARGES] = json.dumps(charges[reference], sort_keys=True, separators=(",", ":"))
             if source is not None:
                 values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
             resume = resumes.get(reference)

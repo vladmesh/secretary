@@ -1609,7 +1609,9 @@ class SprintWriter:
             values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(
                 list(intent.allowed_productions), separators=(",", ":")
             )
-        values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
+        # Only a budget other than the column's default: the read names it only then.
+        if intent.e2e_budget != DEFAULT_E2E_BUDGET:
+            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:
