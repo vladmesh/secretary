@@ -79,6 +79,7 @@ from secretary.memory_write import (
 )
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.board.owner_event_commands import add_owner_event_subcommands
+from secretary.po.commands import add_po_subcommands
 from secretary.po.service import add_po_serve_subcommands
 from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
@@ -178,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
     add_po_serve_subcommands(subparsers)
+    add_po_subcommands(subparsers)
     add_owner_event_subcommands(subparsers)
     automations = subparsers.add_parser(
         "automations",

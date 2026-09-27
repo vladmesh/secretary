@@ -379,7 +379,7 @@ create can never take the id of a message still waiting in the queue.
 
 **Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
 request line, one JSON answer line, ops `submit`, `create_session`, `sprint_session`, `stop_turn`,
-`close_session`, `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the
+`close_session`, `rename_session`, `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the
 store and the queue directory and sends every write here. The service runs a request only once its
 whole line arrived.
 
@@ -409,6 +409,16 @@ The web never starts a turn itself.
 **Turn environment.** Every turn process gets `SECRETARY_PO_SESSION=<session_id>` beside the product
 runtime's `PATH`/`PYTHONPATH`, on its first launch, a re-run and a relaunch alike. `sprint create` inside
 a turn takes it as the default of `--po-session`, so the sprint records the session that opened it.
+
+**Session title.** `po_sessions.title` (0019) is a readable name, null for an untitled session. The owner
+sets it from the session page (`POST /po/sessions/ID/title`, field `title`); the PO sets its own with
+`secretary po rename --instance I --title TEXT [--session ID]`, whose `--session` defaults to
+`$SECRETARY_PO_SESSION`. Both go through the service's `rename_session` to `PoStore.set_title`, the one
+rule: trimmed, one line (no C0/C1 control character), at most 120 characters; empty clears it. It carries
+no request id and writes no `po_requests` row: a repeat sets the same value. A closed session may be
+renamed. The resolver titles a sprint's new session with the sprint's ref (`sprint:<N>`). The CLI prints
+`{"kind": "po_session_renamed", "session_id", "title"}`; a refused title or an unknown session exits 2, a
+service that did not answer 1, as `web-run` does.
 
 **A sprint's session (the resolver).** `sprint_session(sprint_ref, request_id)` answers the live PO
 session of a sprint ([Protocols](PROTOCOLS.md#the-sprints-po-session-and-productions)). The session the
