@@ -470,13 +470,22 @@ body { padding-bottom: var(--bar-height); }
 .statusbar .window > b.stale { color: var(--warn); font-weight: 500; }
 .statusbar .window .dot { color: var(--faint); }
 .resets { color: var(--muted); font-variant-numeric: tabular-nums; }
-.statusbar .credits { display: inline-flex; align-items: baseline; gap: .35rem; font-family: var(--mono); color: var(--ink); }
-.statusbar .credits .dot { color: var(--faint); }
+/* The Codex reset credits fold into one chip-sized label; the details (expiry, whether a reset
+   applies, the button) open above the bar, so the bar itself keeps one chip per fact. */
+.statusbar details.credits { position: relative; display: inline-block; }
+.statusbar details.credits > summary { list-style: none; cursor: pointer; font-family: var(--mono); font-size: inherit; color: var(--muted); background: var(--raised); border: 1px dashed var(--line-strong); border-radius: 999px; padding: .05rem .5rem; }
+.statusbar details.credits > summary::-webkit-details-marker { display: none; }
+.statusbar details.credits > summary:hover, .statusbar details.credits[open] > summary { color: var(--ink); border-style: solid; }
+.statusbar .credits-pop { position: absolute; bottom: calc(100% + .5rem); left: 0; z-index: 7; display: grid; gap: .35rem; min-width: 18rem; max-width: 26rem; padding: .6rem .8rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: normal; font-family: var(--sans, inherit); color: var(--ink); }
+.statusbar .credits-pop .pop-line { display: block; }
+.statusbar .credits-pop .pop-line.expires { color: var(--muted); font-variant-numeric: tabular-nums; }
+.statusbar .credits-pop .pop-line.warn { color: var(--warn); }
+.statusbar .credits-pop .pop-line.applies { color: var(--ok); }
 .statusbar .reason, .statusbar .age { font-size: inherit; }
-.statusbar .bar-reset { font: inherit; font-size: .72rem; padding: 0 .5rem; line-height: 1.4; border-radius: 999px; }
+.statusbar .bar-reset { font: inherit; font-size: .78rem; padding: .15rem .7rem; line-height: 1.4; border-radius: 999px; justify-self: start; }
 .statusbar .bar-reset:disabled { opacity: .55; cursor: not-allowed; }
 .statusbar .bar-feedback:empty { display: none; }
-.statusbar .bar-feedback { color: var(--ink); }
+.statusbar .bar-feedback { color: var(--ink); white-space: normal; }
 .statusbar .bar-feedback.bad { color: var(--bad); }
 .statusbar .bar-refresh { display: inline-flex; align-items: center; gap: .3rem; margin: 0 0 0 auto; font-size: inherit; color: var(--muted); }
 .statusbar .bar-refresh input { margin: 0; }
@@ -747,9 +756,8 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
             f"{_bar_no_reading('this reading carried no usage window')}{old}</span>"
         )
     drawn = "".join(_bar_window(window) for window in windows)
-    credits = _bar_reset_credits(provider.get("reset_credits"))
-    button = _bar_reset_button(provider.get("reset_credits")) if provider.get("id") == "codex" else ""
-    return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{button}{old}</span>'
+    credits = _bar_reset_credits(provider.get("reset_credits")) if provider.get("id") == "codex" else ""
+    return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{old}</span>'
 
 
 def _bar_window(window: dict[str, Any]) -> str:
@@ -770,22 +778,21 @@ def _bar_window(window: dict[str, Any]) -> str:
 
 
 def _bar_reset_credits(credits: Any) -> str:
-    """The rate-limit reset credits a reading carries: how many, how many usable now, the nearest expiry.
+    """The Codex rate-limit reset credits a reading carries, folded into one small label.
 
-    Nothing at all when the reading carries no credits or none are available: a label saying zero
-    would be read as a limit, and there is no credit to spend. Every value is read through the same
-    normalisers the layer wrote it with, so a hand-made document cannot make the bar fail.
+    The bar shows only the count (`1 reset`), a `<details>` summary the reader opens for the rest:
+    the nearest expiry, whether the provider counts a reset as applicable right now, and the button
+    that spends one. Nothing at all when the reading carries no credits or none are available: a label
+    saying zero would be read as a limit, and there is no credit to spend. Every value is read through
+    the same normalisers the layer wrote it with, so a hand-made document cannot make the bar fail.
     """
     if not isinstance(credits, dict):
         return ""
     available = credit_count(credits.get("available"))
     if not available:
         return ""
-    applicable = credit_count(credits.get("applicable"))
-    text = f"{available} reset{'' if available == 1 else 's'}"
-    if applicable is not None:
-        text += f" ({applicable} usable)"
-    drawn = escape(text)
+    count = f"{available} reset{'' if available == 1 else 's'}"
+    lines = [f'<span class="pop-line">{escape(count)} banked</span>']
     moment = credit_moment(credits.get("next_expires_at"))
     if moment is not None:
         try:
@@ -795,24 +802,37 @@ def _bar_reset_credits(credits: Any) -> str:
         if ahead is not None:
             expiry = f"expires in {_duration(ahead / 1_000_000)}" if ahead > 0 else "expired"
             title = credit_moment_iso(credits.get("next_expires_at")) or ""
-            drawn += (
-                f'<span class="dot">·</span>'
-                f'<span class="expires" title="{escape(title)}">{escape(expiry)}</span>'
-            )
-    return f'<span class="credits">{drawn}</span>'
+            lines.append(f'<span class="pop-line expires" title="{escape(title)}">{escape(expiry)}</span>')
+    applicable = credit_count(credits.get("applicable"))
+    if applicable:
+        lines.append(f'<span class="pop-line applies">{escape(RESET_APPLICABLE)}</span>')
+    else:
+        lines.append(f'<span class="pop-line warn">{escape(RESET_NOT_APPLICABLE)}</span>')
+    return (
+        f'<details class="credits"><summary title="{escape(RESET_SUMMARY_TITLE)}">{escape(count)}</summary>'
+        f'<div class="credits-pop">{"".join(lines)}{_bar_reset_button(credits)}</div></details>'
+    )
 
 
-#: The hover title of a reset button with nothing to spend a credit on.
-RESET_NOTHING_TO_RESET = "nothing to reset: no Codex window is exhausted"
+#: The hover title of the folded credits label.
+RESET_SUMMARY_TITLE = "Codex rate-limit reset credits: open for details and the reset"
+#: The provider counts a reset as applicable now (`applicable_available_count` above zero).
+RESET_APPLICABLE = "the provider counts a reset as applicable now"
+#: The provider does not (`applicable_available_count` zero or unknown). The rule behind that count is
+#: the provider's and undocumented; the button stays, and the provider's own answer decides.
+RESET_NOT_APPLICABLE = (
+    "the provider does not count a reset as applicable now: a press may answer nothing to reset, "
+    "or refill windows that still have usage left"
+)
 
 
 def _bar_reset_button(credits: Any) -> str:
-    """The button that spends one Codex reset credit, drawn beside the credits label.
+    """The button that spends one Codex reset credit, drawn inside the credits popover.
 
     No button when the reading carries no credits or none is available -- a fallback reading never
-    carries any. A disabled one with the reason as its title when no credit is usable now
-    (`applicable` 0 or unknown: no window is exhausted). Enabled only when one is. The click asks the
-    person first, naming what it spends; the operation behind it re-reads the provider and refuses
+    carries any. Enabled whenever one is available: whether a reset applies is the provider's call,
+    made when the consume is sent, and its answer is shown in words. The click asks the person first,
+    naming what it spends; the operation behind it re-reads the provider and refuses with no credit
     anyway, so a stale page cannot spend a credit this markup offered.
     """
     if not isinstance(credits, dict):
@@ -821,17 +841,11 @@ def _bar_reset_button(credits: Any) -> str:
     if not available:
         return ""
     feedback = '<span class="bar-feedback" id="codex-reset-feedback" role="status"></span>'
-    applicable = credit_count(credits.get("applicable"))
-    if not applicable:
-        return (
-            f'<button type="button" class="bar-reset" disabled title="{escape(RESET_NOTHING_TO_RESET)}">'
-            f"reset</button>{feedback}"
-        )
     question = f"Spend 1 of {available} Codex reset credits?"
     return (
         '<button type="button" class="bar-reset" data-codex-reset '
-        f'data-confirm="{escape(question)}" title="spend 1 Codex reset credit on the exhausted window">'
-        f"reset</button>{feedback}"
+        f'data-confirm="{escape(question)}" title="spend 1 Codex reset credit">'
+        f"reset limit</button>{feedback}"
     )
 
 
@@ -1824,11 +1838,15 @@ def owner_events(document: dict[str, Any]) -> str:
     back = f'<input type="hidden" name="view" value="{"unread" if unread_only else "all"}">'
     rows = []
     for event in events:
-        label, tone = OWNER_EVENT_CLASSES.get(str(event.get("class") or ""), (str(event.get("class") or "?"), ""))
+        label, tone = OWNER_EVENT_CLASSES.get(
+            str(event.get("class") or ""), (str(event.get("class") or "?"), "")
+        )
         unread = bool(event.get("unread"))
         subject = str(event.get("subject_ref") or "")
-        state = _chip("unread", "warn") if unread else (
-            f'<span class="age">read {escape(str(event.get("read_at") or ""))}</span>'
+        state = (
+            _chip("unread", "warn")
+            if unread
+            else (f'<span class="age">read {escape(str(event.get("read_at") or ""))}</span>')
         )
         if not unread:
             action = ""
@@ -1848,7 +1866,7 @@ def owner_events(document: dict[str, Any]) -> str:
         rows.append(
             f'<li class="{classes}" id="owner-event-{int(event.get("id") or 0)}">'
             f"{_chip(label, tone)}"
-            f'<code>{escape(str(event.get("kind") or ""))}</code>'
+            f"<code>{escape(str(event.get('kind') or ''))}</code>"
             f"{owner_event_subject(subject)}"
             f"{state}"
             f'<time class="when age">{escape(str(event.get("created_at") or ""))}</time>'
@@ -1876,7 +1894,9 @@ def owner_events(document: dict[str, Any]) -> str:
         [
             '<div class="lead"><h1>Owner events</h1>',
             f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
-            _panel("What needs you, and what you should know", actions + listing, count=document.get("unread")),
+            _panel(
+                "What needs you, and what you should know", actions + listing, count=document.get("unread")
+            ),
         ]
     )
     return _page("Owner events", body)
@@ -2527,7 +2547,7 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
     if handed:
         said = (
             f'{_or_dash(handed.get("reason"))} <span class="age">(by {_or_dash(handed.get("by"))} '
-            f'at {_or_dash(handed.get("since"))})</span>'
+            f"at {_or_dash(handed.get('since'))})</span>"
         )
         rows.append(["handed to the owner", said])
     return _rows(["", ""], rows)
@@ -3073,7 +3093,8 @@ _RESET_SCRIPT = """
   const out = document.getElementById('codex-reset-feedback');
   const KEY = 'secretary.web.request.codex-reset';
   const WORDS = {reset: 'reset: the Codex limit is reset', already_redeemed: 'already redeemed: this request was spent before',
-    nothing_to_reset: 'nothing to reset', no_credit: 'no credit left', refused: 'refused', error: 'error', unknown: 'unknown'};
+    nothing_to_reset: 'nothing to reset: the provider says your usage does not need a reset right now; the credit stays',
+    no_credit: 'no credit left', refused: 'refused', error: 'error', unknown: 'unknown'};
   function say(text, bad) { if (!out) return; out.textContent = text; out.className = 'bar-feedback' + (bad ? ' bad' : ''); }
   function kept() { try { return sessionStorage.getItem(KEY); } catch (error) { return null; } }
   function keep(id) { try { if (id) sessionStorage.setItem(KEY, id); else sessionStorage.removeItem(KEY); } catch (error) {} }

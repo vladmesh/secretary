@@ -1,14 +1,15 @@
 """The owner's one write on a provider: spend a Codex rate-limit reset credit.
 
 The account holds few credits -- one, on 2026-09-26 -- so the operation is built around never
-spending one twice and never spending one on a window that is not exhausted. Everything is decided
-in :meth:`ProviderOperationLayer.codex_reset_limit`, in this order:
+spending one twice. Whether a reset applies right now is left to the provider: its
+`applicable_available_count` follows a rule it does not document, and its own client offers the
+reset on any available credit and shows the provider's answer. Everything is decided in
+:meth:`ProviderOperationLayer.codex_reset_limit`, in this order:
 
 1. **A committed record for the request id is the answer.** A repeat, a retry and a reload of the
    same press read what the first one recorded and ask the provider nothing.
 2. **The live reading decides whether there is anything to spend.** The Codex usage is read again
-   past the bar's five-minute cache. No credit, or no credit usable now (`applicable` 0 or unknown,
-   which is the provider saying no window is exhausted), is refused -- recorded, and no consume.
+   past the bar's five-minute cache. No available credit is refused -- recorded, and no consume.
 3. **Otherwise the press is staged, consume is sent, and the mapped outcome is committed.** The
    request id is the provider's `redeem_request_id`, so even a consume sent twice under it spends at
    most one credit.
@@ -44,9 +45,11 @@ SCHEMA_VERSION = 1
 #: The audit record's `kind`, and the action `/history` shows for it.
 CODEX_RESET_KIND = "codex_reset_limit"
 
-#: The two refusals the live reading can force, as the history and the page show them.
+#: The one refusal the live reading can force, as the history and the page show it. Whether a reset
+#: applies is not judged here: the provider's `applicable_available_count` follows a rule it does not
+#: document, and its own client offers the reset on any available credit, so the consume is sent and
+#: the provider's answer (`nothing_to_reset` among them) is recorded as the outcome.
 NO_CREDIT = "no Codex reset credit"
-NOTHING_TO_RESET = "nothing to reset: no exhausted Codex window"
 
 #: The outcome a staged press carries until the provider's answer replaces it. Seen only when the
 #: process stopped between the two, which is exactly when nobody knows what the provider did.
@@ -111,7 +114,7 @@ class ProviderOperationLayer(ProtocolBoundary):
         available = _count(credits.get("available"))
         applicable = _count(credits.get("applicable"))
         seen = {"available": available, "applicable": applicable}
-        refusal = NO_CREDIT if not available else NOTHING_TO_RESET if not applicable else None
+        refusal = NO_CREDIT if not available else None
         if refusal is not None:
             if pending is not None:
                 refusal += "; an earlier consume under this request id was sent and its answer never recorded"

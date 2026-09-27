@@ -584,7 +584,7 @@ class ResetCreditsCostTests(BarCostsNoExtraReadTests):
         app = self.app(provider_usage=self.layer)
         for route in self.page_routes():
             bar = bar_of(self.get(self.concrete(route.pattern), app=app))
-            self.assertIn("1 reset (0 usable)", bar)
+            self.assertIn(">1 reset</summary>", bar)
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL, CODEX_RESET_CREDITS_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:
@@ -606,17 +606,17 @@ class ResetCreditsCostTests(BarCostsNoExtraReadTests):
         app = self.app(provider_usage=self.layer)
         page = self.get("/", app=app)
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL, CODEX_RESET_CREDITS_URL])
-        self.assertEqual(page.count("1 reset (0 usable)"), 1, "the credits are drawn once, on the bar")
+        self.assertEqual(page.count(">1 reset</summary>"), 1, "the credits are drawn once, on the bar")
         claude, codex = provider_places(bar_of(page))[:2]
-        self.assertNotIn("reset (", claude, "Claude gets no analogue")
-        self.assertIn("1 reset (0 usable)", codex)
+        self.assertNotIn("credits", claude, "Claude gets no analogue")
+        self.assertIn(">1 reset</summary>", codex)
 
 
 # -- the Codex reset credits: one label after the Codex windows ----------------------------------
 
 
 class ResetCreditsLabelTests(unittest.TestCase):
-    """The label :func:`pages._bar_reset_credits` draws, in every case the card names."""
+    """The folded label :func:`pages._bar_reset_credits` draws, in every case the card names."""
 
     EXPIRES = "2026-10-16T10:00:00Z"  # 25d 22h after RENDERED_AT
 
@@ -630,30 +630,38 @@ class ResetCreditsLabelTests(unittest.TestCase):
         section = {"available": True, "reason": None, "document": usage_document([codex])}
         return provider_places(bar_of(pages._limits_bar_of(section)))[1]
 
-    def test_counts_with_a_usable_count_and_no_expiry(self) -> None:
+    def test_the_bar_carries_only_the_count_and_the_details_are_folded(self) -> None:
         place = self.codex({"available": 1, "applicable": 0, "next_expires_at": None})
-        self.assertIn('<span class="credits">1 reset (0 usable)</span>', place)
+        self.assertIn('<details class="credits"><summary', place)
+        self.assertIn(">1 reset</summary>", place)
+        self.assertNotIn("<details open", place, "the details open only on a click")
+        self.assertNotIn("usable", place)
+        self.assertNotIn("exhausted", place)
+        self.assertIn('<span class="pop-line">1 reset banked</span>', place)
         self.assertNotIn("expires", place)
 
     def test_the_nearest_expiry_is_a_countdown_with_the_moment_as_its_title(self) -> None:
         place = self.codex({"available": 1, "applicable": 0, "next_expires_at": self.EXPIRES})
         self.assertIn(
-            '<span class="credits">1 reset (0 usable)<span class="dot">·</span>'
-            f'<span class="expires" title="{self.EXPIRES}">expires in 25d 22h</span></span>',
-            place,
+            f'<span class="pop-line expires" title="{self.EXPIRES}">expires in 25d 22h</span>', place
         )
+        summary = place[place.index("<summary") : place.index("</summary>")]
+        self.assertNotIn("expires", summary, "the expiry is in the popover, not on the bar")
 
     def test_the_label_follows_the_windows_in_the_same_group(self) -> None:
         place = self.codex({"available": 1, "applicable": 0, "next_expires_at": self.EXPIRES})
         self.assertLess(place.index('class="window"'), place.index('class="credits"'))
         self.assertEqual(place.count('<span class="provider">'), 1)
 
-    def test_an_unknown_usable_count_draws_the_available_count_alone(self) -> None:
+    def test_applicability_is_a_line_of_the_popover_in_words(self) -> None:
+        place = self.codex({"available": 1, "applicable": 0, "next_expires_at": None})
+        self.assertIn(f'<span class="pop-line warn">{pages.RESET_NOT_APPLICABLE}</span>', place)
         place = self.codex({"available": 1, "applicable": None, "next_expires_at": None})
-        self.assertIn('<span class="credits">1 reset</span>', place)
-        self.assertIn(
-            '<span class="credits">3 resets (2 usable)</span>', self.codex({"available": 3, "applicable": 2})
-        )
+        self.assertIn(f'<span class="pop-line warn">{pages.RESET_NOT_APPLICABLE}</span>', place)
+        place = self.codex({"available": 3, "applicable": 2, "next_expires_at": None})
+        self.assertIn(">3 resets</summary>", place)
+        self.assertIn(f'<span class="pop-line applies">{pages.RESET_APPLICABLE}</span>', place)
+        self.assertNotIn("pop-line warn", place)
 
     def test_no_available_credit_and_no_credits_draw_no_label(self) -> None:
         for credits, carry in (
@@ -665,7 +673,10 @@ class ResetCreditsLabelTests(unittest.TestCase):
             with self.subTest(credits=credits, carry=carry):
                 place = self.codex(credits, carry=carry)
                 self.assertNotIn("credits", place)
-                self.assertNotIn("reset (", place)
+                self.assertNotIn(
+                    "reset",
+                    place.split("resets in")[0] if "resets in" in place else place.replace("resets", ""),
+                )
 
     def test_the_countdown_is_measured_against_the_render_clock(self) -> None:
         with pages.render_clock(lambda: RENDERED_AT + timedelta(days=25, hours=21, minutes=30)):
@@ -684,7 +695,7 @@ class ResetCreditsLabelTests(unittest.TestCase):
             ({"available": -1, "applicable": 0}, None),
             ({"available": float("nan")}, None),
             ({"available": 1.7, "applicable": "0"}, "1 reset"),
-            ({"available": 1, "applicable": -5}, "1 reset (0 usable)"),
+            ({"available": 1, "applicable": -5}, "1 reset"),
             ({"available": 1, "applicable": 10**400}, "1 reset"),
             ({"available": 1, "next_expires_at": "garbage"}, "1 reset"),
             ({"available": 1, "next_expires_at": 10**400}, "1 reset"),
@@ -702,7 +713,7 @@ class ResetCreditsLabelTests(unittest.TestCase):
                 if text is None:
                     self.assertNotIn('class="credits"', place)
                 else:
-                    self.assertIn(f'<span class="credits">{text}', place)
+                    self.assertIn(f">{text}</summary>", place)
 
 
 # -- criterion 6: what keeps the bar current never discards what somebody is typing --------------

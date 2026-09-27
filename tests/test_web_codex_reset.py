@@ -33,7 +33,6 @@ from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.provider_ops import (
     CODEX_RESET_KIND,
     NO_CREDIT,
-    NOTHING_TO_RESET,
     ProviderOperationLayer,
 )
 from tests.web_fakes import Recording
@@ -271,16 +270,19 @@ class ResetOperationTests(ResetFixture):
         self.press("web-codex-reset-abc")
         self.assertEqual(self.provider.posted[0][2], {"redeem_request_id": "web-codex-reset-abc"})
 
-    def test_applicable_zero_makes_no_consume_is_refused_and_recorded(self) -> None:
+    def test_applicable_zero_or_unknown_still_sends_the_consume_and_records_the_providers_answer(
+        self,
+    ) -> None:
+        """Whether a reset applies is the provider's call, made on the consume; the layer does not guess."""
         for applicable in (0, None, "garbage"):
             with self.subTest(applicable=applicable):
                 self.provider.credits = {"available_count": 1, "applicable_available_count": applicable}
+                self.provider.answer = {"code": "nothing_to_reset"}
                 answer = self.press(f"rid-{applicable}")
-                self.assertEqual(answer["outcome"], "refused")
-                self.assertEqual(answer["reason"], NOTHING_TO_RESET)
+                self.assertEqual(answer["outcome"], "nothing_to_reset")
                 record = self.audit.committed[f"rid-{applicable}"]
-                self.assertEqual((record["kind"], record["outcome"]), (CODEX_RESET_KIND, "refused"))
-        self.assertEqual(self.consumes(), 0)
+                self.assertEqual((record["kind"], record["outcome"]), (CODEX_RESET_KIND, "nothing_to_reset"))
+        self.assertEqual(self.consumes(), 3)
 
     def test_no_credit_or_no_live_reading_is_refused_without_a_consume(self) -> None:
         cases = {
@@ -299,8 +301,8 @@ class ResetOperationTests(ResetFixture):
         self.assertEqual(self.consumes(), 0)
 
     def test_the_precheck_reads_live_past_the_cache(self) -> None:
-        self.usage.usage_snapshot()  # the bar's cached reading says one usable credit
-        self.provider.credits = {"available_count": 1, "applicable_available_count": 0}
+        self.usage.usage_snapshot()  # the bar's cached reading says one credit
+        self.provider.credits = {"available_count": 0, "applicable_available_count": 0}
         self.assertEqual(self.press()["outcome"], "refused")
         self.assertEqual(self.consumes(), 0)
 
@@ -453,26 +455,27 @@ def codex_place(credits: Any, *, carry: bool = True, age: float = 0.0) -> str:
 
 
 class ButtonTests(unittest.TestCase):
-    def test_enabled_only_when_a_credit_is_usable_and_it_names_what_it_spends(self) -> None:
-        bar = codex_place({"available": 2, "applicable": 1, "next_expires_at": None})
-        self.assertIn(
-            '<button type="button" class="bar-reset" data-codex-reset '
-            'data-confirm="Spend 1 of 2 Codex reset credits?"',
-            bar,
-        )
-        self.assertNotIn("disabled", bar)
-        self.assertLess(bar.index('class="credits"'), bar.index('class="bar-reset"'))
-
-    def test_disabled_with_its_hint_when_nothing_is_exhausted(self) -> None:
-        for applicable in (0, None):
+    def test_enabled_whenever_a_credit_is_available_and_it_names_what_it_spends(self) -> None:
+        for applicable in (1, 0, None):
             with self.subTest(applicable=applicable):
-                bar = codex_place({"available": 1, "applicable": applicable, "next_expires_at": None})
+                bar = codex_place({"available": 2, "applicable": applicable, "next_expires_at": None})
                 self.assertIn(
-                    '<button type="button" class="bar-reset" disabled '
-                    'title="nothing to reset: no Codex window is exhausted">reset</button>',
+                    '<button type="button" class="bar-reset" data-codex-reset '
+                    'data-confirm="Spend 1 of 2 Codex reset credits?"',
                     bar,
                 )
-                self.assertNotIn("data-codex-reset", bar)
+                self.assertNotIn("disabled", bar)
+                self.assertNotIn("exhausted", bar)
+
+    def test_the_button_sits_inside_the_folded_credits_with_the_applicability_line(self) -> None:
+        bar = codex_place({"available": 1, "applicable": 0, "next_expires_at": None})
+        details = bar[bar.index('<details class="credits">') : bar.index("</details>")]
+        self.assertIn('class="bar-reset"', details)
+        self.assertIn(pages.RESET_NOT_APPLICABLE, details)
+        self.assertLess(details.index("pop-line warn"), details.index('class="bar-reset"'))
+        bar = codex_place({"available": 1, "applicable": 1, "next_expires_at": None})
+        self.assertIn(pages.RESET_APPLICABLE, bar)
+        self.assertNotIn(pages.RESET_NOT_APPLICABLE, bar)
 
     def test_absent_with_no_available_credit_or_on_a_fallback_reading(self) -> None:
         for credits, carry, age in (
