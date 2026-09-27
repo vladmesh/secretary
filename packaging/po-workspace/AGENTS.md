@@ -19,12 +19,35 @@ A `code`, `research` or `infra` card you create with no `--sprint` needs no over
 is the dispatcher's admission: on a project an open sprint reserves, `research` and `infra` run and a
 `code` card is blocked with a reason naming the sprint; move it back to Ready after that sprint closes.
 
+## Delegation
+
+Your turn is a conversation with the owner, not a place to do long work. Work that would take longer
+than about a minute, or read more than about ten files, becomes a card (`task create --role po`),
+unless the owner explicitly asks you to do it yourself. Pick the kind that fits: `research` to find
+something out, `code` or `infra` to change something, `decision` or `operation` for something short
+only you can do, `wait` to wait for a fact.
+
+A card you create inside a turn remembers this session and the owner's message it answers (its
+origin; nothing to pass, the turn's environment names both). When it settles in Done or Blocked, its
+result comes back to this same session as a new input: the report or completion record, or the
+Blocked reason and classification, with its links. Answer the owner from that input then; do not sit
+in the turn waiting for it. A `decision` or `operation` card you cut here with no `--sprint` is
+handed back to this session to execute, like a sprint's card is to the sprint's session.
+
+Background jobs are not a way to wait: no `run_in_background`, `nohup`, `&`, `systemd-run`, or a `gh
+run watch` left running. They die with the turn or outlive it unseen, and nobody reads their result.
+A long wait becomes a `wait` card; the dispatcher watches the target and delivers the outcome here.
+Without `--wait-return` inside a turn, the outcome comes back to this session:
+
+    python3 -P -m secretary task create --role po --project <project> --type wait --title <title> --wait-run <run URL>|--wait-card <ref> --wait-states <state>[,<state>]|--wait-until <UTC> --wait-deadline <UTC>|<duration> [--wait-return observer|po-session:<id>|dependents]... [--wait-transient-window <duration>] [--sprint <sprint>]
+
 ## Decision and operation cards
 
 A sprint's observer (or you) can cut a `decision` card, a question for you, or an `operation` card,
 a short action for you. No head runs them: the dispatcher hands each one to its sprint's PO session as
-an input that carries the card, the sprint's comments and the exact command to complete it. Answer it
-in that turn and complete the card before the turn ends:
+an input that carries the card, the sprint's comments and the exact command to complete it; one you
+cut in a turn with no `--sprint` goes to the session of that turn instead. Answer it in that turn and
+complete the card before the turn ends:
 
     python3 -P -m secretary task complete --ref <card> --role po --kind decision|operation --body-file <file> --request-id <id>
 
@@ -43,6 +66,8 @@ with a `## Production rights (the PO service)` section at the end of the input: 
 sprint <ref> allows [<list>]`.
 
 - When it says the sprint allows it, run the operation: no confirmation is needed.
+- An operation cut outside every sprint has no sprint allowance: the section says so, and you decide
+  under the owner's standing rule below, with nothing to record; if you may not, hand it to the owner.
 - When the sprint does not allow it, decide under the owner's standing rule. Production of secretary is
   allowed by default, because it is the development server. Any other production is allowed only as agreed
   at sprint planning (the sprint's comments and its why-document say what was agreed). If you may allow

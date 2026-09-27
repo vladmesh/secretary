@@ -432,9 +432,11 @@ class PoService:
         say the sprint allows it; any other production is the PO's to decide under the owner's
         standing rule, with the command that records the allowance. A decision card names no
         production, and the owner's answer to a card handed to the owner is not evaluated again (the
-        owner decided): neither gets a note. Facts that are missing or
-        malformed, and a sprint that cannot be read, refuse the input as `unavailable`: it is never
-        executed without its verdict, and the dispatcher repeats it.
+        owner decided): neither gets a note. An operation cut outside every sprint (an empty
+        `sprint_ref`, secretary-1792) has no allowance to read: its note says so, and the PO decides it
+        under the owner's standing rule. Facts that are missing or malformed, and a sprint that cannot
+        be read, refuse the input as `unavailable`: it is never executed without its verdict, and the
+        dispatcher repeats it.
         """
         problem = facts_problem(card)
         if problem:
@@ -450,6 +452,13 @@ class PoService:
         allow_id = f"{request_id}:allow-production"
         if production == NO_PRODUCTION:
             return rights_note(production, sprint_ref, None, request_id=allow_id)
+        if not sprint_ref:
+            # Cut outside every sprint by a PO session (secretary-1792): no allowance to read.
+            _say(
+                f"secretary po: {card['card_ref']} queued for the PO to decide: touches production "
+                f"{production}; no sprint"
+            )
+            return rights_note(production, "", None, request_id=allow_id)
         try:
             sprint = self._sprint_sessions().sprint(sprint_ref)
         except Exception as exc:  # noqa: BLE001 - a sprint that cannot be read runs nothing

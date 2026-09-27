@@ -24,6 +24,7 @@ from secretary.board.task_routing import (
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
+from secretary.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.tasks import (
     BOARD_STORE_KIND,
@@ -350,7 +351,8 @@ def _add_wait_create_args(parser) -> None:
         action="append",
         default=[],
         metavar="ADDRESS",
-        help="required, repeatable: observer (a sprint's card only), po-session:<id> or dependents",
+        help="repeatable: observer (a sprint's card only), po-session:<id> or dependents; required, except "
+        "inside a PO turn with --role po, where none means the session of that turn",
     )
     group.add_argument(
         "--wait-transient-window",
@@ -499,10 +501,34 @@ def run_task_create(args: argparse.Namespace) -> int:
             live_impact=args.live_impact,
             touches_production=args.touches_production,
             wait=_wait_args(args),
+            origin=_po_turn_origin(args.role),
             request_id=args.request_id,
         )
 
     return run_task_command(command)
+
+
+def _po_turn_session() -> str:
+    """The PO session whose turn runs this command (`SECRETARY_PO_SESSION`), or `""` outside one.
+
+    `task complete` and `task handover` record it (secretary-1792): the proof that a delegated card's
+    origin session already has its result. It permits nothing, and no flag sets it.
+    """
+    return os.environ.get(PO_SESSION_ENV, "").strip()
+
+
+def _po_turn_origin(role: str) -> dict[str, str] | None:
+    """The PO turn a `--role po` create runs in, from the turn's environment; None anywhere else.
+
+    `PoRunner.session_environment` sets both variables in every PO turn. No flag sets them, and no
+    other role's create reads them: an origin is only ever the PO turn itself (secretary-1792).
+    """
+    if role != Role.PO.value:
+        return None
+    session = os.environ.get(PO_SESSION_ENV, "").strip()
+    if not session:
+        return None
+    return {"session": session, "request": os.environ.get(PO_REQUEST_ENV, "").strip()}
 
 
 def run_task_edit(args: argparse.Namespace) -> int:
@@ -563,6 +589,7 @@ def run_task_complete(args: argparse.Namespace) -> int:
             kind=args.kind,
             body=body,
             request_id=args.request_id,
+            po_session=_po_turn_session(),
         ),
     )
 
@@ -577,6 +604,7 @@ def run_task_handover(args: argparse.Namespace) -> int:
             to=args.to,
             reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
+            po_session=_po_turn_session(),
         ),
     )
 

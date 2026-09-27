@@ -66,13 +66,13 @@ class EntityTests(unittest.TestCase):
             {"card_handed_to_owner", "steward_needs_human"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
-                     "po_turn_failed", "provider_red"):
+                     "po_turn_failed", "provider_red", "delegated_card_settled"):
             self.assertEqual(class_of(kind), NOTICE, kind)
         with self.assertRaises(ValueError):
             class_of("card_moved")
 
     def test_the_schema_and_the_revision_spell_the_same_vocabularies(self) -> None:
-        """The CHECKs of `board/schema.py` and of 0018 are the lists this module derives classes from."""
+        """The CHECKs of `board/schema.py`, 0018 and 0021 are the lists this module derives classes from."""
         table = schema.metadata.tables["owner_events"]
         import sqlalchemy as sa
 
@@ -88,10 +88,19 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", needs)), set(owner_events.NEEDS_OWNER_KINDS))
         revision = importlib.import_module("secretary.board.migrations.versions.0018_owner_events")
         source = Path(revision.__file__).read_text(encoding="utf-8")
-        for text in checks.values():
-            if "kind" in text or "class" in text:
-                self.assertIn(text.replace("\n", ""), source.replace('"\n            "', ""))
+        # 0021 restates the kind vocabulary with `delegated_card_settled` (secretary-1792); the two
+        # class CHECKs are still the ones 0018 created.
+        restated = importlib.import_module("secretary.board.migrations.versions.0021_delegated_card_settled")
+        restated_source = Path(restated.__file__).read_text(encoding="utf-8")
+        for name, text in checks.items():
+            spelled_in = restated_source if name == "owner_event_kind_in_vocabulary" else source
+            self.assertIn(
+                text.replace("\n", ""),
+                spelled_in.replace('"\n            "', "").replace('"\n        "', ""),
+                name,
+            )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
+        self.assertEqual(restated.down_revision, "0020_wait_card_kind")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()
@@ -132,6 +141,38 @@ class EntityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k5", to=Path(tmp)))
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k6", to=SimpleNamespace(call=None)))
+
+    def test_the_strict_writer_answers_written_present_failed_or_not_applicable(self) -> None:
+        """secretary-1792: the one caller whose work is complete only with its event hears how it went."""
+        store = FakeOwnerEvents()
+        self.assertEqual(owner_events.record_strict("delegated_card_settled", REF, "x", "d1", to=store), "written")
+        self.assertEqual(
+            owner_events.record_strict("delegated_card_settled", REF, "again", "d1", to=store), "already_present"
+        )
+        self.assertEqual(len(store.rows), 1)
+        missing = FakeOwnerEvents()
+        missing.missing_table = True
+        broken = FakeOwnerEvents()
+        broken.failing = RuntimeError("connection reset")
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            for to, kind, key in (
+                (missing, "delegated_card_settled", "d2"),
+                (broken, "delegated_card_settled", "d3"),
+                (FakeOwnerEvents(), "not_a_kind", "d4"),
+                (FakeOwnerEvents(), "delegated_card_settled", ""),
+            ):
+                with self.subTest(kind=kind, key=key):
+                    self.assertEqual(owner_events.record_strict(kind, REF, "x", key, to=to), "failed")
+        # No board store configured at all: nothing to wait for, logged, never raised.
+        with self.assertLogs("secretary.board.owner_events", level="INFO"):
+            self.assertEqual(
+                owner_events.record_strict("delegated_card_settled", REF, "x", "d5", to=None), "not_applicable"
+            )
+        with tempfile.TemporaryDirectory() as tmp, self.assertLogs("secretary.board.owner_events", level="INFO"):
+            self.assertEqual(
+                owner_events.record_strict("delegated_card_settled", REF, "x", "d6", to=Path(tmp)),
+                "not_applicable",
+            )
 
     def test_a_postgres_store_without_the_table_is_unavailable_not_an_error_of_the_caller(self) -> None:
         import psycopg

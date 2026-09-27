@@ -246,7 +246,8 @@ def _restore_board_history(data_dir: Path, audit: Any) -> None:
         if not isinstance(request_id, str) or not request_id or not isinstance(event_id, str) or not event_id:
             raise RestoreError("normalized board audit export contains an invalid event")
         try:
-            audit.append(request_id, event)
+            # History, not new transitions: it owes no origin return (`SqlTaskAudit.append`).
+            audit.append(request_id, event, restoring=True)
         except TaskError as exc:
             raise RestoreError(f"normalized board audit restore failed: {exc.message}") from None
 

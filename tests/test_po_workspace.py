@@ -31,6 +31,42 @@ PO_SKILLS = {"open-sprint", "open-issue", "grilling", "knowledge-doc"}
 PO_TARGETS = {"claude-po-workspace": ".claude/skills", "codex-po-workspace": ".agents/skills"}
 
 
+class InstructionsTests(unittest.TestCase):
+    """The PO instructions `upgrade` ships carry the delegation rule (secretary-1792)."""
+
+    def setUp(self) -> None:
+        self.agents = workspace.agents_source(ROOT).read_text(encoding="utf-8")
+        self.flat = " ".join(self.agents.split())
+
+    def test_long_work_becomes_a_card_unless_the_owner_asks(self) -> None:
+        for rule in (
+            "longer than about a minute",
+            "read more than about ten files",
+            "becomes a card",
+            "unless the owner explicitly asks you to do it yourself",
+            "comes back to this same session as a new input",
+        ):
+            self.assertIn(rule, self.flat)
+
+    def test_background_jobs_are_not_a_way_to_wait_and_a_long_wait_is_a_wait_card(self) -> None:
+        self.assertIn("Background jobs are not a way to wait", self.flat)
+        for job in ("`run_in_background`", "`nohup`", "`&`", "`systemd-run`", "run watch` left running"):
+            self.assertIn(job, self.flat)
+        self.assertIn("A long wait becomes a `wait` card", self.flat)
+
+    def test_it_quotes_the_wait_card_form_of_the_protocols_exactly(self) -> None:
+        protocols = (ROOT / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
+        section = protocols[
+            protocols.index("### Wait cards") : protocols.index("### Owner events and the bell")
+        ]
+        [form] = [
+            line.strip()
+            for line in section.splitlines()
+            if "task create" in line and "--type wait" in line and line.strip().startswith("python3")
+        ]
+        self.assertIn(form, self.agents)
+
+
 class PoWorkspaceStepTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()

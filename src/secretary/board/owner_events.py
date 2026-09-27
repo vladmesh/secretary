@@ -8,13 +8,16 @@ touches it. Producers write through :func:`record`; the web reads and marks thro
 (:data:`KIND_CLASS`), never passed by a producer. `needs_owner` is a fact only the owner can move on:
 a card the PO handed to the owner, the steward's report card that needs a human. `notice` is a fact
 the owner should know: a sprint closed or stopped, the budget signal, a dead head nobody relaunched, a
-failed PO turn, a red provider. The database holds both vocabularies and the kind-to-class rule as
+failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
 CHECK constraints (`board/schema.py`), from the same lists.
 
 **The writer never fails its caller.** :func:`record` is idempotent under its dedup key (a unique
 column: a repeat inserts nothing) and swallows every failure after logging it: a store that does not
 answer, a board without migration `0018` (merged code runs before the upgrade applies the migration),
-a store that is not configured at all. A producer's own work never depends on the bell.
+a store that is not configured at all. A producer's own work never depends on the bell. The one
+exception is :func:`record_strict`, for a caller whose work is complete only with its event (a
+delegated card's returned result, secretary-1792): the same write, answered as written, already
+present or failed instead of swallowed, so that caller repeats it.
 
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark
 (`board.owner_handover`) is never marked read by a click or by "mark all read": :meth:`mark_read`
@@ -52,10 +55,11 @@ OBSERVER_DEAD = "observer_dead"
 HEAD_DEAD = "head_dead"
 PO_TURN_FAILED = "po_turn_failed"
 PROVIDER_RED = "provider_red"
+DELEGATED_CARD_SETTLED = "delegated_card_settled"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018) are these two lists. A new kind joins it
-#: here and in a migration together.
+#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021) are these two lists. A
+#: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
@@ -66,6 +70,8 @@ KIND_CLASS: dict[str, str] = {
     HEAD_DEAD: NOTICE,
     PO_TURN_FAILED: NOTICE,
     PROVIDER_RED: NOTICE,
+    # A card a PO session delegated settled and its result went back to that session (0021).
+    DELEGATED_CARD_SETTLED: NOTICE,
 }
 KINDS = tuple(KIND_CLASS)
 NEEDS_OWNER_KINDS = tuple(kind for kind, value in KIND_CLASS.items() if value == NEEDS_OWNER)
@@ -369,6 +375,41 @@ def record(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to:
         return False
 
 
+#: The answers of :func:`record_strict`.
+WRITTEN = "written"
+ALREADY_PRESENT = "already_present"
+FAILED = "failed"
+NOT_APPLICABLE = "not_applicable"
+
+
+def record_strict(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to: Any) -> str:
+    """Write one owner event for a caller whose own work is not complete without it (secretary-1792).
+
+    The same write as :func:`record`, answered three ways instead of swallowed: :data:`WRITTEN`,
+    :data:`ALREADY_PRESENT` under `dedup_key`, or :data:`FAILED` when the store raised or did not
+    answer (logged), which the caller repeats under the same key. An installation with no board store
+    configured at all answers :data:`NOT_APPLICABLE` (logged): there is no bell to wait for. It never
+    raises. An unknown kind or an empty key is the caller's defect and answers :data:`FAILED`.
+    """
+    try:
+        class_of(kind)
+        if not str(dedup_key or "").strip():
+            raise ValueError("an owner event needs a dedup key")
+        sink = _sink(to)
+    except Exception as exc:  # noqa: BLE001 - answered, not raised
+        logger.warning("owner event %s (%s) not recorded: %s: %s", kind, dedup_key, type(exc).__name__, exc)
+        return FAILED
+    if sink is None:
+        logger.info("owner event %s (%s) not recorded: no board store to record it in", kind, dedup_key)
+        return NOT_APPLICABLE
+    try:
+        written = bool(sink.insert(kind, subject_ref or None, _bounded(text), dedup_key))
+    except Exception as exc:  # noqa: BLE001 - the caller repeats it under the same key
+        logger.warning("owner event %s (%s) not recorded: %s: %s", kind, dedup_key, type(exc).__name__, exc)
+        return FAILED
+    return WRITTEN if written else ALREADY_PRESENT
+
+
 def settle(subject_ref: str, *, to: Any) -> int:
     """Mark read every unread `needs_owner` event of a card whose mark just cleared; never raises."""
     try:
@@ -387,21 +428,26 @@ def _bounded(text: str) -> str:
 
 
 __all__ = [
+    "ALREADY_PRESENT",
     "BUDGET_SIGNAL",
     "CARD_HANDED_TO_OWNER",
     "CLASSES",
+    "DELEGATED_CARD_SETTLED",
+    "FAILED",
     "HEAD_DEAD",
     "KINDS",
     "KIND_CLASS",
     "NEEDS_OWNER",
     "NEEDS_OWNER_KINDS",
     "NOTICE",
+    "NOT_APPLICABLE",
     "OBSERVER_DEAD",
     "PO_TURN_FAILED",
     "PROVIDER_RED",
     "SPRINT_CLOSED",
     "SPRINT_STOPPED",
     "STEWARD_NEEDS_HUMAN",
+    "WRITTEN",
     "OwnerEvent",
     "OwnerEventError",
     "OwnerEventNotFound",
@@ -414,5 +460,6 @@ __all__ = [
     "needs_human_section",
     "po_session_subject",
     "record",
+    "record_strict",
     "settle",
 ]

@@ -183,7 +183,9 @@ executed by the PO service in a turn of the sprint's PO session, never by a head
 no-candidate kinds: no workspace, branch, pull request, CI or reviewer.
 
 **Create.** The observer or the PO creates one (`task create --type decision|operation`, no other
-role). It must carry `--sprint`, and it refuses, each with its reason, `--head`, `--review-head`,
+role). It must carry `--sprint`, except when the PO cuts it inside a PO turn: such a card carries its
+[origin](#po-delegation) and may name no sprint, and the session of that turn executes it (below).
+With no sprint and no origin it is refused (`validation`) as before. It refuses, each with its reason, `--head`, `--review-head`,
 `--review required`, `--live-impact`, `--seed-ref` and `--base-branch`. Its review is `skipped`, and
 a sprint's executor pins do not apply to it. The PO needs no `--sprint-override` to create one in its
 sprint.
@@ -202,7 +204,13 @@ claim moves the card In progress; such a card neither takes nor counts against t
 which counts heads. The dispatcher then:
 
 1. resolves the sprint's PO session, `sprint_session(sprint_ref, request_id)` (see
-   [The sprint's PO session and productions](#the-sprints-po-session-and-productions));
+   [The sprint's PO session and productions](#the-sprints-po-session-and-productions)). A card with no
+   sprint goes instead to its origin session, or to the session that succeeded it in the card's origin
+   line (`session_outcome: origin`; no sprint is resolved and no session opened). When that session is
+   closed or missing at the submit, the dispatcher opens its successor the way a result return does
+   ([PO delegation](#po-delegation)), records it on the card and submits there under the same submit id;
+   a successor that cannot be opened yet postpones the submit to the next tick (`po-service-unanswered`).
+   Such a card's input says it belongs to no sprint and carries no sprint comments;
 2. submits one input to that session, `source: dispatcher`, carrying the card ref, kind and title, the
    card body, the sprint's comments in board order, and the exact completion command, and beside the
    text the card's structured facts (`card`, below):
@@ -219,8 +227,10 @@ python3 -P -m secretary task handover --ref <card> --role po --to owner --reason
 ```
 
 The facts are `{card_ref, kind, touches_production, sprint_ref, input}`: `touches_production` is the
-operation card's value (`null` on a decision card), and `input` is `card` for this submit and
-`owner_answer` for a follow-up carrying the owner's answer (below). They are part of the submit's
+operation card's value (`null` on a decision card), `sprint_ref` is empty for a card with no sprint,
+and `input` is `card` for this submit and `owner_answer` for a follow-up carrying the owner's answer
+(below). A card with an origin records the session it is submitted to on itself (`po_return.executor`),
+before the submit, for its reader; it is no proof of who completed the card. They are part of the submit's
 fingerprint (`send_fingerprint(session, text, card)`, in `po_requests` and on the queued input), so a
 replay is the same session, text and facts, and anything else under the same id is `request_conflict`
 as before. A web input carries none, and a send without facts binds exactly what it bound before them.
@@ -270,7 +280,9 @@ as the PO's comment in the same transaction:
 a comment the PO wrote, the way the infra record is read only from the dispatcher's. The same request
 id repeated with the same body is a replay that writes nothing; with another body it is
 `request_conflict`. `task complete` does not pass the sprint guard: it is the PO executing its
-sprint's card, not an override move.
+sprint's card, not an override move. Run inside a PO turn it records that turn's session
+(`SECRETARY_PO_SESSION`) in the transition's data as `po_session`; a repeat keeps the recorded one. It
+permits nothing; a delegated card's result return reads it ([PO delegation](#po-delegation)).
 
 **Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and the
 service's queue directory, not the service: `po_requests` names the turn the input became once the
@@ -324,6 +336,14 @@ The rights section is the service's, not the submitter's: the request id binds t
 and card facts only, so a repeat of the same submit id answers the input already queued (or its turn)
 whatever the sprint allows by then. A sprint opened before `allowed_productions` existed reads `[]`, so
 each of its operations goes to the PO turn above, never straight to the owner.
+
+An operation cut outside every sprint (`sprint_ref` empty, [PO delegation](#po-delegation)) has no
+sprint allowance to read or to record. Its rights section says so, `touches production <p>; no sprint`,
+and tells the PO to decide it under the same standing rule: production of secretary is allowed by
+default; any other production only when the owner agreed to it, in the session or on the card; if not,
+the PO hands the card to the owner. There is nothing for `sprint allow-production` to record, and the
+service journal says `<card> queued for the PO to decide: touches production <p>; no sprint`. Its
+`none` reads `touches production none: nothing to allow`.
 
 A decision card gets no rights section. Neither does the owner's answer on a handed-over card (`input:
 owner_answer`): the owner decided, so the follow-up is queued as today, its production line says the
@@ -423,7 +443,8 @@ card, so a restarted dispatcher (or PO service) continues where the last one sto
 no-candidate kind: no workspace, branch, pull request, CI, reviewer or broad check.
 
 **Create.** The PO, or the observer for its own sprint (`--sprint` required for the observer), runs
-`task create --type wait` with exactly one target, a deadline and at least one return address:
+`task create --type wait` with exactly one target, a deadline and at least one return address (none,
+for the PO inside a PO turn):
 
 | Flag | Meaning |
 | --- | --- |
@@ -431,8 +452,20 @@ no-candidate kind: no workspace, branch, pull request, CI, reviewer or broad che
 | `--wait-card <ref> --wait-states <state>[,<state>]` | another card reaching one of the named states |
 | `--wait-until <UTC>` | a point in time, ISO-8601 with its zone; not after the deadline |
 | `--wait-deadline <UTC>\|<duration>` | required: an absolute time with its zone, or a duration from creation (`90m`, `2h`, `1d12h`); it must lie in the future |
-| `--wait-return <address>` | required, repeatable: `observer` (a card with `--sprint` only), `po-session:<id>` (a session the PO store holds and that is open), `dependents` |
+| `--wait-return <address>` | required (inside a PO turn, optional: see below), repeatable: `observer` (a card with `--sprint` only), `po-session:<id>` (a session the PO store holds and that is open), `dependents` |
 | `--wait-transient-window <duration>` | how long consecutive transient source errors may last before `source_unreachable`; default `30m` |
+
+The form, as the PO instructions quote it:
+
+```text
+python3 -P -m secretary task create --role po --project <project> --type wait --title <title> --wait-run <run URL>|--wait-card <ref> --wait-states <state>[,<state>]|--wait-until <UTC> --wait-deadline <UTC>|<duration> [--wait-return observer|po-session:<id>|dependents]... [--wait-transient-window <duration>] [--sprint <sprint>]
+```
+
+`--wait-return` is required everywhere except inside a PO turn with `--role po`: there, a wait with no
+`--wait-return` returns to the session of that turn (`po-session:<its origin session>`, which is not
+looked up in the PO store: it is the session creating the card). The create's request identity keeps
+the flags as given, so no address is recorded there. A wait card delivers only through its return
+addresses: its origin never gets a second delivery ([PO delegation](#po-delegation)).
 
 A missing or malformed target, two targets, a missing deadline or one already past, an unknown or
 closed PO session and `observer` without a sprint are refused as `validation` (a PO store that cannot
@@ -549,10 +582,116 @@ frozen, delivery not complete), `delivered` (every address accepted), or the out
 A wait card moved back to Ready by hand is claimed again, keeps its frozen result and its delivery
 records, and ends the same way at once: a wait is not restarted; cut a new one.
 
+### PO delegation
+
+A PO turn is a conversation with the owner. Work that would take longer than about a minute, or read
+more than about ten files, becomes a card the PO cuts (the rule its instructions state,
+`packaging/po-workspace/AGENTS.md`), and the card's result comes back to the session that cut it as a
+new input (secretary-1792). Nothing waits in the turn, and a background job is not a way to wait: a
+long wait is a [wait card](#wait-cards).
+
+**Origin.** `task create --role po` inside a PO turn records the card's origin: the turn's session
+(`SECRETARY_PO_SESSION`) and the request id of the input the turn answers (`SECRETARY_PO_REQUEST`), both
+set by the PO service in every turn. There is no flag for it: the CLI reads the two variables for `--role
+po` only, any other role's create ignores them, and `TaskWriter.create(origin=...)` refuses an origin
+for any role but `po` (`validation`). Outside a PO turn no origin is recorded. The origin is one typed
+field of the extension bag, `extensions.extra.po_origin` (JSON `{session, request}`), written once by
+create and part of its request identity (`po_origin` in the create payload: the same turn's retry
+replays, another turn's is a conflict); nothing writes it afterwards. `task show` and `task list` carry
+an `origin` block: `po_session`, `request_id`, `current_session` (the session a result goes to now: the
+origin, or the successor that replaced it), `executor` (below) and `returns`, the card's outbox rows
+(below), oldest first (`event_id`, `state`, `created_at`, `delivered_at`, `status`, `notice`, `session`,
+`request_id`). The dispatcher's side is a second bag field, `po_return` (`executor`, `successors`),
+written only by the dispatcher (`TaskWriter.record_po_return`).
+
+**The outbox.** What a delegated card owes is written down when it becomes owed. The board store keeps
+one table, `origin_returns` (revision `0022_origin_returns`, `board/origin_outbox.py`): one row per
+transition into Done or Blocked of a card that carries an origin and is not a wait card, with the card
+ref, the transition's event id (unique) and audit request id, the column it entered, when, and its
+delivery (`delivered_at`, `status` `delivered` or `skipped`, the notice result, the session that took
+it, the input's request id). The row is written by `SqlTaskAudit.append`, the one place a committed
+audit record is written, in the same transaction as the record, and a card transition's move and its
+event commit in one transaction (`TaskWriter._transition_card`): the move, its event and its row stand
+or fall together, and no writer can commit one without the other. Every writer of a transition into
+Done or Blocked reaches it: `task move` of any role (the dispatcher's edges, a release's Done, the wait
+edges, which owe nothing since a wait card writes no row), `task complete`, and a pending transition
+finished by repair. Archive, reopen and any later move write no row and touch none. The
+normalized-board restore replays history through `append(..., restoring=True)` and owes nothing for it:
+those returns were owed, and made, when the transitions first committed (a PostgreSQL-level recovery
+restores the table itself).
+
+**Return of the result.** Each tick, after the claim pass, the dispatcher reads the undelivered
+outbox rows in id order, one indexed query, and scans no card (`dispatch/origin_returns.py`).
+`pending_returns` is that query, and it is the only thing that decides what is returned: nothing reads
+a card's present column or picks "the latest" event. A card that was Done or Blocked and was since
+reopened, moved on or archived before any pass still has its row. Rows are made oldest first; the
+first row of a card that does not complete stops that card for the tick, and its later rows wait for
+the next; no row is skipped because a later one exists. For each row, the dispatcher reads the card
+(`task show` finds an archived card) and its audit, finds the row's event by its event id, and submits
+one input to the origin session through `PoService.submit`, `source: dispatcher`, request id
+`dispatcher-origin-return-<card>-<event id>`, with the facts `{card_ref, kind: <the card's kind>,
+touches_production: null, sprint_ref, input: delegated_result}` (any kind, in a sprint or not; no rights
+section). The input carries the card ref, kind and title, the terminal state and when, the sprint, and
+the result: for Done the completion record when the Done move carries one (`[completion:...]`, with the
+decision the move names), else the worker's done report of that round, else the Done move's reason; for
+Blocked the Blocked move's reason and a classification (the round's `report:blocked` classification,
+else `board: <blocked_reason>` of the move's terminal taxonomy, else `unclassified`), with the worker's
+blocked report when it differs. The links are every GitHub pull request and Actions run URL in the
+card's audit up to that move, and the merge a release recorded. Everything about the state is the
+event's: the column it entered and when, and its result; the card's present column is never read, so
+the same row always renders the same text.
+
+The delivery is complete only when both its halves are, in this order: (1) the PO submit, idempotent by
+its request id; (2) the `delegated_card_settled` notice (below), written through the bell's strict
+writer `owner_events.record_strict`, which answers `written`, `already_present` (under the dedup key)
+or `failed` (the store raised or did not answer) instead of swallowing the failure as `record` does for
+every other producer; (3) the row marked delivered, only after (1) and (2) were accepted. The row is the
+only delivery record. A notice that failed marks nothing (`origin-return-notice-failed`, degraded), and
+the next tick repeats both steps under the same keys: the submit is the earlier input to the service (a
+`request_conflict` on an id the service holds for the session is taken as it), the notice a no-op on its
+dedup key. A crash between any two steps is repaired the same way: no second input, no second notice.
+An installation with no board store configured at all has no bell: the strict writer answers
+`not_applicable` (logged), which does not hold the delivery, and the row says so (`notice`). A marked
+row is never selected again.
+
+The PO delivery is the one the wait cards use (`dispatch/po_delivery.py`). A service that does not
+answer, or refuses, postpones it to the next tick (`origin-return-postponed`, degraded). A closed or
+missing origin session never loses the result: the dispatcher opens one successor, through
+`sprint_session` when it is the recorded session of the card's open sprint, through `create_session`
+with its CLI, model and effort otherwise (`po.models.successor_choice`), under request id
+`dispatcher-origin-successor-<card>-<closed session>`, recorded in `po_return.successors` (route before
+the call, session after it). The successor is the card's origin line from then on: later results, and
+an out-of-sprint card's execution, go to it, and a successor closed in turn gets its own.
+
+**Exceptions.**
+
+- A `wait` card delivers only through its own return addresses (above); its transitions write no
+  outbox row, so its origin session never gets the outcome twice. Inside a PO turn `--wait-return` may be omitted and
+  then names the origin session.
+- A Done is skipped only on proof, carried by that Done's own transition, that the origin's line already
+  has the result; it is decided per event.
+  `task complete` records the PO session whose turn ran it (`SECRETARY_PO_SESSION`, present in every PO
+  turn; no flag) in the completion transition's data as `po_session`; `task handover` records it in the
+  handover record's payload the same way. Neither restricts who may run the command. When the Done's
+  recorded `po_session` is the origin session or one of its recorded successors (`po_return.successors`),
+  the Done's row is marked `skipped`, with no input and no notice, so it is never pending again. Anything else is delivered normally,
+  with input and notice: a completion that ran outside a PO turn (no session recorded), one by another
+  session, any Done not made by `task complete`, and every Blocked. The session the dispatcher handed the
+  card to (`po_return.executor`) proves nothing and is not asked.
+
+**Out-of-sprint decision and operation cards.** Created by the PO inside a PO turn with no `--sprint`,
+such a card is accepted; the dispatcher claims it and submits it to its origin line (see
+[Decision and operation cards](#decision-and-operation-cards)), under the same request ids, the same
+waiting and settle rules, the handover and the owner's answer, and a turn that settles without
+completing it Blocks it. Production rights have no sprint allowance to read; the PO service's rights
+section says what applies ([Production rights](#production-rights)). With no sprint and no origin it is
+refused at create; a legacy one is Blocked at claim.
+
 ### Owner events and the bell
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
-(revision `0018_owner_events`), written and read only through `secretary.board.owner_events`. A row is
+(revision `0018_owner_events`; `0021_delegated_card_settled` adds a kind), written and read only through
+`secretary.board.owner_events`. A row is
 `id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
 `created_at`, `read_at` (null while unread) and `dedup_key` (unique).
 
@@ -570,6 +709,7 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
 | `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
 | `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
+| `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
 
 **The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
 dedup_key, to=...)` once, at the place its fact is decided. It is idempotent on the dedup key (`ON
@@ -1678,7 +1818,10 @@ Two fields a sprint records at `sprint create` (board-store revision `0016`, col
 | `allowed_productions` | `--allow-production PROJECT_ID`, repeatable | registered projects whose production the sprint's operations may touch; empty by default |
 
 The PO service gives every PO turn `SECRETARY_PO_SESSION=<session_id>` (new turns, re-runs and
-relaunches alike), so a `sprint create` inside a PO turn records its session with no flag. A session id
+relaunches alike), so a `sprint create` inside a PO turn records its session with no flag. Beside it,
+`SECRETARY_PO_REQUEST=<request id>` names the request id of the input the turn answers (read from the
+PO store, so a re-run names the same one; unset when the input carried none), which a card created in
+the turn records ([PO delegation](#po-delegation)). A session id
 that is not an existing, open PO session is refused (`validation`), and so is an `--allow-production`
 that is not a project of the instance registry. Nothing is inferred: no production is allowed that was
 not named, the sprint's own reserved projects included. Both checks are reads made with the ownership

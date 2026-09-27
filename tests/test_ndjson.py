@@ -173,7 +173,8 @@ class NdjsonTests(unittest.TestCase):
                 self.assertFalse((restored / "board" / "audit.json").exists())
                 audit_target = mock.Mock()
                 _restore_board_history(restored, audit_target)
-                audit_target.append.assert_called_once_with(event["request_id"], event)
+                # History is replayed as history: it owes no origin return (secretary-1792).
+                audit_target.append.assert_called_once_with(event["request_id"], event, restoring=True)
                 self.assertEqual(audit_target.append.call_args.args[1]["text"].encode("utf-8"), TEXT.encode("utf-8"))
                 self.assertTrue(_namespace_is_exported(restored, "old"))
                 self.assertFalse(_namespace_is_exported(restored, "new"))

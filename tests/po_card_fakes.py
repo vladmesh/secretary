@@ -84,6 +84,14 @@ class OneCardBoard:
             )
         return {"action": "moved"}
 
+    def list(self, states: set[str] | None = None, **_: Any) -> list[dict[str, Any]]:
+        return [copy.deepcopy(self.card)] if not states or self.card["state"] in states else []
+
+    def record_po_return(self, *, role: str, reference: str, state: str, **_: Any) -> None:
+        """The dispatcher's `po_return` of a delegated card (secretary-1792)."""
+        assert role == "dispatcher" and reference == self.card["ref"], (role, reference)
+        self.card.setdefault("extensions", {}).setdefault("extra", {})["po_return"] = state
+
     # audit
     def committed_event(self, request_id: str) -> dict[str, Any] | None:
         return next((event for event in self.log if event["request_id"] == request_id), None)

@@ -1498,9 +1498,21 @@ class TurnEnvironmentTests(ServiceFixture):
         # The first launch, its re-run, and the re-run's relaunch over `--resume`.
         self.assertGreaterEqual(len(launches), 2)
         self.assertEqual({call["po_session"] for call in launches}, {session_id})
+        # And the request id of the input it answers (secretary-1792), read back from the store on a re-run.
+        self.assertEqual({call["po_request"] for call in launches}, {"m-1"})
         [elsewhere] = [call for call in self.calls() if call["prompt"] == "elsewhere"]
-        self.assertEqual(elsewhere["po_session"], other)
+        self.assertEqual((elsewhere["po_session"], elsewhere["po_request"]), (other, "m-other"))
         self.assertNotIn(po_runner.PO_SESSION_ENV, second.runner.env)
+        self.assertNotIn(po_runner.PO_REQUEST_ENV, second.runner.env)
+
+    def test_a_turn_whose_input_carried_no_request_id_names_none(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        with mock.patch.dict(os.environ, {po_runner.PO_REQUEST_ENV: "inherited-from-the-service"}):
+            runner = PoRunner(service.store, self.data, executables=self.executables, env=dict(os.environ))
+            environment = runner.session_environment(service.store.session(session_id), 1)
+        self.assertEqual(environment[po_runner.PO_SESSION_ENV], session_id)
+        self.assertNotIn(po_runner.PO_REQUEST_ENV, environment)
 
 
 def why(path: str, text: str) -> WhyDocument:

@@ -80,6 +80,18 @@ class FakePoStore:
         with board.lock:
             return board.requests.get(request_id)
 
+    def turn_request_id(self, session_id: str, seq: int) -> str | None:
+        board = self._open()
+        with board.lock:
+            return next(
+                (
+                    known.request_id
+                    for known in board.requests.values()
+                    if (known.session_id, known.seq, known.operation) == (session_id, seq, SEND)
+                ),
+                None,
+            )
+
     def _known(self, board: FakeBoard, request_id: str | None, operation: str, fingerprint: str):
         if request_id is None or request_id not in board.requests:
             return None

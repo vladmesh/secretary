@@ -72,8 +72,9 @@ SELECT
 #: and adds two on `tasks`: the review choice vocabulary and live impact being research-only.
 #: `0012` and `0013` add non-unique indexes on `requests` only, so no number here moves. `0017`
 #: restates the `task_type` CHECK again, one for one. `0018` adds `owner_events`: three `CHECK`, one
-#: primary key, one `UNIQUE`.
-DOCUMENTED_COUNTS = (29, 53, 44, 29, 18, 5)
+#: primary key, one `UNIQUE`. `0022` adds `origin_returns`: three `CHECK`, one primary key, one
+#: `UNIQUE` (its partial index is not unique).
+DOCUMENTED_COUNTS = (30, 56, 44, 30, 19, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -97,6 +98,8 @@ REVISIONS = (
     "0018_owner_events",
     "0019_po_session_title",
     "0020_wait_card_kind",
+    "0021_delegated_card_settled",
+    "0022_origin_returns",
 )
 
 
@@ -476,6 +479,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -732,6 +737,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1110,6 +1117,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1149,6 +1158,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1228,6 +1239,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1245,6 +1258,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0018_owner_events",
                 "0019_po_session_title",
                 "0020_wait_card_kind",
+                "0021_delegated_card_settled",
+                "0022_origin_returns",
             ),
         )
 
@@ -1347,7 +1362,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"),
         )
 
         self.assertEqual(
@@ -1400,7 +1415,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         self.assertEqual(
             (
@@ -1477,7 +1492,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -1509,7 +1524,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
@@ -1536,7 +1551,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-7", task_type="wait")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind",))
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
         self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
@@ -1556,6 +1571,60 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(migrate.current_revision(connection), "0019_po_session_title")
         with self.assertRaises(sa.exc.IntegrityError):
             self.card(connection, "secretary-7", task_type="wait")
+        connection.rollback()
+
+    # --- 0021: the owner event kind of a delegated card's returned result -----------------------
+
+    def test_0021_keeps_every_event_and_admits_delegated_card_settled_as_a_notice(self) -> None:
+        """secretary-1792: every existing event loads unchanged; the new kind is a notice, nothing else new."""
+        import sqlalchemy as sa
+        from alembic import command
+
+        from secretary.board.owner_events import DELEGATED_CARD_SETTLED, OwnerEventStore, record
+
+        def insert(kind: str, event_class: str, key: str) -> None:
+            connection.exec_driver_sql(
+                'INSERT INTO owner_events (kind, "class", subject_ref, text, created_at, dedup_key) '
+                f"VALUES ('{kind}', '{event_class}', 'secretary-1', 'text', now(), '{key}')"
+            )
+
+        connection = self.owner_connection()
+        config = migrate.alembic_config(connection=connection, passwords=self.passwords)
+        command.upgrade(config, "0020_wait_card_kind")
+        connection.commit()
+        insert("sprint_closed", "notice", "k-1")
+        insert("card_handed_to_owner", "needs_owner", "k-2")
+        connection.commit()
+        before = connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall()
+        with self.assertRaises(sa.exc.IntegrityError):
+            insert(DELEGATED_CARD_SETTLED, "notice", "k-3")
+        connection.rollback()
+
+        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns"))
+
+        self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
+        store = OwnerEventStore(self.credentials("app"))
+        self.assertTrue(record(DELEGATED_CARD_SETTLED, "secretary-1", "settled Done", "d-1", to=store))
+        self.assertFalse(record(DELEGATED_CARD_SETTLED, "secretary-1", "settled Done", "d-1", to=store))
+        [event] = [event for event in store.events() if event.kind == DELEGATED_CARD_SETTLED]
+        self.assertEqual((event.event_class, event.subject_ref, event.dedup_key), ("notice", "secretary-1", "d-1"))
+        # The class still follows the kind, and an unknown kind is still refused.
+        for kind, event_class in ((DELEGATED_CARD_SETTLED, "needs_owner"), ("card_settled", "notice")):
+            with self.subTest(kind=kind, event_class=event_class), self.assertRaises(sa.exc.IntegrityError):
+                insert(kind, event_class, f"x-{kind}-{event_class}")
+            connection.rollback()
+
+        # The downgrade restores 0018's vocabulary, which the new event does not fit.
+        with self.assertRaises(sa.exc.IntegrityError):
+            command.downgrade(config, "0020_wait_card_kind")
+        connection.rollback()
+        connection.exec_driver_sql(f"DELETE FROM owner_events WHERE kind = '{DELEGATED_CARD_SETTLED}'")
+        connection.commit()
+        command.downgrade(config, "0020_wait_card_kind")
+        connection.commit()
+        self.assertEqual(migrate.current_revision(connection), "0020_wait_card_kind")
+        with self.assertRaises(sa.exc.IntegrityError):
+            insert(DELEGATED_CARD_SETTLED, "notice", "k-4")
         connection.rollback()
 
 
