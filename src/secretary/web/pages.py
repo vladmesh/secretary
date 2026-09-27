@@ -1806,14 +1806,14 @@ def owner_event_subject(subject: str) -> str:
 
 
 def owner_events(document: dict[str, Any]) -> str:
-    """The bell's list: every event newest first, open `needs_owner` events pinned, unread highlighted.
+    """The bell's list: the unread by default, or every event, newest first, open `needs_owner` pinned.
 
     A notice is marked read by its own button, and "Mark all read" takes the notices only. A
     `needs_owner` event whose card still waits for the owner has no button: its card clears it.
     """
     unread_only = bool(document.get("unread_only"))
     events = [event for event in document.get("events") or [] if isinstance(event, dict)]
-    back = '<input type="hidden" name="unread" value="1">' if unread_only else ""
+    back = f'<input type="hidden" name="view" value="{"unread" if unread_only else "all"}">'
     rows = []
     for event in events:
         label, tone = OWNER_EVENT_CLASSES.get(str(event.get("class") or ""), (str(event.get("class") or "?"), ""))
@@ -1851,8 +1851,8 @@ def owner_events(document: dict[str, Any]) -> str:
     unread_mark = ' aria-current="true"' if unread_only else ""
     actions = (
         '<div class="owner-events-actions">'
-        f'<div class="filters"><a href="/owner-events"{all_mark}>All</a>'
-        f'<a href="/owner-events?unread=1"{unread_mark}>Unread</a></div>'
+        f'<div class="filters"><a href="/owner-events"{unread_mark}>Unread</a>'
+        f'<a href="/owner-events?all=1"{all_mark}>All</a></div>'
         f'<form method="post" action="/owner-events/read-all">{back}'
         '<button type="submit" class="quiet" title="marks every unread notice read; '
         'what needs the owner stays">Mark all notices read</button></form></div>'

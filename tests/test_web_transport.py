@@ -426,7 +426,7 @@ class StatusMappingTests(unittest.TestCase):
         if route.pattern == "/po/login":
             return urlencode([("token", "t")]).encode("utf-8")
         if route.pattern.startswith("/owner-events/"):
-            # The owner event forms carry only the unread filter.
+            # The owner event forms carry only the view to return to; none is the unread default.
             return b""
         if route.body == "form":
             return self.BODIES["form"]
