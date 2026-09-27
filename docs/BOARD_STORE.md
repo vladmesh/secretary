@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0020` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0021` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
@@ -709,7 +709,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0017_po_card_kinds` | `decision` and `operation` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row of `code`, `research`, `infra` or no type loads unchanged; no column; no downgrade |
 | `0018_owner_events` | `owner_events` (`id` identity, `kind`, `class`, `subject_ref`, `text`, `created_at`, `read_at`, `dedup_key` unique as `owner_event_dedup_key_is_unique`; index `owner_events_by_subject`), with `owner_event_kind_in_vocabulary`, `owner_event_class_in_vocabulary` and `owner_event_class_follows_kind`; one new table, every existing row loads unchanged; no downgrade |
 | `0019_po_session_title` | `po_sessions.title` (nullable text: a readable name the owner or the PO sets); every existing session loads untitled, then each session a `sprints.po_session` names and whose title is null takes that sprint's ref (the first created, if two sprints name it); the downgrade drops the column |
-| `0020_wait_card_kind` | `wait` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row loads unchanged; no column (the spec and state are extension-bag keys, §8.2); the downgrade restores `0017`'s vocabulary and fails while a `wait` card exists (head) |
+| `0020_wait_card_kind` | `wait` in `task_type_is_a_known_type_or_nothing`, restated one for one; every existing row loads unchanged; no column (the spec and state are extension-bag keys, §8.2); the downgrade restores `0017`'s vocabulary and fails while a `wait` card exists |
+| `0021_delegated_card_settled` | `delegated_card_settled` in `owner_event_kind_in_vocabulary`, restated one for one (a notice; `owner_event_class_follows_kind` unchanged); every existing event loads unchanged; no column (a card's origin and return state are extension-bag keys, §8.2); the downgrade restores `0018`'s vocabulary and fails while such an event exists (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1066,7 +1067,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0020_wait_card_kind`). PostgreSQL restore compares against `head_revision()`.
+  (`0021_delegated_card_settled`). PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1114,6 +1115,12 @@ A `wait` card's three keys, with no column either (`board/wait_card.py`,
 `wait_state`, the dispatcher's observation, frozen result and delivery records, written only by the
 dispatcher; and `wait_cancel`, written only by `task cancel`. Each is read through its own reader
 (`wait_spec`, `wait_state`, `wait_cancel`), which treats a field that does not parse as absent.
+
+A delegated card's two keys (`board/po_origin.py`, [Protocols](PROTOCOLS.md#po-delegation)), each JSON
+text: `po_origin`, `{session, request}` of the PO turn that created the card, written once by `task
+create --role po` inside a PO turn and never again; and `po_return`, the dispatcher's `executor`,
+`successors` and `deliveries`, written only by the dispatcher. Each is read through its own reader
+(`po_origin`, `return_state`), which treats a field that does not parse as absent.
 
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that

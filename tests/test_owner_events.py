@@ -66,13 +66,13 @@ class EntityTests(unittest.TestCase):
             {"card_handed_to_owner", "steward_needs_human"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
-                     "po_turn_failed", "provider_red"):
+                     "po_turn_failed", "provider_red", "delegated_card_settled"):
             self.assertEqual(class_of(kind), NOTICE, kind)
         with self.assertRaises(ValueError):
             class_of("card_moved")
 
     def test_the_schema_and_the_revision_spell_the_same_vocabularies(self) -> None:
-        """The CHECKs of `board/schema.py` and of 0018 are the lists this module derives classes from."""
+        """The CHECKs of `board/schema.py`, 0018 and 0021 are the lists this module derives classes from."""
         table = schema.metadata.tables["owner_events"]
         import sqlalchemy as sa
 
@@ -88,10 +88,19 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", needs)), set(owner_events.NEEDS_OWNER_KINDS))
         revision = importlib.import_module("secretary.board.migrations.versions.0018_owner_events")
         source = Path(revision.__file__).read_text(encoding="utf-8")
-        for text in checks.values():
-            if "kind" in text or "class" in text:
-                self.assertIn(text.replace("\n", ""), source.replace('"\n            "', ""))
+        # 0021 restates the kind vocabulary with `delegated_card_settled` (secretary-1792); the two
+        # class CHECKs are still the ones 0018 created.
+        restated = importlib.import_module("secretary.board.migrations.versions.0021_delegated_card_settled")
+        restated_source = Path(restated.__file__).read_text(encoding="utf-8")
+        for name, text in checks.items():
+            spelled_in = restated_source if name == "owner_event_kind_in_vocabulary" else source
+            self.assertIn(
+                text.replace("\n", ""),
+                spelled_in.replace('"\n            "', "").replace('"\n        "', ""),
+                name,
+            )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
+        self.assertEqual(restated.down_revision, "0020_wait_card_kind")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()

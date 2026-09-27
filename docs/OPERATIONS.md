@@ -409,6 +409,11 @@ The web never starts a turn itself.
 **Turn environment.** Every turn process gets `SECRETARY_PO_SESSION=<session_id>` beside the product
 runtime's `PATH`/`PYTHONPATH`, on its first launch, a re-run and a relaunch alike. `sprint create` inside
 a turn takes it as the default of `--po-session`, so the sprint records the session that opened it.
+Beside it, `SECRETARY_PO_REQUEST=<request id>` names the input the turn answers (read from `po_requests`
+for that turn, so a re-run names the same one; unset when the input carried no request id, and never
+inherited from the service's own environment). `task create --role po` inside a turn records both as
+the card's origin, and the card's result comes back to that session when it settles
+([Protocols](PROTOCOLS.md#po-delegation)).
 
 **Session title.** `po_sessions.title` (0019) is a readable name, null for an untitled session. The owner
 sets it from the session page (`POST /po/sessions/ID/title`, field `title`); the PO sets its own with

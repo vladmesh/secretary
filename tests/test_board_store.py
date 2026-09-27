@@ -479,6 +479,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0021_delegated_card_settled",
                 "0020_wait_card_kind",
                 "0019_po_session_title",
                 "0018_owner_events",

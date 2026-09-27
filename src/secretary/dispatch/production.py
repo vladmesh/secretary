@@ -39,6 +39,7 @@ from secretary.dispatch.observer import (
 )
 from secretary.dispatch.observer_fence import fenced_task, observer_fence
 from secretary.dispatch.pause_ops import auto_resume_expired_freeze
+from secretary.dispatch.origin_returns import reconcile_origin_returns
 from secretary.dispatch.po_cards import completion_state
 from secretary.dispatch.wait_cards import pending_wait_blockers
 from secretary.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
@@ -465,6 +466,12 @@ def _production_tick_work(
         else:
             if ready_outcome is not None:
                 outcomes.append(ready_outcome)
+    # Last, after every move this tick made (a claim can Block a decision/operation card): each
+    # delegated card that settled returns its result to the PO session that cut it, once.
+    try:
+        outcomes += reconcile_origin_returns(runtime)
+    except Exception as exc:  # noqa: BLE001 - a return that cannot be read must not stop the tick
+        errors.append(_unexpected_error("", exc))
 
     runtime.production_state.put_records(payload, records)
     checkpoint, push = _coordinate_checkpoint(runtime, payload)
@@ -875,6 +882,9 @@ class _ProbeWriter:
 
     def record_wait_state(self, *args: Any, **kwargs: Any) -> None:
         raise ProbeAbort("wait-state", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
+
+    def record_po_return(self, *args: Any, **kwargs: Any) -> None:
+        raise ProbeAbort("po-return", {"ref": kwargs.get("reference", "") or (args[0] if args else "")})
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

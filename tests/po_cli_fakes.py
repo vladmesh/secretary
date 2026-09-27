@@ -1,8 +1,8 @@
 """Fake `claude` and `codex` executables for PO head turns, shared by the runner and `/po` tests.
 
-Each fake logs its argv, cwd, stdin and `$SECRETARY_PO_SESSION` to `$FAKE_LOG`, prints an event stream
-that carries reasoning and a tool call beside the final answer, and changes behaviour on words in the
-owner's message:
+Each fake logs its argv, cwd, stdin, `$SECRETARY_PO_SESSION` and `$SECRETARY_PO_REQUEST` to
+`$FAKE_LOG`, prints an event stream that carries reasoning and a tool call beside the final answer, and
+changes behaviour on words in the owner's message:
 `SLEEP` keeps the turn running with a child in its process group, `GATE` keeps it running until the
 file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without a final answer,
 `NOPERSIST` makes Claude save no conversation.
@@ -29,7 +29,8 @@ argv = sys.argv[1:]
 log = os.environ["FAKE_LOG"]
 with open(log, "a") as handle:
     handle.write(json.dumps({"cli": "claude", "argv": argv, "cwd": os.getcwd(), "prompt": prompt,
-                             "po_session": os.environ.get("SECRETARY_PO_SESSION")}) + "\n")
+                             "po_session": os.environ.get("SECRETARY_PO_SESSION"),
+                             "po_request": os.environ.get("SECRETARY_PO_REQUEST")}) + "\n")
 flag = "--resume" if "--resume" in argv else "--session-id"
 session = argv[argv.index(flag) + 1]
 # Claude 2.1.270's own refusals: a saved conversation cannot be created again, a missing one resumed.
@@ -76,7 +77,8 @@ argv = sys.argv[1:]
 log = os.environ["FAKE_LOG"]
 with open(log, "a") as handle:
     handle.write(json.dumps({"cli": "codex", "argv": argv, "cwd": os.getcwd(), "prompt": prompt,
-                             "po_session": os.environ.get("SECRETARY_PO_SESSION")}) + "\n")
+                             "po_session": os.environ.get("SECRETARY_PO_SESSION"),
+                             "po_request": os.environ.get("SECRETARY_PO_REQUEST")}) + "\n")
 resume = argv[:2] == ["exec", "resume"]
 thread = argv[-2] if resume else "019a-fake-thread"
 out = argv[argv.index("-o") + 1]

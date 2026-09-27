@@ -110,6 +110,7 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.board.transitions import BoardProtocolError
+from secretary.board import po_origin as origin_field
 from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
@@ -353,19 +354,24 @@ def _po_card_create_refusal(
     live_impact: bool,
     seed_ref: str,
     base_branch: str,
+    origin: bool = False,
 ) -> str:
     """Why a `decision`/`operation`/`wait` card cannot be created as asked, or `""`.
 
     The PO service executes a decision or operation card in a turn of its sprint's PO session: it
-    needs that sprint. The dispatcher advances a wait card itself; the observer cuts one only for
-    its own sprint, the PO in a sprint or outside every sprint. None of them has a head, a reviewer,
+    needs that sprint, unless the PO cuts it inside a PO turn (`origin`), where the session of that turn
+    executes it (secretary-1792). The dispatcher advances a wait card itself; the observer cuts one only
+    for its own sprint, the PO in a sprint or outside every sprint. None of them has a head, a reviewer,
     a checkout or a live impact of its own to declare.
     """
     if role not in {Role.OBSERVER.value, Role.PO.value}:
         return f"a {kind} card is cut by the observer or the PO, not by {role}"
     waits = kind == TaskType.WAIT.value
-    if not sprint and not waits:
-        return f"a {kind} card needs --sprint: the PO session of that sprint executes it"
+    if not sprint and not waits and not origin:
+        return (
+            f"a {kind} card needs --sprint: the PO session of that sprint executes it (cut inside a PO "
+            "turn, the session of that turn does)"
+        )
     if not sprint and role == Role.OBSERVER.value:
         return "the observer cuts a wait card for its own sprint: it needs --sprint"
     runner = "the dispatcher advances it" if waits else "the PO service does"
@@ -405,6 +411,16 @@ def _wait_request(wait: Mapping[str, Any] | None) -> dict[str, Any]:
     if named:
         request["returns"] = named
     return request
+
+
+def _origin_request(origin: Mapping[str, Any] | None) -> dict[str, str]:
+    """The PO turn a create runs in, `{session, request}` normalized; `{}` when there is none."""
+    if not origin:
+        return {}
+    session = _text(origin.get("session")).strip()
+    if not session:
+        return {}
+    return {"session": session, "request": _text(origin.get("request")).strip()}
 
 
 def _check_execution_record(task: dict[str, Any]) -> None:
@@ -995,6 +1011,9 @@ class TaskReader:
         # A wait card's one structured block: target, deadline, last observation, state.
         if (waiting := wait_card.wait_view(result)) is not None:
             result["wait"] = waiting
+        # The PO session a delegated card came from, and where its results went (secretary-1792).
+        if (origin := origin_field.origin_view(result)) is not None:
+            result["origin"] = origin
         if comments is not None:
             result["comments"] = comments
         return result
@@ -1120,6 +1139,7 @@ class TaskWriter:
         live_impact: bool = False,
         touches_production: str = "",
         wait: Mapping[str, Any] | None = None,
+        origin: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
@@ -1127,6 +1147,10 @@ class TaskWriter:
 
         `wait` carries a wait card's create flags (`run`, `run_id`, `card`, `states`, `until`,
         `deadline`, `returns`, `transient_window`); every other kind takes none of them.
+
+        `origin` is the PO turn the create runs in, `{session, request}` (secretary-1792): the CLI
+        reads it from the turn's environment for `--role po` only, and any other role is refused one.
+        It is written once, here, and part of the create's request identity.
         """
         return self._create(
             role=role,
@@ -1156,6 +1180,7 @@ class TaskWriter:
             live_impact=live_impact,
             touches_production=touches_production,
             wait=wait,
+            origin=origin,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1191,6 +1216,7 @@ class TaskWriter:
         live_impact: bool = False,
         touches_production: str = "",
         wait: Mapping[str, Any] | None = None,
+        origin: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
@@ -1243,6 +1269,12 @@ class TaskWriter:
         else:
             review_value = default_review(task_type_value)
         review = review_value.value
+        # The PO turn this create runs in: only the PO has one, and only its environment names it.
+        origin_record = _origin_request(origin)
+        if origin_record and role != Role.PO.value:
+            raise TaskError(
+                "validation", f"only the PO records the PO session a card came from; {role} cannot", 2
+            )
         po_executed = task_type_value in PO_EXECUTED_TYPES
         waits = task_type_value is TaskType.WAIT
         # No head runs either: nothing to pin, no reservation to take, no override for the PO.
@@ -1258,14 +1290,21 @@ class TaskWriter:
                 live_impact=live_impact,
                 seed_ref=seed_ref,
                 base_branch=base_branch,
+                origin=bool(origin_record),
             )
             if refusal:
                 raise TaskError("validation", refusal, 2)
         wait_request = _wait_request(wait)
         spec: wait_card.WaitSpec | None = None
         if waits:
+            # Inside a PO turn a wait with no --wait-return reports to the session of that turn.
+            returns = wait_request.get("returns") or (
+                [wait_card.PO_SESSION_PREFIX + origin_record["session"]] if origin_record else []
+            )
             try:
-                spec = wait_card.build_wait_spec(**wait_request, sprint=sprint, now=datetime.now(UTC))
+                spec = wait_card.build_wait_spec(
+                    **{**wait_request, "returns": returns}, sprint=sprint, now=datetime.now(UTC)
+                )
             except wait_card.WaitSpecError as exc:
                 raise TaskError("validation", str(exc), 2) from None
         elif wait_request:
@@ -1385,7 +1424,12 @@ class TaskWriter:
         if budget_event and not sprint:
             raise TaskError("validation", "budget event requires a linked sprint", 2)
         if spec is not None:
-            self._refuse_unknown_po_sessions(wait_card.po_sessions(spec.returns))
+            # The session of the running turn is not asked about: it is the one creating the card.
+            self._refuse_unknown_po_sessions(
+                session
+                for session in wait_card.po_sessions(spec.returns)
+                if not origin_record or session != origin_record["session"]
+            )
 
         request_id = request_id or str(uuid.uuid4())
         override_payload = self._guard_sprint_write(
@@ -1427,6 +1471,8 @@ class TaskWriter:
             **({"touches_production": touches_production} if touches_production else {}),
             # The flags as given: a retry recomputes the same request, never the same clock.
             **({"wait_request": wait_request} if waits else {}),
+            # Where a delegated card came from: part of the identity, so a replay is the same turn's.
+            **({"po_origin": origin_record} if origin_record else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -1516,6 +1562,11 @@ class TaskWriter:
                     live_impact=live_impact,
                     touches_production=touches_production,
                     wait_spec=spec.text() if spec is not None else "",
+                    po_origin=(
+                        origin_field.origin_text(origin_record["session"], origin_record["request"])
+                        if origin_record
+                        else ""
+                    ),
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -1596,6 +1647,7 @@ class TaskWriter:
         event: dict[str, Any],
         request_id: str,
         wait_spec: str = "",
+        po_origin: str = "",
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
@@ -1658,6 +1710,9 @@ class TaskWriter:
                 if wait_spec:
                     # Not a column either: the wait card's spec (board/wait_card.py).
                     values[wait_card.WAIT_SPEC] = wait_spec
+                if po_origin:
+                    # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
+                    values[origin_field.PO_ORIGIN] = po_origin
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:
@@ -2146,6 +2201,23 @@ class TaskWriter:
             raise TaskError("validation", f"{reference} is not a wait card; it carries no wait state", 2)
         with self._mutation():
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values={wait_card.WAIT_STATE: state})
+
+    def record_po_return(self, *, role: str, actor: str, reference: str, state: str) -> None:
+        """The dispatcher's one write of a delegated card's `po_return` (secretary-1792).
+
+        A state field like `wait_state`: the session it handed a decision/operation card to, the
+        successors of the origin's line, and one record per terminal transition whose result it
+        returned. The delivery itself is recorded elsewhere (the PO input, the owner event). The
+        origin (`po_origin`) is not touched here or anywhere after create.
+        """
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        task = self.reader.show(reference)
+        if origin_field.po_origin(task) is None:
+            raise TaskError("validation", f"{reference} names no PO origin; it carries no return state", 2)
+        with self._mutation():
+            self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values={origin_field.PO_RETURN: state}
+            )
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
@@ -4903,6 +4975,10 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         values["live_impact"] = "1"
     if wait_spec := _text(payload.get("wait_spec")):
         values[wait_card.WAIT_SPEC] = wait_spec
+    if isinstance(origin := payload.get("po_origin"), Mapping) and _text(origin.get("session")):
+        values[origin_field.PO_ORIGIN] = origin_field.origin_text(
+            _text(origin.get("session")), _text(origin.get("request"))
+        )
     for payload_key, metadata_key in (
         ("blocked_by", "blocked_by"),
         ("head", "head"),

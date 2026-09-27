@@ -64,25 +64,18 @@ from secretary.board.wait_card import (
 )
 from secretary.dispatch.gate import _HTTP_STATUS_RE, GateTransportError, _gh_api
 from secretary.dispatch.helpers import _worker_id
-from secretary.dispatch.po_cards import DISPATCHER_SOURCE, _already_submitted
+from secretary.dispatch.po_delivery import deliver, open_successor
 from secretary.dispatch.state import DispatcherRecord, request_token
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.state import new_attempt_id as _new_attempt_id
 from secretary.dispatch.state import record_attempt as _record_attempt
 from secretary.dispatch.types import HostError
-from secretary.po.client import PoServiceError, ServiceRefused
-from secretary.po.store import PoStoreError, RequestConflict, SessionClosed, SessionNotFound
 from secretary.tasks import TaskError, recorded_card_transition
 
 WAIT_STEP = "wait-card"
 #: Request-id actions of a delivery, each under `delivery_request_id(<card>, <action>, <address>, <key>)`.
 PO_DELIVERY = "po"
 PO_SUCCESSOR = "po-successor"
-#: How a closed or missing return session is succeeded: the sprint's resolver, or a plain new session.
-SPRINT_ROUTE = "sprint_session"
-CREATE_ROUTE = "create_session"
-#: Successors one delivery may open in one tick when each is closed again before it takes the input.
-_SUCCESSORS_PER_TICK = 2
 DEPENDENT_COMMENT = "dependent-comment"
 DEPENDENT_BLOCKED = "dependent-blocked"
 TERMINAL_MOVE = "terminal"
@@ -528,50 +521,31 @@ def _deliver_po(
 ) -> tuple[str | None, str, str]:
     """One input to the named PO session, or to its successor: `(status, detail, received_by)`.
 
-    `(None, why, "")` postpones it to the next tick; nothing here gives a result up. A session that
-    is closed or missing gets one successor (`_successor`), recorded on the card before anything is
-    submitted to it, and the input goes there under the same delivery request id: a closed session
-    reserves nothing, so the id is still free.
+    `(None, why, "")` postpones it to the next tick; nothing here gives a result up. The path is the
+    one every dispatcher result takes to a PO session (`dispatch/po_delivery.py`): a session that is
+    closed or missing gets one successor (`_successor`), recorded on the card before anything is
+    submitted to it, and the input goes there under the same delivery request id.
     """
     ref = task["ref"]
     result = state.result or {}
     key = str(result.get("key") or "")
-    request_id = delivery_request_id(ref, PO_DELIVERY, address, key)
     session_id = (state.successors.get(address) or {}).get("session") or address[
         len(wait_card.PO_SESSION_PREFIX) :
     ]
-    for _ in range(_SUCCESSORS_PER_TICK + 1):
-        try:
-            runtime.po.submit(
-                session_id=session_id,
-                text=render_po_input(ref, spec, result),
-                request_id=request_id,
-                source=DISPATCHER_SOURCE,
-                card=card_facts(
-                    card_ref=ref,
-                    kind=WAIT_KIND,
-                    touches_production=None,
-                    sprint_ref=str(task.get("sprint") or ""),
-                    input=WAIT_OUTCOME_INPUT,
-                ),
-            )
-        except (SessionClosed, SessionNotFound):
-            successor, why = _successor(runtime, task, state, address, session_id, key)
-            if not successor:
-                return None, why, ""
-            session_id = successor
-            continue
-        except RequestConflict as exc:
-            # This key already carries an input: the one an earlier tick submitted before it lost the answer.
-            if _already_submitted(runtime, request_id, session_id) is not None:
-                return ACCEPTED, request_id, session_id
-            return None, f"request id {request_id} is bound to another input: {exc}", ""
-        except ServiceRefused as exc:
-            return None, f"the PO service refused it ({exc.code}): {exc}", ""
-        except (PoServiceError, PoStoreError) as exc:
-            return None, f"{type(exc).__name__}: {exc}", ""
-        return ACCEPTED, request_id, session_id
-    return None, f"every successor of the session opened this tick was closed again (last {session_id})", ""
+    return deliver(
+        runtime,
+        session_id=session_id,
+        text=render_po_input(ref, spec, result),
+        request_id=delivery_request_id(ref, PO_DELIVERY, address, key),
+        card=card_facts(
+            card_ref=ref,
+            kind=WAIT_KIND,
+            touches_production=None,
+            sprint_ref=str(task.get("sprint") or ""),
+            input=WAIT_OUTCOME_INPUT,
+        ),
+        successor=lambda closed: _successor(runtime, task, state, address, closed, key),
+    )
 
 
 def _successor(
@@ -579,54 +553,27 @@ def _successor(
 ) -> tuple[str, str]:
     """The one session that succeeds `closed` for this delivery: `(session, "")`, or `("", why)`.
 
-    The sprint's own session goes through `sprint_session`, which opens the successor and records it
-    on the sprint; any other session through `create_session` with the closed session's CLI, model
-    and effort (`PoChannel.successor_choice`). The route is recorded on the card before the call and
-    the session right after it, and the request id is derived from the delivery key and the closed
-    session, so a repeat after a crash takes the same route and opens no second successor.
+    `open_successor` routes it: the sprint's own session through `sprint_session`, any other through
+    `create_session` with the closed session's CLI, model and effort. The route is recorded in
+    `wait_state.successors` before the call and the session right after it, and the request id is
+    derived from the delivery key and the closed session, so a repeat after a crash takes the same
+    route and opens no second successor.
     """
     ref = task["ref"]
-    record = state.successors.get(address) or {}
-    if record.get("replaces") != closed:
-        try:
-            via = SPRINT_ROUTE if _is_sprint_session(runtime, task, closed) else CREATE_ROUTE
-        except TaskError as exc:
-            return "", f"the sprint of {ref} cannot be read to route the successor of {closed}: {exc.message}"
-        state.successors[address] = {"replaces": closed, "via": via, "session": ""}
-        _record(runtime, ref, state)
-    record = state.successors[address]
-    request_id = delivery_request_id(ref, PO_SUCCESSOR, closed, key)
-    try:
-        if record["via"] == SPRINT_ROUTE:
-            answer = runtime.po.sprint_session(
-                sprint_ref=str(task.get("sprint") or ""), request_id=request_id
-            )
-        else:
-            choice = runtime.po.successor_choice(closed)
-            if choice is None:
-                return (
-                    "",
-                    f"PO session {closed} is closed and this installation offers no model for a successor",
-                )
-            cli, model, effort = choice
-            answer = runtime.po.create_session(cli=cli, model=model, effort=effort, request_id=request_id)
-    except (PoServiceError, PoStoreError) as exc:
-        return "", f"the successor of closed PO session {closed} is not open yet: {type(exc).__name__}: {exc}"
-    session = str(answer.get("session_id") or "")
-    if not session:
-        return "", f"the PO service named no successor of {closed}"
-    state.successors[address] = {**record, "session": session}
-    _record(runtime, ref, state)
-    return session, ""
-
-
-def _is_sprint_session(runtime: Any, task: dict[str, Any], session_id: str) -> bool:
-    """Whether `session_id` is the recorded PO session of the wait card's open sprint."""
-    sprint_ref = str(task.get("sprint") or "")
-    if not sprint_ref:
-        return False
-    sprint = runtime.sprints.show(sprint_ref, include_cards=False)
-    return sprint.get("status") == "open" and str(sprint.get("po_session") or "") == session_id
+    record = state.successors.setdefault(address, {})
+    session, why = open_successor(
+        runtime,
+        reference=ref,
+        sprint_ref=str(task.get("sprint") or ""),
+        closed=closed,
+        record=record,
+        persist=lambda: _record(runtime, ref, state),
+        request_id=delivery_request_id(ref, PO_SUCCESSOR, closed, key),
+    )
+    if not record:
+        # No route was recorded (the sprint could not be read): nothing to keep.
+        state.successors.pop(address, None)
+    return session, why
 
 
 def _deliver_dependents(runtime: Any, task: dict[str, Any], result: dict[str, Any]) -> tuple[str | None, str]:

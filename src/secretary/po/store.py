@@ -234,6 +234,15 @@ class PoStore:
             ).fetchone()
         return PoRequest(*row) if row is not None else None
 
+    def turn_request_id(self, session_id: str, seq: int) -> str | None:
+        """The request id of the send that started turn `seq`, or None when its input carried none."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT request_id FROM po_requests WHERE session_id = %s AND seq = %s AND operation = %s",
+                (session_id, seq, SEND),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     @staticmethod
     def _known_request(
         connection: Any, request_id: str, operation: str, fingerprint: str

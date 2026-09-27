@@ -77,6 +77,10 @@ PO_CARD_KINDS = ("decision", OPERATION_KIND)
 #: may belong to no sprint, and the wait touches no production, so neither is asked of it.
 WAIT_KIND = "wait"
 WAIT_OUTCOME_INPUT = "wait_outcome"
+#: The result of a card a PO session delegated, returned to that session when the card settles in
+#: Done or Blocked (secretary-1792). Any kind, in a sprint or not; it is a result, not an operation,
+#: so it names no production and gets no rights section.
+DELEGATED_RESULT_INPUT = "delegated_result"
 
 
 def card_facts(
@@ -102,9 +106,19 @@ def facts_problem(card: Any) -> str:
         if card.get("input") != WAIT_OUTCOME_INPUT:
             return f"a wait card's input is its {WAIT_OUTCOME_INPUT}, not {card.get('input')!r}"
         return "" if card.get("touches_production") is None else "a wait card names no production"
-    for field in ("card_ref", "sprint_ref"):
-        if not isinstance(card.get(field), str) or not card[field].strip():
-            return f"the card facts name no {field}"
+    if card.get("input") == DELEGATED_RESULT_INPUT:
+        for field in ("card_ref", "kind"):
+            if not isinstance(card.get(field), str) or not card[field].strip():
+                return f"the card facts name no {field}"
+        if not isinstance(card.get("sprint_ref"), str):
+            return "the card facts name no sprint_ref (an empty one for a card outside every sprint)"
+        return "" if card.get("touches_production") is None else "a delegated card's result names no production"
+    if not isinstance(card.get("card_ref"), str) or not card["card_ref"].strip():
+        return "the card facts name no card_ref"
+    # An empty sprint_ref is a decision/operation card a PO session cut outside every sprint
+    # (secretary-1792): that session executes it, and it has no sprint allowance.
+    if not isinstance(card.get("sprint_ref"), str):
+        return "the card facts name no sprint_ref"
     if card.get("kind") not in PO_CARD_KINDS:
         return f"the card facts name kind {card.get('kind')!r}, not {' or '.join(PO_CARD_KINDS)}"
     if card.get("input") not in INPUTS:
@@ -150,12 +164,26 @@ def rights_note(
     `allowed` is the sprint's list, or None for `none`, which is allowed without reading the sprint.
     A production the sprint does not allow is not refused: the PO decides it under the owner's
     standing rule and either records an allowance (`allow_production_command`, `request_id` its id)
-    or hands the card to the owner.
+    or hands the card to the owner. An operation cut outside every sprint (`sprint_ref` empty) has
+    no allowance to read or record: the PO decides it under the same rule, with nothing to record.
     """
-    if production == NO_PRODUCTION or allowed is None:
+    if not sprint_ref and production != NO_PRODUCTION:
         return (
             f"{RIGHTS_HEADING}\n\n"
-            f"touches production {NO_PRODUCTION}: the sprint allows it. Touch no production in this turn."
+            f"touches production {production}; no sprint: the card was cut outside every sprint, so "
+            "there is no sprint allowance to read or to record.\n\n"
+            "This is not a refusal: decide it under the owner's standing rule. Production of secretary is "
+            "allowed by default, because it is the development server; any other production only when "
+            "the owner agreed to it (in this session or on the card). If the rule allows it, run the "
+            "operation in this turn and touch no other production. If it does not, hand the card to the "
+            "owner with `task handover --to owner` (the command under \"Or hand it to the owner\" above) "
+            "and end the turn."
+        )
+    if production == NO_PRODUCTION or allowed is None:
+        allows = "the sprint allows it" if sprint_ref else "nothing to allow"
+        return (
+            f"{RIGHTS_HEADING}\n\n"
+            f"touches production {NO_PRODUCTION}: {allows}. Touch no production in this turn."
         )
     allowed = list(allowed)
     line = rights_line(production, sprint_ref, allowed)
@@ -181,6 +209,7 @@ def rights_note(
 
 __all__ = [
     "CARD_INPUT",
+    "DELEGATED_RESULT_INPUT",
     "INPUTS",
     "NO_PRODUCTION",
     "OPERATION_KIND",

@@ -8,7 +8,7 @@ touches it. Producers write through :func:`record`; the web reads and marks thro
 (:data:`KIND_CLASS`), never passed by a producer. `needs_owner` is a fact only the owner can move on:
 a card the PO handed to the owner, the steward's report card that needs a human. `notice` is a fact
 the owner should know: a sprint closed or stopped, the budget signal, a dead head nobody relaunched, a
-failed PO turn, a red provider. The database holds both vocabularies and the kind-to-class rule as
+failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
 CHECK constraints (`board/schema.py`), from the same lists.
 
 **The writer never fails its caller.** :func:`record` is idempotent under its dedup key (a unique
@@ -52,10 +52,11 @@ OBSERVER_DEAD = "observer_dead"
 HEAD_DEAD = "head_dead"
 PO_TURN_FAILED = "po_turn_failed"
 PROVIDER_RED = "provider_red"
+DELEGATED_CARD_SETTLED = "delegated_card_settled"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018) are these two lists. A new kind joins it
-#: here and in a migration together.
+#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021) are these two lists. A
+#: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
@@ -66,6 +67,8 @@ KIND_CLASS: dict[str, str] = {
     HEAD_DEAD: NOTICE,
     PO_TURN_FAILED: NOTICE,
     PROVIDER_RED: NOTICE,
+    # A card a PO session delegated settled and its result went back to that session (0021).
+    DELEGATED_CARD_SETTLED: NOTICE,
 }
 KINDS = tuple(KIND_CLASS)
 NEEDS_OWNER_KINDS = tuple(kind for kind, value in KIND_CLASS.items() if value == NEEDS_OWNER)
@@ -390,6 +393,7 @@ __all__ = [
     "BUDGET_SIGNAL",
     "CARD_HANDED_TO_OWNER",
     "CLASSES",
+    "DELEGATED_CARD_SETTLED",
     "HEAD_DEAD",
     "KINDS",
     "KIND_CLASS",

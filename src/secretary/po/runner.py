@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from secretary.po import PO_SESSION_ENV
+from secretary.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from secretary.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
 from secretary.po.store import (
     CLIS,
@@ -540,7 +540,7 @@ class PoRunner:
                     stdin=stdin,
                     stdout=stdout,
                     stderr=stderr,
-                    env=self.session_environment(session),
+                    env=self.session_environment(session, seq),
                     start_new_session=True,
                 )
         except OSError as exc:
@@ -564,13 +564,29 @@ class PoRunner:
             raise
         return process
 
-    def session_environment(self, session: Session) -> dict[str, str]:
+    def session_environment(self, session: Session, seq: int | None = None) -> dict[str, str]:
         """The environment of one of `session`'s turns: the runner's, naming the session (`PO_SESSION_ENV`).
 
         Every launch goes through here: a new turn, a re-run at start, and a relaunch over a fresh
-        conversation.
+        conversation. With the turn's `seq` it also names the request id of the input the turn answers
+        (`PO_REQUEST_ENV`), read from the store, so a re-run names the same one; a turn whose input
+        carried no request id, or a store that does not answer, leaves it unset.
         """
-        return {**self.env, PO_SESSION_ENV: session.session_id}
+        environment = {key: value for key, value in self.env.items() if key != PO_REQUEST_ENV}
+        environment[PO_SESSION_ENV] = session.session_id
+        if seq is not None:
+            try:
+                request_id = self.store.turn_request_id(session.session_id, seq)
+            except Exception as exc:  # noqa: BLE001 - a turn is not refused for its provenance
+                print(
+                    f"secretary po: turn {session.session_id}/{seq} starts without ${PO_REQUEST_ENV}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                request_id = None
+            if request_id:
+                environment[PO_REQUEST_ENV] = request_id
+        return environment
 
     def _finish(
         self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
@@ -912,6 +928,7 @@ class PoRunner:
 
 
 __all__ = [
+    "PO_REQUEST_ENV",
     "PO_SESSION_ENV",
     "RECOVERED_REASON",
     "RERUN_INTERRUPTED_REASON",

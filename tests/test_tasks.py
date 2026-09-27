@@ -14,6 +14,7 @@ import threading
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from secretary import tasks
@@ -2724,6 +2725,106 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.record_wait_state(role="po", actor="po", reference="secretary-624", state="{}")
         with self.assertRaisesRegex(TaskError, "not a wait card"):
             self.writer.record_wait_state(role="dispatcher", actor="d", reference="secretary-468", state="{}")
+
+    # --- PO delegation: the PO turn a card came from (secretary-1792) -----------------------------
+
+    ORIGIN: ClassVar[dict[str, str]] = {"session": "po-s-1", "request": "web-msg-9"}
+
+    def create_as_po(self, reference: str, task_type: str = "research", **fields: object) -> dict:
+        """The PO's create outside every sprint, as `task create --role po` inside or outside a PO turn."""
+        with self.open_sprint():
+            return self.writer.create(
+                role="po", actor="po", project="secretary", task_type=task_type, title=f"{task_type} card",
+                reference=reference, request_id=f"create-{reference}", **fields,
+            )
+
+    def test_a_create_in_a_po_turn_records_its_origin_and_show_and_list_carry_it(self) -> None:
+        created = self.create_as_po("secretary-630", origin=self.ORIGIN)
+
+        card = self.card("secretary-630")
+        self.assertEqual(json.loads(self.card_extension("secretary-630", "po_origin")), self.ORIGIN)
+        self.assertEqual(
+            card["origin"],
+            {"po_session": "po-s-1", "request_id": "web-msg-9", "current_session": "po-s-1", "executor": None,
+             "returns": []},
+        )
+        self.assertEqual(created["task"]["origin"], card["origin"])
+        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "secretary-630"]
+        self.assertEqual(listed["origin"], card["origin"])
+        self.assertEqual(self.writer.audit.events("secretary-630")[0]["payload"]["po_origin"], self.ORIGIN)
+
+        # Outside a PO turn there is no origin, on any role's card.
+        self.create_as_po("secretary-631")
+        self.create_kind("secretary-632", "research")
+        for reference in ("secretary-631", "secretary-632"):
+            self.assertNotIn("origin", self.card(reference))
+            self.assertIsNone(self.card_extension(reference, "po_origin"))
+
+        # The origin is part of the request identity: the same turn replays, another one conflicts.
+        after = self.board_snapshot()
+        self.assertTrue(self.create_as_po("secretary-630", origin=self.ORIGIN)["replayed"])
+        with self.assertRaises(TaskError):
+            self.create_as_po("secretary-630", origin={"session": "po-s-2", "request": "other"})
+        self.assertBoardUnchanged(after)
+
+    def test_an_origin_is_the_pos_alone_and_nothing_after_create_rewrites_it(self) -> None:
+        before = self.board_snapshot()
+        with self.open_sprint() as sprint, self.assertRaisesRegex(TaskError, "only the PO records") as raised:
+            self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="research", title="T",
+                sprint=sprint, origin=self.ORIGIN,
+            )
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+        self.create_as_po("secretary-633", origin=self.ORIGIN)
+        stored = self.card_extension("secretary-633", "po_origin")
+        with self.open_sprint():
+            self.writer.edit(role="po", actor="po", reference="secretary-633", title="Renamed", description="New body")
+        self.writer.record_po_return(
+            role="dispatcher", actor="d", reference="secretary-633", state='{"executor":"po-s-9"}'
+        )
+        with self.open_sprint():
+            self.writer.move(role="po", actor="po", reference="secretary-633", target="blocked", reason="parked")
+
+        self.assertEqual(self.card_extension("secretary-633", "po_origin"), stored)
+        self.assertEqual(self.card("secretary-633")["origin"]["po_session"], "po-s-1")
+        self.assertEqual(self.card("secretary-633")["origin"]["executor"], "po-s-9")
+        with self.assertRaises(TaskError):
+            self.writer.record_po_return(role="po", actor="po", reference="secretary-633", state="{}")
+        with self.assertRaisesRegex(TaskError, "names no PO origin"):
+            self.writer.record_po_return(role="dispatcher", actor="d", reference="secretary-468", state="{}")
+
+    def test_an_out_of_sprint_decision_or_operation_card_needs_a_po_turn(self) -> None:
+        before = self.board_snapshot()
+        for reference, kind, production in (("secretary-634", "decision", ""), ("secretary-635", "operation", "none")):
+            with self.subTest(kind=kind), self.assertRaisesRegex(TaskError, "needs --sprint") as raised:
+                self.create_as_po(reference, kind, touches_production=production)
+            self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
+        self.create_as_po("secretary-634", "decision", origin=self.ORIGIN)
+        self.create_as_po("secretary-635", "operation", origin=self.ORIGIN, touches_production="none")
+        for reference, kind in (("secretary-634", "decision"), ("secretary-635", "operation")):
+            card = self.card(reference)
+            self.assertEqual((card["type"], card["state"], card["review"]), (kind, "ready", "skipped"))
+            self.assertFalse(card["sprint"])
+            self.assertEqual(card["origin"]["po_session"], "po-s-1")
+
+    def test_a_wait_cut_in_a_po_turn_returns_to_that_session_when_it_names_no_address(self) -> None:
+        wait = {"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z"}
+        with mock.patch.object(TaskWriter, "_po_session_state", side_effect=AssertionError("the turn's session")):
+            self.create_as_po("secretary-636", "wait", origin=self.ORIGIN, wait=wait)
+        card = self.card("secretary-636")
+        self.assertEqual(card["wait"]["return_to"], ["po-session:po-s-1"])
+        self.assertEqual(card["origin"]["po_session"], "po-s-1")
+        # The flags as given are the identity: no --wait-return, so none is recorded as given.
+        self.assertNotIn("returns", self.writer.audit.events("secretary-636")[0]["payload"]["wait_request"])
+
+        before = self.board_snapshot()
+        with self.assertRaisesRegex(TaskError, "at least one --wait-return"):
+            self.create_as_po("secretary-637", "wait", wait=wait)
+        self.assertBoardUnchanged(before)
 
 
 class DoneRetentionTests(CardStoreCase):

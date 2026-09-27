@@ -917,7 +917,7 @@ class PoRequest(Base):
 
 
 class OwnerEvent(Base):
-    """What needs the owner, and what the owner should know (revision 0018, `board.owner_events`).
+    """What needs the owner, and what the owner should know (revision 0018; 0021 adds a kind; `board.owner_events`).
 
     Written only through `board.owner_events.record`, idempotent on `dedup_key`; read by the web's
     bell. `class` is derived from `kind` (`owner_events.KIND_CLASS`), and the CHECKs below are those
@@ -939,7 +939,8 @@ class OwnerEvent(Base):
     __table_args__ = (
         sa.CheckConstraint(
             "kind IN ('card_handed_to_owner','steward_needs_human','sprint_closed','sprint_stopped',"
-            "'budget_signal','observer_dead','head_dead','po_turn_failed','provider_red')",
+            "'budget_signal','observer_dead','head_dead','po_turn_failed','provider_red',"
+            "'delegated_card_settled')",
             name="owner_event_kind_in_vocabulary",
         ),
         sa.CheckConstraint("class IN ('needs_owner','notice')", name="owner_event_class_in_vocabulary"),

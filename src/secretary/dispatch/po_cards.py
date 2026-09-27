@@ -25,6 +25,14 @@ section after its text. A production the sprint does not allow is the PO's to de
 it records the allowance (`sprint allow-production`) and runs the operation, or hands the card to the
 owner like any other.
 
+A card the PO cut inside a PO turn with no sprint (secretary-1792) goes instead to the session of that
+turn, its origin (`board/po_origin.py`), or to the session that succeeded it in the card's origin line:
+no sprint is resolved, and a closed or missing session gets its successor at the submit
+(`origin_returns.succeed_origin`). Such a card's input carries no sprint comments, and its facts an
+empty `sprint_ref`; its production rights have no sprint allowance (the PO service's note says so). A
+card with an origin records the session it is submitted to (`po_return.executor`), which is how its
+result return knows it was completed in a turn of its origin session.
+
 The PO may hand the card to the owner inside its turn (`task handover`, secretary-1761). A card that
 carries that mark is not Blocked when the turn settles: it waits for the owner. Each owner comment on
 it after the handover becomes one follow-up input to the same PO session, carrying the reason, the
@@ -39,6 +47,7 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
+from secretary.board import po_origin as origin_field
 from secretary.board.completion_evidence import missing_completion_evidence
 from secretary.board.owner_handover import (
     owner_answer_event_ids,
@@ -55,6 +64,9 @@ from secretary.board.production_rights import (
 )
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatch.helpers import _worker_id
+from secretary.dispatch.origin_returns import record_return_state, succeed_origin
+from secretary.dispatch.po_delivery import DISPATCHER_SOURCE, SUCCESSORS_PER_TICK
+from secretary.dispatch.po_delivery import already_submitted as _already_submitted
 from secretary.dispatch.state import (
     DispatcherRecord,
     PoSubmission,
@@ -71,10 +83,18 @@ from secretary.dispatch.state import (
 )
 from secretary.po.client import OutcomeUnknown, PoServiceError, ServiceRefused, ServiceUnavailable
 from secretary.po.queue import QueuedInput
-from secretary.po.store import FAILED, INTERRUPTED, RUNNING, PoRequest, PoStoreError, RequestConflict, Turn
+from secretary.po.store import (
+    FAILED,
+    INTERRUPTED,
+    RUNNING,
+    PoRequest,
+    PoStoreError,
+    RequestConflict,
+    SessionClosed,
+    SessionNotFound,
+    Turn,
+)
 
-#: The source the PO service records for a dispatcher input (`secretary.po.queue.SOURCES`).
-DISPATCHER_SOURCE = "dispatcher"
 #: Dispatcher record states of a PO-executed card.
 PO_SUBMITTING = "po_submitting"
 PO_SUBMITTED = "po_submitted"
@@ -88,6 +108,12 @@ PO_BLOCKED_ACTION = "po-card-blocked"
 PO_OWNER_ANSWER_ACTION = "po-owner-answer"
 #: Service refusal codes that say nothing about the request: it is repeated, never failed.
 _UNANSWERED_CODES = frozenset({"unavailable", "outcome_unknown"})
+#: `PoSubmission.session_outcome` of an out-of-sprint card: the session of the PO turn that cut it.
+ORIGIN_SESSION = "origin"
+
+
+class _SuccessorNotOpen(PoServiceError):
+    """The origin session is closed and its successor could not be opened this tick; repeated next."""
 
 
 class PoChannel(Protocol):
@@ -232,14 +258,27 @@ def completion_sections(kind: str) -> tuple[str, str]:
     return first, second
 
 
-def render_po_card_input(task: dict[str, Any], sprint: dict[str, Any], submission: PoSubmission) -> str:
-    """The one input a decision/operation card becomes in its sprint's PO session."""
+def _of_sprint(submission: PoSubmission) -> str:
+    """Where the card belongs, as the inputs say it: its sprint, or no sprint at all."""
+    if submission.sprint_ref:
+        return f"of {submission.sprint_ref}"
+    return "(outside every sprint; you cut it in this session, so this session executes it)"
+
+
+def render_po_card_input(
+    task: dict[str, Any], sprint: dict[str, Any] | None, submission: PoSubmission
+) -> str:
+    """The one input a decision/operation card becomes in its sprint's PO session.
+
+    A card a PO session cut outside every sprint (`sprint` None, secretary-1792) goes to that session
+    instead, with no sprint comments to carry.
+    """
     reference = str(task.get("ref") or "")
     kind = submission.kind
     first, second = completion_sections(kind)
     lines = [
         (
-            f"The dispatcher hands you {kind} card {reference} of {submission.sprint_ref}. Answer it in "
+            f"The dispatcher hands you {kind} card {reference} {_of_sprint(submission)}. Answer it in "
             "this turn and complete the card before the turn ends; a turn that ends with the card still "
             "In progress Blocks it, unless you handed it to the owner in this turn."
         ),
@@ -251,19 +290,19 @@ def render_po_card_input(task: dict[str, Any], sprint: dict[str, Any], submissio
         "",
         str(task.get("description") or "").strip() or "(empty)",
         "",
-        f"## Comments of {submission.sprint_ref}, in board order",
-        "",
     ]
-    comments = [comment for comment in sprint.get("comments") or [] if isinstance(comment, dict)]
-    if not comments:
-        lines.append("(none)")
-    for comment in comments:
-        lines += [
-            f"### {comment.get('created_at') or 'undated'}",
-            "",
-            str(comment.get("body") or "").rstrip(),
-            "",
-        ]
+    if sprint is not None:
+        lines += [f"## Comments of {submission.sprint_ref}, in board order", ""]
+        comments = [comment for comment in sprint.get("comments") or [] if isinstance(comment, dict)]
+        if not comments:
+            lines.append("(none)")
+        for comment in comments:
+            lines += [
+                f"### {comment.get('created_at') or 'undated'}",
+                "",
+                str(comment.get("body") or "").rstrip(),
+                "",
+            ]
     lines += [
         "",
         "## Complete the card",
@@ -310,6 +349,14 @@ def _production_lines(submission: PoSubmission, *, owner_answer: bool = False) -
                 "decided on it in the answer below; touch no other production in this turn."
             )
         ]
+    if not submission.sprint_ref:
+        return [
+            (
+                f"Touches production: {production}. The card belongs to no sprint, so no sprint allowance "
+                "applies; the PO service's production rights section at the end of this input says what "
+                "does. Touch no other production in this turn."
+            )
+        ]
     return [
         (
             f"Touches production: {production}. Whether the sprint allows it is in the PO service's "
@@ -343,7 +390,7 @@ def render_owner_answer_input(
     first, second = completion_sections(kind)
     lines = [
         (
-            f"The owner answered {kind} card {reference} of {submission.sprint_ref}, which you handed to "
+            f"The owner answered {kind} card {reference} {_of_sprint(submission)}, which you handed to "
             f"the owner on {mark['since']}. Complete the card in this turn if the answer settles it. If "
             "it does not, say on the card what is still missing and end the turn: the card keeps waiting "
             "for the owner and is not Blocked."
@@ -405,14 +452,16 @@ def claim_po_card(
     record = _po_record(claimed, attempt_id)
     records[ref] = record
     runtime.save_records(payload, records)
-    if not record.po_submission.sprint_ref:
+    if not record.po_submission.sprint_ref and origin_field.po_origin(claimed) is None:
+        # Outside every sprint only the PO session that cut it executes it (secretary-1792).
         return _block(
             runtime,
             claimed,
             records,
             payload,
             attempt_id,
-            f"a {record.po_submission.kind} card names no sprint, so there is no PO session to execute it",
+            f"a {record.po_submission.kind} card names no sprint and no PO session it came from, so there "
+            "is no PO session to execute it",
         )
     return advance_po_card(runtime, claimed, records, payload, attempt_id)
 
@@ -513,29 +562,36 @@ def _submit(
     ref = task["ref"]
     submission = record.po_submission
     step = "resolve"
+    origin = origin_field.po_origin(task)
     try:
         if not submission.session_id:
-            answer = runtime.po.sprint_session(
-                sprint_ref=submission.sprint_ref, request_id=submission.session_request_id
-            )
-            submission.session_id = str(answer["session_id"])
-            submission.session_outcome = "created" if answer.get("created") else "recorded"
+            if submission.sprint_ref:
+                answer = runtime.po.sprint_session(
+                    sprint_ref=submission.sprint_ref, request_id=submission.session_request_id
+                )
+                submission.session_id = str(answer["session_id"])
+                submission.session_outcome = "created" if answer.get("created") else "recorded"
+            else:
+                # Cut outside every sprint inside a PO turn: that session (or its successor) runs it.
+                assert origin is not None  # the claim Blocks such a card with no origin
+                submission.session_id = origin_field.line_head(origin["session"], origin_field.return_state(task))
+                submission.session_outcome = ORIGIN_SESSION
             runtime.save_records(payload, records)
         step = "submit"
         if not submission.card:
             submission.card = po_card_facts(task, submission)
             runtime.save_records(payload, records)
         if not submission.text:
-            sprint = runtime.sprints.show(submission.sprint_ref, include_resume_freshness=False)
+            sprint = (
+                runtime.sprints.show(submission.sprint_ref, include_resume_freshness=False)
+                if submission.sprint_ref
+                else None
+            )
             submission.text = render_po_card_input(task, sprint, submission)
             runtime.save_records(payload, records)
-        answer = runtime.po.submit(
-            session_id=submission.session_id,
-            text=submission.text,
-            request_id=submission.submit_request_id,
-            source=DISPATCHER_SOURCE,
-            card=submission.card,
-        )
+        answer = _submit_card(runtime, task, origin, submission, records, payload)
+    except _SuccessorNotOpen as exc:
+        return _unanswered(runtime, task, record, records, payload, step, exc)
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
     except ServiceRefused as exc:
@@ -575,22 +631,47 @@ def _submit(
     }
 
 
-def _already_submitted(runtime: Any, request_id: str, session_id: str) -> dict[str, Any] | None:
-    """What a request id this record owns already is at the service, or None when it is not ours.
+def _submit_card(
+    runtime: Any,
+    task: dict[str, Any],
+    origin: dict[str, str] | None,
+    submission: PoSubmission,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Submit the card's input to its session; a closed origin session of an out-of-sprint card is succeeded.
 
-    A turn in `po_requests`, or an input still pending in the queue for the same session: both are
-    the input this record submitted before it lost its answer, whatever the text says now.
+    A card with an origin records on itself the session it is handed to (`po_return.executor`,
+    before the submit), which is how the result return knows the card was completed in a turn of its
+    origin session (`dispatch/origin_returns.py`). An out-of-sprint card whose session is closed or
+    missing goes to the successor of the origin's line (`succeed_origin`) under the same submit id; a
+    sprint's card is refused as before, its session being the sprint's resolver's to answer for.
     """
-    try:
-        known: PoRequest | None = runtime.po.request(request_id)
-        if known is not None:
-            return {"seq": known.seq, "queued": known.seq is None}
-        queued = runtime.po.queued(request_id)
-    except PoStoreError:
-        return None
-    if queued is not None and queued.session_id == session_id:
-        return {"seq": None, "queued": True}
-    return None
+    state = origin_field.return_state(task) if origin is not None else None
+    for _ in range(SUCCESSORS_PER_TICK + 1):
+        if state is not None and state.executor != submission.session_id:
+            state.executor = submission.session_id
+            record_return_state(runtime, task["ref"], state)
+        try:
+            return runtime.po.submit(
+                session_id=submission.session_id,
+                text=submission.text,
+                request_id=submission.submit_request_id,
+                source=DISPATCHER_SOURCE,
+                card=submission.card,
+            )
+        except (SessionClosed, SessionNotFound):
+            if submission.sprint_ref or origin is None or state is None:
+                raise
+            closed = submission.session_id
+            following, why = succeed_origin(runtime, task, origin, state, closed)
+            if not following:
+                raise _SuccessorNotOpen(why) from None
+            submission.session_id = following
+            runtime.save_records(payload, records)
+    raise _SuccessorNotOpen(
+        f"every successor of PO session {submission.session_id} opened this tick was closed again"
+    )
 
 
 def _settle(
