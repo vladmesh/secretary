@@ -30,6 +30,11 @@ side makes it a no-op:
   request id derived from the key; on an outcome other than `target_reached`, a Ready dependent is
   also Blocked with the outcome as its reason. Until then the claim pass leaves such a card in Ready
   (:func:`pending_wait_blockers`).
+- `card:<ref>` (only on a wait the dispatcher created for a code card's e2e run, secretary-1795): one
+  dispatcher comment on that card under a request id derived from the key. The card's own e2e stage
+  (`dispatch/e2e_stage.py`) reads the frozen result off this wait card and acts on it; the comment is
+  what the card's history shows of it. A card that no longer exists takes nothing and gives the
+  delivery up; any other board error postpones it.
 - `observer`: the terminal move itself, last: Done for `target_reached`, Blocked for every other
   outcome, with the result as the move's comment. The observer's wake on Done/Blocked is the delivery.
 
@@ -78,6 +83,7 @@ PO_DELIVERY = "po"
 PO_SUCCESSOR = "po-successor"
 DEPENDENT_COMMENT = "dependent-comment"
 DEPENDENT_BLOCKED = "dependent-blocked"
+CARD_COMMENT = "card-comment"
 TERMINAL_MOVE = "terminal"
 WAIT_MALFORMED_ACTION = "wait-malformed-blocked"
 #: The fields of a run the wait reads, and the one status that ends it.
@@ -461,6 +467,8 @@ def _deliver(
         received = ""
         if address == DEPENDENTS:
             status, detail = _deliver_dependents(runtime, task, result)
+        elif wait_card.returned_card(address):
+            status, detail = _deliver_card(runtime, task, address, result)
         else:
             status, detail, received = _deliver_po(runtime, task, spec, state, address)
         if status is None:
@@ -612,6 +620,27 @@ def _deliver_dependents(runtime: Any, task: dict[str, Any], result: dict[str, An
     return ACCEPTED, ", ".join(str(card["ref"]) for card in dependents) or "(none)"
 
 
+def _deliver_card(
+    runtime: Any, task: dict[str, Any], address: str, result: dict[str, Any]
+) -> tuple[str | None, str]:
+    """One comment on the one card the address names; that card's own stage consumes the result."""
+    ref = task["ref"]
+    other = wait_card.returned_card(address)
+    try:
+        runtime.writer.comment(
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=other,
+            body=render_card_comment(ref, result),
+            request_id=delivery_request_id(ref, CARD_COMMENT, address, str(result.get("key") or "")),
+        )
+    except TaskError as exc:
+        if exc.code == "not_found":
+            return ACCEPTED, f"{other} does not exist; nothing took the result"
+        return None, f"{exc.code}: {exc.message}"
+    return ACCEPTED, other
+
+
 def _result_lines(spec: WaitSpec, result: dict[str, Any]) -> list[str]:
     lines = [
         f"Target: {spec.target.describe()}",
@@ -659,6 +688,21 @@ def render_dependent_comment(reference: str, result: dict[str, Any]) -> str:
     return "\n".join([*lines, "", follows]) + "\n"
 
 
+def render_card_comment(reference: str, result: dict[str, Any]) -> str:
+    """The comment a `card:<ref>` address gets: the result, for the card's own stage to act on."""
+    lines = [
+        f"[wait:{result.get('outcome')}] {reference}",
+        "",
+        (
+            f"The wait card {reference} this card named as its e2e wait ended {result.get('outcome')}: "
+            f"{result.get('summary') or ''}"
+        ),
+    ]
+    if result.get("evidence"):
+        lines.append(f"Evidence: {result['evidence']}")
+    return "\n".join([*lines, "", "The dispatcher's e2e stage acts on this result on this card."]) + "\n"
+
+
 def render_outcome_record(reference: str, spec: WaitSpec, state: WaitState) -> str:
     """The wait card's completion comment, carried by its terminal move."""
     result = state.result or {}
@@ -688,6 +732,7 @@ def _outcome(ref: str, attempt_id: str, action: str, **fields: Any) -> dict[str,
 
 
 __all__ = [
+    "CARD_COMMENT",
     "DEPENDENT_BLOCKED",
     "DEPENDENT_COMMENT",
     "PO_DELIVERY",
@@ -697,6 +742,7 @@ __all__ = [
     "claim_wait_card",
     "delivery_request_id",
     "pending_wait_blockers",
+    "render_card_comment",
     "render_dependent_comment",
     "render_outcome_record",
     "render_po_input",

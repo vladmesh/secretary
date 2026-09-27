@@ -1100,6 +1100,32 @@ answered. Which section each source can take away is in
 Exit statuses: unknown sprint or malformed filter `2` (`not_found` / `validation`), a refusing source
 `1` (`backend_unavailable`). `secretary sprint show --ref` reads the entity record, comments included.
 
+### A card waiting on its e2e run
+
+A code card of a project that declares `validation.e2e` waits for its e2e run after green CI and its
+review ([Protocols](PROTOCOLS.md#the-e2e-stage)). While it does:
+
+- the code card stays in **Validate** (in **Assessment** when a release decision is waiting for a run);
+  its heads are not re-launched and its gate is not re-read;
+- `task show --ref <card>` carries `e2e`: `runs_dispatched` of `run_cap` (3), and per run the SHA, the
+  dispatch id, `state` (`dispatching`, `identifying`, `waiting`, then the conclusion or the wait
+  outcome), the run link and the wait card;
+- a **wait card** titled `E2E run <workflow> for <card> @ <sha>` sits in Ready, then In progress, in the
+  card's sprint; `task show` of it carries `wait` with the run link, the deadline, `last_observation`
+  (`run <repo>#<id> is in_progress`) and `last_error`;
+- the dispatcher's tick outcome for the card is `e2e-identifying` (the run is not named or its SHA not
+  checked yet; at most 15 minutes; when GitHub's answer was lost, `recovery_settles_at` says when the
+  lookup may attach a run) or `e2e-waiting`, with `run`, `wait_card`, `deadline`, `observation` and `runs_dispatched`.
+
+When the run concludes, the wait card goes Done (or Blocked for a missed deadline, an unreachable run
+or a cancel) and comments `[wait:<outcome>]` on the code card, and the code card moves on the next
+tick: Assessment or the release on `success` (with a `## E2E — green` comment), In progress for rework
+on `failure`, Blocked on anything else. A newer base merged in the meantime does not cost a new run
+when only base history came in and the card's own paths are unchanged: the attestation then carries an
+`E2E/base reconciliation` line. To give up on a run, `task cancel` its wait card; the code card
+is then Blocked. A Blocked card brought back on the same SHA dispatches a new run; a card at the cap is
+Blocked with `e2e run cap reached (3)`.
+
 ## What was commanded, and what became of a request
 
 Both are reads: they write nothing and never re-send, retry or repair. Contract in
