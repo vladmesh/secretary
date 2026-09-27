@@ -142,6 +142,38 @@ class EntityTests(unittest.TestCase):
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k5", to=Path(tmp)))
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k6", to=SimpleNamespace(call=None)))
 
+    def test_the_strict_writer_answers_written_present_failed_or_not_applicable(self) -> None:
+        """secretary-1792: the one caller whose work is complete only with its event hears how it went."""
+        store = FakeOwnerEvents()
+        self.assertEqual(owner_events.record_strict("delegated_card_settled", REF, "x", "d1", to=store), "written")
+        self.assertEqual(
+            owner_events.record_strict("delegated_card_settled", REF, "again", "d1", to=store), "already_present"
+        )
+        self.assertEqual(len(store.rows), 1)
+        missing = FakeOwnerEvents()
+        missing.missing_table = True
+        broken = FakeOwnerEvents()
+        broken.failing = RuntimeError("connection reset")
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            for to, kind, key in (
+                (missing, "delegated_card_settled", "d2"),
+                (broken, "delegated_card_settled", "d3"),
+                (FakeOwnerEvents(), "not_a_kind", "d4"),
+                (FakeOwnerEvents(), "delegated_card_settled", ""),
+            ):
+                with self.subTest(kind=kind, key=key):
+                    self.assertEqual(owner_events.record_strict(kind, REF, "x", key, to=to), "failed")
+        # No board store configured at all: nothing to wait for, logged, never raised.
+        with self.assertLogs("secretary.board.owner_events", level="INFO"):
+            self.assertEqual(
+                owner_events.record_strict("delegated_card_settled", REF, "x", "d5", to=None), "not_applicable"
+            )
+        with tempfile.TemporaryDirectory() as tmp, self.assertLogs("secretary.board.owner_events", level="INFO"):
+            self.assertEqual(
+                owner_events.record_strict("delegated_card_settled", REF, "x", "d6", to=Path(tmp)),
+                "not_applicable",
+            )
+
     def test_a_postgres_store_without_the_table_is_unavailable_not_an_error_of_the_caller(self) -> None:
         import psycopg
 

@@ -508,6 +508,15 @@ def run_task_create(args: argparse.Namespace) -> int:
     return run_task_command(command)
 
 
+def _po_turn_session() -> str:
+    """The PO session whose turn runs this command (`SECRETARY_PO_SESSION`), or `""` outside one.
+
+    `task complete` and `task handover` record it (secretary-1792): the proof that a delegated card's
+    origin session already has its result. It permits nothing, and no flag sets it.
+    """
+    return os.environ.get(PO_SESSION_ENV, "").strip()
+
+
 def _po_turn_origin(role: str) -> dict[str, str] | None:
     """The PO turn a `--role po` create runs in, from the turn's environment; None anywhere else.
 
@@ -580,6 +589,7 @@ def run_task_complete(args: argparse.Namespace) -> int:
             kind=args.kind,
             body=body,
             request_id=args.request_id,
+            po_session=_po_turn_session(),
         ),
     )
 
@@ -594,6 +604,7 @@ def run_task_handover(args: argparse.Namespace) -> int:
             to=args.to,
             reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
+            po_session=_po_turn_session(),
         ),
     )
 

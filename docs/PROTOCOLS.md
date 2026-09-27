@@ -230,7 +230,7 @@ The facts are `{card_ref, kind, touches_production, sprint_ref, input}`: `touche
 operation card's value (`null` on a decision card), `sprint_ref` is empty for a card with no sprint,
 and `input` is `card` for this submit and `owner_answer` for a follow-up carrying the owner's answer
 (below). A card with an origin records the session it is submitted to on itself (`po_return.executor`),
-before the submit. They are part of the submit's
+before the submit, for its reader; it is no proof of who completed the card. They are part of the submit's
 fingerprint (`send_fingerprint(session, text, card)`, in `po_requests` and on the queued input), so a
 replay is the same session, text and facts, and anything else under the same id is `request_conflict`
 as before. A web input carries none, and a send without facts binds exactly what it bound before them.
@@ -280,7 +280,9 @@ as the PO's comment in the same transaction:
 a comment the PO wrote, the way the infra record is read only from the dispatcher's. The same request
 id repeated with the same body is a replay that writes nothing; with another body it is
 `request_conflict`. `task complete` does not pass the sprint guard: it is the PO executing its
-sprint's card, not an override move.
+sprint's card, not an override move. Run inside a PO turn it records that turn's session
+(`SECRETARY_PO_SESSION`) in the transition's data as `po_session`; a repeat keeps the recorded one. It
+permits nothing; a delegated card's result return reads it ([PO delegation](#po-delegation)).
 
 **Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and the
 service's queue directory, not the service: `po_requests` names the turn the input became once the
@@ -603,8 +605,11 @@ side is a second bag field, `po_return` (`executor`, `successors`, `deliveries`)
 dispatcher (`TaskWriter.record_po_return`).
 
 **Return of the result.** Each tick, after the claim pass, the dispatcher reads the Done and Blocked
-cards (`dispatch/origin_returns.py`). For a card with an origin it finds the audited transition into its
-current column; the delivery is keyed by the card and that event. It submits one input to the origin
+cards (`dispatch/origin_returns.py`). For a card with an origin it finds the latest audited transition
+into its current column and asks one question: is that event id in `po_return.deliveries`? The
+delivery is keyed by the card and that event, so every entry into Done or Blocked is its own delivery: a
+card reopened and settled again (Done → Ready → … → Done) returns its new result once more, under its
+new event. It submits one input to the origin
 session through `PoService.submit`, `source: dispatcher`, request id
 `dispatcher-origin-return-<card>-<event id>`, with the facts `{card_ref, kind: <the card's kind>,
 touches_production: null, sprint_ref, input: delegated_result}` (any kind, in a sprint or not; no rights
@@ -615,11 +620,19 @@ and a classification (the round's `report:blocked` classification, else `board: 
 move's terminal taxonomy, else `unclassified`), with the worker's blocked report when it differs. The
 links are every GitHub pull request and Actions run URL in the card's audit up to that move, and the
 merge a release recorded. It is built from the card and its audit up to the transition, so a repeat
-renders the same text. After the service took it, the bell records one `delegated_card_settled` notice
-(below), and then the delivery is recorded in `po_return.deliveries[<event id>]`. A crash between any
-two of those repeats the same submit (a `request_conflict` on an id the service holds for the session is
-the earlier submit) and the same notice (a no-op on its dedup key): no second input, no second notice.
-A card Blocked again later is a new transition and a new delivery.
+renders the same text.
+
+The delivery is complete only when both its halves are, in this order: (1) the PO submit, idempotent by
+its request id; (2) the `delegated_card_settled` notice (below), written through the bell's strict
+writer `owner_events.record_strict`, which answers `written`, `already_present` (under the dedup key)
+or `failed` (the store raised or did not answer) instead of swallowing the failure as `record` does for
+every other producer; (3) the record `po_return.deliveries[<event id>]`, written only after (1) and
+(2) were accepted. A notice that failed records nothing (`origin-return-notice-failed`, degraded), and
+the next tick repeats both steps under the same keys: the submit is the earlier input to the service (a
+`request_conflict` on an id the service holds for the session is taken as it), the notice a no-op on its
+dedup key. A crash between any two steps is repaired the same way: no second input, no second notice.
+An installation with no board store configured at all has no bell: the strict writer answers
+`not_applicable` (logged), which does not hold the delivery, and the record says so (`notice`).
 
 The PO delivery is the one the wait cards use (`dispatch/po_delivery.py`). A service that does not
 answer, or refuses, postpones it to the next tick (`origin-return-postponed`, degraded). A closed or
@@ -628,19 +641,23 @@ missing origin session never loses the result: the dispatcher opens one successo
 with its CLI, model and effort otherwise (`po.models.successor_choice`), under request id
 `dispatcher-origin-successor-<card>-<closed session>`, recorded in `po_return.successors` (route before
 the call, session after it). The successor is the card's origin line from then on: later results, and
-an out-of-sprint card's execution, go to it, and a successor closed in turn gets its own. A Done card
-whose Done was returned is not read again (a Done card leaves Done only by hand); a Blocked one is read
-each tick, since it may be Blocked again.
+an out-of-sprint card's execution, go to it, and a successor closed in turn gets its own. Every
+delegated Done and Blocked card's audit is read each tick.
 
 **Exceptions.**
 
 - A `wait` card delivers only through its own return addresses (above); the return pass skips it, so
   its origin session never gets the outcome twice. Inside a PO turn `--wait-return` may be omitted and
   then names the origin session.
-- A `decision` or `operation` card the dispatcher submitted to its origin session, or to a successor in
-  its origin line (`po_return.executor`), was completed in a turn of that session, which has the result:
-  its Done is recorded as `skipped`, with no input and no notice. Its Blocked is returned like any other.
-  One executed by another session (a sprint's session that is not its origin) returns its Done too.
+- A Done is skipped only on proof, carried by the card, that the origin's line already has the result.
+  `task complete` records the PO session whose turn ran it (`SECRETARY_PO_SESSION`, present in every PO
+  turn; no flag) in the completion transition's data as `po_session`; `task handover` records it in the
+  handover record's payload the same way. Neither restricts who may run the command. When the Done's
+  recorded `po_session` is the origin session or one of its recorded successors (`po_return.successors`),
+  the Done is recorded as `skipped`, with no input and no notice. Anything else is delivered normally,
+  with input and notice: a completion that ran outside a PO turn (no session recorded), one by another
+  session, any Done not made by `task complete`, and every Blocked. The session the dispatcher handed the
+  card to (`po_return.executor`) proves nothing and is not asked.
 
 **Out-of-sprint decision and operation cards.** Created by the PO inside a PO turn with no `--sprint`,
 such a card is accepted; the dispatcher claims it and submits it to its origin line (see
@@ -672,7 +689,7 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
 | `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
 | `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
-| `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
+| `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
 
 **The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
 dedup_key, to=...)` once, at the place its fact is decided. It is idempotent on the dedup key (`ON

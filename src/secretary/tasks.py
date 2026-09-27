@@ -269,6 +269,10 @@ _TYPED_RECORD_TYPES = {"issue", "product"}
 WAIT_CANCELLED = "wait_cancelled"
 #: The transition data key a wait card's terminal move (and a dependent it Blocks) carries.
 WAIT_OUTCOME_KEY = "wait_outcome"
+#: The PO session whose turn ran `task complete` or `task handover` (secretary-1792): the transition
+#: data of a completion, the payload of a handover. Read from `SECRETARY_PO_SESSION` by the CLI; absent
+#: when the command ran outside a PO turn.
+PO_SESSION_KEY = "po_session"
 
 _MARKER_EVENT_ACTIONS = {
     EventKind.CARD_REPORTED.value: "reported",
@@ -1950,8 +1954,13 @@ class TaskWriter:
         kind: str,
         body: str,
         request_id: str | None = None,
+        po_session: str = "",
     ) -> dict[str, Any]:
         """The PO completes a `decision`/`operation` card it answered in its turn.
+
+        `po_session` is the PO session whose turn runs the command (the CLI reads it from
+        `SECRETARY_PO_SESSION`), recorded in the completion transition's data as `po_session`. It
+        permits nothing: it is the proof a delegated card's result return reads (secretary-1792).
 
         One Card transition In progress -> Done whose reason is the rendered completion record; the
         transition writes that record as the PO's comment inside its own transaction, so the
@@ -1989,6 +1998,8 @@ class TaskWriter:
                 actor=actor,
                 reason=record,
                 request_id=request_id,
+                # A replay repeats the recorded completion, whichever session repeats it.
+                po_session=str((getattr(existing, "data", None) or {}).get(PO_SESSION_KEY) or ""),
                 finish=self._transition_cleanup(
                     task, source=str(existing.source_state or ""), target="done", reason="", role=role
                 ),
@@ -2021,6 +2032,7 @@ class TaskWriter:
             actor=actor,
             reason=record,
             request_id=request_id,
+            po_session=po_session.strip(),
             finish=self._transition_cleanup(
                 task, source=task["state"], target="done", reason=record, role=role
             ),
@@ -2041,8 +2053,12 @@ class TaskWriter:
         to: str,
         reason: str,
         request_id: str | None = None,
+        po_session: str = "",
     ) -> dict[str, Any]:
         """The PO hands an In progress `decision`/`operation` card to the owner (secretary-1761).
+
+        `po_session`, the session whose turn runs the command, is recorded in the handover record's
+        payload as `po_session`, as `complete` records it (secretary-1792); it permits nothing.
 
         One write: the `waiting_owner` mark on the card (`board.owner_handover`) and a PO comment
         `[handover:owner]` with the reason, in the transaction of one `handed_to_owner` audit record,
@@ -2092,6 +2108,7 @@ class TaskWriter:
                 "kind": kind,
                 "sprint": task.get("sprint"),
                 "waiting_owner": since,
+                **({PO_SESSION_KEY: po_session.strip()} if po_session.strip() else {}),
             }
 
         def mutation(task: dict[str, Any]) -> None:
@@ -3152,6 +3169,7 @@ class TaskWriter:
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
         wait_outcome: str | None = None,
+        po_session: str | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -3192,6 +3210,8 @@ class TaskWriter:
                             **({RELEASE_MERGE_KEY: dict(release_merge)} if release_merge is not None else {}),
                             # A wait card's outcome, and a dependent it Blocks: never a budget charge.
                             **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
+                            # The PO session whose turn completed the card (`complete`).
+                            **({PO_SESSION_KEY: po_session} if po_session else {}),
                         },
                     ),
                     finish=finish,

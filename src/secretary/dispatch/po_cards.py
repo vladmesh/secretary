@@ -30,8 +30,8 @@ turn, its origin (`board/po_origin.py`), or to the session that succeeded it in 
 no sprint is resolved, and a closed or missing session gets its successor at the submit
 (`origin_returns.succeed_origin`). Such a card's input carries no sprint comments, and its facts an
 empty `sprint_ref`; its production rights have no sprint allowance (the PO service's note says so). A
-card with an origin records the session it is submitted to (`po_return.executor`), which is how its
-result return knows it was completed in a turn of its origin session.
+card with an origin records the session it is submitted to (`po_return.executor`), for the reader of
+the card; it proves nothing about who completed it (the completion records that itself, `po_session`).
 
 The PO may hand the card to the owner inside its turn (`task handover`, secretary-1761). A card that
 carries that mark is not Blocked when the turn settles: it waits for the owner. Each owner comment on
@@ -642,8 +642,9 @@ def _submit_card(
     """Submit the card's input to its session; a closed origin session of an out-of-sprint card is succeeded.
 
     A card with an origin records on itself the session it is handed to (`po_return.executor`,
-    before the submit), which is how the result return knows the card was completed in a turn of its
-    origin session (`dispatch/origin_returns.py`). An out-of-sprint card whose session is closed or
+    before the submit), for the reader of the card; the result return does not ask it, since only the
+    completion's own `po_session` proves who completed the card (`dispatch/origin_returns.py`). An
+    out-of-sprint card whose session is closed or
     missing goes to the successor of the origin's line (`succeed_origin`) under the same submit id; a
     sprint's card is refused as before, its session being the sprint's resolver's to answer for.
     """

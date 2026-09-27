@@ -23,7 +23,12 @@ from typing import Any
 from unittest import mock
 
 from secretary.board import po_origin as origin_field
-from secretary.board.owner_events import DELEGATED_CARD_SETTLED, NOTICE, class_of
+from secretary.board.owner_events import (
+    DELEGATED_CARD_SETTLED,
+    NOTICE,
+    OwnerEventsUnavailable,
+    class_of,
+)
 from secretary.board.po_origin import origin_text, origin_view, return_state
 from secretary.board.production_rights import (
     DELEGATED_RESULT_INPUT,
@@ -328,16 +333,74 @@ class DeliveryTests(ReturnCase):
             {
                 "state": "done",
                 "status": "accepted",
+                "notice": "written",
                 "at": "2026-09-27T12:04:00Z",
                 "session": SESSION,
                 "request_id": request_id,
             },
         )
 
-        # The next ticks send nothing: a Done card whose Done was returned is not even read again.
-        with mock.patch.object(self.board, "events", side_effect=AssertionError("audit read again")):
-            self.assertEqual(self.tick(), [])
+        # The next ticks send nothing: that transition is delivered.
+        self.assertEqual(self.tick(), [])
         self.assertEqual((len(self.po.submits), len(self.board.notices())), (1, 1))
+
+    def test_a_card_reopened_and_done_again_returns_its_new_result_once_more(self) -> None:
+        """Every entry into Done is its own delivery, keyed by its event (BLOCKER-DONE-REDISPATCH)."""
+        self.arrange(delegated())
+        first = self.done_code_card()
+        self.tick()
+
+        self.board.move(REF, "ready", "reopened by the owner: the cut was too narrow")
+        second = self.done_code_card()
+        [outcome] = self.tick()
+
+        self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", second))
+        self.assertEqual(
+            list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
+        )
+        self.assertEqual(
+            sorted(notice.dedup_key for notice in self.board.notices()),
+            sorted([notice_key(REF, first), notice_key(REF, second)]),
+        )
+        self.assertEqual(set(self.board.delivered()), {first, second})
+        self.assertEqual(self.tick(), [])
+        self.assertEqual((len(self.po.submits), len(self.board.notices())), (2, 2))
+
+    def test_a_bell_that_fails_once_records_nothing_and_the_next_tick_completes_the_delivery(self) -> None:
+        """BLOCKER-NOTICE-DURABILITY: a delivery is complete only with both its input and its notice."""
+        self.arrange(delegated())
+        event_id = self.done_code_card()
+        self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
+
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            [failed] = self.tick()
+
+        self.assertEqual((failed["status"], failed["action"]), ("degraded", "origin-return-notice-failed"))
+        self.board.client.owner_events.failing = None
+        self.assertEqual((len(self.po.inputs), self.board.notices(), self.board.delivered()), (1, [], {}))
+
+        [outcome] = self.tick()
+
+        self.assertEqual(outcome["action"], "origin-returned")
+        # The submit was repeated under the same id, and the service took it as the earlier input.
+        self.assertEqual(self.po.submits, [return_request_id(REF, event_id)] * 2)
+        self.assertEqual(len(self.po.inputs), 1)
+        [notice] = self.board.notices()
+        self.assertEqual(notice.dedup_key, notice_key(REF, event_id))
+        self.assertEqual(list(self.board.delivered()), [event_id])
+        self.assertEqual(self.tick(), [])
+
+    def test_with_no_board_store_at_all_there_is_no_bell_to_wait_for(self) -> None:
+        self.arrange(delegated())
+        event_id = self.done_code_card()
+        self.board.client = SimpleNamespace()
+
+        with self.assertLogs("secretary.board.owner_events", level="INFO"):
+            [outcome] = self.tick()
+
+        self.assertEqual(outcome["action"], "origin-returned")
+        self.assertEqual(self.board.delivered()[event_id]["notice"], "not_applicable")
+        self.assertEqual(self.tick(), [])
 
     def test_a_blocked_card_carries_its_reason_and_classification(self) -> None:
         self.arrange(delegated(kind="research"))
@@ -489,26 +552,48 @@ class ExceptionTests(ReturnCase):
         self.assertEqual(self.tick(), [])
         self.assertEqual((self.po.submits, self.board.notices()), ([], []))
 
-    def test_a_decision_card_completed_in_its_origin_session_is_not_sent_back_on_done(self) -> None:
-        for executor in (SESSION, "successor-1"):
-            with self.subTest(executor=executor):
-                state = origin_field.ReturnState(executor=executor)
-                if executor != SESSION:
-                    state.successors[SESSION] = {
-                        "replaces": SESSION,
-                        "via": "create_session",
-                        "session": executor,
-                    }
+    def complete(self, **data: str) -> str:
+        """The decision card completed with `task complete`; `data` is its transition data."""
+        self.board.move(REF, "in_progress", "claimed")
+        return self.board.move(REF, "done", "[completion:decision]\n\n## Decision\nShip it.", **data)
+
+    def test_a_done_completed_in_a_turn_of_the_origin_line_is_not_sent_back(self) -> None:
+        """BLOCKER-ORIGIN-EXECUTOR-PROOF: the completion's own `po_session` is the proof."""
+        successor = {"replaces": SESSION, "via": "create_session", "session": "successor-1"}
+        for completer in (SESSION, "successor-1"):
+            with self.subTest(completer=completer):
+                state = origin_field.ReturnState(executor=completer, successors={SESSION: dict(successor)})
                 self.arrange(delegated(kind="decision", sprint="", po_return=state.text()))
-                self.board.move(REF, "in_progress", "claimed")
-                event_id = self.board.move(REF, "done", "[completion:decision]\n\n## Decision\nShip it.")
+                event_id = self.complete(po_session=completer)
 
                 [outcome] = self.tick()
 
-                self.assertEqual((outcome["action"], outcome["session"]), ("origin-return-skipped", executor))
+                self.assertEqual(
+                    (outcome["action"], outcome["session"]), ("origin-return-skipped", completer)
+                )
                 self.assertEqual((self.po.submits, self.board.notices()), ([], []))
                 self.assertEqual(self.board.delivered()[event_id]["status"], "skipped")
                 self.assertEqual(self.tick(), [])
+
+    def test_a_done_completed_anywhere_else_is_sent_back(self) -> None:
+        """The session the dispatcher handed it to proves nothing: only the completion's session does."""
+        for label, data in (
+            ("another session", {"po_session": "someone-else"}),
+            ("outside a PO turn", {}),
+            ("a successor the card never recorded", {"po_session": "successor-9"}),
+        ):
+            with self.subTest(completed_by=label):
+                # The dispatcher handed it to the origin session; that is not who completed it.
+                state = origin_field.ReturnState(executor=SESSION)
+                self.arrange(delegated(kind="decision", sprint="", po_return=state.text()))
+                event_id = self.complete(**data)
+
+                [outcome] = self.tick()
+
+                self.assertEqual((outcome["action"], outcome["session"]), ("origin-returned", SESSION))
+                self.assertEqual(list(self.po.inputs), [return_request_id(REF, event_id)])
+                self.assertEqual(len(self.board.notices()), 1)
+                self.assertEqual(self.board.delivered()[event_id]["status"], "accepted")
 
     def test_its_blocked_is_sent_back_and_a_done_in_another_session_is_too(self) -> None:
         state = origin_field.ReturnState(executor=SESSION)
@@ -582,7 +667,8 @@ class OutOfSprintCardTests(DispatcherFixture):
                 "kind": "card.moved",
                 "reason": "[completion:decision]",
                 "transition": {"source": "in_progress", "target": "done"},
-                "data": {},
+                # What `task complete` records when the origin session's turn runs it.
+                "data": {"po_session": session},
                 "occurred_at": "2026-09-27T13:00:00Z",
             }
         )
@@ -681,6 +767,44 @@ class CreateRuleTests(unittest.TestCase):
                     )
                 self.assertEqual(code, 0)
                 self.assertEqual(writer.return_value.create.call_args.kwargs["origin"], expected)
+
+    def test_complete_and_handover_record_the_session_of_the_turn_that_runs_them(self) -> None:
+        for verb, extra in (
+            ("complete", ["--kind", "decision", "--body-file", "BODY"]),
+            ("handover", ["--to", "owner", "--reason", "Pay the relay."]),
+        ):
+            for environment, expected in (({"SECRETARY_PO_SESSION": "s-7"}, "s-7"), ({}, "")):
+                with self.subTest(verb=verb, environment=environment):
+                    writer = mock.Mock()
+                    getattr(writer.return_value, verb).return_value = {"action": verb}
+                    clean = {k: v for k, v in os.environ.items() if not k.startswith("SECRETARY_PO_")}
+                    with (
+                        mock.patch.dict(os.environ, {**clean, **environment}, clear=True),
+                        mock.patch("secretary.task_commands.TaskWriter", writer),
+                        mock.patch("secretary.task_commands.card_client"),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        tempfile.TemporaryDirectory() as tmp,
+                    ):
+                        body = os.path.join(tmp, "body.md")
+                        with open(body, "w", encoding="utf-8") as handle:
+                            handle.write(DECISION_BODY)
+                        argv = [
+                            "task",
+                            verb,
+                            "--ref",
+                            REF,
+                            "--role",
+                            "po",
+                            "--instance",
+                            tmp,
+                            "--data-dir",
+                            tmp,
+                        ]
+                        code = main(argv + [body if part == "BODY" else part for part in extra])
+                    self.assertEqual(code, 0)
+                    self.assertEqual(
+                        getattr(writer.return_value, verb).call_args.kwargs["po_session"], expected
+                    )
 
     def test_there_is_no_flag_to_name_an_origin(self) -> None:
         for flag in ("--origin", "--po-session", "--po-request"):

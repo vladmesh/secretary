@@ -2811,6 +2811,43 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.assertFalse(card["sprint"])
             self.assertEqual(card["origin"]["po_session"], "po-s-1")
 
+    def test_complete_and_handover_record_the_po_session_whose_turn_ran_them(self) -> None:
+        """The proof a delegated card's return reads (secretary-1792); it permits nothing."""
+        reference = self.in_progress_decision("secretary-638")
+        self.hand_over_in(reference, "handover-638", "po-s-1")
+        [handover] = [event for event in self.writer.audit.events(reference) if event.get("request_id") == "handover-638"]
+        self.assertEqual(handover["payload"]["po_session"], "po-s-1")
+
+        self.writer.complete(
+            role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-638", po_session="po-s-1",
+        )
+        done = self.writer.audit.committed_event("complete-638")
+        self.assertEqual((done["transition"]["target"], done["data"]["po_session"]), ("done", "po-s-1"))
+        # A repeat from another session (or none) is the recorded completion, unchanged.
+        after = self.board_snapshot()
+        again = self.writer.complete(
+            role="po", actor="po", reference=reference, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-638", po_session="po-s-2",
+        )
+        self.assertTrue(again["replayed"])
+        self.assertBoardUnchanged(after)
+        self.assertEqual(self.writer.audit.committed_event("complete-638")["data"]["po_session"], "po-s-1")
+
+        # Outside a PO turn nothing is recorded, and nothing is refused either.
+        other = self.in_progress_decision("secretary-639")
+        self.writer.complete(
+            role="po", actor="po", reference=other, kind="decision", body=self.DECISION_BODY,
+            request_id="complete-639",
+        )
+        self.assertNotIn("po_session", self.writer.audit.committed_event("complete-639")["data"])
+
+    def hand_over_in(self, reference: str, request_id: str, po_session: str) -> dict:
+        return self.writer.handover(
+            role="po", actor="po", reference=reference, to="owner", reason=self.HANDOVER_REASON,
+            request_id=request_id, po_session=po_session,
+        )
+
     def test_a_wait_cut_in_a_po_turn_returns_to_that_session_when_it_names_no_address(self) -> None:
         wait = {"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z"}
         with mock.patch.object(TaskWriter, "_po_session_state", side_effect=AssertionError("the turn's session")):

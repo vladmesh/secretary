@@ -10,7 +10,8 @@ column:
 
 - `po_origin`: `{session, request}`, written once by create and never again;
 - `po_return`: the dispatcher's side, written only by the dispatcher (`TaskWriter.record_po_return`):
-  `executor`, the session the dispatcher handed a decision/operation card to; `successors`, per closed
+  `executor`, the session the dispatcher handed a decision/operation card to (shown, never a proof of
+  who completed it: the completion records its own `po_session`); `successors`, per closed
   or missing session of the origin's line the session that succeeded it (route recorded before it is
   opened, id right after); `deliveries`, per terminal transition event the result was returned for.
 
