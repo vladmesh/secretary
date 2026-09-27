@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
-from typing import ClassVar
+from typing import Any, ClassVar
 from urllib.parse import urlencode
 
 from secretary.config import validate
 from secretary.po import token as po_token
 from secretary.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
+from secretary.web import pages
 from secretary.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
 from secretary.web.server import build_server
 from secretary.webproto.errors import InstallationUnavailable, RuntimeUnavailable
@@ -376,6 +379,222 @@ class PoModelListTests(unittest.TestCase):
         ):
             with self.subTest(bad=bad):
                 self.assertTrue(validate({**self.INSTANCE, "po": bad}, "instance", "instance.yaml"))
+
+
+class _Ids(HTMLParser):
+    """Every element with an id, and the ids of the elements it sits inside."""
+
+    VOID = frozenset(
+        {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stack: list[str | None] = []
+        self.inside: dict[str, tuple[str, ...]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        own = dict(attrs).get("id")
+        if own:
+            self.inside[own] = tuple(ancestor for ancestor in self.stack if ancestor)
+        if tag not in self.VOID:
+            self.stack.append(own)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in self.VOID and self.stack:
+            self.stack.pop()
+
+
+class PoSessionInPlaceTests(unittest.TestCase):
+    """A turn's end updates the session page in place: the changing blocks are swapped, nothing reloads.
+
+    No JS runtime runs here: the script is asserted by structure, the blocks by the markup.
+    """
+
+    SESSION: ClassVar[dict[str, Any]] = {
+        "session_id": "abcdef0123456789",
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "state": "open",
+    }
+
+    def document(self, *, running: bool, queued: int = 0, turns: int = 1) -> dict[str, Any]:
+        seqs = range(1, turns + 1)
+        return {
+            "session": dict(self.SESSION),
+            "turns": [
+                {"seq": seq, "state": "running" if running and seq == turns else "completed"} for seq in seqs
+            ],
+            "feed": [{"turn_seq": seq, "role": "owner", "text": f"question {seq}"} for seq in seqs],
+            "queued": [{"text": f"later {n}", "queued_at": "now"} for n in range(queued)],
+            "running": running,
+            "running_seq": turns if running else None,
+        }
+
+    def ids(self, page: str) -> dict[str, tuple[str, ...]]:
+        parser = _Ids()
+        parser.feed(page)
+        return parser.inside
+
+    def test_the_changing_blocks_carry_stable_ids_and_the_composer_is_in_none_of_them(self) -> None:
+        for draft in ("", "half a thought"):
+            for running, queued in ((True, 0), (True, 2), (False, 0), (False, 1)):
+                with self.subTest(draft=draft, running=running, queued=queued):
+                    page = pages.po_session(
+                        self.document(running=running, queued=queued), request_id="r", draft=draft
+                    )
+                    ids = self.ids(page)
+                    for block in pages.PO_SESSION_BLOCKS:
+                        self.assertEqual(page.count(f'id="{block}"'), 1, block)
+                    self.assertIn("po-turn-state", ids)
+                    self.assertIn("po-head", ids["po-turn-state"])
+                    for composer in ("po-text", "po-send", "po-status"):
+                        self.assertFalse(set(ids[composer]) & set(pages.PO_SESSION_BLOCKS), composer)
+                    send = page.index('<button type="submit" form="po-send">')
+                    for block in pages.PO_SESSION_BLOCKS:
+                        start = page.index(f'id="{block}"')
+                        self.assertFalse(start < send < start + len(self.block(page, block)), block)
+                    if draft:
+                        self.assertIn(f">{draft}</textarea>", page)
+
+    def block(self, page: str, block: str) -> str:
+        """The markup of one block, from its opening tag to its matching close."""
+        start = page.rindex("<", 0, page.index(f'id="{block}"'))
+        tag = re.match(r"<(\w+)", page[start:]).group(1)  # type: ignore[union-attr]
+        depth, at = 0, start
+        for found in re.finditer(rf"<(/?){tag}\b", page[start:]):
+            depth += -1 if found.group(1) else 1
+            if depth == 0:
+                at = start + found.end()
+                break
+        return page[start : page.index(">", at) + 1]
+
+    def test_the_blocks_say_what_the_turn_is_doing(self) -> None:
+        running = pages.po_session(self.document(running=True, queued=1), request_id="r")
+        state = self.block(running, "po-turn-state")
+        self.assertIn("turn running", state)
+        self.assertIn("1 queued", state)
+        self.assertIn("/stop", self.block(running, "po-stop"))
+        self.assertNotIn("<form", self.block(running, "po-close"))
+        self.assertIn("later 0", self.block(running, "po-feed"))
+
+        idle = pages.po_session(self.document(running=False), request_id="r")
+        self.assertIn("idle", self.block(idle, "po-turn-state"))
+        self.assertNotIn("<form", self.block(idle, "po-stop"))
+        self.assertIn("/close", self.block(idle, "po-close"))
+
+        empty = pages.po_session({**self.document(running=False, turns=0), "feed": []}, request_id="r")
+        self.assertIn("nothing said yet", self.block(empty, "po-feed"))
+
+    def test_the_script_swaps_the_blocks_of_the_page_read_again_and_never_reloads(self) -> None:
+        script = pages._PO_SESSION_SCRIPT
+        page = pages.po_session(self.document(running=True), request_id="r", draft="typed")
+        self.assertNotIn("location.reload", script)
+        self.assertIn("const BLOCKS = ['po-head', 'po-stop', 'po-close', 'po-feed'];", page)
+        self.assertIn("fetch(window.location.pathname, { cache: 'no-store' })", script)
+        self.assertIn("new DOMParser().parseFromString(await response.text(), 'text/html')", script)
+        self.assertIn("here.outerHTML = there.outerHTML;", script)
+        self.assertIn("document.getElementById('po-status')", script)
+        # The composer is read for Enter, and never written: no value, selection or focus is set.
+        for touch in ("draft.value =", ".focus(", ".blur(", "setSelectionRange", ".select("):
+            self.assertNotIn(touch, script)
+        # The draft is no longer a reason to take another path: the swap is the one path.
+        self.assertNotIn("draft && draft.value", script)
+        self.assertIn("say('the answer arrived');", script)
+
+    def test_the_page_carries_its_own_polling_baseline(self) -> None:
+        running = pages.po_session(self.document(running=True, queued=1, turns=2), request_id="r")
+        state = self.block(running, "po-turn-state")
+        for attribute in ('data-turns="2"', 'data-last="running"', 'data-queued="1"', 'data-running="true"'):
+            self.assertIn(attribute, state)
+        idle = pages.po_session(self.document(running=False, turns=3), request_id="r")
+        state = self.block(idle, "po-turn-state")
+        for attribute in (
+            'data-turns="3"',
+            'data-last="completed"',
+            'data-queued="0"',
+            'data-running="false"',
+        ):
+            self.assertIn(attribute, state)
+        empty = pages.po_session({**self.document(running=False, turns=0), "feed": []}, request_id="r")
+        self.assertIn('data-turns="0" data-last=""', self.block(empty, "po-turn-state"))
+        # One source for the baseline: nothing about the turns is pasted into the script any more.
+        for placeholder in ("__TURNS__", "__LAST__", "__QUEUED__", "__RUNNING__"):
+            self.assertNotIn(placeholder, pages._PO_SESSION_SCRIPT)
+        self.assertIn("let seen = shown(document);", pages._PO_SESSION_SCRIPT)
+        self.assertIn("if (seen && (seen.running || seen.queued > 0)) {", pages._PO_SESSION_SCRIPT)
+
+    def test_a_turn_that_starts_between_the_json_and_the_page_read_is_followed_to_its_end(self) -> None:
+        """The JSON read says turn N ended and nothing waits; another tab's message then starts turn N+1
+        before the page is read, so the page swapped in shows N+1 running. The baseline and the decision
+        to keep polling are the page's, so the poll goes on; the idle JSON decides nothing after the swap.
+        """
+        script = pages._PO_SESSION_SCRIPT
+        # The page read at that moment says N+1 runs, in the attributes the script reads.
+        fresh = pages.po_session(self.document(running=True, turns=2), request_id="r")
+        self.assertIn('data-turns="2" data-last="running" data-queued="0" data-running="true"', fresh)
+        # The swap answers the fresh page's state, and only after reading it does it write anything.
+        swap = script[script.index("async function swapBlocks()") : script.index("function waitingText")]
+        self.assertIn("const state = shown(fresh);", swap)
+        self.assertLess(swap.index("const state = shown(fresh);"), swap.index("outerHTML"))
+        self.assertIn("return { state: state };", swap)
+        tick = script[
+            script.index("const swapped = await swapBlocks();") : script.index(
+                "} catch (error) {\n      say("
+            )
+        ]
+        # After the swap the JSON document is never read again: baseline and stop come from `seen` alone.
+        self.assertNotIn("doc", tick)
+        taken = tick.index("seen = swapped.state;")
+        self.assertLess(tick.index("if (swapped.failed)"), taken)
+        still = tick.index(
+            "if (seen.running || seen.queued > 0) { say('the page is up to date; ' + waitingText(seen.running)); return; }"
+        )
+        self.assertLess(taken, still)
+        self.assertLess(still, tick.index("window.clearInterval(timer);"))
+        self.assertEqual(script.count("window.clearInterval(timer);"), 1)
+        # Before the swap the JSON is compared with what the page shows, running included.
+        detect = script[script.index("const changed =") : script.index("const swapped = await swapBlocks();")]
+        for compared in ("!== seen.turns", "!== seen.last", "!== seen.queued", "!== seen.running"):
+            self.assertIn(compared, detect)
+
+    def test_a_failed_read_says_why_and_leaves_the_page_as_it_was(self) -> None:
+        script = pages._PO_SESSION_SCRIPT
+        swap = script[script.index("async function swapBlocks()") : script.index("function waitingText")]
+        self.assertIn("if (!response.ok) return { failed: String(response.status) };", swap)
+        self.assertIn(
+            "catch (error) { return { failed: (error && error.message) || 'network error' }; }", swap
+        )
+        self.assertIn("if (missing) return { failed: 'the page has no #' + missing[2] };", swap)
+        # A page without its turn state is a failed read too: no swap, the old baseline stays.
+        self.assertIn("if (!state) return { failed: 'the page does not say its turn state' };", swap)
+        # Every block and the state are checked before any is written: a page missing one changes nothing.
+        self.assertLess(swap.index("if (missing)"), swap.index("outerHTML"))
+        self.assertLess(swap.index("if (!state)"), swap.index("outerHTML"))
+        shown = script[script.index("function shown(page)") : script.index("async function swapBlocks()")]
+        for guard in ("if (!element) return null;", "Number.isInteger(turns)", "data.running !== 'true'"):
+            self.assertIn(guard, shown)
+        self.assertIn("say('could not refresh the answer (' + swapped.failed + ')'); return;", script)
+        # The tick itself never throws: its whole body is guarded, and a busy tick is skipped.
+        self.assertIn(
+            "say('could not refresh the answer (' + ((error && error.message) || 'unexpected error') + ')');",
+            script,
+        )
+        self.assertIn("if (busy) return;", script)
+        self.assertIn("finally {\n      busy = false;", script)
+
+    def test_send_works_again_after_the_turn_it_started(self) -> None:
+        script = pages._PO_SESSION_SCRIPT
+        taken = script.index("seen = swapped.state;")
+        reset = script.index("submitted = false;\n      if (button) button.disabled = false;")
+        self.assertLess(taken, reset)
+
+    def test_no_page_tells_the_owner_to_reload_to_see_anything(self) -> None:
+        web = Path(pages.__file__).parent
+        for source in sorted(web.rglob("*.py")):
+            with self.subTest(source=source.name):
+                self.assertNotIn("reload to see", source.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
