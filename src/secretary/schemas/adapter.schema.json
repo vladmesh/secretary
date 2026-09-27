@@ -63,7 +63,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["workflow"],
-          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'). Needs ci 'github'. The workflow must take the workflow_dispatch input 'secretary_dispatch_id' and carry it in its run-name.",
+          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'). Needs ci 'github'. The run is identified from GitHub's dispatch answer (return_run_details), so the workflow needs no extra input.",
           "properties": {
             "workflow": {
               "oneOf": [
@@ -74,7 +74,7 @@
             },
             "inputs": {
               "type": "object",
-              "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$", "not": {"const": "secretary_dispatch_id"}},
+              "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$"},
               "additionalProperties": {"type": ["string", "number", "boolean"]},
               "description": "Static workflow_dispatch inputs sent with every dispatch."
             },
@@ -87,8 +87,12 @@
             "candidate_input": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
-              "not": {"const": "secretary_dispatch_id"},
               "description": "The workflow_dispatch input that receives the candidate SHA, when the workflow takes one."
+            },
+            "dispatch_id_input": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
+              "description": "Optional: the workflow_dispatch input that receives the dispatcher's dispatch id. When declared, a run whose run-name carries it breaks a tie in crash recovery. No static input and not candidate_input may share its name."
             }
           }
         }

@@ -21,7 +21,6 @@ from secretary.board.wait_card import WaitSpecError, parse_returns
 from secretary.config import validate
 from secretary.dispatch.e2e import (
     DEFAULT_DEADLINE,
-    DISPATCH_ID_INPUT,
     AdapterE2eDeclarationError,
     E2eDeclaration,
     parse_e2e,
@@ -52,26 +51,51 @@ class DeclarationTests(unittest.TestCase):
                     "inputs": {"suite": "mega", "stands": 2, "fast": False},
                     "deadline": "90m",
                     "candidate_input": "sha",
+                    "dispatch_id_input": "secretary_dispatch_id",
                 }
             ),
             adapter="codegen",
         )
         self.assertEqual(
             declaration,
-            E2eDeclaration("e2e.yml", (("suite", "mega"), ("stands", "2"), ("fast", "false")), "90m", "sha"),
+            E2eDeclaration(
+                "e2e.yml",
+                (("suite", "mega"), ("stands", "2"), ("fast", "false")),
+                "90m",
+                "sha",
+                "secretary_dispatch_id",
+            ),
         )
         assert declaration is not None
         self.assertEqual(
             declaration.dispatch_inputs("d-1", "a" * 40),
-            {"suite": "mega", "stands": "2", "fast": "false", "sha": "a" * 40, DISPATCH_ID_INPUT: "d-1"},
+            {
+                "suite": "mega",
+                "stands": "2",
+                "fast": "false",
+                "sha": "a" * 40,
+                "secretary_dispatch_id": "d-1",
+            },
         )
+
+    def test_without_a_dispatch_id_input_only_the_declared_inputs_are_sent(self) -> None:
+        """The Codegen mega's shape: its workflow takes its own inputs and nothing the dispatcher adds."""
+        declaration = parse_e2e(
+            github({"workflow": "stand-e2e.yml", "inputs": {"suite": "mega", "qa": True}})
+        )
+        assert declaration is not None
+        self.assertEqual(declaration.dispatch_inputs("d-1", "a" * 40), {"suite": "mega", "qa": "true"})
+        # A name the dispatcher reserved before is an ordinary input when no dispatch id input is declared.
+        plain = parse_e2e(github({"workflow": "e2e.yml", "inputs": {"secretary_dispatch_id": "x"}}))
+        assert plain is not None
+        self.assertEqual(plain.dispatch_inputs("d-1", "a" * 40), {"secretary_dispatch_id": "x"})
 
     def test_the_minimal_declaration_takes_the_defaults(self) -> None:
         declaration = parse_e2e(github({"workflow": 4242}))
-        self.assertEqual(declaration, E2eDeclaration("4242", (), DEFAULT_DEADLINE, ""))
+        self.assertEqual(declaration, E2eDeclaration("4242", (), DEFAULT_DEADLINE, "", ""))
         assert declaration is not None
         self.assertEqual(DEFAULT_DEADLINE, "6h")
-        self.assertEqual(declaration.dispatch_inputs("d-1", "a" * 40), {DISPATCH_ID_INPUT: "d-1"})
+        self.assertEqual(declaration.dispatch_inputs("d-1", "a" * 40), {})
         self.assertEqual(parse_e2e(github({"workflow": "e2e.yaml", "inputs": None})).workflow, "e2e.yaml")
 
     def test_no_e2e_key_is_no_declaration(self) -> None:
@@ -94,12 +118,17 @@ class DeclarationTests(unittest.TestCase):
             ({"workflow": "e2e.yml", "inputs": {"suite": ["a"]}}, "is a list"),
             ({"workflow": "e2e.yml", "inputs": {"suite": None}}, "is a NoneType"),
             ({"workflow": "e2e.yml", "inputs": {"bad name": "x"}}, "not a workflow input name"),
-            ({"workflow": "e2e.yml", "inputs": {DISPATCH_ID_INPUT: "x"}}, "sets itself"),
+            (
+                {"workflow": "e2e.yml", "inputs": {"sid": "x"}, "dispatch_id_input": "sid"},
+                "sets itself",
+            ),
+            ({"workflow": "e2e.yml", "dispatch_id_input": "a b"}, "not a workflow input name"),
+            ({"workflow": "e2e.yml", "dispatch_id_input": 7}, "not a workflow input name"),
             ({"workflow": "e2e.yml", "deadline": "soon"}, "not a duration"),
             ({"workflow": "e2e.yml", "deadline": "0m"}, "not a positive duration"),
             ({"workflow": "e2e.yml", "deadline": 3600}, "not a duration"),
             ({"workflow": "e2e.yml", "candidate_input": "a b"}, "not a workflow input name"),
-            ({"workflow": "e2e.yml", "candidate_input": DISPATCH_ID_INPUT}, "sets itself"),
+            ({"workflow": "e2e.yml", "candidate_input": "sid", "dispatch_id_input": "sid"}, "sets itself"),
             (
                 {"workflow": "e2e.yml", "inputs": {"sha": "main"}, "candidate_input": "sha"},
                 "also a static input",
@@ -165,6 +194,7 @@ class AdapterSchemaTests(unittest.TestCase):
                 "inputs": {"suite": "mega", "n": 2, "fast": True},
                 "candidate_input": "sha",
             },
+            {"workflow": "e2e.yml", "dispatch_id_input": "secretary_dispatch_id"},
         ):
             with self.subTest(e2e=e2e):
                 self.assertEqual(validate(self.adapter(github(e2e)), "adapter", "a.yaml"), [])
@@ -175,10 +205,10 @@ class AdapterSchemaTests(unittest.TestCase):
             github({"workflow": "e2e.yml", "retries": 2}),
             github({"inputs": {"suite": "mega"}}),
             github({"workflow": "e2e"}),
-            github({"workflow": "e2e.yml", "inputs": {DISPATCH_ID_INPUT: "x"}}),
+            github({"workflow": "e2e.yml", "dispatch_id_input": "a b"}),
             github({"workflow": "e2e.yml", "inputs": {"suite": ["a"]}}),
             github({"workflow": "e2e.yml", "deadline": "soon"}),
-            github({"workflow": "e2e.yml", "candidate_input": DISPATCH_ID_INPUT}),
+            github({"workflow": "e2e.yml", "candidate_input": "a b"}),
             {"ci": "local", "command": "make test", "e2e": {"workflow": "e2e.yml"}},
         ):
             with self.subTest(validation=validation):

@@ -64,9 +64,11 @@ def _now() -> str:
 class E2eGitHubHost(FakeHost):
     """The fake host with a GitHub behind `run_capture`, and a github gate that mints real receipts.
 
-    `dispatch_answer`: `ok`; `crash` (GitHub took it, then the dispatcher died before reading the
-    answer); `hidden` (GitHub took it, but the run's title never carries the dispatch id); or
-    `("http", <gh stderr>)`. `run_answer`: a run's status and conclusion, or `("http", <gh stderr>)`.
+    `dispatch_answer`: `ok` (the run's details, as `return_run_details` answers); `bare` (accepted with
+    no details, as the API answered before it named runs); `crash` (GitHub took it, then the dispatcher
+    died before reading the answer); `hidden` (accepted with no details, and the run never shows up);
+    or `("http", <gh stderr>)`. `run_answer`: a run's status and conclusion, or `("http", <gh stderr>)`.
+    `run_listings` counts the reads of the workflow's run list, the recovery lookup.
     """
 
     def __init__(self, root: Path, catalog: Any) -> None:
@@ -80,6 +82,7 @@ class E2eGitHubHost(FakeHost):
         self.jobs: list[dict[str, Any]] = []
         self.failed_log = FAILED_LOG
         self.gh_calls: list[list[str]] = []
+        self.run_listings = 0
 
     # the github gate, green with an exact-SHA receipt unless a test scripts it
     def gate_check(self, task: dict, record) -> GateResult:
@@ -108,6 +111,8 @@ class E2eGitHubHost(FakeHost):
             path = args[2]
             if re.fullmatch(rf"repos/{REPO}/actions/workflows/e2e\.yml/runs\?.*", path):
                 assert "event=workflow_dispatch" in path and f"branch={BRANCH}" in path, path
+                assert f"head_sha={self.commit}" in path, path
+                self.run_listings += 1
                 return self._ok(args, json.dumps(list(self.runs.values())))
             if match := re.fullmatch(rf"repos/{REPO}/actions/runs/(\d+)", path):
                 return self._run(args, int(match.group(1)))
@@ -123,16 +128,35 @@ class E2eGitHubHost(FakeHost):
 
     def _dispatch(self, args: list[str]) -> subprocess.CompletedProcess:
         fields = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "-f")
+        typed = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "-F")
         inputs = {
             key[len("inputs[") : -1]: value for key, value in fields.items() if key.startswith("inputs[")
         }
-        self.dispatches.append({"path": args[4], "ref": fields.get("ref"), "inputs": inputs})
+        self.dispatches.append({"path": args[4], "ref": fields.get("ref"), "inputs": inputs, "typed": typed})
         if isinstance(self.dispatch_answer, tuple):
             return subprocess.CompletedProcess(args, 1, "", self.dispatch_answer[1])
+        if self.dispatch_answer == "hidden":
+            return self._ok(args, "")
+        run_id = self.add_run(f"e2e {inputs.get('sid', '')}".strip())
+        if self.dispatch_answer == "crash":
+            raise SimulatedCrash("the dispatcher died after GitHub took the dispatch")
+        if self.dispatch_answer == "bare":
+            return self._ok(args, "")
+        url = f"https://github.com/{REPO}/actions/runs/{run_id}"
+        details = {
+            "workflow_run_id": run_id,
+            "run_url": f"https://api.github.com/{url[19:]}",
+            "html_url": url,
+        }
+        return self._ok(args, json.dumps(details))
+
+    def add_run(self, title: str = "e2e") -> int:
+        """A `workflow_dispatch` run of the workflow on the card's branch, created now."""
         run_id = FIRST_RUN + len(self.runs)
-        title = "e2e" if self.dispatch_answer == "hidden" else f"e2e {inputs['secretary_dispatch_id']}"
         self.runs[run_id] = {
             "id": run_id,
+            "event": "workflow_dispatch",
+            "head_branch": BRANCH,
             "display_title": title,
             "name": "e2e",
             "head_sha": self.run_head_sha or self.commit,
@@ -140,15 +164,14 @@ class E2eGitHubHost(FakeHost):
             "status": "queued",
             "created_at": _now(),
         }
-        if self.dispatch_answer == "crash":
-            raise SimulatedCrash("the dispatcher died after GitHub took the dispatch")
-        return self._ok(args, "")
+        return run_id
 
     def _run(self, args: list[str], run_id: int) -> subprocess.CompletedProcess:
         if isinstance(self.run_answer, tuple) and self.run_answer[0] == "http":
             return subprocess.CompletedProcess(args, 1, "", self.run_answer[1])
         status, conclusion = self.run_answer
         run = {
+            "head_sha": self.runs.get(run_id, {}).get("head_sha", self.commit),
             "status": status,
             "conclusion": conclusion,
             "html_url": f"https://github.com/{REPO}/actions/runs/{run_id}",
@@ -277,11 +300,12 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         [dispatch] = self.host.dispatches
         self.assertEqual(dispatch["path"], f"repos/{REPO}/actions/workflows/e2e.yml/dispatches")
         self.assertEqual(dispatch["ref"], BRANCH)
+        self.assertEqual(dispatch["typed"], {"return_run_details": "true"})
+        # Only the declared inputs and the candidate: no dispatch id input is declared, so none is sent.
+        self.assertEqual(dispatch["inputs"], {"suite": "mega", "sha": SHA})
         [run] = e2e_state(self.card()).runs
-        self.assertEqual(
-            dispatch["inputs"], {"suite": "mega", "sha": SHA, "secretary_dispatch_id": run.dispatch_id}
-        )
-        self.assertEqual((run.sha, run.run_id, run.run_url), (SHA, FIRST_RUN, RUN_URL))
+        self.assertEqual((run.sha, run.run_id, run.run_url, run.head_sha), (SHA, FIRST_RUN, RUN_URL, SHA))
+        self.assertEqual(self.host.run_listings, 0, "GitHub's answer named the run: no list lookup")
         self.assertEqual((waiting["run"], waiting["wait_card"]), (RUN_URL, run.wait_ref))
         # The wait card is on the board, in the card's sprint, waiting for that run and returning here.
         wait = self.reader.show(run.wait_ref)
@@ -382,7 +406,7 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     # --- crash and restart ---------------------------------------------------------------------------
 
-    def test_a_crash_after_the_dispatch_finds_the_run_by_its_dispatch_id(self) -> None:
+    def test_a_crash_after_the_dispatch_finds_the_run_by_sha_branch_event_and_time(self) -> None:
         self.arrange()
         self.to_green_review()
         self.host.dispatch_answer = "crash"
@@ -397,9 +421,88 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(waiting["action"], "e2e-waiting", waiting)
         self.assertEqual(len(self.host.dispatches), 1, "recovery never dispatches again")
+        self.assertEqual(self.host.run_listings, 1)
         [run] = e2e_state(self.card()).runs
-        self.assertEqual((run.dispatch_id, run.run_id), (intent.dispatch_id, FIRST_RUN))
+        self.assertEqual((run.dispatch_id, run.run_id, run.head_sha), (intent.dispatch_id, FIRST_RUN, SHA))
         self.assertTrue(run.wait_ref)
+
+    def test_recovery_ignores_runs_of_another_sha_branch_event_or_time(self) -> None:
+        self.arrange()
+        self.to_green_review()
+        self.host.dispatch_answer = "crash"
+        with self.assertRaises(SimulatedCrash):
+            self.tick()
+        # Before the intent, and others that are not this dispatch: none of them is a match.
+        stale = self.host.add_run()
+        self.host.runs[stale]["created_at"] = "2026-01-01T00:00:00Z"
+        pushed = self.host.add_run()
+        self.host.runs[pushed]["event"] = "push"
+        other = self.host.add_run()
+        self.host.runs[other]["head_branch"] = "main"
+        elsewhere = self.host.add_run()
+        self.host.runs[elsewhere]["head_sha"] = SECOND_SHA
+
+        self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
+
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual(run.run_id, FIRST_RUN)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_two_matching_runs_block_the_card_and_none_is_guessed(self) -> None:
+        self.arrange()
+        self.to_green_review()
+        self.host.dispatch_answer = "crash"
+        with self.assertRaises(SimulatedCrash):
+            self.tick()
+        second = self.host.add_run()
+
+        blocked = self.tick(self._runtime())
+
+        self.assertBlockedAsInfrastructure(
+            blocked, "cannot be told apart", RUN_URL, f"https://github.com/{REPO}/actions/runs/{second}"
+        )
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual(run.run_id, 0)
+        self.assertEqual(self.wait_cards(), [])
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_a_declared_dispatch_id_input_is_sent_and_breaks_a_tie_in_recovery(self) -> None:
+        self.arrange(e2e={**E2E, "dispatch_id_input": "sid"})
+        self.to_green_review()
+        self.host.dispatch_answer = "crash"
+        with self.assertRaises(SimulatedCrash):
+            self.tick()
+        [intent] = e2e_state(self.card()).runs
+        [dispatch] = self.host.dispatches
+        self.assertEqual(dispatch["inputs"], {"suite": "mega", "sha": SHA, "sid": intent.dispatch_id})
+        self.host.add_run("e2e someone else's dispatch")
+
+        self.assertEqual(self.tick(self._runtime())["action"], "e2e-waiting")
+
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual(run.run_id, FIRST_RUN)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_an_answer_without_run_details_is_looked_up(self) -> None:
+        self.arrange()
+        self.to_green_review()
+        self.host.dispatch_answer = "bare"
+
+        self.assertEqual(self.tick()["action"], "e2e-waiting")
+
+        [run] = e2e_state(self.card()).runs
+        self.assertEqual((run.run_id, run.dispatch), (FIRST_RUN, "sent"))
+        self.assertEqual(self.host.run_listings, 1)
+
+    def test_a_run_on_another_sha_is_not_accepted(self) -> None:
+        self.arrange()
+        self.to_green_review()
+        self.host.run_head_sha = SECOND_SHA
+
+        blocked = self.tick()
+
+        self.assertBlockedAsInfrastructure(blocked, f"ran on `{SECOND_SHA[:12]}`", RUN_URL)
+        self.assertEqual(self.wait_cards(), [])
 
     def test_a_crash_after_the_wait_card_was_created_creates_no_second_one(self) -> None:
         self.arrange()
@@ -526,7 +629,9 @@ class E2eStageTests(DispatcherRuntimeFixture, unittest.TestCase):
         with mock.patch.object(e2e_stage, "utcnow", return_value=later):
             blocked = self.tick()
 
-        self.assertBlockedAsInfrastructure(blocked, "secretary_dispatch_id", "run-name")
+        self.assertBlockedAsInfrastructure(
+            blocked, "could not be identified", "Nothing was dispatched a second time"
+        )
         self.assertEqual(len(self.host.dispatches), 1)
         self.assertEqual(self.wait_cards(), [])
 

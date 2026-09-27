@@ -1113,8 +1113,8 @@ review ([Protocols](PROTOCOLS.md#the-e2e-stage)). While it does:
 - a **wait card** titled `E2E run <workflow> for <card> @ <sha>` sits in Ready, then In progress, in the
   card's sprint; `task show` of it carries `wait` with the run link, the deadline, `last_observation`
   (`run <repo>#<id> is in_progress`) and `last_error`;
-- the dispatcher's tick outcome for the card is `e2e-identifying` (the run is not found yet; at most 15
-  minutes) or `e2e-waiting`, with `run`, `wait_card`, `deadline`, `observation` and `runs_dispatched`.
+- the dispatcher's tick outcome for the card is `e2e-identifying` (the run is not named or its SHA not
+  checked yet; at most 15 minutes) or `e2e-waiting`, with `run`, `wait_card`, `deadline`, `observation` and `runs_dispatched`.
 
 When the run concludes, the wait card goes Done (or Blocked for a missed deadline, an unreachable run
 or a cancel) and comments `[wait:<outcome>]` on the code card, and the code card moves on the next

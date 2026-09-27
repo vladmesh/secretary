@@ -9,10 +9,12 @@ run is not dispatched again. A red review never reaches it, so rework rounds spe
 
 Dispatch, exactly once per candidate SHA. The card's `e2e` field (`board/e2e_record.py`) is the
 stage's record. A run record is written as an intent (card, SHA, dispatch id) before the
-`workflow_dispatch` call; the run is identified by that dispatch id among the workflow's runs on the
-card's branch. A record that exists for the SHA is continued, never dispatched again: after a crash
-or a restart the run is looked up by its id, and one that does not appear within the identification
-window Blocks the card. A dispatch GitHub refuses Blocks the card with GitHub's answer.
+`workflow_dispatch` call, which asks GitHub for the run it starts (`return_run_details`); the run id in
+the answer is recorded right after it, and the run's `head_sha` is checked against the candidate. A
+record that exists for the SHA is continued, never dispatched again: after a crash between the call and
+that record the run is looked up by event, branch, SHA and creation time (`e2e.matching_runs`); several
+matches Block the card with the candidates listed, and none within the identification window Blocks
+it too. A dispatch GitHub refuses Blocks the card with GitHub's answer.
 
 Wait. Once the run is identified the dispatcher creates a `wait` card for it (`dispatch/wait_cards.py`),
 in the code card's sprint, with the adapter's deadline and the return address `card:<ref>`, under a
@@ -53,8 +55,9 @@ from secretary.dispatch.e2e import (
     E2eDeclaration,
     declared_e2e,
     dispatch_workflow,
-    find_run,
+    matching_runs,
     red_evidence,
+    run_head_sha,
 )
 from secretary.dispatch.gate import GateResult, _name_with_owner
 from secretary.dispatch.gate import _fingerprint as _gate_fingerprint
@@ -209,7 +212,7 @@ def _dispatch(
     # The intent is on the card before anything reaches GitHub.
     _persist(runtime, ref, state)
     try:
-        dispatch_workflow(
+        dispatched = dispatch_workflow(
             runtime.host, repo, declaration, branch=run.branch, dispatch_id=run.dispatch_id, sha=sha
         )
     except DispatchRefused as exc:
@@ -222,48 +225,96 @@ def _dispatch(
             "workflow, its `workflow_dispatch` trigger or the dispatcher's access has to be repaired.",
         )
     except HostError as exc:
-        # No answer, or a rate limit: GitHub may or may not have taken it. The run is looked up by
-        # its dispatch id from here on, exactly as after a crash; it is never dispatched again.
+        # No answer, or a rate limit: GitHub may or may not have taken it. The run is looked up from
+        # here on, exactly as after a crash; it is never dispatched again.
         run.dispatch_detail = f"unconfirmed: {safe_one_line(scrub_host_output(str(exc)), limit=500)}"
     else:
         run.dispatch = SENT
+        # GitHub's own answer names the run; an answer without one is looked up like a crash.
+        if dispatched.run_id:
+            run.run_id = dispatched.run_id
+            run.run_url = f"https://github.com/{repo}/actions/runs/{dispatched.run_id}"
     _persist(runtime, ref, state)
     return run
 
 
 def _identify(
-    runtime: Any, task: dict[str, Any], attempt_id: str, state: E2eState, run: E2eRun, *, step: str
+    runtime: Any,
+    task: dict[str, Any],
+    attempt_id: str,
+    state: E2eState,
+    run: E2eRun,
+    declaration: E2eDeclaration,
+    *,
+    step: str,
 ) -> dict[str, Any] | None:
-    """Find the run by its dispatch id; None once it is identified, else the tick's outcome."""
+    """Name the run and check its SHA; None once both are on the record, else the tick's outcome.
+
+    A run GitHub's dispatch answer named is only checked (`head_sha`). One that no answer named (a crash
+    after the POST, no answer, an answer without details) is looked up by event, branch, SHA and
+    creation time. More than one match is never guessed: the card is Blocked with every candidate.
+    """
     ref = task["ref"]
     error = ""
     try:
-        found = find_run(runtime.host, run.repo, run.workflow, branch=run.branch, dispatch_id=run.dispatch_id)
+        if run.run_id:
+            head_sha = run_head_sha(runtime.host, run.repo, run.run_id)
+        else:
+            found = matching_runs(
+                runtime.host,
+                run.repo,
+                run.workflow,
+                branch=run.branch,
+                sha=run.sha,
+                since=wait_card.parse_utc(run.intent_at, "intent_at"),
+                dispatch_id=run.dispatch_id if declaration.dispatch_id_input else "",
+            )
+            if len(found) > 1:
+                listed = ", ".join(
+                    f"{candidate.get('html_url') or candidate['id']} (created {candidate.get('created_at')})"
+                    for candidate in sorted(found, key=lambda candidate: int(candidate["id"]))
+                )
+                _close(
+                    run,
+                    f"The e2e run dispatched at {run.intent_at} for `{run.sha[:12]}` cannot be told apart: "
+                    f"{len(found)} `{run.workflow}` workflow_dispatch runs on `{run.branch}` at that SHA "
+                    f"were created since: {listed}. None is taken as this candidate's e2e result, and "
+                    "nothing is dispatched again.",
+                )
+                _persist(runtime, ref, state)
+                return None
+            if found:
+                run.run_id = int(found[0]["id"])
+                run.run_url = f"https://github.com/{run.repo}/actions/runs/{run.run_id}"
+            head_sha = str(found[0].get("head_sha") or "") if found else ""
     except HostError as exc:
-        found, error = None, safe_one_line(scrub_host_output(str(exc)), limit=500)
-    if found is None:
+        head_sha, error = "", safe_one_line(scrub_host_output(str(exc)), limit=500)
+    if not head_sha:
         window_end = wait_card.parse_utc(run.intent_at, "intent_at") + timedelta(seconds=E2E_IDENTIFY_SECONDS)
         if utcnow() < window_end:
             return {
                 **_outcome(ref, attempt_id, "e2e-identifying", step=step, sha=run.sha),
                 "dispatch_id": run.dispatch_id,
+                **({"run": run.run_url} if run.run_url else {}),
                 **({"error": error} if error else {}),
             }
+        what = (
+            f"its run {run.run_url} could not be read"
+            if run.run_id
+            else f"no `{run.workflow}` workflow_dispatch run on `{run.branch}` at that SHA was found"
+        )
         _close(
             run,
             f"The e2e run dispatched at {run.intent_at} for `{run.sha[:12]}` (dispatch id `{run.dispatch_id}`) "
-            f"was not found among the `{run.workflow}` runs on `{run.branch}` within "
-            f"{E2E_IDENTIFY_SECONDS // 60} minutes"
+            f"could not be identified: {what} within {E2E_IDENTIFY_SECONDS // 60} minutes"
             + (f" ({run.dispatch_detail})" if run.dispatch_detail else "")
-            + ". The workflow must take the input `secretary_dispatch_id` and carry it in its `run-name`. "
-            "Nothing was dispatched a second time.",
+            + (f"; last error: {error}" if error else "")
+            + ". Nothing was dispatched a second time.",
         )
         _persist(runtime, ref, state)
         return None
-    head_sha = str(found.get("head_sha") or "")
-    run.run_id = int(found["id"])
-    run.run_url = f"https://github.com/{run.repo}/actions/runs/{run.run_id}"
-    if head_sha and head_sha != run.sha:
+    run.head_sha = head_sha
+    if head_sha != run.sha:
         _close(
             run,
             f"The e2e run {run.run_url} ran on `{head_sha[:12]}`, not on the candidate `{run.sha[:12]}`: "
@@ -316,8 +367,8 @@ def _advance(
 ) -> dict[str, Any] | None:
     ref = task["ref"]
     if not run.closing and run.result is None:
-        if not run.run_id:
-            pending = _identify(runtime, task, attempt_id, state, run, step=step)
+        if not run.run_id or not run.head_sha:
+            pending = _identify(runtime, task, attempt_id, state, run, declaration, step=step)
             if pending is not None:
                 return pending
         if not run.closing and not run.wait_ref:

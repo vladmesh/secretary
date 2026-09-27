@@ -1304,24 +1304,20 @@ validation:
     inputs: {suite: mega} # optional static workflow_dispatch inputs (string, number or boolean)
     deadline: 6h          # optional duration, default 6h: the wait card's deadline
     candidate_input: sha  # optional: the input that receives the candidate SHA
+    dispatch_id_input: sid # optional: the input that receives the dispatch id (see below)
 ```
 
 It is read with the adapter (`InstanceCatalog.adapter`), and a malformed one fails that read with
 `AdapterE2eDeclarationError`, a typed adapter error naming the adapter and the problem: an unknown key,
 no or a bad `workflow`, `inputs` that is not a mapping of input names to scalars, a bad `deadline`, a bad
-`candidate_input`, an input named `secretary_dispatch_id`, or `ci` other than `github`. The card's gate
+`candidate_input` or `dispatch_id_input`, a static input or `candidate_input` sharing the
+`dispatch_id_input` name, or `ci` other than `github`. The card's gate
 then fails with that reason, and nothing is skipped silently. The adapter schema says the same. A
 project with no `e2e` key behaves exactly as before.
 
-The workflow must take the input `secretary_dispatch_id` and carry it in its `run-name`:
-
-```yaml
-on:
-  workflow_dispatch:
-    inputs:
-      secretary_dispatch_id: {required: true}
-run-name: e2e ${{ inputs.secretary_dispatch_id }}
-```
+The workflow needs no input of the dispatcher's: it is dispatched with exactly its declared `inputs`,
+plus `candidate_input` when declared, plus `dispatch_id_input` when declared (GitHub refuses an input the
+workflow does not declare, HTTP 422).
 
 **Placement.** For a `code` card of a declaring project, the stage runs in `park_green_verdict`: after a
 green review verdict, or right after green CI when the card's review is `skipped`, and before the park in
@@ -1338,15 +1334,25 @@ merges only after it is green.
 dispatcher through `TaskWriter.record_e2e_state`; no column, no migration) is the stage's record: one
 entry per dispatch. The entry is written as an intent (card, SHA, dispatch id
 `<card>-e2e-<n>-<random>`, repository, branch, workflow, deadline) before `POST
-repos/<repo>/actions/workflows/<workflow>/dispatches` on `pipeline/<card>`, with the static inputs,
-the candidate input when declared, and `secretary_dispatch_id`. The run is identified by that id: the
-dispatcher lists the workflow's `workflow_dispatch` runs on the branch and takes the one whose title
-carries it, and checks that its `head_sha` is the candidate. An entry that exists for the SHA is
-continued and never dispatched again: after a crash or a restart the run is looked up by its id. A
-dispatch that got no answer, or was rate limited, is looked up the same way. A run not found within 15
-minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`), a run on another SHA, and a dispatch GitHub
-refused (no workflow, no `workflow_dispatch` trigger, an input the workflow does not take, no access)
-Block the card with the reason, not rework.
+repos/<repo>/actions/workflows/<workflow>/dispatches` on `pipeline/<card>` with `return_run_details:
+true`. The run is identified by GitHub's own answer: the 200 response carries `workflow_run_id` (GitHub
+changelog 2026-02-19, "Workflow dispatch API now returns run IDs"). The parameter is sent explicitly
+through `gh api`, so it does not depend on the host's `gh` version. The run id is recorded right after
+the call, and the run's `head_sha` (`GET repos/<repo>/actions/runs/<id>`) is checked against the
+candidate.
+
+An entry that exists for the SHA is continued and never dispatched again. When no answer named the run
+(the dispatcher died after the POST and before recording it, the POST got no answer or was rate
+limited, or the answer carried no details), the run is looked up among the workflow's runs by all of:
+`event == workflow_dispatch`, branch `pipeline/<card>`, `head_sha ==` the candidate, and `created_at`
+no earlier than the intent less a 120-second clock margin (GitHub's clock against the dispatcher's).
+One dispatch per SHA makes one match the run. Several matches are ambiguous and are never guessed: the
+card is Blocked with every candidate listed. With `dispatch_id_input` declared, the dispatch id is sent
+in that input and, among several matches, the ones whose title carries it are kept, which breaks a tie
+for a workflow that puts the input in its `run-name`. A run not identified (or whose SHA could not be
+read) within 15 minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`), a run on another SHA, and a
+dispatch GitHub refused (no workflow, no `workflow_dispatch` trigger, an input the workflow does not
+take, no access) Block the card with the reason, not rework.
 
 **Wait.** Once the run is identified, the dispatcher creates a `wait` card for it: target the run,
 the adapter's deadline, the code card's sprint (none if it has none), return address

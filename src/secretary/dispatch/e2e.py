@@ -9,6 +9,7 @@ A project declares one e2e check in its adapter, beside its mechanical gate (sec
         inputs: {suite: mega}     # optional static `workflow_dispatch` inputs
         deadline: 6h              # optional; how long the run may take, 6h when absent
         candidate_input: sha      # optional; the input that receives the candidate SHA
+        dispatch_id_input: sid    # optional; the input that receives the dispatch id
 
 `parse_e2e` is the one reading of it, and a malformed declaration raises
 :class:`AdapterE2eDeclarationError`, a typed adapter error: the adapter read fails (`InstanceCatalog.
@@ -16,20 +17,18 @@ adapter`), so the card's gate fails with the reason, instead of the stage being 
 with no `e2e` key reads as None and nothing changes. `e2e` needs `ci: github`: only the github gate
 publishes the candidate branch the workflow is dispatched on.
 
-The run is identified by a **dispatch id**. The dispatcher passes a fresh id as the input
-:data:`DISPATCH_ID_INPUT` and looks it up among the workflow's `workflow_dispatch` runs on the card's
-branch, in the run's title. The declared workflow therefore has to take that input and put it in its
-`run-name`:
+The run is identified by **GitHub's own answer**: the dispatch is sent with `return_run_details: true`
+(REST, explicitly, so it does not depend on the host's `gh` version), and the 200 answer names the
+run (`workflow_run_id`, `html_url`). The workflow needs no contract for that.
 
-    on:
-      workflow_dispatch:
-        inputs:
-          secretary_dispatch_id: {required: true}
-    run-name: e2e ${{ inputs.secretary_dispatch_id }}
-
-A workflow that does not declare the input is refused by GitHub at dispatch (HTTP 422), which Blocks
-the card with GitHub's answer; one that does not put it in its `run-name` is never identified, which
-Blocks the card when the identification window runs out.
+A dispatcher that died after the POST and before it recorded the answer finds the run again among the
+workflow's runs by all of: `event == workflow_dispatch`, branch `pipeline/<ref>`, `head_sha ==` the
+candidate, and `created_at` at or after the intent less :data:`E2E_CLOCK_MARGIN_SECONDS` (GitHub's clock
+against the dispatcher's). One dispatch per SHA is already guaranteed, so one match is the run; more
+than one is ambiguous and is never guessed (:func:`matching_runs` returns them all). When the adapter
+declares `dispatch_id_input`, that input carries the dispatch id and a match whose title carries it
+breaks such a tie; that asks the workflow to put the input in its `run-name`. Without it no extra input
+is sent.
 
 Everything here is host I/O through the gate's `_backend_call`/`_gh_api`, so a question that got no
 answer is a `GateTransportError`, never a verdict. The stage (`dispatch/e2e_stage.py`) decides what
@@ -38,29 +37,31 @@ each answer does to the card.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
-from secretary.board.wait_card import WaitSpecError, parse_duration
+from secretary.board.wait_card import WaitSpecError, parse_duration, parse_utc
 from secretary.dispatch.gate import _HTTP_STATUS_RE, _backend_call, _failed_log, _gh_api, _LogFragment
 from secretary.dispatch.helpers import _tail
 from secretary.dispatch.types import GateTransportError, HostError
 
-#: The `workflow_dispatch` input that carries the dispatch id, and must appear in the run's `run-name`.
-DISPATCH_ID_INPUT = "secretary_dispatch_id"
 DEFAULT_DEADLINE = "6h"
+#: How far before the intent a recovered run's `created_at` may lie: GitHub's clock against ours.
+E2E_CLOCK_MARGIN_SECONDS = 120
 #: How long after its intent a dispatched run may stay unidentified before the card is Blocked.
 E2E_IDENTIFY_SECONDS = max(60, int(os.environ.get("SECRETARY_E2E_IDENTIFY_SECONDS", str(15 * 60))))
 
-_KEYS = frozenset({"workflow", "inputs", "deadline", "candidate_input"})
+_KEYS = frozenset({"workflow", "inputs", "deadline", "candidate_input", "dispatch_id_input"})
 _WORKFLOW_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.ya?ml$")
 _INPUT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,99}$")
 #: Conclusions of a failed job whose steps and log are the evidence of a red run.
 _FAILED_JOB_CONCLUSIONS = frozenset({"failure", "timed_out"})
-_RUNS_JQ = "[.workflow_runs[] | {id, display_title, name, head_sha, html_url, status, created_at}]"
+_RUNS_JQ = "[.workflow_runs[] | {id, event, head_branch, head_sha, display_title, name, html_url, status, created_at}]"
 _JOBS_JQ = (
     "[.jobs[] | {name, conclusion, html_url, "
     'steps: [(.steps // [])[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name]}]'
@@ -84,13 +85,15 @@ class E2eDeclaration:
     inputs: tuple[tuple[str, str], ...] = ()
     deadline: str = DEFAULT_DEADLINE
     candidate_input: str = ""
+    dispatch_id_input: str = ""
 
     def dispatch_inputs(self, dispatch_id: str, sha: str) -> dict[str, str]:
-        """Every input one dispatch sends: the static ones, the candidate SHA if declared, the id."""
+        """Every input one dispatch sends: the static ones, and the SHA and the id where declared."""
         inputs = dict(self.inputs)
         if self.candidate_input:
             inputs[self.candidate_input] = sha
-        inputs[DISPATCH_ID_INPUT] = dispatch_id
+        if self.dispatch_id_input:
+            inputs[self.dispatch_id_input] = dispatch_id
         return inputs
 
 
@@ -105,10 +108,10 @@ def _input_value(name: str, value: Any, adapter: str) -> str:
     )
 
 
-def _input_name(value: Any, what: str, adapter: str) -> str:
+def _input_name(value: Any, what: str, adapter: str, reserved: str = "") -> str:
     if not isinstance(value, str) or not _INPUT_NAME_RE.match(value):
         raise AdapterE2eDeclarationError(adapter, f"{what} {value!r} is not a workflow input name")
-    if value == DISPATCH_ID_INPUT:
+    if reserved and value == reserved:
         raise AdapterE2eDeclarationError(
             adapter, f"{what} {value!r} is the dispatch id input the dispatcher sets itself"
         )
@@ -145,8 +148,12 @@ def parse_e2e(validation: Any, *, adapter: str = "") -> E2eDeclaration | None:
         inputs_raw = {}
     if not isinstance(inputs_raw, Mapping):
         raise AdapterE2eDeclarationError(adapter, "inputs is not a mapping of input names to values")
+    dispatch_raw = raw.get("dispatch_id_input")
+    dispatch_id_input = (
+        "" if dispatch_raw is None else _input_name(dispatch_raw, "dispatch_id_input", adapter)
+    )
     inputs = tuple(
-        (_input_name(name, "input", adapter), _input_value(str(name), value, adapter))
+        (_input_name(name, "input", adapter, dispatch_id_input), _input_value(str(name), value, adapter))
         for name, value in inputs_raw.items()
     )
     deadline = raw.get("deadline", DEFAULT_DEADLINE)
@@ -155,12 +162,14 @@ def parse_e2e(validation: Any, *, adapter: str = "") -> E2eDeclaration | None:
     except WaitSpecError as exc:
         raise AdapterE2eDeclarationError(adapter, str(exc)) from None
     candidate = raw.get("candidate_input")
-    candidate_input = "" if candidate is None else _input_name(candidate, "candidate_input", adapter)
+    candidate_input = (
+        "" if candidate is None else _input_name(candidate, "candidate_input", adapter, dispatch_id_input)
+    )
     if candidate_input and candidate_input in dict(inputs):
         raise AdapterE2eDeclarationError(
             adapter, f"candidate_input {candidate_input!r} is also a static input; it takes the candidate SHA"
         )
-    return E2eDeclaration(workflow, inputs, str(deadline).strip(), candidate_input)
+    return E2eDeclaration(workflow, inputs, str(deadline).strip(), candidate_input, dispatch_id_input)
 
 
 def declared_e2e(host: Any, project: str) -> E2eDeclaration | None:
@@ -176,14 +185,25 @@ class DispatchRefused(HostError):
     """GitHub answered the dispatch and refused it: no workflow, no `workflow_dispatch`, no access."""
 
 
+@dataclass(frozen=True)
+class DispatchedRun:
+    """The run GitHub's dispatch answer names; `run_id` 0 when the answer named none."""
+
+    run_id: int = 0
+    html_url: str = ""
+
+
 def dispatch_workflow(
     host: Any, repo: str, declaration: E2eDeclaration, *, branch: str, dispatch_id: str, sha: str
-) -> None:
-    """`POST .../workflows/{workflow}/dispatches` on the candidate branch, with the dispatch id.
+) -> DispatchedRun:
+    """`POST .../workflows/{workflow}/dispatches` on the candidate branch, asking for the run it starts.
 
-    Returns when GitHub accepted it. :class:`DispatchRefused` when GitHub answered with a refusal;
-    `GateTransportError` when no answer came back (which says nothing about whether it was accepted),
-    and for a rate limit, which is GitHub declining to answer now rather than refusing the workflow.
+    `return_run_details: true` is sent explicitly, so the answer is the same whatever `gh` the host
+    runs. Returns the run GitHub named, or an empty :class:`DispatchedRun` when it accepted the dispatch
+    without naming one (the run is then looked up as after a crash). :class:`DispatchRefused` when
+    GitHub answered with a refusal; `GateTransportError` when no answer came back (which says nothing
+    about whether it was accepted), and for a rate limit, which is GitHub declining to answer now rather
+    than refusing the workflow.
     """
     args = [
         "gh",
@@ -193,12 +213,21 @@ def dispatch_workflow(
         f"repos/{repo}/actions/workflows/{declaration.workflow}/dispatches",
         "-f",
         f"ref={branch}",
+        "-F",
+        "return_run_details=true",
     ]
     for name, value in declaration.dispatch_inputs(dispatch_id, sha).items():
         args += ["-f", f"inputs[{name}]={value}"]
     completed = _backend_call(host, args, "e2e workflow dispatch")
     if completed.returncode == 0:
-        return
+        try:
+            answer = json.loads((completed.stdout or "").strip() or "{}")
+        except ValueError:
+            answer = {}
+        run_id = answer.get("workflow_run_id") if isinstance(answer, dict) else None
+        if isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0:
+            return DispatchedRun(run_id, str(answer.get("html_url") or ""))
+        return DispatchedRun()
     text = _tail((completed.stderr or completed.stdout or "").strip()) or "(no output)"
     status = _HTTP_STATUS_RE.search(text)
     code = (status.group(1) or status.group(2)) if status else ""
@@ -207,23 +236,64 @@ def dispatch_workflow(
     raise DispatchRefused(f"GitHub refused the dispatch of {declaration.workflow} on {branch}: {text}")
 
 
-def find_run(host: Any, repo: str, workflow: str, *, branch: str, dispatch_id: str) -> dict[str, Any] | None:
-    """The workflow's `workflow_dispatch` run on `branch` whose title carries `dispatch_id`, or None.
+def matching_runs(
+    host: Any,
+    repo: str,
+    workflow: str,
+    *,
+    branch: str,
+    sha: str,
+    since: datetime,
+    dispatch_id: str = "",
+) -> list[dict[str, Any]]:
+    """The workflow's runs that can be this dispatch's: every one of them, never a guess among them.
 
+    A match is a `workflow_dispatch` run on `branch` at `head_sha == sha`, created at or after `since`
+    less :data:`E2E_CLOCK_MARGIN_SECONDS`. `dispatch_id` (only when the adapter declares a
+    `dispatch_id_input`) narrows several matches to the ones whose title carries it, when any does.
     `GateTransportError` when GitHub did not answer; `HostError` when it answered with an error.
     """
     path = (
-        f"repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch={branch}&per_page=100"
+        f"repos/{repo}/actions/workflows/{workflow}/runs"
+        f"?event=workflow_dispatch&branch={branch}&head_sha={sha}&per_page=100"
     )
     runs = _gh_api(host, path, jq=_RUNS_JQ)
+    earliest = since - timedelta(seconds=E2E_CLOCK_MARGIN_SECONDS)
+    found: list[dict[str, Any]] = []
     for run in runs if isinstance(runs, list) else []:
         if not isinstance(run, dict):
             continue
-        title = f"{run.get('display_title') or ''} {run.get('name') or ''}"
         run_id = run.get("id")
-        if dispatch_id in title and isinstance(run_id, int) and run_id > 0:
-            return run
-    return None
+        if not (isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0):
+            continue
+        if (run.get("event"), run.get("head_branch"), run.get("head_sha")) != (
+            "workflow_dispatch",
+            branch,
+            sha,
+        ):
+            continue
+        try:
+            created = parse_utc(str(run.get("created_at") or ""), "created_at")
+        except WaitSpecError:
+            continue
+        if created >= earliest:
+            found.append(run)
+    if dispatch_id and len(found) > 1:
+        titled = [
+            run for run in found if dispatch_id in f"{run.get('display_title') or ''} {run.get('name') or ''}"
+        ]
+        if titled:
+            found = titled
+    return found
+
+
+def run_head_sha(host: Any, repo: str, run_id: int) -> str:
+    """The SHA a run ran on. `GateTransportError` for no answer, `HostError` for an answered error."""
+    run = _gh_api(host, f"repos/{repo}/actions/runs/{run_id}", jq="{head_sha}")
+    head = run.get("head_sha") if isinstance(run, dict) else None
+    if not head:
+        raise GateTransportError(f"GitHub answered run {repo}#{run_id} with no head_sha")
+    return str(head)
 
 
 @dataclass(frozen=True)
@@ -257,15 +327,17 @@ def red_evidence(host: Any, repo: str, run_id: int, run_url: str) -> RedEvidence
 
 __all__ = [
     "DEFAULT_DEADLINE",
-    "DISPATCH_ID_INPUT",
+    "E2E_CLOCK_MARGIN_SECONDS",
     "E2E_IDENTIFY_SECONDS",
     "AdapterE2eDeclarationError",
     "DispatchRefused",
+    "DispatchedRun",
     "E2eDeclaration",
     "RedEvidence",
     "declared_e2e",
     "dispatch_workflow",
-    "find_run",
+    "matching_runs",
     "parse_e2e",
     "red_evidence",
+    "run_head_sha",
 ]

@@ -9,8 +9,9 @@ extension bag (`extensions.extra`, docs/BOARD_STORE.md §8.2), JSON text, no col
   (`TaskWriter.record_e2e_state`), and it rewrites it only when what it knows changed.
 
 A run record is written as an **intent** (card, SHA, dispatch id) before the workflow is dispatched,
-so a dispatcher that dies between the intent and the call finds the run by its dispatch id and never
-dispatches a second one. It then gains the run it identified, the wait card that waits for it, the
+so a dispatcher that dies between the intent and the call looks the run up instead and never
+dispatches a second one. It then gains the run (from GitHub's dispatch answer, or that lookup), the SHA
+the run was checked to run on, the wait card that waits for it, the
 wait's frozen result, and, when the result Blocked the card, the request id of that Blocked move
 (`closing`): once the move is committed that run's pass is over, and a card brought back to the same
 SHA after an unblock may spend a new run on it.
@@ -62,6 +63,8 @@ class E2eRun:
     dispatch_detail: str = ""
     run_id: int = 0
     run_url: str = ""
+    # The SHA GitHub says the run ran on, once checked against `sha`; empty until then.
+    head_sha: str = ""
     wait_ref: str = ""
     # {outcome, conclusion, summary, evidence, key}: the wait card's frozen result, copied once.
     result: dict[str, str] | None = None
@@ -89,8 +92,8 @@ class E2eRun:
         if self.result is not None:
             outcome = str(self.result.get("outcome") or "")
             return (self.conclusion or "no_conclusion") if outcome == "target_reached" else outcome
-        if not self.run_id:
-            return "identifying" if self.dispatch == SENT else "dispatching"
+        if not self.run_id or not self.head_sha:
+            return "identifying" if self.dispatch == SENT or self.run_id else "dispatching"
         return "waiting" if self.wait_ref else "wait_card_pending"
 
     @classmethod
@@ -110,6 +113,7 @@ class E2eRun:
                 "dispatch",
                 "dispatch_detail",
                 "run_url",
+                "head_sha",
                 "wait_ref",
                 "closing",
                 "closing_reason",
