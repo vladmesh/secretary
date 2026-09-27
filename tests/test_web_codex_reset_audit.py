@@ -14,20 +14,21 @@ from typing import Any
 
 from secretary.tasks import task_audit_for
 from secretary.webproto.command_reads import CommandReadLayer
-from secretary.webproto.provider_ops import CODEX_RESET_KIND, NOTHING_TO_RESET, ProviderOperationLayer
+from secretary.webproto.provider_ops import CODEX_RESET_KIND, NO_CREDIT, ProviderOperationLayer
 from tests.sql_backend_fixtures import CardStoreCase
 
 
 class FakeUsage:
     """The provider layer as the operation calls it: a live reading, a consume and an invalidation."""
 
-    def __init__(self, *, applicable: int) -> None:
+    def __init__(self, *, applicable: int, available: int = 1) -> None:
         self.applicable = applicable
+        self.available = available
         self.consumed: list[str] = []
         self.invalidated = 0
 
     def codex_live(self) -> dict[str, Any]:
-        return {"id": "codex", "reset_credits": {"available": 1, "applicable": self.applicable}}
+        return {"id": "codex", "reset_credits": {"available": self.available, "applicable": self.applicable}}
 
     def consume_codex_reset(self, redeem_request_id: str) -> tuple[str, str | None]:
         self.consumed.append(redeem_request_id)
@@ -69,9 +70,9 @@ class CodexResetAuditTests(CardStoreCase):
         self.assertIn("web-codex-reset-live", [item["request_id"] for item in items])
 
     def test_a_refusal_is_recorded_and_sends_nothing(self) -> None:
-        usage = FakeUsage(applicable=0)
+        usage = FakeUsage(applicable=0, available=0)
         answer = self.layer(usage).codex_reset_limit(request_id="web-codex-reset-refused", actor="web")
-        self.assertEqual((answer["outcome"], answer["reason"]), ("refused", NOTHING_TO_RESET))
+        self.assertEqual((answer["outcome"], answer["reason"]), ("refused", NO_CREDIT))
         self.assertEqual(usage.consumed, [])
         found = self.reads().command_request("web-codex-reset-refused")["operation"]
         self.assertEqual((found["state"], found["result"]["outcome"]), ("committed", "refused"))
