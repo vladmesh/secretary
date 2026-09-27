@@ -543,7 +543,7 @@ class PoTurnFailedTests(HandedOverFixture):
         service = self.start()
         events = FakeOwnerEvents()
         service.owner_events = events
-        created = service.create_session(request_id="c-1", cli="claude", model="opus")
+        created = service.create_session(request_id="c-1", cli="claude", model="opus", effort="high")
         session = created["session_id"]
         service.submit(session_id=session, text="FAIL at once", request_id="s-1")
         self.assertEqual(self.settled(session, 1).state, "failed")

@@ -855,8 +855,8 @@ class WebApp:
     def _po_create(self, _params, _query, body) -> Response:
         _fields(body, PO_CREATE_FIELDS, "PO session create")
         cli, model = _first(body, "cli"), _first(body, "model")
-        # A form from before efforts were offered carries none; that is the CLI's own default.
-        effort = _first(body, "effort") or "default"
+        # No effort, or `default`, is refused by the PO layer and re-renders the form with the reason.
+        effort = _first(body, "effort")
         try:
             created = self.po.po_create_session(
                 request_id=_first(body, "request_id"), cli=cli, model=model, effort=effort

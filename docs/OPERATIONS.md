@@ -277,10 +277,12 @@ is one CLI process with full permissions (`--dangerously-skip-permissions`,
 | Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` once a turn completed; before that `--session-id UUID` again | `result` of the JSON result object |
 | Codex | `codex exec --json -C DATA_DIR/po -` | `codex exec resume THREAD_ID -` (`thread_id` from turn 1's event stream) | the `-o` file |
 
-**Effort.** Every turn of a session opened with an effort other than `default` carries it: Claude
-`--effort LEVEL`, Codex `-c model_reasoning_effort=LEVEL` (both checked on Claude Code 2.1.280 and
-Codex 0.155.1). `default` passes no flag, so the CLI runs with its own configured effort; every session
-opened before efforts existed is `default`.
+**Effort.** Every turn carries the session's effort: Claude `--effort LEVEL`, Codex
+`-c model_reasoning_effort=LEVEL` (both checked on Claude Code 2.1.280 and Codex 0.155.1). A new session's
+effort is always explicit (`po/models.py::require_explicit_effort`, used by the web, the PO service and
+the runner). `default` survives only as the stored value of sessions opened before that rule (every
+session from before efforts existed, and later ones opened on `default`): they still resume with no flag,
+so the CLI runs with its own configured effort, and the pages say their effort is `not set`.
 
 **Resolved model.** Each settled turn records the model the CLI actually ran (`po_turns.resolved_model`),
 e.g. `claude-opus-5-5` for `opus`. Claude: the first key of `modelUsage` in its JSON result — the
@@ -305,7 +307,7 @@ Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_s
 
 | Table | Holds |
 | --- | --- |
-| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (`default` unless chosen) |
+| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed), `effort` (always an explicit offered one for a new session; `default` only on sessions opened before that rule, which resume with no effort flag and read `not set`) |
 | `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, reason (why it failed or was interrupted; on a re-run turn, why it was re-run), `resolved_model` |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
 | `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`, or `po_sprint_session` for a resolver's session, since 0016), fingerprint of its inputs, the session and, for a send, the turn it made |
@@ -553,11 +555,14 @@ route answers 401 (a page with the login form, or JSON `po_token_required`) befo
 board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
 
 **The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI, a model
-from the list below and a reasoning effort (`CLI default`, preselected, passes no effort flag). A row's link is the start of the session's first owner message (whitespace
+from the list below and a reasoning effort (the CLI's first offered one preselected; there is no
+`CLI default` option). A create with no effort or `default` is refused on the form with the offered list,
+and nothing is opened. A row's link is the start of the session's first owner message (whitespace
 collapsed, at most 80 characters with `…` when cut, plain text; `no message yet` before the first
 message), then its last activity (the latest of creation, any turn's start or finish, and any feed
 entry), the model — the one its last turn reported (`claude-opus-5-5`, said `Opus 5.5`), else the one it
-was opened with, the CLI and the exact id under it — its effort, state, whether a turn runs, the short session id and a `close` button. The panel
+was opened with, the CLI and the exact id under it — its effort (bars and the word; `not set` for a session
+stored with `default`), state, whether a turn runs, the short session id and a `close` button. The panel
 links to `closed sessions (N)`, `/po?closed=1`, which lists closed sessions the same way with their
 `closed_at` instead of state and turn, and links back to the open ones. A session page names its model
 and effort beside its title and shows the owner's messages, the PO
@@ -597,19 +602,23 @@ with a link to `/po`; it needs no token, and a PO store that does not answer hid
 ```yaml
 po:
   models:
-    claude: [fable, opus, sonnet]
-    codex: [gpt-6-astra, gpt-5.6-terra, gpt-5.6-sol, gpt-5.6-luna]
+    claude: [fable, claude-opus-5-5]
+    codex: [gpt-6-astra, gpt-6-sol, gpt-5.6-terra]
   efforts:
-    claude: [default, low, medium, high, xhigh, max]
-    codex: [default, low, medium, high, xhigh]
+    claude: [high, low, medium, xhigh, max]
+    codex: [high, low, medium, xhigh]
 ```
 
 Without `po.models` or `po.efforts` the product default is exactly that list. The first entry per CLI is preselected in
-the new-session form: `fable` when Claude is chosen, `gpt-6-astra` when Codex is. A CLI left out keeps its default; an
-empty list offers that CLI nothing. Creating a session with a CLI or model outside the list is refused
-(400). The same holds for efforts, except that `default` (no effort flag) is always accepted, listed or
-not; a create that names no effort is `default`. The lists are read on every request, so an edit needs no
-restart.
+the new-session form: `fable` and `high` when Claude is chosen, `gpt-6-astra` and `high` when Codex is; a model
+id is shown as people say it (`claude-opus-5-5` is `Opus 5.5`), the id stays the posted value. A CLI left
+out keeps its default; an empty list offers that CLI nothing. Creating a session with a CLI, model or
+effort outside the list is refused (400), and so is a create with no effort or `default`: a listed
+`default` is dropped from the offered efforts. A sprint's session opened by the PO service reuses the
+previous session's CLI, model and effort, taking the CLI's first offered effort instead when that one is
+`default` (or no longer offered), and with no previous session opens at the form's preselection. `new
+session` on a session page sends that session's effort, or for a `default` session the CLI's first offered
+one, and says so beside the button. The lists are read on every request, so an edit needs no restart.
 
 ### Read-only checkpoint and quiet-tick check
 

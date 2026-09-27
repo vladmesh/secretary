@@ -15,12 +15,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
 from secretary.po import store as po_store
 from secretary.po.runner import (
     PoRunner,
+    RunnerError,
     claude_resolved_model,
     codex_resolved_model,
     codex_thread_id,
@@ -148,7 +150,7 @@ class PoRunnerTests(unittest.TestCase):
     # --- first turn and resume -------------------------------------------------------------
 
     def test_claude_first_turn_and_resume_use_the_secretarys_session_id(self) -> None:
-        session = self.runner.create_session("claude", "opus")
+        session = self.runner.create_session("claude", "opus", "high")
         self.assertEqual(session.cwd, str(self.data / "po"))
         self.assertIsNotNone(session.cli_session_id)
         sid = session.cli_session_id
@@ -158,7 +160,16 @@ class PoRunnerTests(unittest.TestCase):
 
         self.assertEqual((first.state, second.state), (po_store.COMPLETED, po_store.COMPLETED))
         calls = self.calls()
-        base = ["-p", "--output-format", "json", "--model", "opus", "--dangerously-skip-permissions"]
+        base = [
+            "-p",
+            "--output-format",
+            "json",
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+            "--dangerously-skip-permissions",
+        ]
         self.assertEqual(calls[0]["argv"], [*base, "--session-id", sid])
         self.assertEqual(calls[1]["argv"], [*base, "--resume", sid])
         self.assertEqual({call["cwd"] for call in calls}, {str(self.data / "po")})
@@ -179,7 +190,7 @@ class PoRunnerTests(unittest.TestCase):
         self.assertIn('"type": "result"', stdout.read_text())
 
     def test_codex_first_turn_captures_the_thread_id_and_resume_uses_it(self) -> None:
-        session = self.runner.create_session("codex", "gpt-5.5")
+        session = self.runner.create_session("codex", "gpt-5.5", "high")
         self.assertIsNone(session.cli_session_id)
 
         first = self.settle(session.session_id, self.runner.send(session.session_id, "remember 42").seq)
@@ -192,6 +203,8 @@ class PoRunnerTests(unittest.TestCase):
             "--json",
             "-m",
             "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=high",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ]
@@ -220,8 +233,8 @@ class PoRunnerTests(unittest.TestCase):
     # --- one running turn, parallel sessions -------------------------------------------------
 
     def test_a_second_send_is_refused_while_a_turn_runs_and_two_sessions_run_at_once(self) -> None:
-        first = self.runner.create_session("claude", "opus")
-        other = self.runner.create_session("codex", "gpt-5.5")
+        first = self.runner.create_session("claude", "opus", "high")
+        other = self.runner.create_session("codex", "gpt-5.5", "high")
         self.runner.send(first.session_id, "SLEEP one")
         self.runner.send(other.session_id, "SLEEP two")
         self.spawned(2)
@@ -240,7 +253,7 @@ class PoRunnerTests(unittest.TestCase):
     def test_the_database_itself_refuses_a_second_running_turn(self) -> None:
         import psycopg
 
-        session = self.runner.create_session("claude", "opus")
+        session = self.runner.create_session("claude", "opus", "high")
         self.store.begin_turn(session.session_id, "one", lambda seq: self.root / f"{seq}.out")
         with (
             psycopg.connect(self.store.credentials.conninfo()) as connection,
@@ -255,7 +268,7 @@ class PoRunnerTests(unittest.TestCase):
     # --- stop -------------------------------------------------------------------------------
 
     def test_stop_kills_the_process_group_and_the_session_resumes(self) -> None:
-        session = self.runner.create_session("claude", "opus")
+        session = self.runner.create_session("claude", "opus", "high")
         self.runner.send(session.session_id, "SLEEP please")
         [(leader, child)] = self.spawned(1)
 
@@ -286,7 +299,7 @@ class PoRunnerTests(unittest.TestCase):
         )
 
     def test_a_stopped_first_claude_turn_that_saved_nothing_starts_its_conversation_again(self) -> None:
-        session = self.runner.create_session("claude", "opus")
+        session = self.runner.create_session("claude", "opus", "high")
         self.runner.send(session.session_id, "SLEEP NOPERSIST")
         self.spawned(1)
         self.assertEqual(self.runner.stop(session.session_id).state, po_store.INTERRUPTED)
@@ -317,7 +330,7 @@ class PoRunnerTests(unittest.TestCase):
             with self.subTest(store_answers=store_answers):
                 if pids.exists():
                     pids.unlink()
-                session = self.runner.create_session("codex", "m")
+                session = self.runner.create_session("codex", "m", "high")
                 real_finish = self.store.finish_turn
 
                 def record_fails(*_args, **_kwargs):
@@ -359,7 +372,7 @@ class PoRunnerTests(unittest.TestCase):
                 self.assertEqual(self.store.running_turns(), [])
 
     def test_a_stopped_codex_first_turn_keeps_its_thread_id_for_resume(self) -> None:
-        session = self.runner.create_session("codex", "gpt-5.5")
+        session = self.runner.create_session("codex", "gpt-5.5", "high")
         self.runner.send(session.session_id, "SLEEP please")
         self.spawned(1)
 
@@ -371,14 +384,14 @@ class PoRunnerTests(unittest.TestCase):
         self.assertEqual(self.calls()[-1]["argv"][-2:], ["019a-fake-thread", "-"])
 
     def test_stop_without_a_running_turn_does_nothing(self) -> None:
-        session = self.runner.create_session("claude", "opus")
+        session = self.runner.create_session("claude", "opus", "high")
         self.assertIsNone(self.runner.stop(session.session_id))
 
     # --- recovery ---------------------------------------------------------------------------
 
     def test_recover_interrupts_running_turns_and_kills_only_their_own_processes(self) -> None:
-        own = self.runner.create_session("claude", "opus")
-        reused = self.runner.create_session("codex", "gpt-5.5")
+        own = self.runner.create_session("claude", "opus", "high")
+        reused = self.runner.create_session("codex", "gpt-5.5", "high")
         own_turn = self.store.begin_turn(own.session_id, "left running", lambda seq: self.root / "own.out")
         reused_turn = self.store.begin_turn(
             reused.session_id, "also left", lambda seq: self.root / "reused.out"
@@ -415,7 +428,7 @@ class PoRunnerTests(unittest.TestCase):
     def test_a_failing_process_fails_the_turn_and_leaves_the_feed_whole(self) -> None:
         for cli, status in (("claude", 3), ("codex", 4)):
             with self.subTest(cli=cli):
-                session = self.runner.create_session(cli, "m")
+                session = self.runner.create_session(cli, "m", "high")
                 done = self.settle(session.session_id, self.runner.send(session.session_id, "hello").seq)
                 failed = self.settle(session.session_id, self.runner.send(session.session_id, "FAIL now").seq)
 
@@ -430,7 +443,7 @@ class PoRunnerTests(unittest.TestCase):
     def test_a_zero_exit_without_a_final_answer_fails_the_turn(self) -> None:
         for cli in ("claude", "codex"):
             with self.subTest(cli=cli):
-                session = self.runner.create_session(cli, "m")
+                session = self.runner.create_session(cli, "m", "high")
                 turn = self.settle(session.session_id, self.runner.send(session.session_id, "SILENT").seq)
 
                 self.assertEqual(turn.state, po_store.FAILED)
@@ -440,7 +453,7 @@ class PoRunnerTests(unittest.TestCase):
     def test_a_missing_executable_fails_the_turn_with_its_reason(self) -> None:
         self.executables["claude"] = str(self.root / "no-such-claude")
         runner = self.make_runner()
-        session = runner.create_session("claude", "opus")
+        session = runner.create_session("claude", "opus", "high")
 
         with self.assertRaises(RuntimeError):
             runner.send(session.session_id, "hello")
@@ -475,7 +488,7 @@ class PoRunnerTests(unittest.TestCase):
         service.pop("PYTHONPATH", None)
 
         def turn(runner: PoRunner) -> dict[str, str]:
-            session = runner.create_session("claude", "m")
+            session = runner.create_session("claude", "m", "high")
             settled = runner.wait(
                 session.session_id, runner.send(session.session_id, "hi").seq, SETTLE_SECONDS
             )
@@ -519,12 +532,48 @@ class PoRunnerTests(unittest.TestCase):
         self.assertEqual(self.store.session(session.session_id).resolved_model, "claude-opus-5-5")
         self.assertEqual(self.store.sessions()[0].resolved_model, "claude-opus-5-5")
 
-    def test_a_default_effort_passes_no_flag(self) -> None:
-        session = self.runner.create_session("claude", "sonnet")
-        self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+    def test_a_session_stored_with_default_resumes_with_no_flag_stops_and_closes(self) -> None:
+        """A session opened before an effort had to be chosen keeps working as it did."""
+        for cli, model in (("claude", "sonnet"), ("codex", "gpt-5.5")):
+            with self.subTest(cli=cli):
+                # The store still writes the legacy value; only a new session's create refuses it.
+                session = self.store.create_session(
+                    session_id=str(uuid.uuid4()),
+                    cli=cli,
+                    model=model,
+                    cwd=str(self.runner.workspace),
+                    cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
+                )
+                self.assertEqual(self.store.session(session.session_id).effort, po_store.DEFAULT_EFFORT)
+                before = len(self.calls())
+                self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
+                self.settle(session.session_id, self.runner.send(session.session_id, "two").seq)
+                self.runner.send(session.session_id, "SLEEP please")
+                self.spawned(1 if cli == "claude" else 2)
+                self.assertEqual(self.runner.stop(session.session_id).state, po_store.INTERRUPTED)
 
-        self.assertEqual(self.store.session(session.session_id).effort, po_store.DEFAULT_EFFORT)
-        self.assertNotIn("--effort", self.calls()[0]["argv"])
+                argvs = [call["argv"] for call in self.calls()[before:]]
+                self.assertEqual(len(argvs), 3)
+                for argv in argvs:
+                    self.assertNotIn("--effort", argv)
+                    self.assertFalse([part for part in argv if "model_reasoning_effort" in part])
+                resumed = argvs[1][-2:] if cli == "claude" else argvs[1][:2]
+                self.assertEqual(resumed[0], "--resume" if cli == "claude" else "exec")
+                closed = self.store.close_session(session.session_id, "owner")
+                self.assertEqual(closed.state, po_store.SESSION_CLOSED)
+
+    def test_a_new_session_needs_an_explicit_offered_effort(self) -> None:
+        for effort in ("", "  ", "default", "none"):
+            with self.subTest(effort=effort), self.assertRaises(RunnerError) as refused:
+                self.runner.create_session("claude", "opus", effort)
+            self.assertIn("explicit effort", str(refused.exception))
+            self.assertIn("high, low, medium, xhigh, max", str(refused.exception))
+        with self.assertRaises(RunnerError):
+            self.runner.create_session_request("codex", "gpt-5.5", "req-max", "max")
+        with self.assertRaises(RunnerError):
+            self.runner.create_session("claude", "opus", "max", efforts={"claude": ("high",)})
+        self.assertEqual(self.runner.create_session("claude", "opus", " max ").effort, "max")
+        self.assertEqual(len(self.store.sessions()), 1)
 
     def test_a_codex_effort_is_a_config_override_and_the_model_comes_from_the_rollout(self) -> None:
         session = self.runner.create_session("codex", "gpt-5.6-terra", "xhigh")
@@ -543,7 +592,7 @@ class PoRunnerTests(unittest.TestCase):
 
     def test_a_codex_turn_with_no_rollout_resolves_nothing(self) -> None:
         self.runner.env.pop("FAKE_CODEX_HOME")
-        session = self.runner.create_session("codex", "gpt-5.5")
+        session = self.runner.create_session("codex", "gpt-5.5", "high")
 
         turn = self.settle(session.session_id, self.runner.send(session.session_id, "one").seq)
 
@@ -555,10 +604,10 @@ class PoRunnerTests(unittest.TestCase):
         """The resolver's operation passes the real `po_request_operation_in_vocabulary` CHECK."""
         fingerprint = po_store.sprint_session_fingerprint("sprint:7")
         session, created = self.runner.create_session_request(
-            "claude", "opus", "resolve-1", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
+            "claude", "opus", "resolve-1", "high", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
         )
         again, created_again = self.runner.create_session_request(
-            "claude", "opus", "resolve-1", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
+            "claude", "opus", "resolve-1", "high", operation=po_store.SPRINT_SESSION, fingerprint=fingerprint
         )
 
         self.assertEqual((created, created_again, again.session_id), (True, False, session.session_id))
@@ -569,7 +618,7 @@ class PoRunnerTests(unittest.TestCase):
             (po_store.SPRINT_SESSION, fingerprint, session.session_id, None),
         )
         with self.assertRaises(po_store.RequestConflict):
-            self.runner.create_session_request("claude", "opus", "resolve-1")
+            self.runner.create_session_request("claude", "opus", "resolve-1", "high")
         with self.assertRaises(po_store.RequestConflict):
             self.runner.send_request(session.session_id, "hello", "resolve-1")
         with self.assertRaises(po_store.RequestConflict):
@@ -577,6 +626,7 @@ class PoRunnerTests(unittest.TestCase):
                 "claude",
                 "opus",
                 "resolve-1",
+                "high",
                 operation=po_store.SPRINT_SESSION,
                 fingerprint=po_store.sprint_session_fingerprint("sprint:8"),
             )

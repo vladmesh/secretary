@@ -19,10 +19,15 @@ from typing import Any
 
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.po.client import OutcomeUnknown, PoServiceClient, ServiceRefused, ServiceUnavailable
-from secretary.po.models import DEFAULT_EFFORTS, efforts_from_instance, models_from_instance
+from secretary.po.models import (
+    DEFAULT_EFFORTS,
+    EffortRefused,
+    efforts_from_instance,
+    models_from_instance,
+    require_explicit_effort,
+)
 from secretary.po.queue import PoQueue, QueueError
 from secretary.po.store import (
-    DEFAULT_EFFORT,
     OWNER,
     RUNNING,
     SESSION_CLOSED,
@@ -114,7 +119,11 @@ class PoLayer(ProtocolBoundary):
         }
 
     def po_session(self, session_id: str) -> dict[str, Any]:
-        """The session, its turns and feed from the store, and its messages still in the service's queue."""
+        """The session, its turns and feed from the store, and its messages still in the service's queue.
+
+        `efforts` is what the installation offers per CLI, so "new session" from a session stored with
+        `default` can name the effort the new one opens at; an unreadable config offers none.
+        """
         store = self._store_or_refuse()
         session = self._store(lambda: store.session(session_id))
         turns = self._store(lambda: store.turns(session_id))
@@ -129,7 +138,14 @@ class PoLayer(ProtocolBoundary):
             "running_seq": running.seq if running is not None else None,
             "last_turn": _turn(turns[-1]) if turns else None,
             "queued": self._queued(session_id),
+            "efforts": self._offered_efforts(),
         }
+
+    def _offered_efforts(self) -> dict[str, list[str]]:
+        try:
+            return {cli: list(values) for cli, values in self._effort_list().items()}
+        except InstallationUnavailable:
+            return {}
 
     def _queued(self, session_id: str) -> list[dict[str, Any]]:
         """Messages the PO service holds for this session and has not started, oldest first.
@@ -154,12 +170,12 @@ class PoLayer(ProtocolBoundary):
     # --- writes -----------------------------------------------------------------------------
 
     def po_create_session(
-        self, *, request_id: str, cli: str, model: str, effort: str = DEFAULT_EFFORT
+        self, *, request_id: str, cli: str, model: str, effort: str = ""
     ) -> dict[str, Any]:
         """One session per request id (`PoStore.claim_session`); a repeat answers the same session.
 
-        `effort` is one the installation offers for `cli`, or `default` (no effort flag), which is
-        always accepted; it is bound to the request id with the CLI and the model.
+        `effort` is one the installation offers for `cli` (`require_explicit_effort`: none, or `default`,
+        is refused); it is bound to the request id with the CLI and the model.
         """
         request_id = _required(request_id, "request_id")
         models = self._model_list()
@@ -171,15 +187,10 @@ class PoLayer(ProtocolBoundary):
                 f"{model!r} is not a model this installation offers for {cli}: {', '.join(models[cli])}",
                 data=NOTHING_WRITTEN,
             )
-        effort = str(effort or "").strip() or DEFAULT_EFFORT
-        if effort != DEFAULT_EFFORT:
-            efforts = self._effort_list().get(cli, ())
-            if effort not in efforts:
-                offered = ", ".join(dict.fromkeys((DEFAULT_EFFORT, *efforts)))
-                raise ValidationRefused(
-                    f"{effort!r} is not an effort this installation offers for {cli}: {offered}",
-                    data=NOTHING_WRITTEN,
-                )
+        try:
+            effort = require_explicit_effort(cli, effort, self._effort_list())
+        except EffortRefused as exc:
+            raise ValidationRefused(str(exc), data=NOTHING_WRITTEN) from None
         client = self._client_or_refuse()
         created = self._store(
             lambda: client.create_session(cli=cli, model=model, effort=effort, request_id=request_id),

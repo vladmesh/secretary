@@ -1567,7 +1567,10 @@ answers `{session_id, created, repeated}`:
 - the recorded `po_session` exists and is open: that session, `created: false`, nothing written;
 - it is `null`, missing from the store or closed: a fresh session, `created: true`. It takes the recorded
   session's CLI, model and effort when that row exists, else the new-session form's preselection (the
-  first CLI offering a model in `po.models`, its first model, effort `default`). Its first input is a
+  first CLI offering a model in `po.models`, its first model). Its effort is never `default`: a recorded
+  session's effort is reused unless it is `default` or no longer offered for that CLI in `po.efforts`,
+  and then, as with no recorded session, it opens at the first effort offered for the chosen CLI. A CLI
+  that offers no effort is refused (`validation`) and nothing is opened. Its first input is a
   seeding message naming the sprint and why the session was opened, quoting the sprint's why-document —
   the one `state/knowledge/decisions/*.md` of the instance repository that names the sprint ref as a whole
   word; with none or several it says so and lists the paths — and telling the head to read `NOTES.md`
@@ -3529,10 +3532,13 @@ request id, so a resend is a replay; it gets a fresh one only after a refusal wh
 `nothing_written: true` — service not reached, validation before the id was reserved, `request_conflict`,
 unknown or closed session.
 
-**PO documents.** `po.po_create_session(request_id, cli, model, effort="default")` answers
-`{kind: "po_session_created", request_id, session_id, effort, repeated}`; an `effort` outside
-`po.efforts` for the CLI is refused (400 `validation`) and `default` (no effort flag) is always accepted;
-the effort is one of the inputs the request id is bound to. `po_models()` (and `po_overview`) carry
+**PO documents.** `po.po_create_session(request_id, cli, model, effort)` answers
+`{kind: "po_session_created", request_id, session_id, effort, repeated}`. `effort` is required and must be
+one of the installation's offered efforts for that CLI (`po.efforts`, `default` never among them); an
+empty effort, `default`, `none`, or one outside that list is refused (400 `validation`) and nothing is
+written. The effort is one of the inputs the request id is bound to. `default` survives only as the stored
+value of sessions opened before this rule: they resume with no effort flag, `effort` in their documents
+stays `default`, and the pages say their effort is `not set`. `po_models()` (and `po_overview`) carry
 `models` and `efforts`, each `{cli: [values]}`. Every session object (`po_overview.sessions[]`,
 `po_session.session`) carries `effort` and `resolved_model` — the model the latest turn that reported one
 ran, `null` before any did — and every turn object (`po_session.turns[]`, `last_turn`) its own
