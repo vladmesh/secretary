@@ -393,7 +393,7 @@ class PoWebOperationTests(unittest.TestCase):
         # The key handler is installed outside the running-or-queued polling branch.
         self.assertLess(
             _PO_SESSION_SCRIPT.index("addEventListener('keydown'"),
-            _PO_SESSION_SCRIPT.index("if (__RUNNING__ || QUEUED > 0)"),
+            _PO_SESSION_SCRIPT.index("if (__RUNNING__ || queued > 0)"),
         )
         self.assertIn("draft.addEventListener('keydown'", page)
         for line in (
