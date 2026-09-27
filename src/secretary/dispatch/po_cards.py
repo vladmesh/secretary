@@ -99,6 +99,10 @@ class PoChannel(Protocol):
         self, *, session_id: str, text: str, request_id: str, source: str, card: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def create_session(self, *, cli: str, model: str, effort: str, request_id: str) -> dict[str, Any]: ...
+
+    def successor_choice(self, session_id: str) -> tuple[str, str, str] | None: ...
+
     def request(self, request_id: str) -> PoRequest | None: ...
 
     def turn(self, session_id: str, seq: int) -> Turn: ...
@@ -145,6 +149,35 @@ class ServicePoChannel:
         return self._service().submit(
             session_id=session_id, text=text, request_id=request_id, source=source, card=card
         )
+
+    def create_session(self, *, cli: str, model: str, effort: str, request_id: str) -> dict[str, Any]:
+        return self._service().create_session(cli=cli, model=model, effort=effort, request_id=request_id)
+
+    def successor_choice(self, session_id: str) -> tuple[str, str, str] | None:
+        """The CLI, model and effort a successor of this closed or missing session opens with.
+
+        The service's own rule (`secretary.po.models.successor_choice`) over the session's row and
+        the instance's offered models and efforts; None when the installation offers no model.
+        """
+        from secretary.config import ConfigError, load_config
+        from secretary.po.models import efforts_from_instance, models_from_instance, successor_choice
+        from secretary.po.store import SessionNotFound
+
+        try:
+            row = self._po_store().session(session_id)
+            previous: tuple[str, str, str] | None = (row.cli, row.model, row.effort)
+        except SessionNotFound:
+            previous = None
+        instance = Path(self.instance_dir) if self.instance_dir is not None else None
+        try:
+            config = (
+                load_config(instance / "instance.yaml" if instance.is_dir() else instance)
+                if instance is not None
+                else None
+            )
+        except ConfigError as exc:
+            raise PoStoreError(f"the instance config cannot be read: {exc}") from exc
+        return successor_choice(previous, models_from_instance(config), efforts_from_instance(config))
 
     def request(self, request_id: str) -> PoRequest | None:
         return self._po_store().request(request_id)

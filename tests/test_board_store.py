@@ -358,7 +358,7 @@ class SchemaModelTests(unittest.TestCase):
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
-            "task_type IN ('code','research','infra','decision','operation')",
+            "task_type IN ('code','research','infra','decision','operation','wait')",
             "review IN ('required','skipped')",
             "status IN ('staged','committed','discarded')",
         ):
@@ -479,6 +479,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0020_wait_card_kind",
                 "0019_po_session_title",
                 "0018_owner_events",
                 "0017_po_card_kinds",

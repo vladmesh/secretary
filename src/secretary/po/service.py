@@ -78,11 +78,10 @@ from secretary.po.client import (
 )
 from secretary.po.models import (
     EffortRefused,
-    default_session_choice,
     efforts_from_instance,
-    first_effort,
     models_from_instance,
     require_explicit_effort,
+    successor_choice,
 )
 from secretary.po.queue import (
     DISPATCHER_SOURCE,
@@ -557,14 +556,15 @@ class PoService:
             previous = self._session_or_none(sprint.po_session)
             if previous is not None and previous.state == SESSION_OPEN:
                 return {"session_id": previous.session_id, "created": False, "repeated": False}
-            if previous is not None:
-                cli, model, effort = previous.cli, previous.model, previous.effort
-            else:
-                cli, model = self._default_choice()
-                effort = ""
             efforts = self._effort_list()
-            if effort not in (efforts.get(cli) or ()):
-                effort = first_effort(cli, efforts) or ""
+            choice = successor_choice(
+                (previous.cli, previous.model, previous.effort) if previous is not None else None,
+                self._model_list(),
+                efforts,
+            )
+            if choice is None:
+                raise Refused("validation", "this installation offers no model for a PO session")
+            cli, model, effort = choice
             try:
                 effort = require_explicit_effort(cli, effort, efforts)
             except EffortRefused as exc:
@@ -634,13 +634,9 @@ class PoService:
             )
         return self.sprints
 
-    def _default_choice(self) -> tuple[str, str]:
-        """The new-session form's preselected CLI and model (`default_session_choice`)."""
-        models = self.models if self.models is not None else models_from_instance(self._instance_config())
-        choice = default_session_choice(models)
-        if choice is None:
-            raise Refused("validation", "this installation offers no model for a PO session")
-        return choice
+    def _model_list(self) -> dict[str, tuple[str, ...]]:
+        """The models a new session may take, per CLI (`models_from_instance`)."""
+        return self.models if self.models is not None else models_from_instance(self._instance_config())
 
     def _effort_list(self) -> dict[str, tuple[str, ...]]:
         """The efforts a new session may take, per CLI (`efforts_from_instance`)."""

@@ -22,7 +22,9 @@ from secretary.board.completion_evidence import (
     PO_COMPLETION_MARKERS,
     has_candidate,
     infra_report_fields,
+    is_headless,
     is_po_executed,
+    is_wait,
     po_completion_fields,
     render_po_completion_record,
     research_report_refusal,
@@ -108,6 +110,7 @@ from secretary.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from secretary.board.transitions import BoardProtocolError
+from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -261,6 +264,10 @@ _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
 _TYPED_RECORD_TYPES = {"issue", "product"}
+#: The audit kind of `task cancel` on a wait card.
+WAIT_CANCELLED = "wait_cancelled"
+#: The transition data key a wait card's terminal move (and a dependent it Blocks) carries.
+WAIT_OUTCOME_KEY = "wait_outcome"
 
 _MARKER_EVENT_ACTIONS = {
     EventKind.CARD_REPORTED.value: "reported",
@@ -347,17 +354,23 @@ def _po_card_create_refusal(
     seed_ref: str,
     base_branch: str,
 ) -> str:
-    """Why a `decision`/`operation` card cannot be created as asked, or `""`.
+    """Why a `decision`/`operation`/`wait` card cannot be created as asked, or `""`.
 
-    The PO service executes such a card in a turn of its sprint's PO session: it needs that sprint,
-    and it has no head, no reviewer, no checkout and no live impact of its own to declare.
+    The PO service executes a decision or operation card in a turn of its sprint's PO session: it
+    needs that sprint. The dispatcher advances a wait card itself; the observer cuts one only for
+    its own sprint, the PO in a sprint or outside every sprint. None of them has a head, a reviewer,
+    a checkout or a live impact of its own to declare.
     """
     if role not in {Role.OBSERVER.value, Role.PO.value}:
         return f"a {kind} card is cut by the observer or the PO, not by {role}"
-    if not sprint:
+    waits = kind == TaskType.WAIT.value
+    if not sprint and not waits:
         return f"a {kind} card needs --sprint: the PO session of that sprint executes it"
+    if not sprint and role == Role.OBSERVER.value:
+        return "the observer cuts a wait card for its own sprint: it needs --sprint"
+    runner = "the dispatcher advances it" if waits else "the PO service does"
     refused = [
-        (bool(head), "--head", "no head runs it; the PO service does"),
+        (bool(head), "--head", f"no head runs it; {runner}"),
         (bool(review_head), "--review-head", "nobody reviews it"),
         (review is TaskReview.REQUIRED, "--review required", "its review is skipped"),
         (live_impact, "--live-impact", "that is a research attribute"),
@@ -368,6 +381,30 @@ def _po_card_create_refusal(
         if present:
             return f"a {kind} card takes no {flag}: {reason}"
     return ""
+
+
+#: The create flags of a wait card, as `TaskWriter.create(wait=...)` takes them.
+_WAIT_FIELDS = ("run", "run_id", "card", "states", "until", "deadline", "transient_window")
+
+
+def _wait_request(wait: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A wait card's create flags, normalized; `{}` when none was given.
+
+    This is what the create's request id binds (a retry recomputes it), not the spec, whose relative
+    deadline and creation time depend on the clock.
+    """
+    if not wait:
+        return {}
+    request: dict[str, Any] = {
+        key: _text(wait.get(key)).strip() for key in _WAIT_FIELDS if _text(wait.get(key)).strip()
+    }
+    returns = wait.get("returns") or []
+    if isinstance(returns, str):
+        returns = [returns]
+    named = [_text(value).strip() for value in returns if _text(value).strip()]
+    if named:
+        request["returns"] = named
+    return request
 
 
 def _check_execution_record(task: dict[str, Any]) -> None:
@@ -955,6 +992,9 @@ class TaskReader:
             # The production an operation card touches, beside the kind it belongs to.
             if (production := card_production(result)) is not None:
                 result["touches_production"] = production
+        # A wait card's one structured block: target, deadline, last observation, state.
+        if (waiting := wait_card.wait_view(result)) is not None:
+            result["wait"] = waiting
         if comments is not None:
             result["comments"] = comments
         return result
@@ -1079,10 +1119,15 @@ class TaskWriter:
         review: str = "",
         live_impact: bool = False,
         touches_production: str = "",
+        wait: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
-        """Create an ordinary task through the released admission contract."""
+        """Create an ordinary task through the released admission contract.
+
+        `wait` carries a wait card's create flags (`run`, `run_id`, `card`, `states`, `until`,
+        `deadline`, `returns`, `transient_window`); every other kind takes none of them.
+        """
         return self._create(
             role=role,
             actor=actor,
@@ -1110,6 +1155,7 @@ class TaskWriter:
             review=review,
             live_impact=live_impact,
             touches_production=touches_production,
+            wait=wait,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1144,6 +1190,7 @@ class TaskWriter:
         review: str = "",
         live_impact: bool = False,
         touches_production: str = "",
+        wait: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
@@ -1197,7 +1244,10 @@ class TaskWriter:
             review_value = default_review(task_type_value)
         review = review_value.value
         po_executed = task_type_value in PO_EXECUTED_TYPES
-        if po_executed:
+        waits = task_type_value is TaskType.WAIT
+        # No head runs either: nothing to pin, no reservation to take, no override for the PO.
+        headless = po_executed or waits
+        if headless:
             refusal = _po_card_create_refusal(
                 task_type,
                 role=role,
@@ -1211,6 +1261,17 @@ class TaskWriter:
             )
             if refusal:
                 raise TaskError("validation", refusal, 2)
+        wait_request = _wait_request(wait)
+        spec: wait_card.WaitSpec | None = None
+        if waits:
+            try:
+                spec = wait_card.build_wait_spec(**wait_request, sprint=sprint, now=datetime.now(UTC))
+            except wait_card.WaitSpecError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+        elif wait_request:
+            raise TaskError(
+                "validation", f"the --wait-* flags belong to a wait card; a {task_type} card takes none", 2
+            )
         # The production an operation card touches (secretary-1764), checked against the registry
         # `sprint create --allow-production` reads, and refused on every other kind.
         registered = None
@@ -1297,14 +1358,15 @@ class TaskWriter:
             linked_sprint = SprintReader(self.client).show(sprint, include_cards=False)
             if linked_sprint["status"] != "open":
                 raise TaskError("closed", "cannot link a new card to a closed or stopped sprint", 3)
-            if project not in linked_sprint.get("reservations", []):
+            # A wait card touches no repository, so no reservation admits or refuses it.
+            if project not in linked_sprint.get("reservations", []) and not waits:
                 raise TaskError(
                     "sprint_project_unreserved",
                     f"project {project!r} is not reserved by sprint {sprint}",
                     3,
                 )
-            # A PO-executed card has no head to pin: the PO service runs it.
-            if not restoring and not po_executed:
+            # A PO-executed or wait card has no head to pin: the PO service or the dispatcher runs it.
+            if not restoring and not headless:
                 pinned_head, pinned_review = self._sprint_executor_pins(
                     sprint_ref=sprint,
                     head=head,
@@ -1322,6 +1384,8 @@ class TaskWriter:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
             raise TaskError("validation", "budget event requires a linked sprint", 2)
+        if spec is not None:
+            self._refuse_unknown_po_sessions(wait_card.po_sessions(spec.returns))
 
         request_id = request_id or str(uuid.uuid4())
         override_payload = self._guard_sprint_write(
@@ -1335,7 +1399,7 @@ class TaskWriter:
             request_id=request_id,
             reference=reference,
             steward_report=steward_report,
-            po_card=po_executed,
+            po_card=headless,
         )
         # Admission follows ownership; Issues proposals and restores are not new work.
         # The PO may cut a card outside every sprint; the dispatcher decides at admission whether it runs.
@@ -1361,6 +1425,8 @@ class TaskWriter:
             "review": review,
             **({"live_impact": True} if live_impact else {}),
             **({"touches_production": touches_production} if touches_production else {}),
+            # The flags as given: a retry recomputes the same request, never the same clock.
+            **({"wait_request": wait_request} if waits else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -1414,7 +1480,8 @@ class TaskWriter:
                 "reference_assignment": "atomic",
             },
             "request_id": request_id,
-            "payload": payload,
+            # The spec rides in the event beside the identity, so a pending create is repaired whole.
+            "payload": {**payload, "wait_spec": spec.text()} if spec is not None else payload,
         }
         # One transaction from the claim to the committed record, where the backend has
         # transactions (§7.1).  The claim used to be committed on its own before the card was
@@ -1448,6 +1515,7 @@ class TaskWriter:
                     review=review,
                     live_impact=live_impact,
                     touches_production=touches_production,
+                    wait_spec=spec.text() if spec is not None else "",
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -1527,6 +1595,7 @@ class TaskWriter:
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
+        wait_spec: str = "",
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
@@ -1586,6 +1655,9 @@ class TaskWriter:
                 if touches_production:
                     # Not a column: a typed field of the extension bag (board/production_rights.py).
                     values[TOUCHES_PRODUCTION] = touches_production
+                if wait_spec:
+                    # Not a column either: the wait card's spec (board/wait_card.py).
+                    values[wait_card.WAIT_SPEC] = wait_spec
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:
@@ -1990,6 +2062,90 @@ class TaskWriter:
             to=self.client,
         )
         return result
+
+    def cancel(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel a pending wait card: the PO, or the observer of the card's own sprint (secretary-1790).
+
+        One write: the `wait_cancel` field (who, when, why) and a `[wait:cancel]` comment with the
+        reason, in the transaction of one `wait_cancelled` audit record. The card does not move here:
+        the dispatcher freezes `cancelled` as the wait's result on its next tick, delivers it to every
+        return address and then Blocks the card, as it does every other outcome. A wait whose result
+        is already frozen is not cancelled; that result stands. Idempotent under the request id.
+        """
+        role = self._role(role, {Role.PO, Role.OBSERVER}, actor=actor)
+        reason = self._redact_for_board(reason).strip()
+        if not reason:
+            raise TaskError("validation", "a cancel needs a non-empty reason (--reason-file)", 2)
+        identity = {"reason_sha256": _digest(reason)}
+        current = self.reader.show(reference)
+        if role is Role.OBSERVER:
+            if not str(current.get("sprint") or ""):
+                raise TaskError("role_forbidden", "the observer cancels only a wait card of its own sprint", 3)
+            self._guard_observer_identity(
+                role=role.value,
+                actor=actor,
+                project=str(current.get("project") or ""),
+                card_sprint=str(current.get("sprint") or ""),
+                request_id=request_id or "",
+                reference=reference,
+            )
+        at = _now()
+
+        def payload(task: dict[str, Any]) -> dict[str, Any]:
+            _check_execution_record(task)
+            if not is_wait(task):
+                raise TaskError(
+                    "validation", f"{reference} is a {task.get('type') or 'typeless'} card; only a wait card is cancelled", 2
+                )
+            if task["state"] not in {CardState.READY.value, CardState.IN_PROGRESS.value}:
+                raise TaskError(
+                    "transition_forbidden", f"a wait card is cancelled while it waits; {reference} is {task['state']}", 3
+                )
+            if (held := wait_card.wait_cancel(task)) is not None:
+                raise TaskError(
+                    "already_cancelled", f"{reference} was cancelled at {held['at']}: {held['reason']}", 3
+                )
+            if (result := wait_card.wait_state(task).result) is not None:
+                raise TaskError(
+                    "already_settled", f"{reference} already has its result ({result.get('outcome')}); it stands", 3
+                )
+            return {"marker": role.value, **identity, "sprint": task.get("sprint"), "wait_cancel": at}
+
+        def mutation(task: dict[str, Any]) -> None:
+            number = _task_number(task)
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=number,
+                values={wait_card.WAIT_CANCEL: wait_card.cancel_text(at, actor, role.value, reason)},
+            )
+            self.client.call(
+                "createComment", task_id=number, user_id=0, content=f"[{role.value}]\n[wait:cancel]\n\n{reason}\n"
+            )
+
+        return self._write(WAIT_CANCELLED, role, actor, reference, request_id, payload, mutation, identity=identity)
+
+    def record_wait_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
+        """The dispatcher's one write of a wait card's `wait_state` (secretary-1790).
+
+        A state field, not an event: the dispatcher rewrites it only when what it knows changed (a
+        new observation or error, the frozen result, a delivery record), and it carries no audit
+        record of its own. The result it freezes and every delivery it records are what the audit
+        records elsewhere (the terminal move, the dependents' comments, the PO input).
+        """
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        task = self.reader.show(reference)
+        if not is_wait(task):
+            raise TaskError("validation", f"{reference} is not a wait card; it carries no wait state", 2)
+        with self._mutation():
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values={wait_card.WAIT_STATE: state})
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
@@ -2518,12 +2674,12 @@ class TaskWriter:
                 predecessor = self.reader.show(str(blocked_by))
                 if predecessor["state"] != "done":
                     raise TaskError("predecessor_open", "blocked_by task is not Done", 3)
-            # A decision/operation card runs no head, so it neither takes nor counts against the
+            # A decision/operation/wait card runs no head, so it neither takes nor counts against the
             # capacity, which is how many heads the installation runs at once.
             headed = [
                 active
                 for active in self.reader.list(states=set(ACTIVE_STATES))
-                if active["id"] != task["id"] and not _is_steward_report(active) and not is_po_executed(active)
+                if active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
             for active in headed:
                 if (
@@ -2534,7 +2690,7 @@ class TaskWriter:
                     raise TaskError(
                         "capacity_reached", "one active code task per project is already claimed", 3
                     )
-            if len(headed) >= cap and not is_po_executed(task):
+            if len(headed) >= cap and not is_headless(task):
                 raise TaskError("capacity_reached", "active task capacity is reached", 3)
 
         values = {
@@ -2583,6 +2739,7 @@ class TaskWriter:
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
+        wait_outcome: str | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
@@ -2669,6 +2826,7 @@ class TaskWriter:
                 outcome_owed=outcome_owed,
                 terminal_taxonomy=terminal_taxonomy,
                 release_merge=release_merge,
+                wait_outcome=wait_outcome,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2719,6 +2877,8 @@ class TaskWriter:
         # A Blocked exit records the observer's disposition of its classification.
         if role == "observer" and source == "blocked" and not reason.strip():
             raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
+        if role == "dispatcher" and (refusal := self._dispatcher_wait_edge_refusal(task, source, target)):
+            raise TaskError("transition_forbidden", refusal, 3)
         self._check_decision(task, source, target, decision, role)
         result = self._transition_card(
             reference=reference,
@@ -2730,6 +2890,7 @@ class TaskWriter:
             outcome_owed=outcome_owed,
             terminal_taxonomy=terminal_taxonomy,
             release_merge=release_merge,
+            wait_outcome=wait_outcome,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2748,6 +2909,27 @@ class TaskWriter:
             moved["outcome_owed"] = outcome_owed
         self._steward_needs_human(task, role=role, target=target, reason=reason, moved=moved)
         return moved
+
+    def _dispatcher_wait_edge_refusal(self, task: dict[str, Any], source: str, target: str) -> str:
+        """Why the dispatcher may not take one of its two wait edges here, or `""` (secretary-1790).
+
+        In progress -> Done is a wait card's `target_reached`, once its result is frozen; Ready ->
+        Blocked is a card held by a wait card (`blocked_by`) that ended another way. The dispatcher
+        takes neither edge for any other card.
+        """
+        if (source, target) == ("in_progress", "done"):
+            result = wait_card.wait_state(task).result if is_wait(task) else None
+            if result is None or result.get("outcome") != wait_card.TARGET_REACHED:
+                return "the dispatcher moves an In progress card to Done only as a wait card's target_reached"
+        if (source, target) == ("ready", "blocked"):
+            for blocker in _blocker_refs(task):
+                try:
+                    if is_wait(self.reader.show(blocker)):
+                        return ""
+                except TaskError:
+                    continue
+            return "the dispatcher Blocks a Ready card only when a wait card it is blocked by ended unreached"
+        return ""
 
     def _steward_needs_human(
         self, task: dict[str, Any], *, role: str, target: str, reason: str, moved: dict[str, Any]
@@ -2897,6 +3079,7 @@ class TaskWriter:
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
+        wait_outcome: str | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -2935,6 +3118,8 @@ class TaskWriter:
                                 else {}
                             ),
                             **({RELEASE_MERGE_KEY: dict(release_merge)} if release_merge is not None else {}),
+                            # A wait card's outcome, and a dependent it Blocks: never a budget charge.
+                            **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
                         },
                     ),
                     finish=finish,
@@ -3054,10 +3239,11 @@ class TaskWriter:
             and (bounds_refusal := impact_bounds_refusal(description))
         ):
             raise TaskError("validation", bounds_refusal, 2)
-        # Nothing edits a head onto a card the PO service executes.
-        if is_po_executed(current) and ((head or "").strip() or (review_head or "").strip()):
+        # Nothing edits a head onto a card the PO service executes or the dispatcher advances.
+        if is_headless(current) and ((head or "").strip() or (review_head or "").strip()):
+            runner = "the dispatcher advances it" if is_wait(current) else "the PO service runs it"
             raise TaskError(
-                "validation", f"a {current.get('type')} card takes no head or reviewer: the PO service runs it", 2
+                "validation", f"a {current.get('type')} card takes no head or reviewer: {runner}", 2
             )
         override_payload = self._guard_sprint_write(
             role=role,
@@ -3197,6 +3383,39 @@ class TaskWriter:
                 )
             requested[role] = profile
         return requested["worker"], requested["reviewer"]
+
+    def _po_session_state(self, session_id: str) -> str:
+        """The PO session's state (`open`/`closed`), `""` when the PO store has no such session.
+
+        Raises `TaskError` when the store cannot answer: an unverifiable address is not admitted.
+        """
+        from secretary.po.store import PoStore, SessionNotFound
+
+        try:
+            return str(PoStore.for_instance(self.instance_dir).session(session_id).state)
+        except SessionNotFound:
+            return ""
+        except Exception as exc:  # noqa: BLE001 - a store error, or credentials that cannot be read
+            raise TaskError(
+                "po_store_unavailable",
+                f"cannot verify PO session {session_id}: the PO store did not answer ({type(exc).__name__})",
+                1,
+            ) from None
+
+    def _refuse_unknown_po_sessions(self, session_ids: Iterable[str]) -> None:
+        """A wait card's `po-session:<id>` must name a session the PO store holds and that is open."""
+        from secretary.po.store import SESSION_CLOSED
+
+        for session_id in session_ids:
+            state = self._po_session_state(session_id)
+            if not state:
+                raise TaskError("validation", f"--wait-return po-session:{session_id} names no PO session", 2)
+            if state == SESSION_CLOSED:
+                raise TaskError(
+                    "validation",
+                    f"--wait-return po-session:{session_id} names a closed PO session; it takes no input",
+                    2,
+                )
 
     def _refuse_unpinned_reviewer_on_skipped(
         self, *, sprint_ref: str, review_head: str, sprint: dict[str, Any] | None = None
@@ -3370,6 +3589,10 @@ class TaskWriter:
         if role == "po" and not card_sprint and linked_sprint is None:
             return {}
         if role == "po" and po_card:
+            return {}
+        # The observer's own headless card (a wait) touches no branch any sprint owns; its identity
+        # as this card's sprint's observer was proven above.
+        if role == "observer" and po_card and card_sprint:
             return {}
         # The steward's own report card is its tick's accounting, created In progress as research
         # and linked to no sprint; the dispatcher never claims it. Its proposals and every other
@@ -4594,6 +4817,11 @@ def _dispatcher_record_has_live_work(record: dict[str, Any]) -> bool:
     return any(_text(record.get(key)) for key in ("workspace", "handle", "review_handle", "review_leaf"))
 
 
+def _blocker_refs(task: Mapping[str, Any]) -> list[str]:
+    """The card refs `blocked_by` names, in order (the board spells several comma-joined)."""
+    return [part.strip() for part in str(task.get("blocked_by") or "").split(",") if part.strip()]
+
+
 def _task_number(task: dict[str, Any]) -> int:
     """The backend's own number for a normalized card, read through the one identity parser."""
     value = entity_number("task", task.get("id"))
@@ -4673,6 +4901,8 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         values["review"] = review
     if payload.get("live_impact") is True:
         values["live_impact"] = "1"
+    if wait_spec := _text(payload.get("wait_spec")):
+        values[wait_card.WAIT_SPEC] = wait_spec
     for payload_key, metadata_key in (
         ("blocked_by", "blocked_by"),
         ("head", "head"),

@@ -32,6 +32,12 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             # Claim is a dispatcher-owned Ready-to-In progress lifecycle edge.  It
             # used to bypass this registry through TaskWriter's raw column move.
             (CardState.READY, CardState.IN_PROGRESS),
+            # A wait card's `target_reached` (secretary-1790). `TaskWriter.move` admits this edge
+            # for the dispatcher on a wait card only.
+            (CardState.IN_PROGRESS, CardState.DONE),
+            # A wait card's other outcome Blocks the Ready cards it holds (`blocked_by`); admitted
+            # by `TaskWriter.move` only for a card whose `blocked_by` names a wait card.
+            (CardState.READY, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.VALIDATE),
             (CardState.IN_PROGRESS, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.READY),

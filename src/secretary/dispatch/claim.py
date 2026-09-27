@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.board.completion_evidence import has_candidate, is_po_executed
+from secretary.board.completion_evidence import has_candidate, is_po_executed, is_wait
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.helpers import _worker_id, scrub_host_output
 from secretary.dispatch.host import _blocked_actions_and_their_infrastructure_twins
@@ -48,6 +48,7 @@ from secretary.dispatch.state import (
     record_attempt as _record_attempt,
 )
 from secretary.dispatch.types import STOPPED_BY_REPLACEMENT, HostError
+from secretary.dispatch.wait_cards import claim_wait_card
 from secretary.dispatch.worker_launch import launch_worker_after_claim
 from secretary.head_health import HeadChoice, resolve_head_chain
 from secretary.infra.github_credential import ProjectGitAccess
@@ -735,6 +736,9 @@ def claim_ready_task(
     if is_po_executed(task):
         # No head, no workspace, no broad-check or Git preflight: the PO service executes it.
         return claim_po_card(runtime, task, records, payload, attempt_id)
+    if is_wait(task):
+        # The same for a wait card: the dispatcher itself advances it, once per tick.
+        return claim_wait_card(runtime, task, records, payload, attempt_id)
     prepared = _prepare_claim(
         runtime,
         task,

@@ -110,6 +110,30 @@ def default_session_choice(models: Mapping[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def successor_choice(
+    previous: tuple[str, str, str] | None,
+    models: Mapping[str, Any],
+    efforts: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    """The CLI, model and effort of a session opened to succeed a closed or missing one.
+
+    The previous session's `(cli, model, effort)`, or the new-session form's defaults when there is
+    no row (`default_session_choice`); an effort that is `default` or no longer offered gives way to
+    the first one offered for that CLI. None when no CLI offers a model. The one rule for a sprint's
+    successor (`PoService.sprint_session`) and a wait card's (`secretary.dispatch.wait_cards`).
+    """
+    if previous is not None:
+        cli, model, effort = previous
+    else:
+        choice = default_session_choice(models)
+        if choice is None:
+            return None
+        (cli, model), effort = choice, ""
+    if effort not in (efforts.get(cli) or ()):
+        effort = first_effort(cli, efforts) or ""
+    return cli, model, effort
+
+
 __all__ = [
     "DEFAULT_EFFORTS",
     "DEFAULT_MODELS",
@@ -120,4 +144,5 @@ __all__ = [
     "first_effort",
     "models_from_instance",
     "require_explicit_effort",
+    "successor_choice",
 ]
