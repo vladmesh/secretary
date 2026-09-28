@@ -244,6 +244,8 @@ details.panel > summary::-webkit-details-marker { display: none; }
 details.panel > summary::before { content: "▸ "; color: var(--faint); }
 details.panel[open] > summary::before { content: "▾ "; }
 details.panel > .body { padding: .25rem .9rem .9rem; }
+main > details.po-delegated { margin: 0 0 1rem; }
+details.po-delegated > summary { text-transform: none; letter-spacing: normal; font-size: .9rem; }
 
 /* the pipeline strip */
 .strip { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: .7rem .9rem; }
@@ -4628,6 +4630,7 @@ def po_session(
                 f'<span class="age">{head}</span></div>'
             ),
             rename,
+            _po_delegated(document.get("delegated")),
             _po_refusal(refusal, refused),
             (
                 f'<p class="po-closed">closed {escape(str(session.get("closed_at") or ""))} '
@@ -4639,7 +4642,6 @@ def po_session(
             if closed
             else _panel("Send", message + controls + '<p class="feedback" id="po-status"></p>'),
             _panel("Feed", feed, more='<a class="more" href="/po">all sessions</a>'),
-            _po_delegated(document.get("delegated")),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
@@ -4658,8 +4660,12 @@ def po_session(
 def _po_delegated(section: Any) -> str:
     """The cards this session delegated, or whose results now come to it, with their states (secretary-1811).
 
-    Nothing when the document carries no such block (a poll that did not ask for it); the reason when
-    the board could not be read; a quiet line when the session delegated nothing.
+    A collapsed disclosure at the head of the page, by the title (secretary-1818): its summary alone
+    says the count, the columns the cards are in and how many results are not returned yet, and the
+    table opens under it. It is outside every block the session script swaps (PO_SESSION_BLOCKS), so
+    an in-place update never closes or moves it. Nothing when the document carries no such block (a
+    poll that did not ask for it); the reason when the board could not be read; `none` when the
+    session delegated nothing.
     """
     if not isinstance(section, dict):
         return ""
@@ -4670,15 +4676,24 @@ def _po_delegated(section: Any) -> str:
         body = (
             f'<p class="unavailable"><b>could not find out the cards this session delegated:</b> {reason}</p>'
         )
-        return _panel("Delegated cards", body)
-    if not items:
-        return _panel("Delegated cards", '<p class="empty">this session has delegated no card.</p>', count=0)
+        return _po_delegated_details("Delegated cards: unavailable", body)
+    entries = list(_entries(items))
+    if not entries:
+        return _po_delegated_details(
+            "Delegated cards: none", '<p class="empty">this session has delegated no card.</p>'
+        )
     rows = []
-    for item in _entries(items):
+    tally: dict[str, int] = {}
+    pending = 0
+    for item in entries:
         last = _block(item.get("last_return"))
         returned = (
             f"{_state_chip(last.get('state'))} {_or_dash(last.get('status') or 'pending')}" if last else "—"
         )
+        state = str(item.get("state") or "unknown")
+        tally[state] = tally.get(state, 0) + 1
+        if (last and not last.get("status")) or (not last and state in PO_RETURNED_STATES):
+            pending += 1
         relation = "" if item.get("relation") != "inherited" else ' <span class="age">(as successor)</span>'
         rows.append(
             [
@@ -4689,8 +4704,29 @@ def _po_delegated(section: Any) -> str:
                 returned,
             ]
         )
-    return _panel(
-        "Delegated cards", _rows(["card", "title", "kind", "column", "last return"], rows), count=len(rows)
+    summary = f"Delegated cards: {len(rows)} — " + ", ".join(
+        f"{count} {_po_delegated_state(state)}" for state, count in tally.items()
+    )
+    if pending:
+        summary += f" · {pending} {'result' if pending == 1 else 'results'} not returned yet"
+    return _po_delegated_details(summary, _rows(["card", "title", "kind", "column", "last return"], rows))
+
+
+#: The columns a delegated card returns its result from (`origin_outbox.TERMINAL_STATES`).
+PO_RETURNED_STATES = ("done", "blocked")
+
+
+def _po_delegated_state(state: str) -> str:
+    """A column as the summary's tally says it: `done`, `blocked`, `in progress`, `in validate`."""
+    word = state.replace("_", " ")
+    return word if state in (*PO_RETURNED_STATES, "in_progress", "unknown") else f"in {word}"
+
+
+def _po_delegated_details(summary: str, body: str) -> str:
+    """The delegated-cards disclosure: closed on every render, so the owner opens it when they want it."""
+    return (
+        f'<details class="panel po-delegated" id="po-delegated"><summary>{escape(summary)}</summary>'
+        f'<div class="body">{body}</div></details>'
     )
 
 

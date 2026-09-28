@@ -105,11 +105,24 @@ def wait(state: str = "waiting", **changes: Any) -> dict[str, Any]:
 
 
 def panel(html: str, title: str) -> str:
-    """The body of the page's panel titled `title`, or "" when the page has none."""
+    """The body of the page's panel titled `title`, or "" when the page has none.
+
+    A disclosure panel matches when its summary starts with `title` (`Delegated cards: 2 — ...`).
+    """
     found = re.search(
         rf"<h2>{re.escape(title)}</h2>.*?<div class=\"body\">(.*?)</div></section>", html, re.DOTALL
+    ) or re.search(
+        rf"<summary>{re.escape(title)}[^<]*</summary><div class=\"body\">(.*?)</div></details>",
+        html,
+        re.DOTALL,
     )
     return found.group(1) if found else ""
+
+
+def delegated_details(html: str) -> tuple[str, str]:
+    """The delegated-cards disclosure's opening tag and its summary text, or ("", "") when absent."""
+    found = re.search(r'(<details [^>]*id="po-delegated"[^>]*>)<summary>([^<]*)</summary>', html)
+    return (found.group(1), found.group(2)) if found else ("", "")
 
 
 class PageFixture(unittest.TestCase):
@@ -435,8 +448,57 @@ class PoSessionPageTests(PageFixture):
 
     def test_a_session_that_delegated_nothing_says_so(self) -> None:
         reads = Recording(po_delegated={**self.DELEGATED, "items": []})
-        body = panel(self.po_get(f"/po/sessions/{SESSION}", reads).body.decode(), "Delegated cards")
+        html = self.po_get(f"/po/sessions/{SESSION}", reads).body.decode()
+        body = panel(html, "Delegated cards")
         self.assertIn("delegated no card", body)
+        tag, summary = delegated_details(html)
+        self.assertEqual(summary, "Delegated cards: none")
+        self.assertNotIn(" open", tag)
+
+    def test_the_panel_sits_collapsed_by_the_title_before_the_feed(self) -> None:
+        reads = Recording(po_delegated=self.DELEGATED)
+        html = self.po_get(f"/po/sessions/{SESSION}", reads).body.decode()
+        tag, summary = delegated_details(html)
+        self.assertTrue(tag, "the page has the delegated-cards disclosure")
+        self.assertNotIn(" open", tag, "collapsed by default")
+        self.assertEqual(summary, "Delegated cards: 2 — 1 in progress, 1 done")
+        start = html.index('id="po-delegated"')
+        self.assertLess(html.index('id="po-title"'), start)
+        self.assertLess(start, html.index('id="po-feed"'))
+        self.assertLess(start, html.index('id="po-send"'))
+
+    def test_the_summary_tallies_columns_and_hints_at_results_not_returned(self) -> None:
+        items = [
+            {
+                "ref": "secretary-530",
+                "state": "done",
+                "last_return": {"state": "done", "status": "delivered"},
+            },
+            {"ref": "secretary-531", "state": "done", "last_return": {"state": "done", "status": None}},
+            {"ref": "secretary-532", "state": "validate", "last_return": None},
+            {"ref": "secretary-533", "state": "blocked", "last_return": None},
+        ]
+        reads = Recording(po_delegated={**self.DELEGATED, "items": items})
+        _, summary = delegated_details(self.po_get(f"/po/sessions/{SESSION}", reads).body.decode())
+        self.assertEqual(
+            summary, "Delegated cards: 4 — 2 done, 1 in validate, 1 blocked · 2 results not returned yet"
+        )
+
+    def test_the_in_place_update_leaves_the_panel_alone(self) -> None:
+        # The session script replaces exactly PO_SESSION_BLOCKS by id; the disclosure is in none of them,
+        # so its `open`, set by the owner, survives every in-place update and it never moves.
+        reads = Recording(po_delegated=self.DELEGATED)
+        html = self.po_get(f"/po/sessions/{SESSION}", reads).body.decode()
+        start = html.index('<details class="panel po-delegated"')
+        end = html.index("</details>", start)
+        self.assertNotIn("po-delegated", pages.PO_SESSION_BLOCKS)
+        # #po-head is the one swapped block above the panel, and it closes before the rename form;
+        # every other swapped block opens after the panel has closed, so none of them contains it.
+        self.assertLess(html.index('id="po-head"'), html.index('id="po-title"'))
+        self.assertLess(html.index('id="po-title"'), start)
+        for block in pages.PO_SESSION_BLOCKS:
+            if block != "po-head":
+                self.assertLess(end, html.index(f'id="{block}"'), f"#{block} opens after the panel")
 
 
 class SprintPageTests(PageFixture):
