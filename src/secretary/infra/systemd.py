@@ -48,19 +48,33 @@ def observation_error(
     A reported user-bus failure is still unavailable; it does not select a user manager.
     """
     detail = ""
-    diagnostic = (result.stderr + " " + result.stdout).lower()
     if not result.ran:
         detail = result.reason
-    elif "bus" in diagnostic or "connect" in diagnostic or "not been booted with systemd" in diagnostic:
-        detail = "manager/bus connection failed"
     elif result.stderr.strip():
         detail = f"systemctl exited {result.returncode} with a diagnostic"
     elif states is not None and (
         result.stdout.strip() not in states or result.returncode not in {0, 1, 3, 4}
     ):
         detail = f"systemctl runtime status unavailable (exit {result.returncode})"
-    elif states is None and result.returncode != 0 and not (allow_empty_match and result.returncode == 1):
+    elif (
+        states is None
+        and result.returncode != 0
+        and not (allow_empty_match and result.returncode == 1 and not result.stdout.strip())
+    ):
         detail = f"systemctl exited {result.returncode}"
+    if detail and result.ran:
+        # Only failed observations carry diagnostics. Successful stdout includes arbitrary unit
+        # names and property values; recognized nonzero status output is also ordinary data.
+        diagnostic = (result.stderr + " " + result.stdout).lower()
+        if any(
+            phrase in diagnostic
+            for phrase in (
+                "failed to connect",
+                "failed to get bus connection",
+                "not been booted with systemd",
+            )
+        ):
+            detail = "manager/bus connection failed"
     if detail:
         return f"system manager/bus unavailable: {detail}"
     return ""

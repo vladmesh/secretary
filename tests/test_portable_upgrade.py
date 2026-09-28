@@ -36,6 +36,7 @@ from secretary.head_registry import (
 )
 from secretary.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
 from secretary.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
+from secretary.projects.availability import ProjectAvailability
 from secretary.runtime import heads as shipped_heads
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import (
@@ -682,6 +683,213 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.bus_error = error
         self.error_probe = probe
         return mock.patch("secretary.infra.systemd._proc.run", side_effect=self.systemctl_reply)
+
+    def test_successful_native_enumeration_with_bus_and_connect_foreign_names(self):
+        args = [
+            "doctor",
+            "--dry-run",
+            "--instance",
+            str(self.instance),
+            "--host-fixture",
+            str(self.host_fixture),
+        ]
+        baseline_code, baseline = self.run_json_cli([*args, "--json"])
+        self.assertEqual(baseline_code, 1, baseline)
+        self.assertEqual(
+            {finding["code"] for finding in baseline["findings"]},
+            {"production_runtime_provenance", "dispatcher"},
+        )
+        foreign = {"secretary-bus-forwarder.service", "secretary-connect-forwarder.service"}
+        config = self.instance / "instance.yaml"
+        config.write_text(config.read_text() + f"  foreign_units: {sorted(foreign)}\n")
+        manifest = (self.data / "host-managed.json").read_bytes()
+        files = dict(self.units.files)
+        # Native enumeration reads only this temporary root, never the live manager's units.
+        unit_dir = self.root / "systemd-root" / "etc" / "systemd" / "system"
+        unit_dir.mkdir(parents=True)
+        for name, content in files.items():
+            (unit_dir / name).write_bytes(content)
+        for name in foreign:
+            (unit_dir / name).write_text("[Service]\nExecStart=/bin/true\n")
+        foreign_files = {name: (unit_dir / name).read_bytes() for name in foreign}
+        native = subprocess.run(
+            [
+                "systemctl",
+                "--system",
+                f"--root={self.root / 'systemd-root'}",
+                "list-unit-files",
+                "--no-legend",
+                "secretary-*",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        self.assertEqual(native.stderr, "")
+        self.assertTrue(foreign <= {line.split()[0] for line in native.stdout.splitlines()})
+
+        def reply(argv, **kwargs):
+            if argv[:3] == ["systemctl", "--system", "list-unit-files"]:
+                return subprocess.CompletedProcess(argv, native.returncode, native.stdout, native.stderr)
+            return self.systemctl_reply(argv, **kwargs)
+
+        with (
+            self.native_boundary(),
+            mock.patch("secretary.infra.systemd._proc.run", side_effect=reply),
+            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+        ):
+            result = self.verify(host_fixture=None)
+            self.assertEqual(result.status, "unchanged", result.detail)
+            text_code, output = self.run_cli(args)
+            json_code, payload = self.run_json_cli([*args, "--json"])
+        self.assertEqual(text_code, baseline_code, output)
+        self.assertEqual(json_code, baseline_code, payload)
+        self.assertEqual(payload["findings"], baseline["findings"])
+        self.assertNotIn("unavailable: system manager/bus", output)
+        self.assertEqual(self.units.files, files)
+        self.assertEqual({name: (unit_dir / name).read_bytes() for name in foreign}, foreign_files)
+        self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
+        self.assertEqual(self.units.calls, [])
+
+    def test_previously_owned_foreign_dispatcher_is_unchanged_in_all_consumers(self):
+        pair = {"secretary-dispatcher-production.service", "secretary-dispatcher-production.timer"}
+        managed, error = strict_manifest(self.data / "host-managed.json")
+        self.assertEqual(error, "")
+        self.assertTrue(pair <= {resource.name for resource in managed})
+        self.assertEqual(len(self.units.files), 16)
+        files = dict(self.units.files)
+        manifest = (self.data / "host-managed.json").read_bytes()
+        state = self.data / "dispatcher" / "production-state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"owner": "operator", "phase": "ready"}))
+        args = [
+            "doctor",
+            "--dry-run",
+            "--instance",
+            str(self.instance),
+            "--host-fixture",
+            str(self.host_fixture),
+        ]
+        baseline_code, baseline = self.run_json_cli([*args, "--json"])
+        self.assertEqual(baseline_code, 1, baseline)
+        self.assertEqual(
+            {finding["code"] for finding in baseline["findings"]},
+            {"production_runtime_provenance", "dispatcher"},
+        )
+        self.assertFalse(any("managed unit mismatch" in str(finding) for finding in baseline["findings"]))
+        config = self.instance / "instance.yaml"
+        config.write_text(config.read_text() + f"  foreign_units: {sorted(pair)}\n")
+        self.assertEqual(upgrade.step_host(self.context()).status, "unchanged")
+        result = self.verify()
+        self.assertEqual(result.status, "unchanged", result.detail)
+        text_code, output = self.run_cli(args)
+        json_code, payload = self.run_json_cli([*args, "--json"])
+        self.assertEqual(text_code, baseline_code, output)
+        self.assertEqual(json_code, baseline_code, payload)
+        self.assertEqual(payload["findings"], baseline["findings"])
+        self.assertNotIn("managed unit mismatch", output)
+        self.assertEqual(self.units.files, files)
+        self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
+        self.assertEqual(self.units.calls, [])
+
+    def test_failed_connection_diagnostic_on_stdout_is_unavailable_in_all_consumers(self):
+        def reply(argv, **kwargs):
+            if argv[:3] == ["systemctl", "--system", "list-unit-files"]:
+                return subprocess.CompletedProcess(
+                    argv, 1, "Failed to connect to bus: No such file or directory\n", ""
+                )
+            return self.systemctl_reply(argv, **kwargs)
+
+        with (
+            self.native_boundary(),
+            mock.patch("secretary.infra.systemd._proc.run", side_effect=reply),
+            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+        ):
+            result = self.verify(host_fixture=None)
+            self.assertTrue(result.failed, result.detail)
+            self.assertIn("system manager/bus unavailable: manager/bus connection failed", result.detail)
+            args = [
+                "doctor",
+                "--dry-run",
+                "--instance",
+                str(self.instance),
+                "--host-fixture",
+                str(self.host_fixture),
+            ]
+            text_code, output = self.run_cli(args)
+            json_code, payload = self.run_json_cli([*args, "--json"])
+        self.assertEqual(text_code, 2, output)
+        self.assertEqual(json_code, 2, payload)
+        self.assertIn(
+            "units:\n  unavailable: system manager/bus unavailable: manager/bus connection failed", output
+        )
+        self.assertIn(
+            {
+                "code": "host_inventory_unavailable",
+                "kind": "units",
+                "message": "system manager/bus unavailable: manager/bus connection failed",
+            },
+            payload["findings"],
+        )
+        self.assertFalse(
+            any(finding["code"] in {"unit_runtime", "missing_on_host"} for finding in payload["findings"])
+        )
+        self.assertEqual(self.units.calls, [])
+
+    def test_excluded_schema_valid_symlink_loop_preserves_upgrade_project_policy(self):
+        loop = self.root / "unavailable-checkout"
+        loop.symlink_to(loop)
+        project = self.instance / "projects" / "unavailable.yaml"
+        project.parent.mkdir(parents=True)
+        project.write_text(
+            f"id: unavailable\nrepo: {loop}\nenabled: true\norca_binding: unavailable\n"
+            "adapter: unavailable\ndefault_branch: main\n"
+        )
+        context = self.context(host_fixture=None)
+        availability = ProjectAvailability.inspect(context.report.bindings)
+        self.assertEqual(availability.unavailable, frozenset({"unavailable"}))
+        context.project_availability = availability
+        manifest = (self.data / "host-managed.json").read_bytes()
+        files = dict(self.units.files)
+        with self.native_boundary():
+            host = upgrade.step_host(context)
+            self.assertEqual(host.status, "unchanged", host.detail)
+            result = self.verify(host_fixture=None, project_availability=availability)
+            self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertEqual(self.units.files, files)
+        self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
+        self.assertEqual(self.units.calls, [])
+        # Unit assessment is still required when the unavailable checkout is excluded.
+        self.units.active.discard("secretary-steward.timer")
+        with self.native_boundary():
+            result = self.verify(host_fixture=None, project_availability=availability)
+        self.assertTrue(result.failed, result.detail)
+        self.assertIn("secretary-steward.timer: expected active, got inactive", result.detail)
+        self.assertEqual(self.units.calls, [])
+
+    def test_included_project_symlink_loop_remains_unavailable_in_upgrade(self):
+        # Upgrade's existing project policy inspects names relative to cwd before projects_root.
+        loop = self.root / "included-checkout"
+        loop.symlink_to(loop)
+        project = self.instance / "projects" / "included.yaml"
+        project.parent.mkdir(parents=True)
+        project.write_text(
+            f"id: included\nrepo: {loop}\nenabled: true\norca_binding: included\n"
+            "adapter: included\ndefault_branch: main\n"
+        )
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with self.native_boundary():
+                host = upgrade.step_host(self.context(host_fixture=None))
+                result = self.verify(host_fixture=None)
+        finally:
+            os.chdir(previous_cwd)
+        for step in (host, result):
+            self.assertTrue(step.failed, step.detail)
+            self.assertIn("projects: expected project checkout path could not be inspected", step.detail)
+        self.assertEqual(self.units.calls, [])
 
     def test_root_and_different_shell_identity_observe_the_same_owner_and_system_manager(self):
         for shell_user, effective_uid in (("root", 0), ("different-shell-user", 2000)):

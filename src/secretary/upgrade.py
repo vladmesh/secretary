@@ -1204,11 +1204,16 @@ def step_host(context: UpgradeContext) -> StepResult:
         )
     except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
-    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    canonical = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
     # Upgrade retains its project availability policy; unit requirements come from the same
     # canonical desired state doctor assesses, using this upgrade's explicit target catalogue.
     projects = build_expectations(report.bindings, report.host, availability=context.project_availability)
-    expected = replace(expected, projects=projects.projects)
+    expected = replace(
+        projects,
+        units=canonical.units,
+        unit_runtime=canonical.unit_runtime,
+        foreign_units=canonical.foreign_units,
+    )
     source = (
         FixtureHostSource(context.host_fixture)
         if context.host_fixture

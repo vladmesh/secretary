@@ -55,6 +55,7 @@ from secretary.host import (
     assess_unit_runtime,
     build_doctor_expectations,
     build_plan,
+    foreign_units,
     inventory,
     load_managed_manifest,
     plan_changes,
@@ -1518,7 +1519,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
     managed, error = load_managed_manifest(data_dir / "host-managed.json")
     if error:
         return ["production dispatcher managed manifest unavailable: " + error]
-    changes = plan_changes(desired, collected_host.inventory, managed, prefix)
+    changes = plan_changes(desired, collected_host.inventory, managed, prefix, foreign_units(report.host))
     findings = []
     for change in changes:
         if not change.logical_id.startswith("systemd:dispatcher:production"):
