@@ -117,6 +117,7 @@ def block_merge_path(
     step: str,
     outcome: str,
     decision: str = "",
+    request_id: str = "",
 ) -> dict[str, Any]:
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
@@ -127,7 +128,7 @@ def block_merge_path(
         target="blocked",
         reason=reason,
         decision=decision,
-        request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
+        request_id=request_id or _attempt_request_id(record.attempt_id or attempt_id, action, ref),
         terminal_state="blocked",
         disposition="blocked",
         verdict=record.worker_continuation.verdict_outcome
@@ -415,6 +416,10 @@ def release_effect(
     `release_merge` marker, and the observer is woken on the watch's result instead of on the move.
     """
     ref = task["ref"]
+    if record.activation_recovery is not None:
+        return release_activation.resume_refused_activation(
+            runtime, task, record, records, payload, attempt_id
+        )
     release_merge: dict[str, Any] | None = None
     if has_candidate(task):
         try:

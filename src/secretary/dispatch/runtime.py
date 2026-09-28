@@ -12,7 +12,7 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
-from secretary.dispatch import attempt_accounting
+from secretary.dispatch import attempt_accounting, release_activation
 from secretary.dispatch.assessment_decision import advance_assessment as _advance_assessment
 from secretary.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
@@ -457,6 +457,11 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        record = records.get(ref)
+        if record is not None and record.activation_recovery is not None:
+            return release_activation.resume_refused_activation(
+                self, task, record, records, payload, attempt_id
+            )
         if is_po_executed(task):
             # A decision/operation card has no head, workspace or launch intent to settle: the PO
             # service executes it, and the dispatcher only submits it and watches the turn.

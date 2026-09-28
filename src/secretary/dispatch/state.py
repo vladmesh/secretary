@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import time
 import uuid
@@ -742,6 +743,41 @@ class PoSubmission:
         )
 
 
+@dataclass(frozen=True)
+class ActivationRecovery:
+    """The refused release's exact facts and board requests, owed until terminal settlement."""
+
+    facts: dict[str, Any]
+    operation: dict[str, Any]
+    comment_request_id: str
+    block_request_id: str
+    step: str
+
+    def to_json(self) -> dict[str, Any]:
+        return copy.deepcopy({
+            "facts": self.facts,
+            "operation": self.operation,
+            "comment_request_id": self.comment_request_id,
+            "block_request_id": self.block_request_id,
+            "step": self.step,
+        })
+
+    @classmethod
+    def from_json(cls, payload: Any) -> ActivationRecovery | None:
+        if payload is None:
+            return None
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("facts"), dict)
+            or not isinstance(payload.get("operation"), dict)
+            or not payload["operation"].get("request_id")
+            or any(not isinstance(payload.get(key), str) or not payload[key]
+                   for key in ("comment_request_id", "block_request_id", "step"))
+        ):
+            raise DispatcherError("invalid_activation_recovery", "invalid persisted release activation recovery")
+        return cls(**copy.deepcopy(payload))
+
+
 @dataclass
 class DispatcherRecord:
     worker: str
@@ -754,6 +790,7 @@ class DispatcherRecord:
     review_baseline: int
     state: str
     claimed_at: float
+    activation_recovery: ActivationRecovery | None = None
     # Durable report round advances only when a new round opens, never on respawn.
     # The head each role was preferred on when the claim had to leave that preference behind
     # (secretary-1165), empty when it did not. The claim walks the canon's fallback chain when the
@@ -1014,6 +1051,7 @@ class DispatcherRecord:
     def to_json(self) -> dict[str, Any]:
         return {
             "claimed_at": self.claimed_at,
+            "activation_recovery": self.activation_recovery.to_json() if self.activation_recovery else None,
             "comment_baseline": self.comment_baseline,
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
@@ -1153,6 +1191,7 @@ class DispatcherRecord:
             outcome_terminal_path=outcome_terminal_path(payload.get("outcome_terminal_path"), state=state),
             state=state,
             claimed_at=float(payload.get("claimed_at") or time.time()),
+            activation_recovery=ActivationRecovery.from_json(payload.get("activation_recovery")),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
             gate_attestation=PersistedGateReceipt.from_value(payload.get("gate_attestation")),

@@ -1,24 +1,10 @@
-"""A release whose production activation was refused: one reason, one operation, the card Blocked.
+"""One durable recovery obligation for a refused production activation.
 
-`complete_green` raises `ProductionActivationRefused` when the Secretary production checkout could not
-be advanced because the target's board schema was refused (`dispatch.production_checkout`). By then the
-release has delivered its commit to the remote (pushed, or the pull request merged), so the card is
-neither undelivered nor Done: its code is on the base and not running. :func:`block_refused_activation`
-makes that visible on the board, in this order, each step under a request id derived from the attempt
-and the card so a replayed tick repeats none of them:
-
-1. one `operation` card for the PO (`production_rights.ACTIVATION_OPERATION_REQUEST_PREFIX`, the one
-   operation the dispatcher may create), in the card's sprint, or under the card's PO origin when it has
-   no sprint, touching the card's own project's production. It names the old and target code revisions,
-   the owed and failing migration, what was applied, and the supported recovery and verification;
-2. one dispatcher comment on the card carrying the typed reason (`release_schema_refused`, its reason,
-   the failing revision, the target, the remote merge kept apart from the production checkout) as JSON;
-3. the card Blocked (`block_merge_path`), its reason naming the same.
-
-The operation is created first so an interrupted tick cannot lose it: until the Block commits, the card
-is still in its release and the next tick replays it, which finds the operation already created. A
-create that is refused (a closed sprint, no registry) is named in the comment and the reason instead of
-stopping the Block.
+Persist the original refusal and exact board requests in the release record before creation. Every
+retry services those requests before another activation or terminal record removal: commit one PO
+operation, commit one canonical reason naming it, then Block the source and remove the record. Board
+admission failures retain the obligation and leave the original refusal intact. Committed request ids
+recover interruptions after any board write without repeating it or consulting a moving Git ref.
 """
 
 from __future__ import annotations
@@ -35,8 +21,9 @@ from secretary.board.release_migrations import (
     UNCLASSIFIED_PENDING,
 )
 from secretary.dispatch.production_checkout import ProductionActivationRefused
-from secretary.dispatch.state import DispatcherRecord, request_token
+from secretary.dispatch.state import ActivationRecovery, DispatcherRecord, request_token
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
+from secretary.dispatch.types import HostError
 from secretary.tasks import TaskError
 
 ACTION = "production-activation-blocked"
@@ -59,38 +46,75 @@ def block_refused_activation(
     *,
     step: str,
 ) -> dict[str, Any]:
-    from secretary.dispatch.release_lifecycle import block_merge_path
-
     ref = str(task["ref"])
     attempt = record.attempt_id or attempt_id
-    facts = refused.facts()
-    operation, problem = _operation(runtime, task, facts, operation_request_id(ref, attempt))
-    facts["operation"] = operation or None
-    if problem:
-        facts["operation_problem"] = problem
-    _once(
-        runtime,
-        _attempt_request_id(attempt, COMMENT_ACTION, ref),
-        lambda request_id: runtime.writer.comment(
-            role="dispatcher",
-            actor=runtime.owner,
-            reference=ref,
-            body=_comment(facts),
-            request_id=request_id,
-        ),
-    )
-    outcome = block_merge_path(
-        runtime,
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        action=ACTION,
-        reason=_reason(facts),
-        step=step,
-        outcome="production activation refused",
-    )
+    if record.activation_recovery is None:
+        facts = refused.facts()
+        project = str(task.get("project") or "")
+        sprint = str(task.get("sprint") or "")
+        record.activation_recovery = ActivationRecovery(
+            facts=facts,
+            operation={
+                "role": "dispatcher",
+                "actor": runtime.owner,
+                "project": project,
+                "task_type": "operation",
+                "title": f"Recover the production activation of {ref} ({facts['reason']})",
+                "description": _description(task, facts),
+                "target": "ready",
+                "sprint": sprint,
+                "touches_production": project,
+                "origin": None if sprint else origin_field.po_origin(task),
+                "request_id": operation_request_id(ref, attempt),
+            },
+            comment_request_id=_attempt_request_id(attempt, COMMENT_ACTION, ref),
+            block_request_id=_attempt_request_id(attempt, ACTION, ref),
+            step=step,
+        )
+    records[ref] = record
+    return resume_refused_activation(runtime, task, record, records, payload, attempt_id)
+
+
+def resume_refused_activation(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> dict[str, Any]:
+    from secretary.dispatch.release_lifecycle import block_merge_path
+
+    owed = record.activation_recovery
+    assert owed is not None
+    ref = str(task["ref"])
+    # Also flush on re-entry after a failed state save. No fallible board write may outrun this.
+    runtime.save_records(payload, records)
+    try:
+        operation = _operation(runtime, owed)
+        facts = {**owed.facts, "operation": operation}
+        _once(
+            runtime,
+            owed.comment_request_id,
+            lambda request_id: runtime.writer.comment(
+                role="dispatcher", actor=runtime.owner, reference=ref,
+                body=_comment(facts), request_id=request_id,
+            ),
+        )
+        outcome = block_merge_path(
+            runtime, task, record, records, payload, attempt_id,
+            action=ACTION, reason=_reason(facts), step=owed.step,
+            outcome="production activation refused", request_id=owed.block_request_id,
+        )
+    except (TaskError, OSError, HostError) as exc:
+        # A failed final state save must leave the obligation in this tick's records too.
+        records[ref] = record
+        return {
+            "status": "degraded", "step": owed.step, "pilot_ref": ref,
+            "action": "production-activation-recovery-pending",
+            "reason": f"production activation recovery remains owed: {getattr(exc, 'code', type(exc).__name__)}: {exc}",
+            "activation_refused": dict(owed.facts),
+        }
     outcome["activation_refused"] = {
         key: facts[key] for key in ("code", "reason", "revision", "target", "old", "operation")
     }
@@ -105,36 +129,17 @@ def _once(runtime: Any, request_id: str, write: Any) -> dict[str, Any] | None:
     return write(request_id)
 
 
-def _operation(runtime: Any, task: dict[str, Any], facts: dict[str, Any], request_id: str) -> tuple[str, str]:
-    """The operation card's ref (created now or by an interrupted earlier tick), and why there is none."""
-    committed = runtime.audit.committed_event(request_id)
+def _operation(runtime: Any, owed: ActivationRecovery) -> str:
+    """Read a committed operation or submit the persisted request through ordinary admission."""
+    committed = runtime.audit.committed_event(owed.operation["request_id"])
     if committed is not None and committed.get("ref"):
-        return str(committed["ref"]), ""
-    project = str(task.get("project") or "")
-    sprint = str(task.get("sprint") or "")
-    origin = None if sprint else origin_field.po_origin(task)
-    if not sprint and origin is None:
-        return (
-            "",
-            f"{task['ref']} belongs to no sprint and carries no PO origin: no PO session executes an operation",
+        return str(committed["ref"])
+    if not owed.operation["sprint"] and owed.operation["origin"] is None:
+        raise TaskError(
+            "validation", "the source belongs to no sprint and carries no PO origin: no PO session executes an operation", 2,
         )
-    try:
-        created = runtime.writer.create(
-            role="dispatcher",
-            actor=runtime.owner,
-            project=project,
-            task_type="operation",
-            title=f"Recover the production activation of {task['ref']} ({facts['reason']})",
-            description=_description(task, facts),
-            target="ready",
-            sprint=sprint,
-            touches_production=project,
-            origin=origin,
-            request_id=request_id,
-        )
-    except TaskError as exc:
-        return "", f"the operation card was refused: {exc.code}: {exc}"
-    return str(created["task"]["ref"]), ""
+    created = runtime.writer.create(**owed.to_json()["operation"])
+    return str(created["task"]["ref"])
 
 
 def _landing_line(facts: dict[str, Any]) -> str:
@@ -148,7 +153,7 @@ def _landing_line(facts: dict[str, Any]) -> str:
 
 def _reason(facts: dict[str, Any]) -> str:
     revision = f" at revision {facts['revision']}" if facts.get("revision") else ""
-    operation = facts.get("operation") or f"none ({facts.get('operation_problem')})"
+    operation = facts["operation"]
     return (
         f"production activation refused ({facts['code']}: {facts['reason']}{revision}): {facts['message']}. "
         f"Delivered to the remote: {_landing_line(facts)}; the production checkout {facts['checkout']} stays at "
@@ -167,7 +172,7 @@ def _comment(facts: dict[str, Any]) -> str:
                 f"was refused ({facts['reason']})."
             ),
             "",
-            f"Operation card: {facts.get('operation') or 'none — ' + str(facts.get('operation_problem'))}",
+            f"Operation card: {facts['operation']}",
             "",
             "```json",
             json.dumps(facts, indent=2, sort_keys=True),
@@ -244,4 +249,4 @@ def _description(task: dict[str, Any], facts: dict[str, Any]) -> str:
     )
 
 
-__all__ = ["ACTION", "block_refused_activation", "operation_request_id"]
+__all__ = ["ACTION", "block_refused_activation", "operation_request_id", "resume_refused_activation"]

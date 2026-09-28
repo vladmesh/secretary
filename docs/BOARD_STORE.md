@@ -1119,9 +1119,13 @@ kind is refused.
   the advisory-lock wait and every DDL lock wait. Nothing owed: one lock, one read, unchanged. Any
   refusal (`release_schema_refused`: `bundle_unreadable`, `store_unavailable`, `lock_timeout`,
   `destructive`, `unclassified`, `migration_failed`, `unknown_revision`, `not_verified`) leaves the
-  checkout on its old commit; the release Blocks the card with that typed reason, keeps the remote
-  merge as delivered, and creates one `operation` card for the sprint's PO
-  (`dispatch/release_activation.py`). Other projects' checkouts and the instance repository keep
+  checkout on its old commit. The release persists its original typed facts, remote delivery and
+  exact board requests in its dispatcher record before creating one `operation` for the sprint's
+  PO (`dispatch/release_activation.py`). A registry, sprint or board refusal retains that obligation;
+  ordinary ticks, including after restart, retry it before another activation or record removal.
+  Only after the operation commits does the release write its canonical reason naming the operation,
+  durably Block the source, and remove the release record. Request-id replay uses the persisted facts
+  and description, even if the remote ref moves. Other projects' checkouts and the instance repository keep
   their plain fast-forward.
 - **Release eligibility (for revision authors):** the release applies a revision unattended only if
   it declares, at module level, `release_safety = "additive"`: the previous release keeps working

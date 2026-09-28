@@ -14,6 +14,7 @@ revision written here is ever packaged.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -31,9 +32,10 @@ from secretary.board import migrate, release_migrations, schema_gate
 from secretary.board.production_rights import ACTIVATION_OPERATION_REQUEST_PREFIX, touches_production
 from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig
-from secretary.dispatch import production_checkout, release_activation, release_lifecycle
+from secretary.dispatch import release_activation, release_lifecycle
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.production_checkout import ProductionActivationRefused
+from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.tasks import TaskError, TaskReader, TaskWriter
@@ -676,15 +678,22 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         DispatcherRuntimeFixture.setUp(self)
         self.release_fixture()
 
-    def arrange(self) -> tuple[DispatcherRecord, dict, dict]:
+    def arrange(self, *, ci: str = "local", partial: bool = False) -> tuple[DispatcherRecord, dict, dict]:
         self.start_dispatcher()
         self.board.move(self.board.key_of(CARD_REF), "assessment")
         # The production board is the card board: the release migrates the store it then writes to.
         self.instance(self.board_config(), self.data_dir)
         production, workspace = self.repos()
         self.old = git(production, "rev-parse", "HEAD")
-        self.target = self.revisions(workspace, (FAILING, HEAD, FAILING_BODY, "additive"))
-        releasing = _ReleaseHost(_Catalog(production, self.data_dir, "local"), self.root, workspace, product_root=production)
+        revisions = [(FAILING, HEAD, FAILING_BODY, "additive")]
+        if partial:
+            revisions = [(CANARY, HEAD, CANARY_BODY, "additive"), (FAILING, CANARY, FAILING_BODY, "additive")]
+            # This case changes the schema, so discard its database before the ordinary fixture
+            # cleanup can return it to the empty-row reuse pool.
+            self.addCleanup(self.postgres.drop_database, self.board.credentials.dbname)
+        self.target = self.revisions(workspace, *revisions)
+        self.production, self.workspace = production, workspace
+        releasing = _ReleaseHost(_Catalog(production, self.data_dir, ci), self.root, workspace, product_root=production)
         self.host.complete_green = lambda task, record: self.release(releasing, workspace)  # type: ignore[method-assign]
         record = DispatcherRecord(
             worker="w", workspace=str(workspace), handle="", head="codex", review_head="claude",
@@ -705,6 +714,206 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
 
     def operations(self) -> list[dict[str, Any]]:
         return [card for card in self.reader.list() if card.get("type") == "operation"]
+
+    def restart(self) -> None:
+        """Construct a new runtime; its next tick loads the obligation from the production state."""
+        self.runtime = DispatcherRuntime(
+            self.reader, self.writer, self.writer.audit, self.data_dir, self.catalog, self.host,
+            owner="secretary-pilot", sprints=self.sprints,
+        )
+
+    def obligation(self) -> dict[str, Any]:
+        persisted = self.runtime.production_state.load()["records"][CARD_REF]["activation_recovery"]
+        restored = self.runtime.production_state.records(self.runtime.production_state.load())[CARD_REF]
+        self.assertEqual(restored.activation_recovery.to_json(), persisted)
+        facts = persisted["facts"]
+        self.assertEqual((facts["old"], facts["target"], facts["revision"]), (self.old, self.target, FAILING))
+        self.assertIn('relation "release_canary_missing" does not exist', facts["cause"])
+        self.assertNotIn("current transaction is aborted", facts["cause"])
+        self.assertEqual(facts["remote_merge"]["sha"], self.target)
+        self.assertEqual(git(self.production, "rev-parse", "HEAD"), self.old)
+        return persisted
+
+    def settled(self, owed: dict[str, Any]) -> None:
+        card = self.reader.show(CARD_REF)
+        self.assertEqual(card["state"], "blocked")
+        [body] = [c["body"] for c in card["comments"] if release_activation.HEADING in c["body"]]
+        facts = json.loads(body.split("```json\n", 1)[1].split("\n```", 1)[0])
+        [operation] = self.operations()
+        self.assertEqual(facts, {**owed["facts"], "operation": operation["ref"]})
+        self.assertEqual((operation["project"], operation["sprint"], touches_production(operation)),
+                         ("secretary", SPRINT, "secretary"))
+        self.assertEqual(operation["description"], owed["operation"]["description"])
+        [created] = self.writer.audit.events(operation["ref"], kind="created")
+        self.assertEqual(created["request_id"], owed["operation"]["request_id"])
+        [blocked] = [e for e in self.writer.audit.events(CARD_REF)
+                     if (e.get("transition") or {}).get("target") == "blocked"]
+        self.assertEqual(blocked["request_id"], owed["block_request_id"])
+        self.assertIn(operation["ref"], str(blocked))
+        self.assertEqual(git(self.production, "rev-parse", "HEAD"), self.old)
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+
+    def recovered_tick(self, owed: dict[str, Any], *, full: bool = False) -> dict:
+        self.restart()
+        with mock.patch.object(self.host, "complete_green", side_effect=AssertionError("activation rerun")):
+            outcome = self.runtime.production_tick() if full else self.tick()
+        self.settled(owed)
+        return outcome
+
+    def test_native_registry_refusal_survives_reload_and_an_ordinary_production_tick(self) -> None:
+        record, records, payload = self.arrange(partial=True)
+        registry = self.data_dir / "projects" / "secretary.yaml"
+        withheld = registry.with_suffix(".withheld")
+        registry.rename(withheld)
+        try:
+            outcome = self.release_card(record, records, payload)
+            self.assertEqual(outcome["status"], "degraded")
+            self.assertIn("unknown registered project: secretary", outcome["reason"])
+            owed = self.obligation()
+            self.assertEqual(owed["facts"]["applied"], [CANARY])
+            self.assertEqual(owed["facts"]["pending"], [CANARY, FAILING])
+            self.assertEqual(self.version(self.board_config()), [CANARY])
+            self.assertEqual(self.operations(), [])
+            self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+            self.assertFalse(any(release_activation.HEADING in c["body"]
+                                 for c in self.reader.show(CARD_REF)["comments"]))
+        finally:
+            withheld.rename(registry)
+        # Moving the remote and the attempt cannot change the request or its original facts.
+        later = self.commit(self.workspace, {"LATER.md": "later\n"}, "a later remote commit")
+        git(self.workspace, "push", "--quiet", "origin", f"{BRANCH}:main")
+        self.assertNotEqual(later, self.target)
+        persisted = self.runtime.production_state.load()
+        persisted["records"][CARD_REF]["attempt_id"] = "a-later-tick"
+        self.runtime.production_state.save(persisted)
+        self.recovered_tick(owed, full=True)
+        # Ordinary orphan reconciliation after settlement cannot multiply the writes.
+        self.runtime.production_tick()
+        self.settled(owed)
+
+    def test_one_shot_sprint_guard_unavailable_retains_the_original_github_delivery(self) -> None:
+        from secretary.tasks import SprintReservationUnverifiable
+
+        record, records, payload = self.arrange(ci="github")
+        with mock.patch.object(self.writer, "open_sprints_reserving",
+                               side_effect=SprintReservationUnverifiable(SPRINT, TaskError("unavailable", "one-shot outage", 4))):
+            outcome = self.release_card(record, records, payload)
+        self.assertEqual(outcome["status"], "degraded")
+        self.assertIn("sprint_guard_unavailable", outcome["reason"])
+        owed = self.obligation()
+        self.assertEqual(owed["facts"]["remote_merge"],
+                         {"sha": self.target, "base": "main", "path": "github-pr", "branch": BRANCH})
+        self.assertEqual(self.operations(), [])
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.recovered_tick(owed, full=True)
+
+    def test_interruptions_around_each_board_write_recover_from_durable_state(self) -> None:
+        for method in ("create", "comment", "move"):
+            for after in (False, True):
+                # Each case owns a fresh board and native Git history.
+                with self.subTest(method=method, after=after), contextlib.ExitStack() as cleanups:
+                    case = RefusedActivationOnTheBoardTests()
+                    case.setUp()
+                    cleanups.callback(case.doCleanups)
+                    cleanups.callback(case.tearDown)
+                    record, records, payload = case.arrange(partial=True)
+                    original = getattr(case.writer, method)
+
+                    def interrupt(*, case=case, after=after, original=original, **kwargs):
+                        case.obligation()  # Durable before the first create call.
+                        if after:
+                            original(**kwargs)
+                        raise RuntimeError("tick interrupted")
+
+                    with (
+                        mock.patch.object(case.writer, method, side_effect=interrupt),
+                        case.assertRaisesRegex(RuntimeError, "tick interrupted"),
+                    ):
+                        case.release_card(record, records, payload)
+                    owed = case.obligation()
+                    expected_operations = int(method != "create" or after)
+                    case.assertEqual(len(case.operations()), expected_operations)
+                    reasons = [c for c in case.reader.show(CARD_REF)["comments"]
+                               if release_activation.HEADING in c["body"]]
+                    case.assertEqual(len(reasons), int(method == "move" or (method == "comment" and after)))
+                    case.assertEqual(case.reader.show(CARD_REF)["state"],
+                                     "blocked" if method == "move" and after else "assessment")
+                    case.recovered_tick(owed, full=True)
+
+    def test_final_state_save_failure_retains_the_obligation_after_source_block(self) -> None:
+        record, records, payload = self.arrange()
+        save = self.runtime.save_records
+
+        def fail_removal(payload, records):
+            if CARD_REF not in records:
+                raise OSError("state save interrupted")
+            return save(payload, records)
+
+        with mock.patch.object(self.runtime, "save_records", side_effect=fail_removal):
+            outcome = self.release_card(record, records, payload)
+        self.assertEqual(outcome["status"], "degraded")
+        self.assertIn(CARD_REF, records)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        owed = self.obligation()
+        self.recovered_tick(owed, full=True)
+
+    def test_operation_audit_failure_rolls_back_creation_and_retries_the_exact_request(self) -> None:
+        record, records, payload = self.arrange()
+        append = self.writer.audit.append
+
+        def refuse_operation_audit(request_id, event):
+            if request_id.startswith(ACTIVATION_OPERATION_REQUEST_PREFIX):
+                raise OSError("operation audit unavailable")
+            return append(request_id, event)
+
+        with mock.patch.object(self.writer.audit, "append", side_effect=refuse_operation_audit):
+            outcome = self.release_card(record, records, payload)
+        self.assertEqual(outcome["status"], "degraded")
+        self.assertIn("audit_pending", outcome["reason"])
+        owed = self.obligation()
+        self.assertEqual(self.operations(), [])
+        self.assertIsNone(self.writer.audit.committed_event(owed["operation"]["request_id"]))
+        # PostgreSQL owns the claim, card and event in one transaction; an append failure rolls
+        # all three back. Only the dispatcher's release obligation remains durable.
+        self.assertIsNone(self.writer.audit.pending_event(owed["operation"]["request_id"]))
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.recovered_tick(owed, full=True)
+
+    def test_a_failed_initial_state_save_cannot_create_or_settle_anything(self) -> None:
+        record, records, payload = self.arrange()
+        with (
+            mock.patch.object(self.runtime, "save_records", side_effect=OSError("disk unavailable")),
+            self.assertRaisesRegex(OSError, "disk unavailable"),
+        ):
+            self.release_card(record, records, payload)
+        self.assertEqual(self.operations(), [])
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.assertEqual(git(self.production, "rev-parse", "HEAD"), self.old)
+        # The same process can flush its retained facts before retrying creation.
+        self.release_card(record, records, payload)
+        self.assertEqual(len(self.operations()), 1)
+
+    def test_an_interruption_after_final_state_save_needs_no_recovery_record(self) -> None:
+        record, records, payload = self.arrange()
+        save = self.runtime.save_records
+        owed = None
+
+        def after_removal(payload, records):
+            nonlocal owed
+            if CARD_REF in records:
+                result = save(payload, records)
+                owed = self.obligation()
+                return result
+            save(payload, records)
+            raise RuntimeError("tick died after settlement")
+
+        with (
+            mock.patch.object(self.runtime, "save_records", side_effect=after_removal),
+            self.assertRaisesRegex(RuntimeError, "tick died after settlement"),
+        ):
+            self.release_card(record, records, payload)
+        self.assertIsNotNone(owed)
+        self.recovered_tick(owed, full=True)
 
     def test_the_card_blocks_with_one_typed_reason_and_one_operation_for_the_sprint_po(self) -> None:
         record, records, payload = self.arrange()

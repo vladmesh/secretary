@@ -1298,6 +1298,13 @@ def _reconcile_production(
         if state is None or state in ACTIVE_STATES:
             continue
         record = records[ref]
+        if record.activation_recovery is not None:
+            # A terminal source can retain the record after its move committed but the tick died
+            # before the final state save. Finish the exact board requests before orphan removal.
+            task = card(ref)
+            assert task is not None
+            outcomes.append(runtime._tick_task(task, records, payload, record.attempt_id))
+            continue
         if (
             state == "blocked"
             and record.gate_state == "green"
@@ -1493,6 +1500,8 @@ def _production_tick_active(
     ref = task["ref"]
     task = runtime.reader.show(ref)
     record = records.get(ref)
+    if record is not None and record.activation_recovery is not None:
+        return runtime._tick_task(task, records, payload, record.attempt_id)
     mismatch = _production_active_mismatch(runtime, task, record, records, payload)
     if mismatch is not None:
         return mismatch
@@ -1575,6 +1584,10 @@ def _production_claim_ready(
     sprint_errors: dict[str, str] = {}
     blockers: dict[str, Any] = {}
     for task in _production_tasks(runtime, {"ready"}):
+        record = records.get(task["ref"])
+        if record is not None and record.activation_recovery is not None:
+            skipped.append({"ref": task["ref"], "reason": "production activation recovery remains owed"})
+            continue
         if is_steward_report(task):
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
             continue
