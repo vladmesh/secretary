@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import Any, Self
 from unittest import mock
 
 import psycopg
 
+from secretary.board.migrate import EXPECTED_SCHEMA_REVISION
 from secretary.board.sql_cards import SqlCardClient
 from secretary.tasks import TaskError
 
@@ -60,6 +62,14 @@ class _Connection:
         self.statements: list[str] = []
         self.commits = 0
         self.rollbacks = 0
+        #: The schema gate's reads (`board.schema_gate`), kept apart from the board calls' statements.
+        self.probes: list[str] = []
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        """The schema gate's version read: this stand-in is a store at this build's head."""
+        self._alive()
+        self.probes.append(sql)
+        return SimpleNamespace(fetchall=lambda: [(EXPECTED_SCHEMA_REVISION,)])
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)

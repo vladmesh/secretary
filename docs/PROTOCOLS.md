@@ -17,6 +17,25 @@ config and data; `--host-fixture` replaces live inventory with a deterministic f
 combined with `--offline`. Exit `0`: no findings; `1`: findings (or warnings under `--strict`); `2`:
 invalid input or unreachable inventory. Without `--strict`, warnings alone stay green.
 
+### Board schema gate
+
+Every operational board-store connection reads Alembic's version table when it opens
+(`board/schema_gate.py`, [Board store §7.4](BOARD_STORE.md#74-schema-versioning-and-migrations)).
+A store at an earlier revision of this build's migrations, or with no schema at all, is refused
+before any schema-dependent statement with code `schema_owed`, the actual and expected revisions,
+and every owed migration in application order; the upgrade's `board-store` step applies them. A
+store at a revision this build does not know was migrated by a later build and is read as additive,
+not refused. Bootstrap, provisioning, migration and restore are exempt: they are how an owed schema
+is inspected and applied.
+
+A normal `doctor` run reads the same assessment on the `read` role and never writes. Text prints a
+`board schema:` line (`current at …`, `owed: …` followed by `board schema pending: …`, `ahead: …`,
+`unavailable: …` or `not configured: …`); JSON carries the same dict as `board_schema`. An owed
+schema adds the finding `schema_owed` with `actual`, `expected` and `pending`, and a store that is
+configured but cannot be read adds `board_schema_unavailable`; both exit `1`. A current, ahead or
+unconfigured store adds no finding. `--offline` and `--host-fixture` read no live board store and
+report it `not inspected`.
+
 Live parity uses the same desired state as `reconcile`: each project checkout is checked against the
 normalised absolute path from its binding, including a path outside the projects root; the projects
 root is only used to find unmanaged checkouts. An unreachable or unnormalisable expected checkout
@@ -732,8 +751,9 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 
 **The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
 dedup_key, to=...)` once, at the place its fact is decided. It is idempotent on the dedup key (`ON
-CONFLICT DO NOTHING`) and swallows and logs every failure: a store that does not answer, a board without
-`0018` (merged code runs before the upgrade applies the migration), no board store at all. A producer's
+CONFLICT DO NOTHING`) and swallows and logs every failure: a store that does not answer, a board that
+owes migrations (merged code runs before the upgrade applies them; refused as `schema_owed`, see
+[Board schema gate](#board-schema-gate)), no board store at all. A producer's
 own write never depends on it.
 
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark stays unread:
@@ -743,7 +763,7 @@ PostgreSQL): `task complete`, or any other move out of In progress. A `needs_own
 carries no mark (the steward's report) is read by a click.
 
 **The web.** The header of every page shows the bell, the unread count read from the board for that
-render (`?` with the reason when the board cannot count, for instance before `0018`); it links to the
+render (`?` with the reason when the board cannot count, for instance while it owes migrations); it links to the
 unread view. `GET /owner-events` lists the unread events, open `needs_owner` events pinned first, then
 newest first, each with its class badge and a link to its subject; `?all=1` lists every event, unread
 rows highlighted. `?unread=1` from an older link, or any other value, is the unread default. A

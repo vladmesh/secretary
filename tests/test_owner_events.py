@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import owner_events, schema
+from secretary.board import owner_events, schema, schema_gate
 from secretary.board.owner_events import (
     CLASSES,
     KIND_CLASS,
@@ -190,13 +190,19 @@ class EntityTests(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-            def execute(self, *_args, **_kwargs):
+            def execute(self, sql, *_args, **_kwargs):
+                # A store one revision before owner events: the schema gate reads it, and nothing
+                # may reach the table it does not have.
+                if sql == schema_gate.VERSION_QUERY:
+                    return SimpleNamespace(fetchall=lambda: [("0017_po_card_kinds",)])
                 raise psycopg.errors.UndefinedTable('relation "owner_events" does not exist')
 
         store = owner_events.OwnerEventStore(SimpleNamespace(conninfo=lambda: "dbname=x"))
         with mock.patch("psycopg.connect", return_value=Connection()):
-            with self.assertRaisesRegex(OwnerEventsUnavailable, "migration 0018"):
+            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 7 migration.*0018_owner_events") as raised:
                 store.unread_count()
+            self.assertEqual(raised.exception.code, "schema_owed")
+            self.assertEqual(raised.exception.pending[0], "0018_owner_events")
             with self.assertLogs("secretary.board.owner_events", level="WARNING"):
                 self.assertFalse(record("sprint_closed", SPRINT, "x", "k", to=store))
 

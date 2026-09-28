@@ -129,6 +129,8 @@ class DoctorInspection:
     expected: object | None = None
     collected: CollectResult | None = None
     diffs: dict[str, KindDiff] | None = None
+    #: The board store's schema against this build (`board_schema_inspection`).
+    board_schema: dict[str, object] | None = None
 
 
 class StructuredArgumentParser(argparse.ArgumentParser):
@@ -558,6 +560,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_recovery_inventory(inspection.recovery)
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
+    print_board_schema_status(inspection.board_schema)
 
     print("host changes: none")
     if inspection.unavailable:
@@ -742,6 +745,7 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         "schema_version": 1,
         "ok": not inspection.findings,
         "findings": inspection.findings,
+        "board_schema": inspection.board_schema,
         "status": snapshot,
         "codex_home": _codex_home_status(report),
     }
@@ -826,6 +830,8 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     if not args.dry_run:
         record_provider_owner_events(report, recovery.get("resources") or [])
     findings.extend(_recovery_findings(recovery))
+    board_schema = board_schema_inspection(report, args)
+    findings.extend(_board_schema_findings(board_schema))
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
@@ -840,7 +846,64 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         expected,
         collected,
         diffs,
+        board_schema,
     )
+
+
+def board_schema_inspection(report, args: argparse.Namespace) -> dict[str, object]:
+    """The board store's schema against this build, read once for both doctor renderers.
+
+    The operational readers' own gate (`board.schema_gate`), read on the `read` role and never
+    written. `--offline` and `--host-fixture` read nothing live, so they report it not inspected.
+    """
+    from secretary.board import schema_gate
+
+    if args.offline or args.host_fixture:
+        flag = "--offline" if args.offline else "--host-fixture"
+        return {
+            "state": "not_inspected",
+            "actual": None,
+            "expected": schema_gate.EXPECTED_SCHEMA_REVISION,
+            "pending": [],
+            "reason": f"{flag} reads no live board store",
+        }
+    return schema_gate.inspect_instance(report.instance_path.parent)
+
+
+def _board_schema_findings(board_schema: dict[str, object]) -> list[dict[str, object]]:
+    """`schema_owed` with the owed migrations, or the inspection that could not be made."""
+    from secretary.board import schema_gate
+
+    state = board_schema.get("state")
+    if state == schema_gate.OWED:
+        return [
+            {
+                "code": schema_gate.SCHEMA_OWED,
+                "actual": board_schema.get("actual"),
+                "expected": board_schema.get("expected"),
+                "pending": list(board_schema.get("pending") or []),  # type: ignore[call-overload]
+                "message": board_schema.get("message"),
+            }
+        ]
+    if state == schema_gate.UNAVAILABLE:
+        return [{"code": "board_schema_unavailable", "message": board_schema.get("reason")}]
+    return []
+
+
+def print_board_schema_status(board_schema: dict[str, object] | None) -> None:
+    """The text renderer's lines for `board_schema_inspection`; JSON carries the same dict."""
+    if not board_schema:
+        return
+    state = board_schema.get("state")
+    if state == "current":
+        print(f"board schema: current at {board_schema.get('expected')}")
+    elif state == "owed":
+        print(f"board schema: owed: {board_schema.get('message')}")
+        print(f"board schema pending: {', '.join(board_schema.get('pending') or [])}")  # type: ignore[arg-type]
+    elif state == "ahead":
+        print(f"board schema: ahead: {board_schema.get('message')}")
+    else:
+        print(f"board schema: {str(state).replace('_', ' ')}: {board_schema.get('reason')}")
 
 
 #: The probe verdicts that put a provider in front of the owner, and what each one means to them.

@@ -36,8 +36,10 @@ from secretary.board.store import BoardStoreError
 #: Alembic's script directory, shipped inside the package.
 SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
-#: The revision this build of the product expects a store to be at.  It is Alembic's head, and
-#: `head_revision()` reads it from the script directory rather than trusting this literal.
+#: The revision this build of the product expects a store to be at.  It is Alembic's head, which
+#: `head_revision()` reads from the script directory; the schema gate (`board.schema_gate`) compares
+#: against this literal so that a healthy read never imports Alembic, and `tests/test_board_store.py`
+#: holds the two equal.
 #: `0024_e2e_after_merge_kind` is the head: PO sessions, turns and feed, the one record of /po
 #: request ids, who closed a session and when, the card kinds with their review choice and
 #: live-impact flag, the indexes the audit's narrowed reads are served by, the budget pass's
@@ -131,26 +133,16 @@ def pending(connection: Any) -> tuple[str, ...]:
     return tuple(owed)
 
 
-def assert_schema_revision(connection: Any, expected: str | None = None) -> str:
-    """Refuse to proceed against a schema this build does not speak (§7.4).
+def lineage(target: str | None = None) -> tuple[str, ...]:
+    """Every revision from the base to `target` (the shipped head by default), in application order.
 
-    Deliberately **not** wired into any write path by this card: no consumer reads SQL yet, and
-    the process that asserts it is the SQL ``BoardHost``, which is a later card.  It exists, and
-    it is what that card calls.
+    The graph is linear, so an installation at one of these revisions owes exactly the ones after it,
+    and one at none of them is at a schema this build's graph does not know (`board.schema_gate`).
     """
-    wanted = expected or head_revision()
-    revision = current_revision(connection)
-    if revision is None:
-        raise BoardStoreError(
-            f"the board store has no schema at all; this build expects revision {wanted}, "
-            "so run the migrations before writing"
-        )
-    if revision != wanted:
-        raise BoardStoreError(
-            f"the board store is at schema revision {revision} and this build expects {wanted}; "
-            "refusing to write through a schema it does not know"
-        )
-    return revision
+    script = script_directory()
+    walked = [revision.revision for revision in script.iterate_revisions(target or head_revision(), "base")]
+    walked.reverse()
+    return tuple(walked)
 
 
 def apply(
@@ -248,9 +240,9 @@ __all__ = [
     "SCRIPT_LOCATION",
     "alembic_config",
     "apply",
-    "assert_schema_revision",
     "current_revision",
     "head_revision",
+    "lineage",
     "migrate_instance",
     "passwords_for",
     "pending",
