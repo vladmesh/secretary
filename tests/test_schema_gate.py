@@ -170,6 +170,56 @@ class DoctorRenderingTests(unittest.TestCase):
             answer = schema_gate.inspect_instance(Path(tmp))
         self.assertEqual(answer["state"], schema_gate.NOT_CONFIGURED)
 
+    def test_offline_and_fixture_doctor_opens_no_board_connection_in_text_or_json(self) -> None:
+        """A configured store is never contacted under `--offline` or `--host-fixture`, whichever renderer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            instance.mkdir()
+            (instance / "instance.yaml").write_text(
+                f"version: 1\nname: gate\ndata_dir: {root / 'data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y\n",
+                encoding="utf-8",
+            )
+            store = instance / "board-store.env"
+            store.write_text(
+                "".join(
+                    f"{key}=value-{index}\n" if "PORT" not in key else f"{key}=5432\n"
+                    for index, key in enumerate(
+                        (
+                            "SECRETARY_DB_HOST",
+                            "SECRETARY_DB_PORT",
+                            "SECRETARY_DB_NAME",
+                            "SECRETARY_DB_OWNER_USER",
+                            "SECRETARY_DB_OWNER_PASSWORD",
+                            "SECRETARY_DB_APP_USER",
+                            "SECRETARY_DB_APP_PASSWORD",
+                            "SECRETARY_DB_READ_USER",
+                            "SECRETARY_DB_READ_PASSWORD",
+                        )
+                    )
+                ),
+                encoding="utf-8",
+            )
+            store.chmod(0o600)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            attempts: list[Any] = []
+
+            def refuse(*args: Any, **kwargs: Any) -> Any:
+                attempts.append(args)
+                raise psycopg.OperationalError("no board connection may be opened here")
+
+            for flags in (("--offline",), ("--host-fixture", str(fixture))):
+                for renderer in ((), ("--json",)):
+                    with self.subTest(flags=flags, renderer=renderer):
+                        attempts.clear()
+                        output = io.StringIO()
+                        with mock.patch("psycopg.connect", side_effect=refuse), contextlib.redirect_stdout(output):
+                            cli.main(["doctor", "--dry-run", *flags, *renderer, "--instance", str(instance)])
+                        self.assertEqual(attempts, [], "no board connection was attempted")
+                        self.assertNotIn("no board connection may be opened", output.getvalue())
+
     def test_offline_and_fixture_runs_are_not_inspected(self) -> None:
         report = SimpleNamespace(instance_path=Path("/nonexistent/instance.yaml"))
         with mock.patch.object(schema_gate, "inspect_instance", side_effect=AssertionError("read live")):

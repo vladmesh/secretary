@@ -34,7 +34,8 @@ A normal `doctor` run reads the same assessment on the `read` role and never wri
 schema adds the finding `schema_owed` with `actual`, `expected` and `pending`, and a store that is
 configured but cannot be read adds `board_schema_unavailable`; both exit `1`. A current, ahead or
 unconfigured store adds no finding. `--offline` and `--host-fixture` read no live board store and
-report it `not inspected`.
+report it `not inspected`; in JSON their status snapshot skips the sprints too
+(`installation.sprints.skipped`), since sprints are read from that store.
 
 Live parity uses the same desired state as `reconcile`: each project checkout is checked against the
 normalised absolute path from its binding, including a path outside the projects root; the projects

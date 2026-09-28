@@ -387,17 +387,47 @@ class SchemaGateBackendTests(unittest.TestCase):
         [finding] = [f for f in payload["findings"] if f["code"] == "board_schema_unavailable"]
         self.assertIn("could not be read", finding["message"])
 
-    def test_doctor_offline_and_on_a_fixture_reads_no_live_store(self) -> None:
+    def test_doctor_offline_and_on_a_fixture_reads_no_live_store_in_text_or_json(self) -> None:
+        import psycopg
+
         instance = self.instance(self.database(STALE))
         fixture = self.scratch / "host-fixture"
         fixture.mkdir()
-        with mock.patch.object(schema_gate, "inspect_instance", side_effect=AssertionError("read live")):
-            _, offline = self.doctor(instance, "--offline")
-            _, fixed = self.doctor(instance, "--host-fixture", str(fixture))
-        self.assertIn("board schema: not inspected: --offline reads no live board store", offline)
-        self.assertIn("board schema: not inspected: --host-fixture reads no live board store", fixed)
-        self.assertNotIn("schema_owed", offline + fixed)
+        original = psycopg.connect
+        connections: list[str] = []
 
+        def connect(*args: Any, **kwargs: Any) -> Any:
+            connections.append(str(args[0] if args else kwargs.get("conninfo", "")))
+            return original(*args, **kwargs)
+
+        for flags in (("--offline",), ("--host-fixture", str(fixture))):
+            for renderer in ((), ("--json",)):
+                with self.subTest(flags=flags, renderer=renderer):
+                    connections.clear()
+                    with mock.patch("psycopg.connect", side_effect=connect), self.statements() as seen:
+                        _, output = self.doctor(instance, *flags, *renderer)
+                    self.assertEqual((connections, seen), ([], []), "no board connection or query")
+                    self.assertNotIn("schema_owed", output)
+                    reason = f"{flags[0]} reads no live board store"
+                    if renderer:
+                        payload = json.loads(output)
+                        self.assertEqual(payload["board_schema"]["state"], "not_inspected")
+                        self.assertEqual(payload["board_schema"]["reason"], reason)
+                        sprints = payload["status"]["installation"]["sprints"]
+                        self.assertEqual((sprints["items"], sprints["error"]), ([], None))
+                        self.assertIn("skipped", sprints)
+                    else:
+                        self.assertIn(f"board schema: not inspected: {reason}", output)
+
+    def test_online_json_doctor_still_reads_sprints_and_reports_the_owed_schema(self) -> None:
+        instance = self.instance(self.database(STALE))
+
+        payload = json.loads(self.doctor(instance, "--json")[1])
+
+        sprints = payload["status"]["installation"]["sprints"]
+        self.assertNotIn("skipped", sprints)
+        self.assertIn("schema_owed", str(sprints["error"]))
+        self.assertIn("schema_owed", {finding["code"] for finding in payload["findings"]})
 
 if __name__ == "__main__":
     unittest.main()

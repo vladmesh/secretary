@@ -740,6 +740,8 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         host_fixture=args.host_fixture,
         offline=args.offline,
         recovery=inspection.recovery,
+        # Sprints are read from the live board store: `--offline` and `--host-fixture` read none.
+        sprints=not (args.offline or args.host_fixture),
     )
     payload = {
         "schema_version": 1,
