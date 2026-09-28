@@ -66,6 +66,28 @@ class InstructionsTests(unittest.TestCase):
         ]
         self.assertIn(form, self.agents)
 
+    def test_an_issue_like_finding_is_filed_at_once_without_asking_the_owner(self) -> None:
+        for rule in (
+            "file it with `secretary issue create --role po` at once",
+            "Do not ask the owner whether to file it",
+            "Check for a duplicate first",
+            "`issue append` what is new",
+            "Choose kind and priority yourself, then tell the owner the ref",
+            "pipeline cards still follow the delegation rules",
+        ):
+            self.assertIn(rule, self.flat)
+
+    def test_the_open_issue_skill_chooses_the_fields_without_owner_confirmation(self) -> None:
+        skill = (ROOT / "skills" / "roles" / "po" / "open-issue" / "SKILL.md").read_text(encoding="utf-8")
+        flat = " ".join(skill.split())
+        self.assertIn("## 2. Choose the fields", skill)
+        self.assertIn("there is no owner confirmation before create", flat)
+        self.assertIn("`issue update-priority`", flat)
+        self.assertIn("--request-id", flat)
+        self.assertIn("issue append", flat)
+        for old in ("Agree the fields with the owner", "Show the owner the fields", "with the owner, and create"):
+            self.assertNotIn(old, flat)
+
 
 class PoWorkspaceStepTests(unittest.TestCase):
     def setUp(self) -> None:
