@@ -1118,7 +1118,7 @@ def materialize_host(
         product_root=product_root,
         base_branch="main",
         dry_run=False,
-        units=SystemdUnitInstaller(),
+        units=SystemdUnitInstaller(runtime_user=installation_user),
         host_fixture=host_fixture,
         pull=False,
         report=report,

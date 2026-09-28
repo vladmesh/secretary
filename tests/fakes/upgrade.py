@@ -11,6 +11,7 @@ class FakeUnitInstaller:
     def __init__(self, present: dict[str, bytes] | None = None, active: set[str] | None = None) -> None:
         self.files = dict(present or {})
         self.active = set(active or set())
+        self.enabled = set(active or set())
         self.calls: list[tuple[str, str]] = []
         self.fail_on: set[str] = set()
         self.identities = {name: self._new_identity() for name in self.active if name.endswith(".service")}
@@ -37,7 +38,10 @@ class FakeUnitInstaller:
         self.calls.append(("daemon-reload", ""))
 
     def enable(self, name: str) -> None:
+        if name in self.fail_on:
+            raise HostCommandError(f"enable {name}: exited 1")
         self.calls.append(("enable", name))
+        self.enabled.add(name)
         self.active.add(name)
         if name.endswith(".service"):
             self.identities[name] = self._new_identity()
@@ -45,6 +49,7 @@ class FakeUnitInstaller:
     def disable(self, name: str) -> None:
         self.calls.append(("disable", name))
         self.active.discard(name)
+        self.enabled.discard(name)
         self.identities.pop(name, None)
 
     def restart(self, name: str) -> None:
@@ -53,6 +58,23 @@ class FakeUnitInstaller:
         self.active.add(name)
         if name.endswith(".service"):
             self.identities[name] = self._new_identity()
+
+    def start(self, name: str) -> None:
+        if name in self.fail_on:
+            raise HostCommandError(f"start {name}: exited 1")
+        self.calls.append(("start", name))
+        self.active.add(name)
+        if name.endswith(".service"):
+            self.identities[name] = self._new_identity()
+
+    def unit_states(self) -> dict[str, tuple[str, str]]:
+        return {
+            name: (
+                "enabled" if name in self.enabled else "disabled",
+                "active" if name in self.active else "inactive",
+            )
+            for name in self.files
+        }
 
     def is_active(self, name: str) -> bool:
         return name in self.active

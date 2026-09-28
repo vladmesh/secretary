@@ -316,7 +316,10 @@ class ApplyHostTests(unittest.TestCase):
         desired = build_plan(instance_config(self.data), [], packaged=self.packaged)
         self.manifest.write_text(manifest_text(desired), encoding="utf-8")
         account = SimpleNamespace(pw_uid=1234, pw_gid=5678)
-        inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+        inventory = HostInventory(
+            units={resource.name for resource in desired if resource.kind == "unit"},
+            unit_states={unit.name: ("enabled", "active") for unit in self.packaged if unit.installable},
+        )
         with (
             mock.patch("secretary.host_apply.os.geteuid", return_value=0),
             mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
@@ -348,7 +351,7 @@ class ApplyHostTests(unittest.TestCase):
         apply_host(self.inputs(HostInventory()), units=units)
         managed, error = strict_manifest(self.manifest)
         self.assertEqual(error, "")
-        installed = HostInventory(units=set(units.files))
+        installed = HostInventory(units=set(units.files), unit_states=units.unit_states())
         units.calls.clear()
 
         result = apply_host(self.inputs(installed, managed), units=units)
@@ -393,7 +396,7 @@ class ApplyHostTests(unittest.TestCase):
         units = FakeUnitInstaller()
         apply_host(self.inputs(HostInventory()), units=units)
         managed, _ = strict_manifest(self.manifest)
-        installed = HostInventory(units=set(units.files))
+        installed = HostInventory(units=set(units.files), unit_states=units.unit_states())
         units.calls.clear()
         shed = instance_config(self.data, components={"example": {"enabled": False}})
 
@@ -445,7 +448,11 @@ class ApplyHostTests(unittest.TestCase):
         binding = {"id": "demo", "repo": "/srv/demo", "orca_binding": "demo", "enabled": True}
 
         result = apply_host(
-            self.inputs(HostInventory(units=set(units.files)), [*managed, legacy], bindings=[binding]),
+            self.inputs(
+                HostInventory(units=set(units.files), unit_states=units.unit_states()),
+                [*managed, legacy],
+                bindings=[binding],
+            ),
             units=units,
         )
 
@@ -464,7 +471,9 @@ class AgentSpecsTests(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("TA_WORKSPACES_ROOT", None)
             worktrees = upgrade.desired_role_worktrees(product, home)
-        self.assertEqual(worktrees, [workspaces / name for name in ("curator", "pipeline", "retro", "steward")])
+        self.assertEqual(
+            worktrees, [workspaces / name for name in ("curator", "pipeline", "retro", "steward")]
+        )
 
     def test_the_product_manifest_decides_whether_any_specs_ship(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1424,9 +1433,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(second.status, "unchanged")
-        self.assertEqual(
-            state_repo.packing_controls(self.instance), dict(state_repo.PACKING_CONTROLS)
-        )
+        self.assertEqual(state_repo.packing_controls(self.instance), dict(state_repo.PACKING_CONTROLS))
 
     def test_changed_pair_is_scoped_committed_published_and_cleanly_restored(self):
         # These are deliberately all outside the registry writer's pathspec.
@@ -1528,9 +1535,9 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(failed_push.status, "changed", failed_push.detail)
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
         (self.instance / "heads" / "heads.toml").write_text(
-            (
-                self.context.product_root / "src" / "secretary" / "runtime" / "heads.toml"
-            ).read_text(encoding="utf-8"),
+            (self.context.product_root / "src" / "secretary" / "runtime" / "heads.toml").read_text(
+                encoding="utf-8"
+            ),
             encoding="utf-8",
         )
         upgrade.step_head_registry(self.context)

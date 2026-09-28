@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from secretary import cli as cli_module
 from secretary import installation, role_skills, upgrade
 from secretary.cli import main as cli_main
 from secretary.config import validate_instance
@@ -32,6 +34,8 @@ from secretary.head_registry import (
     read_source,
     snapshot_path,
 )
+from secretary.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
+from secretary.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
 from secretary.runtime import heads as shipped_heads
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import (
@@ -140,6 +144,13 @@ class RecordingUnits(FakeUnitInstaller):
         (self.fixture / "units.txt").write_text(
             "".join(f"{name}\n" for name in sorted(self.files)), encoding="utf-8"
         )
+        (self.fixture / "unit-states.txt").write_text(
+            "".join(
+                f"{name} {enabled} {active}\n"
+                for name, (enabled, active) in sorted(self.unit_states().items())
+            ),
+            encoding="utf-8",
+        )
 
     def install(self, unit) -> None:
         super().install(unit)
@@ -147,6 +158,22 @@ class RecordingUnits(FakeUnitInstaller):
 
     def remove(self, name: str) -> None:
         super().remove(name)
+        self._publish()
+
+    def enable(self, name: str) -> None:
+        super().enable(name)
+        self._publish()
+
+    def disable(self, name: str) -> None:
+        super().disable(name)
+        self._publish()
+
+    def start(self, name: str) -> None:
+        super().start(name)
+        self._publish()
+
+    def restart(self, name: str) -> None:
+        super().restart(name)
         self._publish()
 
 
@@ -389,6 +416,408 @@ class PortableFixture(unittest.TestCase):
         """Nothing in a result may name the developing machine's home or this checkout."""
         for foreign in (RUNNING_CHECKOUT, LIVE_HOME):
             self.assertNotIn(foreign, text)
+
+
+class PackagedRuntimeParityTests(PortableFixture):
+    """Real upgrade/doctor consumers, using the full shipped catalogue on an isolated host."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        shutil.copytree(SHIPPED_PACKAGING_ROOT, self.product / "packaging" / "systemd", dirs_exist_ok=True)
+        context = self.context()
+        prepared = upgrade.run_steps(
+            context,
+            (
+                upgrade.step_role_skills,
+                upgrade.step_head_registry,
+                upgrade.step_instance_packing,
+                upgrade.step_publish_head_registry,
+            ),
+        )
+        self.assertTrue(prepared.ok, prepared.render())
+        self.assertFalse(upgrade.step_host(context).failed)
+        self.units.calls.clear()
+
+    def verify(self, **overrides):
+        # Process receipts have their own fixture coverage. Keep those consumers running here,
+        # with their evidence provided by the fake host, while exercising real host verification.
+        with (
+            mock.patch.object(
+                upgrade, "_receipt_evidence", return_value=(True, "web receipt current")
+            ) as web,
+            mock.patch.object(
+                upgrade, "_po_receipt_evidence", return_value=(True, "PO receipt current")
+            ) as po,
+        ):
+            result = upgrade.step_verify(self.context(**overrides))
+        if not result.failed:
+            web.assert_called_once()
+            po.assert_called_once()
+        return result
+
+    def doctor_inventory(self):
+        return cli_module.collect_host_inventory(
+            self.context().report, SimpleNamespace(host_fixture=str(self.host_fixture))
+        )
+
+    def test_full_catalog_rendering_ownership_and_completed_oneshots(self):
+        packaged = resolve_packaged(
+            self.context().report.instance,
+            self.product / "packaging" / "systemd",
+            product_root=self.product,
+            instance_path=self.instance,
+            data_dir=self.data,
+            runtime_user="operator",
+        )
+        self.assertEqual(len(packaged), 16)
+        self.assertEqual(self.units.files, {unit.name: unit.content for unit in packaged})
+        managed, error = strict_manifest(self.data / "host-managed.json")
+        self.assertEqual(error, "")
+        self.assertEqual({resource.name for resource in managed}, set(self.units.files))
+        self.assertEqual(self.units.enabled, {unit.name for unit in packaged if unit.installable})
+        for unit in packaged:
+            self.assertNotIn(b"{{SECRETARY_", unit.content)
+            if unit.name.endswith(".service"):
+                self.assertIn(b"User=operator", unit.content)
+            if unit.oneshot and not unit.installable:
+                self.assertNotIn(unit.name, self.units.active)
+        for component in ("steward", "retro", "steward-deep-sweep"):
+            self.assertIn(f"secretary-{component}.timer", self.units.enabled)
+            self.assertIn(
+                f"Unit=secretary-{component}.service".encode(),
+                self.units.files[f"secretary-{component}.timer"],
+            )
+        self.assertFalse(self.verify().failed)
+        expected, collected, diffs = self.doctor_inventory()
+        self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
+        self.assertEqual(diffs["units"].missing_on_host, [])
+        self.assertEqual(upgrade.step_host(self.context()).status, "unchanged")
+        self.assertEqual(self.units.calls, [])
+
+    def test_inactive_and_disabled_timers_fail_both_consumers_and_reconcile_unchanged_bytes(self):
+        manifest = (self.data / "host-managed.json").read_bytes()
+        before = dict(self.units.files)
+        for component in ("steward", "retro", "steward-deep-sweep"):
+            for enabled, action in ((True, "start"), (False, "enable")):
+                name = f"secretary-{component}.timer"
+                with self.subTest(name=name, enabled=enabled):
+                    self.units.active.discard(name)
+                    if not enabled:
+                        self.units.enabled.discard(name)
+                    self.units._publish()
+                    result = self.verify()
+                    self.assertTrue(result.failed, result.detail)
+                    self.assertIn(f"{name}: expected active, got inactive", result.detail)
+                    expected, collected, _ = self.doctor_inventory()
+                    self.assertIn(
+                        f"{name}: expected active, got inactive",
+                        cli_module._unit_runtime_findings(expected, collected),
+                    )
+                    if not enabled:
+                        self.assertIn(f"{name}: expected enabled, got disabled", result.detail)
+                    preview = upgrade.step_host(self.context(dry_run=True))
+                    self.assertEqual(preview.status, "changed", preview.detail)
+                    self.assertIn(f"{action} {name}", preview.detail)
+                    self.assertEqual(self.units.calls, [])
+                    self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
+                    repaired = upgrade.step_host(self.context())
+                    self.assertEqual(repaired.status, "changed", repaired.detail)
+                    self.assertEqual(self.units.calls, [(action, name)])
+                    self.assertEqual(self.units.files, before)
+                    self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
+                    self.assertFalse(self.verify().failed)
+                    self.units.calls.clear()
+
+    def test_missing_catalog_units_independently_fail_verify_and_doctor(self):
+        before = dict(self.units.files)
+        for name in before:
+            with self.subTest(name=name):
+                self.units.files.pop(name)
+                self.units._publish()
+                result = self.verify()
+                self.assertTrue(result.failed, result.detail)
+                self.assertIn(f"create {name}", result.detail)
+                expected, collected, diffs = self.doctor_inventory()
+                self.assertEqual(diffs["units"].missing_on_host, [name])
+                self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
+                self.assertEqual(self.units.calls, [])
+                self.units.files[name] = before[name]
+                self.units._publish()
+
+    def test_existing_materializer_updates_steward_and_retro_templates_and_layout(self):
+        for component in ("steward", "retro"):
+            name = f"secretary-{component}.service"
+            template = self.product / "packaging" / "systemd" / name
+            template.write_bytes(template.read_bytes() + b"\n# changed catalogue input\n")
+            result = upgrade.step_host(self.context())
+            self.assertEqual(result.status, "changed", result.detail)
+            self.assertIn(f"update {name}", result.detail)
+            self.assertIn(("install", name), self.units.calls)
+            self.assertNotIn(("enable", name), self.units.calls)
+            self.units.calls.clear()
+        other_home = self.root / "other-owner-home"
+        with mock.patch(
+            "secretary.host_apply.pwd.getpwnam", return_value=SimpleNamespace(pw_dir=str(other_home))
+        ):
+            result = upgrade.step_host(self.context())
+        self.assertEqual(result.status, "changed", result.detail)
+        for component in ("steward", "retro"):
+            self.assertIn(str(other_home).encode(), self.units.files[f"secretary-{component}.service"])
+        managed, error = strict_manifest(self.data / "host-managed.json")
+        self.assertEqual(error, "")
+        self.assertEqual({resource.name for resource in managed}, set(self.units.files))
+
+    def test_opted_out_and_foreign_units_are_excluded_from_materialization_and_assessment(self):
+        # A foreign declaration relinquishes a real owned unit through the supported plan boundary.
+        config = self.instance / "instance.yaml"
+        config.write_text(
+            config.read_text()
+            + "  components:\n    retro: {enabled: false}\n"
+            + "  foreign_units: [secretary-steward.service, secretary-steward.timer]\n"
+        )
+        self.units.active.discard("secretary-steward.timer")
+        self.units.enabled.discard("secretary-steward.timer")
+        self.units._publish()
+        foreign_before = {name: content for name, content in self.units.files.items() if "steward." in name}
+        result = upgrade.step_host(self.context())
+        self.assertFalse(result.failed, result.detail)
+        self.assertFalse(any("steward." in name for _, name in self.units.calls))
+        self.assertFalse(any("retro." in name for name in self.units.files))
+        self.assertEqual({name: self.units.files[name] for name in foreign_before}, foreign_before)
+        expected, collected, diffs = self.doctor_inventory()
+        self.assertNotIn("secretary-steward.timer", expected.unit_runtime)
+        self.assertNotIn("secretary-retro.timer", expected.unit_runtime)
+        self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
+        self.assertEqual(diffs["units"].unmanaged_on_host, [])
+        self.assertFalse(self.verify().failed)
+
+    def test_failed_runtime_repair_is_failed_and_verify_still_reads_inactive(self):
+        name = "secretary-steward.timer"
+        self.units.active.discard(name)
+        self.units.fail_on.add(name)
+        self.units._publish()
+        result = upgrade.step_host(self.context())
+        self.assertTrue(result.failed, result.detail)
+        self.assertIn("start", result.detail)
+        self.assertTrue(self.verify().failed)
+
+    def test_required_long_running_service_is_repaired_and_verified(self):
+        name = "secretary-memory.service"
+        self.units.active.discard(name)
+        self.units._publish()
+        result = self.verify()
+        self.assertTrue(result.failed, result.detail)
+        self.assertIn(f"{name}: expected active, got inactive", result.detail)
+        expected, collected, _ = self.doctor_inventory()
+        self.assertIn(
+            f"{name}: expected active, got inactive", cli_module._unit_runtime_findings(expected, collected)
+        )
+        repaired = upgrade.step_host(self.context())
+        self.assertFalse(repaired.failed, repaired.detail)
+        self.assertEqual(self.units.calls, [("start", name)])
+        self.assertFalse(self.verify().failed)
+
+    def test_process_reconciliation_respects_foreign_and_disabled_components(self):
+        config = self.instance / "instance.yaml"
+        config.write_text(
+            config.read_text()
+            + "  components:\n    memory: {enabled: false}\n"
+            + "  foreign_units: [secretary-web.service, secretary-po.service]\n"
+        )
+        context = self.context()
+        host = upgrade.step_host(context)
+        self.assertFalse(host.failed, host.detail)
+        self.units.calls.clear()
+        with (
+            mock.patch.object(upgrade, "_receipt_evidence") as web,
+            mock.patch.object(upgrade, "_po_receipt_evidence") as po,
+            mock.patch.object(self.units, "is_active", side_effect=AssertionError("excluded process probe")),
+        ):
+            for step in (upgrade.step_memory, upgrade.step_web, upgrade.step_po):
+                result = step(context)
+                self.assertEqual(result.status, "skipped", result.detail)
+            verified = upgrade.step_verify(context)
+            self.assertFalse(verified.failed, verified.detail)
+            web.assert_not_called()
+            po.assert_not_called()
+        self.assertEqual(self.units.calls, [])
+
+    def test_runtime_state_absent_is_unavailable_without_live_fixture_probes(self):
+        (self.host_fixture / "unit-states.txt").unlink()
+        with mock.patch("secretary.infra.systemd._proc.run", side_effect=AssertionError("live probe")):
+            result = self.verify()
+            expected, collected, _ = self.doctor_inventory()
+            findings = cli_module._unit_runtime_findings(expected, collected)
+        self.assertTrue(result.failed, result.detail)
+        self.assertIn("runtime status unavailable", result.detail)
+        self.assertTrue(findings)
+        self.assertTrue(all("unavailable" in finding for finding in findings))
+        self.assertEqual(self.units.calls, [])
+
+    def systemctl_reply(self, argv, **kwargs):
+        """Native systemctl boundary backed by the same isolated installation as the file fixture."""
+        if argv[0] != "systemctl":
+            return self.real_run(argv, **kwargs)
+        self.assertEqual(argv[1], "--system")
+        self.assertEqual(kwargs["timeout"], 10)
+        self.systemctl_calls.append(argv)
+        verb, name = argv[2], argv[-1]
+        if self.bus_error and (self.error_probe == "list-unit-files" or verb == self.error_probe):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr=self.bus_error)
+        if verb == "list-unit-files":
+            output = "".join(f"{unit} enabled enabled\n" for unit in sorted(self.units.files))
+            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+        if verb == "show":
+            return subprocess.CompletedProcess(argv, 0, stdout="n/a\n", stderr="")
+        enabled, active = self.units.unit_states()[name]
+        state = enabled if verb == "is-enabled" else active
+        code = 0 if state in {"active", "enabled"} else (3 if verb == "is-active" else 1)
+        return subprocess.CompletedProcess(argv, code, stdout=state + "\n", stderr="")
+
+    def native_boundary(self, error="", probe="list-unit-files"):
+        from secretary import _proc
+
+        self.real_run = _proc.run
+        self.systemctl_calls = []
+        self.bus_error = error
+        self.error_probe = probe
+        return mock.patch("secretary.infra.systemd._proc.run", side_effect=self.systemctl_reply)
+
+    def test_root_and_different_shell_identity_observe_the_same_owner_and_system_manager(self):
+        for shell_user, effective_uid in (("root", 0), ("different-shell-user", 2000)):
+            with (
+                self.subTest(shell_user=shell_user),
+                mock.patch.dict(os.environ, {"USER": shell_user}),
+                mock.patch("secretary.host_apply.os.geteuid", return_value=effective_uid),
+                self.native_boundary(),
+            ):
+                context = self.context(host_fixture=None)
+                captured = []
+                real_source = LiveHostSource
+
+                def source(runtime_user, captured=captured, real_source=real_source):
+                    captured.append(runtime_user)
+                    return real_source(runtime_user)
+
+                with (
+                    mock.patch.object(upgrade, "LiveHostSource", side_effect=source),
+                    mock.patch.object(cli_module, "LiveHostSource", side_effect=source),
+                ):
+                    result = self.verify(host_fixture=None)
+                    expected, collected, diffs = cli_module.collect_host_inventory(
+                        context.report, SimpleNamespace(host_fixture=None)
+                    )
+                self.assertFalse(result.failed, result.detail)
+                self.assertEqual(captured, ["operator", "operator"])
+                self.assertEqual(collected.errors, {})
+                self.assertEqual(diffs["units"].missing_on_host, [])
+                self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
+                installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
+                self.assertTrue(installer.is_active("secretary-steward.timer"))
+                self.assertEqual(installer.observation.runtime_user, "operator")
+                self.assertTrue(self.systemctl_calls)
+                self.assertTrue(all("--user" not in argv for argv in self.systemctl_calls))
+
+    def test_native_inactive_exit_is_a_finding_in_verify_and_text_json_doctor(self):
+        name = "secretary-steward.timer"
+        self.units.active.discard(name)
+        self.units._publish()
+        with self.native_boundary():
+            result = upgrade.step_verify(self.context(host_fixture=None))
+            self.assertTrue(result.failed, result.detail)
+            self.assertIn(f"{name}: expected active, got inactive", result.detail)
+            self.assertFalse(SystemdUnitInstaller(sudo=False).is_active(name))
+            with mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")):
+                text_code, output = self.run_cli(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--instance",
+                        str(self.instance),
+                        "--host-fixture",
+                        str(self.host_fixture),
+                    ]
+                )
+                json_code, payload = self.run_json_cli(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--instance",
+                        str(self.instance),
+                        "--host-fixture",
+                        str(self.host_fixture),
+                        "--json",
+                    ]
+                )
+        self.assertEqual(text_code, 1, output)
+        self.assertEqual(json_code, 1, payload)
+        message = f"{name}: expected active, got inactive"
+        self.assertIn(message, output)
+        self.assertIn({"code": "unit_runtime", "message": message}, payload["findings"])
+        self.assertFalse(
+            any(finding["code"] == "host_inventory_unavailable" for finding in payload["findings"])
+        )
+
+    def test_unavailable_manager_and_historical_user_bus_error_fail_all_observation_consumers(self):
+        for diagnostic in (
+            "Failed to connect to bus: No such file or directory",
+            "Failed to connect to user bus: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined",
+        ):
+            for probe in ("list-unit-files", "is-active"):
+                with (
+                    self.subTest(diagnostic=diagnostic, probe=probe),
+                    self.native_boundary(diagnostic, probe),
+                ):
+                    result = upgrade.step_verify(self.context(host_fixture=None))
+                    self.assertTrue(result.failed, result.detail)
+                    self.assertIn(
+                        "system manager/bus unavailable: manager/bus connection failed", result.detail
+                    )
+                    self.assertNotIn("expected active", result.detail)
+                    installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
+                    with self.assertRaisesRegex(HostCommandError, "manager/bus connection failed"):
+                        installer.is_active("secretary-steward.timer")
+                    with mock.patch.object(
+                        cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")
+                    ):
+                        text_code, output = self.run_cli(
+                            [
+                                "doctor",
+                                "--dry-run",
+                                "--instance",
+                                str(self.instance),
+                                "--host-fixture",
+                                str(self.host_fixture),
+                            ]
+                        )
+                        json_code, payload = self.run_json_cli(
+                            [
+                                "doctor",
+                                "--dry-run",
+                                "--instance",
+                                str(self.instance),
+                                "--host-fixture",
+                                str(self.host_fixture),
+                                "--json",
+                            ]
+                        )
+                    self.assertEqual(text_code, 2, output)
+                    self.assertEqual(json_code, 2, payload)
+                    self.assertIn("manager/bus connection failed", output)
+                    unavailable = [
+                        finding
+                        for finding in payload["findings"]
+                        if finding["code"] == "host_inventory_unavailable"
+                    ]
+                    self.assertEqual(len(unavailable), 1, payload)
+                    self.assertIn("manager/bus connection failed", unavailable[0]["message"])
+                    self.assertFalse(
+                        any(
+                            finding["code"] in {"missing_on_host", "unit_runtime"}
+                            for finding in payload["findings"]
+                        )
+                    )
+                    self.assertEqual(self.units.calls, [])
 
 
 class StaleTransportLeftoverTests(PortableFixture):
@@ -689,7 +1118,13 @@ class CodexHomeMigrationTests(PortableFixture):
         self.assertEqual(json_code, 1, report)
         self.assertEqual(
             report["codex_home"],
-            {"path": None, "kind": "", "data_dir_home": str(data_home), "login_missing": fix, "codex_required": True},
+            {
+                "path": None,
+                "kind": "",
+                "data_dir_home": str(data_home),
+                "login_missing": fix,
+                "codex_required": True,
+            },
         )
         self.assertIn({"code": "codex_home_login_missing", "message": fix}, report["findings"])
 
@@ -737,7 +1172,9 @@ class InstallationOwnerTests(PortableFixture):
     def test_nonroot_dry_run_reports_an_unreadable_managed_manifest(self) -> None:
         with (
             mock.patch.object(upgrade.os, "geteuid", return_value=1000),
-            mock.patch.object(upgrade, "strict_manifest", return_value=([], "managed manifest is unreadable")),
+            mock.patch.object(
+                upgrade, "strict_manifest", return_value=([], "managed manifest is unreadable")
+            ),
         ):
             code, output = self.capture(lambda: self.run_upgrade_command(dry_run=True))
 
@@ -1068,7 +1505,9 @@ class ShippedRegistryHomeTests(unittest.TestCase):
 
     def test_the_product_fallback_is_the_registry_the_runtime_ships(self) -> None:
         path, owner = canonical_path(self.ROOT)
-        self.assertEqual((path, owner), (self.ROOT / "src" / "secretary" / "runtime" / "heads.toml", PRODUCT_ORIGIN))
+        self.assertEqual(
+            (path, owner), (self.ROOT / "src" / "secretary" / "runtime" / "heads.toml", PRODUCT_ORIGIN)
+        )
         self.assertEqual(path.resolve(), shipped_heads.HEADS_TOML.resolve())
         self.assertTrue(canonical_heads(self.ROOT)["profiles"])
 

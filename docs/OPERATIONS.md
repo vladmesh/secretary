@@ -2409,6 +2409,30 @@ the restart. Run the upgrade as the installation owner from the installed checko
 (`/home/dev/secretary/.venv/bin/secretary`), never from a task workspace: without `--product-root` it
 materializes the configured checkout.
 
+The `host` step uses the complete `packaging/systemd` catalogue of the selected target checkout,
+including steward, retro and deep sweep. Component opt-outs and `host.foreign_units` exclude units
+from its desired state. The existing managed manifest authorizes writes and runtime repairs;
+an installed name alone does not confer ownership. An unchanged owned timer that is enabled but
+inactive needs `start`; a disabled required unit needs `enable --now`. Healthy repeated runs leave
+both the files and runtime unchanged. `--dry-run` names these repairs without applying them.
+
+Upgrade verify and doctor use `host.unit_runtime_expectations` and `host.assess_unit_runtime`.
+Required timers and long-running services must be enabled and active. Timer-triggered oneshot
+services remain installed and owned but need neither persistent state. Verify collects fresh
+runtime state after materialization, so unchanged bytes and a current manifest cannot hide an
+inactive timer or a missing catalogue file. Doctor uses the installation-pinned checkout's
+catalogue; upgrade uses its explicit target. Neither selects units from the caller's working tree.
+
+Packaged units use the system manager in `/etc/systemd/system`, with services running as the
+resolved installation owner. `infra.systemd.SystemdObservation` supplies the shared bounded probes
+through `systemctl --system`, independently of root or another shell account. An execution or
+manager/bus connection failure is explicitly unavailable and suppresses inventory comparisons;
+a native nonzero status carrying `inactive` is an observed inactive state. The historical
+unreachable operator user bus does not establish a user-unit installation or Orca schedule owner.
+Fixture and offline diagnostics retain their no-live-probe behavior. Web, memory and PO process
+receipts still bind the same PID, kernel start ticks, invocation id and process inputs; their
+format and the PO's deferred-until-idle restart are unchanged.
+
 Restart reasons, from repository-relative changed paths:
 
 | reason | what moved |
@@ -2422,7 +2446,7 @@ Restart reasons, from repository-relative changed paths:
 | --- | --- |
 | `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200; wrote web process receipt: ...` | replaced, answered, receipt written |
 | `unchanged web: web process receipt verified: ...` | the active process generation matches the receipt for this revision and inputs |
-| `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | optional unit; never started by upgrade |
+| `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the web receipt step has no active transport to reconcile; `host` starts enabled canonical services and `verify` checks their required state |
 | `failed    web: …` | see below |
 
 An empty pull does not prove the process is current: a checkout the dispatcher advanced, or a missing

@@ -37,11 +37,13 @@ from secretary._fsutil import directory_lock, write_text_atomic
 from secretary.config import instance_data_dir
 from secretary.head_registry import pinned_product_root
 from secretary.host import (
+    CollectResult,
     HostInventory,
     PackagedUnit,
     PlanChange,
     PlannedResource,
     SystemdLayout,
+    assess_unit_runtime,
     build_plan,
     default_packaging_root,
     foreign_units,
@@ -51,7 +53,9 @@ from secretary.host import (
     plan_changes,
     plan_input_errors,
     strict_manifest,
+    unit_runtime_expectations,
 )
+from secretary.infra.systemd import ACTIVE_STATES, SystemdObservation, observation_error
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -65,6 +69,8 @@ class ApplyResult:
     conflicts: list[PlanChange] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
+    runtime_changes: list[PlanChange] = field(default_factory=list)
+    runtime_findings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -79,7 +85,7 @@ class ApplyResult:
         # the two lines an operator actually has to read.
         lines = [
             f"{change.action} {change.logical_id} {change.kind} {change.name}"
-            for change in self.changes
+            for change in [*self.changes, *self.runtime_changes]
             if change.action != "unchanged"
         ]
         for conflict in self.conflicts:
@@ -113,6 +119,9 @@ class UnitInstaller(ABC):
     def restart(self, name: str) -> None: ...
 
     @abstractmethod
+    def start(self, name: str) -> None: ...
+
+    @abstractmethod
     def is_active(self, name: str) -> bool: ...
 
     @abstractmethod
@@ -137,12 +146,17 @@ class SystemdUnitInstaller(UnitInstaller):
 
     timeout_seconds = 60
 
-    def __init__(self, unit_dir: Path = SYSTEM_UNIT_DIR, sudo: bool = True) -> None:
+    def __init__(
+        self, unit_dir: Path = SYSTEM_UNIT_DIR, sudo: bool = True, runtime_user: str | None = None
+    ) -> None:
         self.unit_dir = unit_dir
         self.sudo = sudo
+        self.observation = SystemdObservation(runtime_user)
 
     def argv(self, cmd: list[str]) -> list[str]:
         """The privileged invocation contour: root work goes through non-interactive sudo."""
+        if cmd[0] == "systemctl":
+            cmd = [cmd[0], "--system", *cmd[1:]]
         return (["sudo", "-n"] if self.sudo else []) + cmd
 
     def _run(self, cmd: list[str], label: str) -> subprocess.CompletedProcess[str]:
@@ -205,12 +219,13 @@ class SystemdUnitInstaller(UnitInstaller):
     def restart(self, name: str) -> None:
         self._run(["systemctl", "restart", name], f"restart {name}")
 
+    def start(self, name: str) -> None:
+        self._run(["systemctl", "start", name], f"start {name}")
+
     def is_active(self, name: str) -> bool:
-        argv = ["systemctl", "is-active", name]
-        try:
-            result = _proc.run(argv, timeout=self.timeout_seconds)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        result = self.observation.run(["systemctl", "is-active", name])
+        if reason := observation_error(result, states=ACTIVE_STATES):
+            raise HostCommandError(f"observe {name}: {reason}")
         return result.stdout.strip() == "active"
 
     def process_identity(self, name: str) -> UnitProcessIdentity | None:
@@ -240,16 +255,9 @@ class SystemdUnitInstaller(UnitInstaller):
             "--property=MainPID",
             "--property=InvocationID",
         ]
-        try:
-            result = _proc.run(argv, timeout=self.timeout_seconds)
-        except FileNotFoundError:
-            raise HostCommandError(f"observe {name}: systemctl not found") from None
-        except subprocess.TimeoutExpired:
-            raise HostCommandError(f"observe {name}: systemctl timed out") from None
-        except OSError:
-            raise HostCommandError(f"observe {name}: systemctl could not run") from None
-        if result.returncode != 0:
-            raise HostCommandError(f"observe {name}: systemctl exited {result.returncode}")
+        result = self.observation.run(argv)
+        if reason := observation_error(result):
+            raise HostCommandError(f"observe {name}: {reason}")
         values = {}
         for line in (result.stdout or "").splitlines():
             key, separator, value = line.partition("=")
@@ -444,6 +452,29 @@ def apply_host(
     if unshipped:
         result.errors.append("no unit file is shipped for: " + ", ".join(unshipped))
         return result
+    runtime = unit_runtime_expectations(desired, inputs.packaged)
+    findings = assess_unit_runtime(runtime, CollectResult(inputs.inventory))
+    # File creates/updates already settle installable units after daemon-reload. Existing owned
+    # units need runtime repair even when their manifest and template fingerprints are unchanged.
+    unchanged = {
+        change.name: change for change in changes if change.kind == "unit" and change.action == "unchanged"
+    }
+    by_name = {}
+    for finding in findings:
+        if finding.name not in unchanged:
+            continue
+        result.runtime_findings.append(finding.render())
+        if finding.field == "runtime":
+            result.errors.append(finding.render())
+            continue
+        previous = by_name.get(finding.name)
+        action = "enable" if finding.field == "enabled" else "start"
+        if previous is None or action == "enable":
+            change = unchanged[finding.name]
+            by_name[finding.name] = PlanChange(change.logical_id, "unit", change.name, action)
+    result.runtime_changes = list(by_name.values())
+    if result.errors:
+        return result
     if dry_run:
         return result
 
@@ -488,6 +519,17 @@ def apply_host(
             _settle_units(changes, desired_by_id, packaged_by_name, units)
         except HostCommandError as exc:
             result.errors.append(str(exc))
+    if not result.errors:
+        for change in result.runtime_changes:
+            try:
+                if change.action == "enable":
+                    units.enable(change.name)
+                else:
+                    units.start(change.name)
+                result.applied.append(f"{change.action} {change.name}")
+            except HostCommandError as exc:
+                result.errors.append(str(exc))
+                break
     return result
 
 

@@ -24,7 +24,7 @@ from secretary.host import (
     LiveHostSource,
     build_doctor_expectations,
 )
-from secretary.host_apply import resolve_installed_packaged
+from secretary.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
@@ -71,7 +71,11 @@ def collect_status(
     if offline:
         collected = CollectResult(expected_to_empty_inventory())
     else:
-        source = FixtureHostSource(Path(host_fixture)) if host_fixture else LiveHostSource()
+        source = (
+            FixtureHostSource(Path(host_fixture))
+            if host_fixture
+            else LiveHostSource(resolve_runtime_owner(instance_dir)[0])
+        )
         collected = source.collect(expected)
     checkpoint = checkpoint_snapshot(
         report.instance_path.parent,

@@ -49,7 +49,9 @@ from secretary.head_registry import (
 from secretary.host import (
     FixtureHostSource,
     LiveHostSource,
+    build_doctor_expectations,
     build_expectations,
+    foreign_units,
     strict_manifest,
 )
 from secretary.host_apply import (
@@ -76,7 +78,7 @@ from secretary.po import client as po_client
 from secretary.po import token as po_token
 from secretary.po import workspace as po_workspace
 from secretary.projects.availability import ProjectAvailability
-from secretary.runtime.paths import configured_product_root
+from secretary.runtime.paths import component_enabled, configured_product_root
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from secretary.web.health import WebProbeError, probe_web, target_from_unit
 from secretary.web.server import LoopbackOnly
@@ -1202,8 +1204,16 @@ def step_host(context: UpgradeContext) -> StepResult:
         )
     except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
-    expected = build_expectations(report.bindings, report.host, availability=context.project_availability)
-    source = FixtureHostSource(context.host_fixture) if context.host_fixture else LiveHostSource()
+    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    # Upgrade retains its project availability policy; unit requirements come from the same
+    # canonical desired state doctor assesses, using this upgrade's explicit target catalogue.
+    projects = build_expectations(report.bindings, report.host, availability=context.project_availability)
+    expected = replace(expected, projects=projects.projects)
+    source = (
+        FixtureHostSource(context.host_fixture)
+        if context.host_fixture
+        else LiveHostSource(context.runtime_user)
+    )
     collected = source.collect(expected)
     if collected.errors:
         reasons = "; ".join(f"{kind}: {reason}" for kind, reason in sorted(collected.errors.items()))
@@ -1244,9 +1254,12 @@ def step_host(context: UpgradeContext) -> StepResult:
         change.kind == "unit" and change.action == "update" and change.name == _po_unit(report)
         for change in pending
     )
-    if not pending:
+    runtime_pending = result.runtime_changes
+    if not pending and not runtime_pending:
         return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
-    detail = ", ".join(f"{change.action} {change.name}" for change in pending)
+    detail = ", ".join(f"{change.action} {change.name}" for change in [*pending, *runtime_pending])
+    if result.runtime_findings:
+        detail += "; " + "; ".join(result.runtime_findings)
     return StepResult("host", "changed", detail)
 
 
@@ -1262,6 +1275,13 @@ def _component_unit_prefix(report: Any, component: str) -> str:
 
 def _memory_unit_prefix(report: Any) -> str:
     return f"{_component_unit_prefix(report, MEMORY_COMPONENT)}."
+
+
+def _process_unit_enabled(context: UpgradeContext, component: str, unit: str) -> bool:
+    """Process reconciliation follows the catalogue's component and foreign declarations too."""
+    return component_enabled(context.report.host, component) and unit not in foreign_units(
+        context.report.host
+    )
 
 
 MEMORY_PROCESS_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "memory-process-receipt.json"
@@ -1402,12 +1422,17 @@ def step_memory(context: UpgradeContext) -> StepResult:
     """
     report = context.report
     unit = f"{_memory_unit_prefix(report)}service"
+    if not _process_unit_enabled(context, MEMORY_COMPONENT, unit):
+        return StepResult("memory", "skipped", f"{unit} is outside this installation's desired units")
     try:
         inputs = memory_process_inputs(context, unit)
     except ReceiptError as exc:
         return StepResult("memory", "failed", f"cannot compare the memory service with the checkout: {exc}")
     reasons = []
-    active = context.units.is_active(unit)
+    try:
+        active = context.units.is_active(unit)
+    except HostCommandError as exc:
+        return StepResult("memory", "failed", str(exc))
     if not active:
         reasons.append("service is not active")
     if context.unit_changed:
@@ -1904,9 +1929,15 @@ def step_po(context: UpgradeContext) -> StepResult:
     """
     report = context.report
     unit = _po_unit(report)
+    if not _process_unit_enabled(context, PO_COMPONENT, unit):
+        return StepResult("po", "skipped", f"{unit} is outside this installation's desired units")
     if context.units.installed(unit) is None:
         return StepResult("po", "skipped", f"{unit} is not installed; this host runs no PO service")
-    if not context.units.is_active(unit):
+    try:
+        active = context.units.is_active(unit)
+    except HostCommandError as exc:
+        return StepResult("po", "failed", str(exc))
+    if not active:
         if context.dry_run:
             return StepResult("po", "changed", f"would start {unit}: service is not active")
         try:
@@ -2040,10 +2071,16 @@ def step_web(context: UpgradeContext) -> StepResult:
     report = context.report
     name_prefix = _component_unit_prefix(report, WEB_COMPONENT)
     unit = f"{name_prefix}.service"
+    if not _process_unit_enabled(context, WEB_COMPONENT, unit):
+        return StepResult("web", "skipped", f"{unit} is outside this installation's desired units")
     installed = context.units.installed(unit)
     if installed is None:
         return StepResult("web", "skipped", f"{unit} is not installed; this host serves no web transport")
-    if not context.units.is_active(unit):
+    try:
+        active = context.units.is_active(unit)
+    except HostCommandError as exc:
+        return StepResult("web", "failed", str(exc))
+    if not active:
         return StepResult(
             "web", "skipped", f"{unit} is installed but not active; an upgrade does not start it"
         )
@@ -2135,7 +2172,21 @@ def step_verify(context: UpgradeContext) -> StepResult:
     name_prefix = _component_unit_prefix(context.report, WEB_COMPONENT)
     web_unit = f"{name_prefix}.service"
     web_evidence = ""
-    if context.units.installed(web_unit) is not None and context.units.is_active(web_unit):
+    po_unit = _po_unit(context.report)
+    try:
+        web_active = (
+            _process_unit_enabled(context, WEB_COMPONENT, web_unit)
+            and context.units.installed(web_unit) is not None
+            and context.units.is_active(web_unit)
+        )
+        po_installed = (
+            _process_unit_enabled(context, PO_COMPONENT, po_unit)
+            and context.units.installed(po_unit) is not None
+        )
+        po_active = po_installed and context.units.is_active(po_unit)
+    except HostCommandError as exc:
+        return StepResult("verify", "failed", str(exc))
+    if web_active:
         try:
             inputs = web_process_inputs(context, name_prefix)
             identity = context.units.process_identity(web_unit)
@@ -2146,10 +2197,9 @@ def step_verify(context: UpgradeContext) -> StepResult:
             return StepResult(
                 "verify", "failed", f"active web process receipt is not current: {web_evidence}"
             )
-    po_unit = _po_unit(context.report)
-    if context.units.installed(po_unit) is None:
+    if not po_installed:
         po_evidence = f"PO process receipt not checked: {po_unit} is not installed"
-    elif not context.units.is_active(po_unit):
+    elif not po_active:
         po_evidence = f"PO process receipt not checked: {po_unit} is not active"
     else:
         data_dir = getattr(context.report, "data_dir", None)
@@ -2338,7 +2388,10 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
 def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
     result = UpgradeResult()
     for step in steps:
-        outcome = step(context)
+        try:
+            outcome = step(context)
+        except HostCommandError as exc:
+            outcome = StepResult(step.__name__.removeprefix("step_"), "failed", str(exc))
         result.steps.append(outcome)
         if outcome.failed:
             break
@@ -2385,7 +2438,7 @@ def run_upgrade(args) -> int:
         product_root=product_root,
         base_branch=args.base_branch,
         dry_run=args.dry_run,
-        units=SystemdUnitInstaller(),
+        units=SystemdUnitInstaller(runtime_user=runtime_user),
         host_fixture=Path(args.host_fixture) if args.host_fixture else None,
         pull=not args.no_pull,
         report=report,
