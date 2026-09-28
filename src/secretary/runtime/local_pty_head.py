@@ -2637,6 +2637,33 @@ def head_run_turn_reading(
         return _turn_unavailable(f"the supervisor journal could not be read ({type(exc).__name__})")
 
 
+def head_run_screen_lines(
+    root: str | os.PathLike[str], run_id: str, *, timeout: float = 2.0
+) -> dict[str, Any]:
+    """This run's head screen as text lines, rendered from its supervisor's output buffer.
+
+    Read-only: one `status` and one `output` request, nothing typed and nothing drained. The output
+    tail is fed to the same bounded `ScreenModel` the supervisor judges progress with, at the head's
+    own terminal size, so the lines are what the head's screen shows, not the raw byte stream. Used
+    by the dispatcher's first-turn provider-failure reader (secretary-1799) for a Claude head whose
+    session transcript could not be bound. Every failure is an answer: `{"state": "unavailable"}`.
+    """
+    from secretary.runtime.head.local_pty.screen import ScreenModel
+
+    try:
+        socket_path = protocol.run_dir_for(root, run_id) / protocol.SOCKET_NAME
+        with local_pty.SupervisorClient.connect(socket_path, timeout=timeout) as client:
+            status = client.status()
+            output = client.read_output()
+    except Exception as exc:  # noqa: BLE001 - a screen nobody can read is no answer, never an error
+        return _turn_unavailable(f"the head's screen could not be read ({type(exc).__name__})")
+    if not output.get("ok"):
+        return _turn_unavailable("the head's supervisor did not hand out its output")
+    screen = ScreenModel(int(status.get("rows") or 24), int(status.get("cols") or 80))
+    screen.feed(bytes(output.get("bytes_data") or b""))
+    return {"state": "observed", "run_id": run_id, "lines": screen.lines()}
+
+
 def _turn_reading(path: Path, run_id: str, max_bytes: int) -> dict[str, Any]:
     window = local_pty.tail_window(path, max_bytes=max_bytes)
     if window is None:

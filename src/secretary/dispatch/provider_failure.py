@@ -146,12 +146,10 @@ def _screen_failure(run: HeadRun, local_pty_root: Path | None, why: str) -> dict
     """The PTY fallback for a Claude head with no readable transcript.
 
     Asked only of a local-pty head whose supervisor journal says its first turn is over (idle, turn
-    1): the screen of a head still at work, or already on a later turn, answers nothing.
+    1): the screen of a head still at work, or already on a later turn, answers nothing. The screen
+    itself is read through the local-pty backend, the one module that reaches its substrate.
     """
-    from secretary.runtime.head import local_pty
-    from secretary.runtime.head.local_pty import protocol
-    from secretary.runtime.head.local_pty.screen import ScreenModel
-    from secretary.runtime.local_pty_head import head_run_turn_reading
+    from secretary.runtime.local_pty_head import head_run_screen_lines, head_run_turn_reading
 
     if local_pty_root is None:
         return _unavailable(why or "no session transcript and no PTY to read")
@@ -160,18 +158,10 @@ def _screen_failure(run: HeadRun, local_pty_root: Path | None, why: str) -> dict
         return _unavailable(why or str(reading.get("reason") or "supervisor journal is unavailable"))
     if reading.get("turn") != "idle" or int(reading.get("turn_number") or 0) != 1:
         return _none("the head is not idle after its first turn")
-    try:
-        socket_path = protocol.run_dir_for(local_pty_root, run.run_id) / protocol.SOCKET_NAME
-        with local_pty.SupervisorClient.connect(socket_path, timeout=_SCREEN_READ_TIMEOUT_SECONDS) as client:
-            status = client.status()
-            output = client.read_output()
-    except Exception as exc:  # noqa: BLE001 - a screen nobody can read is no answer, never an error
-        return _unavailable(f"the head's screen could not be read ({type(exc).__name__})")
-    if not output.get("ok"):
-        return _unavailable("the head's supervisor did not hand out its output")
-    screen = ScreenModel(int(status.get("rows") or 24), int(status.get("cols") or 80))
-    screen.feed(bytes(output.get("bytes_data") or b""))
-    failure = screen_turn_failure(screen.lines())
+    screen = head_run_screen_lines(local_pty_root, run.run_id, timeout=_SCREEN_READ_TIMEOUT_SECONDS)
+    if str(screen.get("state") or "") != "observed":
+        return _unavailable(str(screen.get("reason") or "the head's screen could not be read"))
+    failure = screen_turn_failure(screen.get("lines") or [])
     return _failed(run, failure) if failure is not None else _none()
 
 

@@ -174,6 +174,30 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self._await(arrived, timeout=timeout, message=f"{marker!r} never appeared in {seen[-400:]!r}")
         return seen
 
+    # -- the screen the provider-failure reader sees (secretary-1799) ------------------------
+
+    def test_the_backend_renders_the_heads_screen_for_the_provider_failure_reader(self) -> None:
+        """`head_run_screen_lines` reads a live head's screen through its supervisor, read-only."""
+        from secretary.runtime.local_pty_head import head_run_screen_lines
+        from secretary.runtime.provider_errors import screen_turn_failure
+
+        error = "  \u23bf  API Error: 401 invalid token \u00b7 Please run /login"
+        handle = self._start(
+            run_id="screen",
+            command=f"{sys.executable} -u -c \"print({error!r}); print('> '); import time; time.sleep(30)\"",
+        )
+        self._await_output(self._client(handle), b"Please run /login")
+
+        screen = head_run_screen_lines(self.root, "screen")
+
+        self.assertEqual(screen["state"], "observed")
+        self.assertTrue(any("API Error: 401" in line for line in screen["lines"]), screen["lines"])
+        found = screen_turn_failure(screen["lines"])
+        assert found is not None
+        self.assertEqual((found.status, found.source), (401, "pty-screen"))
+        self.assertTrue(_alive(handle.head_pid), "reading the screen must not disturb the head")
+        self.assertEqual(head_run_screen_lines(self.root, "no-such-run")["state"], "unavailable")
+
     # -- ownership of the process ----------------------------------------------------------
 
     def test_the_head_gets_its_own_session_and_the_launchers_group_cannot_signal_it(self) -> None:
