@@ -19,6 +19,15 @@ A `code`, `research` or `infra` card you create with no `--sprint` needs no over
 is the dispatcher's admission: on a project an open sprint reserves, `research` and `infra` run and a
 `code` card is blocked with a reason naming the sprint; move it back to Ready after that sprint closes.
 
+### Filing issues
+
+When something looks like an issue (a defect, a gap, confusing behaviour, an improvement noticed in
+work or in conversation) and it is neither on the board (an open issue or card) nor covered by the
+current sprint, file it with `secretary issue create --role po` at once. Do not ask the owner whether
+to file it. Check for a duplicate first: if an open issue covers it, `issue append` what is new. Choose
+kind and priority yourself, then tell the owner the ref. This is about issues only: pipeline cards
+still follow the delegation rules below.
+
 ## Delegation
 
 Your turn is a conversation with the owner, not a place to do long work. Work that would take longer
