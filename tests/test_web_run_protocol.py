@@ -1720,6 +1720,7 @@ class ErrorContractTests(ProductRuntimeFixture):
         "task_snapshot": lambda layer: layer.task_snapshot("secretary-run-1"),
         "task_events": lambda layer: layer.task_events("secretary-run-1", None, limit=10),
         "head_view": lambda layer: layer.head_view("secretary-run-1", "a" * 32),
+        "po_delegated": lambda layer: layer.po_delegated("session-contract"),
     }
 
     OPERATION_CALLS = {

@@ -569,7 +569,22 @@ class WebApp:
         snapshot = self.reads.task_snapshot(
             ref, events=_int(query, "events", TASK_PAGE_EVENTS, ceiling=MAX_LIMIT)
         )
-        return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
+        return _html(
+            200,
+            pages.task(snapshot, runs=self._runs_or_reason(ref), sessions=self._session_titles(snapshot)),
+        )
+
+    def _session_titles(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """The titles of the PO sessions a card page links to, or the reason there are none (secretary-1811).
+
+        None when the page names no session or this process was built without the PO layer: the page
+        then draws short ids. A PO store that does not answer marks the titles unavailable and takes
+        nothing else down.
+        """
+        named = pages.po_sessions_named(snapshot)
+        if not named or self.po is None:
+            return None
+        return self._or_reason(lambda: self.po.po_session_titles(named))
 
     def _head_page(self, params, _query, _body) -> Response:
         return _html(200, pages.head_view(self.reads.head_view(params["ref"], params["run_id"])))
@@ -878,11 +893,32 @@ class WebApp:
         return _redirect(f"/po/sessions/{quote(str(created['session_id']))}", what="the session is open")
 
     def _po_session_page(self, params, _query, _body) -> Response:
-        document = self.po.po_session(params["session"])
+        document = self._po_session_document(params["session"])
         return _html(200, pages.po_session(document, request_id=_po_request_id()))
 
-    def _po_session_json(self, params, _query, _body) -> Response:
-        return _json(200, self.po.po_session(params["session"]))
+    def _po_session_json(self, params, query, _body) -> Response:
+        # The page's poller only watches turns, so it asks with `cards=0` and pays no board listing.
+        return _json(200, self._po_session_document(params["session"], cards=_one(query, "cards") != "0"))
+
+    def _po_session_document(self, session_id: str, *, cards: bool = True) -> dict[str, Any]:
+        """The session from the PO layer, and beside it the cards it delegated from one board listing.
+
+        `delegated` is the read layer's answer (secretary-1811); a board that refused marks only that
+        block, the session is still served. Without `cards` it is null and the board is not read.
+        """
+        document = self.po.po_session(session_id)
+        if not cards:
+            return {**document, "delegated": None}
+        try:
+            delegated = self.reads.po_delegated(session_id)
+        except ReadError as exc:
+            delegated = {
+                "kind": "po_delegated",
+                "session": session_id,
+                "source": {"state": "unavailable", "reason": exc.message},
+                "items": None,
+            }
+        return {**document, "delegated": delegated}
 
     def _po_send(self, params, _query, body) -> Response:
         """One message into the PO service's queue. A refusal renders the session again with the text kept.
@@ -903,7 +939,7 @@ class WebApp:
             return _html(
                 status_for(exc.code),
                 pages.po_session(
-                    self.po.po_session(session_id),
+                    self._po_session_document(session_id),
                     request_id=request_id if _keeps_request_id(exc) else _po_request_id(),
                     draft=text,
                     refusal=exc.to_json(),
@@ -931,7 +967,7 @@ class WebApp:
             return _html(
                 status_for(exc.code),
                 pages.po_session(
-                    self.po.po_session(session_id),
+                    self._po_session_document(session_id),
                     request_id=_po_request_id(),
                     refusal=exc.to_json(),
                     refused="close",
@@ -951,7 +987,7 @@ class WebApp:
             return _html(
                 status_for(exc.code),
                 pages.po_session(
-                    self.po.po_session(session_id),
+                    self._po_session_document(session_id),
                     request_id=_po_request_id(),
                     refusal=exc.to_json(),
                     refused="title",

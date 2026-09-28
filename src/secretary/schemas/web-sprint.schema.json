@@ -384,6 +384,7 @@
         "degraded_cards",
         "checks",
         "waiting",
+        "waiting_on",
         "head_profiles"
       ],
       "properties": {
@@ -637,6 +638,39 @@
                 "string",
                 "null"
               ]
+            }
+          }
+        },
+        "waiting_on": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "What the sprint waits for, one entry per waiting live card, derived at read time from the sprint's cards in the Pipeline listing and nothing else. Not a section: the document's `cards` mark is its source. Empty when nothing is waited for (and for a closed sprint); null, never empty, when the sprint board or the listing did not answer.",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "card",
+              "detail"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "run",
+                  "owner",
+                  "po"
+                ],
+                "description": "run: an active wait card, or a code card whose e2e run has not answered. owner: a card handed to the owner, or an e2e budget decision. po: a decision or operation card In progress and not handed over."
+              },
+              "card": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string",
+                "description": "One line: the run URL, the handover reason, the budget mark, or who holds the card."
+              }
             }
           }
         },

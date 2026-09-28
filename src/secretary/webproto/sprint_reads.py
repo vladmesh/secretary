@@ -111,7 +111,11 @@ from typing import Any
 
 from secretary.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from secretary.board.completion_evidence import is_po_executed
+from secretary.board.e2e_record import AFTER_MERGE
 from secretary.board.owner_handover import waiting_owner
+from secretary.board.wait_card import RESULT_READY as WAIT_RESULT_READY
+from secretary.board.wait_card import TARGET_CARD, TARGET_RUN, TARGET_TIME
+from secretary.board.wait_card import WAITING as WAIT_WAITING
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.headless import headless_cards
 from secretary.dispatch.observer import (
@@ -243,6 +247,17 @@ WAITING_ENDED = "ended"
 WAITING_UNKNOWN = "unknown"
 
 WAITING_STATES = (WAITING_WORKING, WAITING_WAITING, WAITING_BLOCKED, WAITING_ENDED, WAITING_UNKNOWN)
+
+#: What a sprint waits for, one entry per waiting card (`work.waiting_on`, secretary-1811): a run (an
+#: active wait card, or a code card whose e2e run has not answered), the owner (a card handed over, or
+#: an e2e budget decision), or the PO (a decision/operation card In progress and not handed over).
+WAITING_ON_RUN = "run"
+WAITING_ON_OWNER = "owner"
+WAITING_ON_PO = "po"
+WAITING_ON_KINDS = (WAITING_ON_RUN, WAITING_ON_OWNER, WAITING_ON_PO)
+
+#: The e2e run states (`E2eRun.status`) in which the run has not answered yet.
+E2E_IN_FLIGHT = frozenset({"dispatching", "identifying", "wait_card_pending", "waiting"})
 
 #: How a sprint row carries its declared observer, kept as three states for the same reason
 #: :func:`secretary.sprints._observer` keeps them: the repairs differ. A row with no field at all is
@@ -1494,6 +1509,7 @@ class SprintReadLayer(ProtocolBoundary):
             "degraded_cards": SECTIONS.degraded_cards(sprint),
             "checks": SECTIONS.checks(sprint),
             "waiting": SECTIONS.waiting(sprint),
+            "waiting_on": _waiting_on(sprint),
             "head_profiles": SECTIONS.head_profiles(sprint),
         }
 
@@ -2099,6 +2115,110 @@ def _po_card_wait(reference: str | None, card: dict[str, Any] | None) -> tuple[s
     if mark is not None:
         return WAITING_WAITING, f"{reference} ({kind}) is handed to the owner: {mark['reason']}"
     return WAITING_WAITING, f"{reference} ({kind}) is with the PO"
+
+
+def _waiting_on(read: SourceSet) -> list[dict[str, Any]] | None:
+    """What this sprint waits for, card by card: `{kind, card, detail}` for each waiting live card.
+
+    Derived at read time from the sprint's cards in the one Pipeline listing and nothing else: no
+    dispatcher record, no journal, nothing stored. Not a section, because it is a list; the
+    document's `cards` mark is the source it was read from. Null, never `[]`, when the sprint board
+    or the listing did not answer, since an empty list is the claim that nothing is waited for. A
+    closed sprint waits for nothing.
+    """
+    if not (read.answered(SOURCE_SPRINTS) and read.answered(SOURCE_CARDS)):
+        return None
+    sprint = read.value(SOURCE_SPRINTS)
+    if sprint[1] is None:
+        return None
+    reference, status, _current = _subject(sprint)
+    if status == "closed":
+        return []
+    linked = read.value(SOURCE_CARDS)
+    found: list[dict[str, Any]] = []
+    for card in (linked.get(reference) if isinstance(linked, dict) else None) or []:
+        if isinstance(card, dict):
+            found.extend(card_waits(card))
+    return found
+
+
+def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """What one card of a sprint waits for, as `work.waiting_on` entries; `[]` for a card that does not.
+
+    Tolerates any value in the card's blocks: a missing, partial or legacy `wait`, `e2e` or handover
+    mark contributes nothing rather than raising. A done card waits for nothing, except on the
+    after-merge e2e run that covers it and a budget decision that run's batch is held on.
+    """
+    reference = str(card.get("ref") or "")
+    state = str(card.get("state") or "")
+    kind = str(card.get("type") or "")
+    if not reference:
+        return []
+    live = state != "done"
+    found: list[dict[str, Any]] = []
+
+    def said(what: str, detail: str) -> None:
+        found.append({"kind": what, "card": reference, "detail": detail})
+
+    wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
+    if (
+        live
+        and state != "blocked"
+        and kind == "wait"
+        and wait.get("state") in (WAIT_WAITING, WAIT_RESULT_READY)
+    ):
+        said(WAITING_ON_RUN, wait_line(wait))
+    e2e = card.get("e2e") if isinstance(card.get("e2e"), dict) else {}
+    runs = [*(_list(e2e.get("runs")) if live else []), *_list(e2e.get("after_merge_runs"))]
+    for run in runs:
+        if isinstance(run, dict) and run.get("state") in E2E_IN_FLIGHT:
+            sha = str(run.get("sha") or "")[:12] or "an unrecorded SHA"
+            said(
+                WAITING_ON_RUN,
+                f"e2e run {run.get('run') or '(not identified yet)'} on {sha}: {str(run.get('state')).replace('_', ' ')}",
+            )
+    if e2e.get("mark") and (live or e2e.get("placement") == AFTER_MERGE):
+        said(WAITING_ON_OWNER, str(e2e.get("mark")))
+    if not live:
+        return found
+    mark = waiting_owner(card)
+    if mark is not None:
+        said(
+            WAITING_ON_OWNER,
+            f"{kind or 'card'} handed to the owner: {mark.get('reason') or 'no reason recorded'}",
+        )
+    elif is_po_executed(card) and state == "in_progress":
+        said(WAITING_ON_PO, f"{kind} card with the PO")
+    return found
+
+
+def wait_line(wait: dict[str, Any]) -> str:
+    """A wait block in one line: its target, since when, its deadline, and a result waiting delivery."""
+    target = wait.get("target") if isinstance(wait.get("target"), dict) else {}
+    what = str(target.get("kind") or "")
+    if what == TARGET_RUN:
+        subject = str(target.get("link") or target.get("url") or "") or (
+            f"GitHub run {target.get('repo') or '?'}#{target.get('run_id') or '?'}"
+        )
+    elif what == TARGET_CARD:
+        states = " or ".join(str(item) for item in _list(target.get("states"))) or "an unrecorded state"
+        subject = f"card {target.get('ref') or '?'} reaching {states}"
+    elif what == TARGET_TIME:
+        subject = f"the time {target.get('at') or '?'}"
+    else:
+        subject = "an unreadable target"
+    line = f"waits for {subject}"
+    if wait.get("waiting_since"):
+        line += f" since {wait['waiting_since']}"
+    if wait.get("deadline"):
+        line += f", deadline {wait['deadline']}"
+    if wait.get("state") == WAIT_RESULT_READY:
+        line += ": result ready, delivery pending"
+    return line
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:

@@ -13,7 +13,7 @@ nothing is written.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +140,22 @@ class PoLayer(ProtocolBoundary):
             "queued": self._queued(session_id),
             "efforts": self._offered_efforts(),
         }
+
+    def po_session_titles(self, session_ids: Iterable[str]) -> dict[str, Any]:
+        """The title and state of each named session a card page links to (secretary-1811).
+
+        A session the store no longer holds is left out, so a page draws its short id; a store that
+        does not answer refuses the whole call, and the page says the titles are unavailable.
+        """
+        store = self._store_or_refuse()
+        sessions: dict[str, dict[str, Any]] = {}
+        for session_id in dict.fromkeys(str(value) for value in session_ids if value):
+            try:
+                session = self._store(lambda session_id=session_id: store.session(session_id))
+            except PoSessionNotFound:
+                continue
+            sessions[session_id] = {"title": session.title, "state": session.state}
+        return {"kind": "po_session_titles", "sessions": sessions}
 
     def _offered_efforts(self) -> dict[str, list[str]]:
         try:
