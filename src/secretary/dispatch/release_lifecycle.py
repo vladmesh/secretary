@@ -13,9 +13,10 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
-from secretary.dispatch import attempt_accounting, e2e_stage, post_merge
+from secretary.dispatch import attempt_accounting, e2e_stage, post_merge, release_activation
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
+from secretary.dispatch.production_checkout import ProductionActivationRefused
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import GateTransportError, HostError, MergeLanding
@@ -116,6 +117,7 @@ def block_merge_path(
     step: str,
     outcome: str,
     decision: str = "",
+    request_id: str = "",
 ) -> dict[str, Any]:
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
@@ -126,7 +128,7 @@ def block_merge_path(
         target="blocked",
         reason=reason,
         decision=decision,
-        request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
+        request_id=request_id or _attempt_request_id(record.attempt_id or attempt_id, action, ref),
         terminal_state="blocked",
         disposition="blocked",
         verdict=record.worker_continuation.verdict_outcome
@@ -414,10 +416,20 @@ def release_effect(
     `release_merge` marker, and the observer is woken on the watch's result instead of on the move.
     """
     ref = task["ref"]
+    if record.activation_recovery is not None:
+        return release_activation.resume_refused_activation(
+            runtime, task, record, records, payload, attempt_id
+        )
     release_merge: dict[str, Any] | None = None
     if has_candidate(task):
         try:
             landing = runtime.host.complete_green(task, record)
+        except ProductionActivationRefused as exc:
+            # Delivered to the remote, not activated on production: its own reason, one operation
+            # for the PO, and the card Blocked (secretary-1824).
+            return release_activation.block_refused_activation(
+                runtime, task, record, records, payload, attempt_id, exc, step=step
+            )
         except HostError as exc:
             # A rejected merge must land the card in Blocked rather than escape the tick: an
             # escaping error leaves the verdict standing and every later tick retries the merge.

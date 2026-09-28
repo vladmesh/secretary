@@ -71,6 +71,12 @@ def create_refusal(kind: str, value: str, registered: Iterable[str] | None) -> s
 CARD_INPUT = "card"
 OWNER_ANSWER_INPUT = "owner_answer"
 INPUTS = (CARD_INPUT, OWNER_ANSWER_INPUT)
+#: The one operation card the dispatcher itself cuts, and only under this request-id prefix
+#: (secretary-1824): the release whose production activation was refused (the target's board schema
+#: could not be applied) hands the PO one operation to recover it. The dispatcher creates no other
+#: operation, and this one touches the production of the card it released (`TaskWriter._create`).
+ACTIVATION_OPERATION_REQUEST_PREFIX = "dispatcher-release-activation-op-"
+
 #: The kinds a dispatcher input may be about.
 PO_CARD_KINDS = ("decision", OPERATION_KIND)
 #: A wait card's outcome delivered to a PO session its creator named (secretary-1790). The session
@@ -208,6 +214,7 @@ def rights_note(
 
 
 __all__ = [
+    "ACTIVATION_OPERATION_REQUEST_PREFIX",
     "CARD_INPUT",
     "DELEGATED_RESULT_INPUT",
     "INPUTS",

@@ -96,6 +96,7 @@ from secretary.board.task_routing import (
     impact_bounds_refusal,
 )
 from secretary.board.production_rights import (
+    ACTIVATION_OPERATION_REQUEST_PREFIX,
     NO_PRODUCTION,
     TOUCHES_PRODUCTION,
 )
@@ -360,6 +361,7 @@ def _po_card_create_refusal(
     seed_ref: str,
     base_branch: str,
     origin: bool = False,
+    activation_operation: bool = False,
 ) -> str:
     """Why a `decision`/`operation`/`wait` card cannot be created as asked, or `""`.
 
@@ -371,9 +373,14 @@ def _po_card_create_refusal(
     reviewer, a checkout or a live impact of its own to declare.
     """
     waits = kind == TaskType.WAIT.value
-    # The dispatcher cuts a code card's e2e wait, and the decision a spent e2e budget needs
-    # (secretary-1796); nothing else.
-    if role == Role.DISPATCHER.value and kind not in {TaskType.WAIT.value, TaskType.DECISION.value}:
+    # The dispatcher cuts a code card's e2e wait, the decision a spent e2e budget needs
+    # (secretary-1796), and the operation a refused production activation needs, under its request id
+    # (secretary-1824); nothing else.
+    if (
+        role == Role.DISPATCHER.value
+        and kind not in {TaskType.WAIT.value, TaskType.DECISION.value}
+        and not (kind == TaskType.OPERATION.value and activation_operation)
+    ):
         return f"the dispatcher cuts only a wait or a decision card, not a {kind} card"
     if role not in {Role.OBSERVER.value, Role.PO.value, Role.DISPATCHER.value}:
         return f"a {kind} card is cut by the observer or the PO, not by {role}"
@@ -1258,13 +1265,21 @@ class TaskWriter:
     ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply. The dispatcher creates
         # nothing but the wait card of a code card's e2e run (secretary-1795), the decision a spent e2e
-        # budget needs (secretary-1796), and the `code` hotfix of a red after-merge e2e run, under that
-        # run's hotfix request id (secretary-1807); every other kind it names is refused below, before
-        # anything is read.
+        # budget needs (secretary-1796), the `code` hotfix of a red after-merge e2e run, under that
+        # run's hotfix request id (secretary-1807), and the `operation` a refused production activation
+        # needs, under its activation request id and touching its own project's production
+        # (secretary-1824); every other kind it names is refused below, before anything is read.
         task_type = task_type.strip()
-        dispatcher_creates = task_type in {TaskType.WAIT.value, TaskType.DECISION.value} or (
-            task_type == TaskType.CODE.value
-            and str(request_id or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+        activation_operation = task_type == TaskType.OPERATION.value and str(request_id or "").startswith(
+            ACTIVATION_OPERATION_REQUEST_PREFIX
+        )
+        dispatcher_creates = (
+            task_type in {TaskType.WAIT.value, TaskType.DECISION.value}
+            or (
+                task_type == TaskType.CODE.value
+                and str(request_id or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+            )
+            or activation_operation
         )
         role = self._role(
             role,
@@ -1325,6 +1340,7 @@ class TaskWriter:
         carried_origin = role == Role.DISPATCHER.value and task_type in {
             TaskType.DECISION.value,
             TaskType.CODE.value,
+            TaskType.OPERATION.value,
         }
         if origin_record and role != Role.PO.value and not carried_origin:
             raise TaskError(
@@ -1346,9 +1362,17 @@ class TaskWriter:
                 seed_ref=seed_ref,
                 base_branch=base_branch,
                 origin=bool(origin_record),
+                activation_operation=activation_operation,
             )
             if refusal:
                 raise TaskError("validation", refusal, 2)
+        if role == Role.DISPATCHER.value and activation_operation and touches_production != project:
+            raise TaskError(
+                "validation",
+                "the dispatcher's activation operation touches the production of its own project "
+                f"{project!r}, not {touches_production or 'nothing'!r}",
+                2,
+            )
         wait_request = _wait_request(wait)
         spec: wait_card.WaitSpec | None = None
         if waits:

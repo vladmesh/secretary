@@ -36,6 +36,7 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.config import validate_instance
+from secretary.dispatch import production_checkout
 from secretary.dispatch.e2e import parse_e2e
 from secretary.dispatch.gate import (
     GateResult,
@@ -116,6 +117,7 @@ from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
 from secretary.dispatch.post_merge import pr_merge_commit
+from secretary.dispatch.production_checkout import ProductionActivationRefused
 from secretary.dispatch.provider_failure import (
     provider_failure_for_persisted_run as _provider_failure_for_persisted_run,
 )
@@ -2257,7 +2259,18 @@ class CommandHostRuntime:
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         ci = _validation_ci(self, task)
         if ci == "github":
-            self._merge_github_pr(task, record, branch, base)
+            try:
+                self._merge_github_pr(task, record, branch, base)
+            except ProductionActivationRefused as exc:
+                # The pull request is merged; only the production activation was refused.
+                exc.landing = MergeLanding(
+                    sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                    base=base,
+                    path="github-pr",
+                    ci=ci,
+                    branch=branch,
+                )
+                raise
             self._require_production_runtime("release-after")
             return MergeLanding(
                 sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
@@ -2284,9 +2297,28 @@ class CommandHostRuntime:
             project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
         )
         self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
-        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        try:
+            self._advance_checkout(repo, f"origin/{base}")
+        except ProductionActivationRefused as exc:
+            # The push landed; only the production activation was refused.
+            exc.landing = MergeLanding(
+                sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
+            )
+            raise
         self._require_production_runtime("release-after")
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
+
+    def _advance_checkout(self, repo: Path, ref: str) -> None:
+        """Fast-forward a project checkout to `ref` after a merge.
+
+        The production checkout this dispatcher runs from moves only through
+        `production_checkout.advance`: the target's board schema first, then the code
+        (secretary-1824). Every other checkout keeps its plain fast-forward.
+        """
+        if self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root)):
+            production_checkout.advance(self._run, repo, ref, instance_dir=self.catalog.instance_dir)
+            return
+        self._run(["git", "-C", str(repo), "merge", "--ff-only", ref], "post-merge fast-forward")
 
     def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
         """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
@@ -2399,6 +2431,9 @@ class CommandHostRuntime:
         gh honours branch protection and refuses to merge while required checks are unsatisfied. The
         checkout tracks the project's default branch, not the card's base, and the refresh stays
         best-effort: the card is already merged by then, so a failed refresh is not the card's failure.
+        The one exception is the production checkout's schema refusal (`ProductionActivationRefused`):
+        the checkout stayed where it was because the board could not take the merged code's schema,
+        which is the release's to report, never a refresh to forget.
 
         `gh pr merge` lands the pull request in *its own* base, whatever that is, so the base is read
         back and required to be this card's integration base before the irreversible call is made
@@ -2417,10 +2452,9 @@ class CommandHostRuntime:
             self._remote_git_checked(
                 task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
             )
-            self._run(
-                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{refresh_branch}"],
-                "post-merge fast-forward",
-            )
+            self._advance_checkout(repo, f"origin/{refresh_branch}")
+        except ProductionActivationRefused:
+            raise
         except HostError:
             pass
 

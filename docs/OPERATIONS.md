@@ -1829,6 +1829,17 @@ On release the dispatcher:
 2. Fast-forwards the project's local checkout onto the new tip (for the product repository this deploys
    the checkout it runs from). A card based on another card's branch lands on that base; the checkout is
    refreshed only from the default branch, and a failed refresh there does not send the card back.
+   The production checkout the dispatcher runs from moves only after the board store is at the new
+   tip's schema: the tip is pinned by commit id, its own owed migrations (only those declaring
+   `release_safety = "additive"`) are applied under the migration lock with a bounded wait, and then the
+   checkout fast-forwards to that commit ([Board store §7.4](BOARD_STORE.md#74-schema-versioning-and-migrations)).
+   A refused migration keeps the checkout on its old commit, on both paths. The dispatcher retains
+   the original `release_schema_refused` facts and delivered remote merge in its release record,
+   then creates one `operation` for the sprint's PO with recovery (`secretary upgrade` once the
+   cause is fixed) and verification. If creation is refused, ordinary ticks retry the persisted
+   request, including after restart; the source stays unsettled and activation is not retried.
+   Once the operation commits, the canonical typed reason references it, the source goes to Blocked,
+   and its release record is removed after durable settlement.
 3. Stops the worktree's terminals and removes the worktree.
 
 For the private instance repository, publishing uses the checkpoint writer lock and publishes only the
