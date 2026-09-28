@@ -287,6 +287,56 @@ class ReadLayer(ProtocolBoundary):
             },
         }
 
+    def po_delegated(self, session_id: str) -> dict[str, Any]:
+        """The cards a PO session delegated, or whose results now go to it, from one board listing.
+
+        One `TaskReader.list` for the whole answer (secretary-1811): the listing, the metadata of its
+        rows and their outbox returns are each one batched read, and nothing here reads per card. A
+        card counts when its `origin.po_session` is this session (`delegated`) or when this session is
+        the successor its results go to now (`current_session`, `inherited`). `items` is null, never
+        `[]`, when the board could not be read.
+        """
+        now = self._clock()
+        session = str(session_id or "")
+        report = self.report()
+        data_dir = self.data_dir(report)
+        try:
+            cards = TaskReader(self._client()).list()
+        except _SOURCE_FAILURES as exc:
+            return {
+                "kind": "po_delegated",
+                "session": session,
+                "source": sources.unavailable(
+                    f"the board could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=data_dir / "board" / "cards.ndjson",
+                ).to_json(),
+                "items": None,
+            }
+        items = []
+        for card in cards:
+            origin = _object(card.get("origin"))
+            delegated = _text(origin.get("po_session")) == session
+            if not session or not (delegated or _text(origin.get("current_session")) == session):
+                continue
+            returns = [row for row in origin.get("returns") or [] if isinstance(row, dict)]
+            items.append(
+                {
+                    "ref": _text(card.get("ref")),
+                    "title": _text(card.get("title")),
+                    "type": _text(card.get("type")) or None,
+                    "state": _text(card.get("state")) or None,
+                    "relation": "delegated" if delegated else "inherited",
+                    "last_return": returns[-1] if returns else None,
+                }
+            )
+        return {
+            "kind": "po_delegated",
+            "session": session,
+            "source": sources.available(now).to_json(),
+            "items": items,
+        }
+
     def task_events(
         self, ref: str, cursor: str | None = None, *, limit: int = DEFAULT_LIMIT
     ) -> dict[str, Any]:
@@ -677,6 +727,10 @@ def _card_value(card: dict[str, Any] | None) -> dict[str, Any] | None:
     value["waiting_owner"] = waiting_owner(card)
     # The production an operation card touches (`none` included), else null.
     value["touches_production"] = touches_production(card)
+    # The blocks `task show` carries (secretary-1811): the PO session a card was delegated from and
+    # its returns, a wait card's target and outcome, a code card's e2e runs. Null for a card without.
+    for block in ("origin", "wait", "e2e"):
+        value[block] = card.get(block) if isinstance(card.get(block), dict) else None
     return value
 
 

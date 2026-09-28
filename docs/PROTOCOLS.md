@@ -437,6 +437,8 @@ waiting`, with `card` pointing at it and the reason `<card> (<kind>) is handed t
 when it carries the mark, or `<card> (<kind>) is with the PO` otherwise. The Pipeline listing decides
 it, before the dispatcher's record, since no head runs such a card; every other answer of the section
 carries `card` as well (the sprint's current card, or null).
+Every card of the sprint that waits on the PO, the owner or a run, current or not, is listed in
+`work.waiting_on` ([What a sprint is doing](#what-a-sprint-is-doing)).
 
 ### Wait cards
 
@@ -3488,9 +3490,19 @@ project is registered, what the dispatcher durably holds for it (attempt, round,
 heads, pause), the heads working it, what each role ran (`heads`, below), the tail of its history with a
 cursor, and its result: the worker's
 `report:done` / `report:blocked` (with classification), the reviewer's `review:green` / `review:red`, the
-observer's `decision:*`, and the latest of them, marked `terminal` when the card is Done.
+observer's `decision:*`, and the latest of them, marked `terminal` when the card is Done. `card.value`
+also carries the card's `origin` ([PO delegation](#po-delegation), with its `returns`), `wait`
+([Wait cards](#wait-cards)) and `e2e` ([The e2e stage](#the-e2e-stage)) blocks as `task show` gives them,
+each null for a card without one.
 
 **`task_events(ref, cursor, limit)`** — the history, one page at a time, with `next_cursor`.
+
+**`po_delegated(session)`** — the cards whose `origin.po_session` is this PO session (`relation:
+delegated`) or whose `origin.current_session` is (`inherited`: the session succeeded the origin), each
+`{ref, title, type, state, relation, last_return}`, `last_return` being the card's newest outbox row or
+null. One Pipeline listing (`TaskReader.list`: one `getAllTasks`, the metadata in one batch, the outbox
+rows in one read) and nothing per card; `items` is null, never `[]`, with an unavailable `source` when
+the board could not be read.
 
 ### Sources fail apart
 
@@ -4010,6 +4022,29 @@ A listing item and the watched sprint's `work` are built by the same call over t
 An unreadable `journal` marks only `decision.freshness`. An unavailable `sprints` yields no affirmative
 observer claim.
 
+**`waiting_on`** is what the sprint waits for, beside `waiting` (which is about the current card only): a
+list of `{kind, card, detail}`, one entry per waiting live card of the sprint, derived at read time from
+the sprint's cards in the Pipeline listing and nothing else -- no dispatcher record, no journal, nothing
+stored (secretary-1811). It is a list rather than a section; the document's `cards` mark is its source.
+`kind` is exactly one of:
+
+| kind | a card of the sprint that is | `detail` |
+| --- | --- | --- |
+| `run` | a `wait` card not Done or Blocked whose `wait.state` is `waiting` or `result_ready` | `waits for <run URL, card reaching states, or time> since <t>, deadline <d>` (and `result ready, delivery pending`) |
+| `run` | a card not Done with an e2e run still `dispatching`, `identifying`, `wait_card_pending` or `waiting`; or any card carrying such an after-merge run | `e2e run <run URL> on <sha>: <state>` |
+| `run` | a merged card whose after-merge mark is `covered` -- every card a coalesced run covers, not only its carrier -- unless the carrier's own record of that run has answered | `after-merge e2e run <run URL> carried by <carrier>, covering merge <sha>` (the dispatch id while the run is not identified) |
+| `run` | a merged card whose after-merge mark is `pending` (queued, no run covers it yet) | `queued for the next after-merge run` |
+| `owner` | a card carrying the `waiting_owner` mark ([Handover to the owner](#handover-to-the-owner)) | `<kind> handed to the owner: <reason>` |
+| `owner` | a card waiting on an e2e budget decision (`e2e.mark`) | the mark, `e2e: budget spent, waiting on <decision>` |
+| `po` | a `decision` or `operation` card In progress without the mark | `<kind> card with the PO` |
+
+One card may carry more than one entry (a run and a budget mark), but one run is said once per card:
+the carrier's run record and its own `covered` mark are one entry, deduplicated by (card, run URL or
+dispatch id). A `green`, `red` or `declined` after-merge mark waits for nothing. The list is empty when nothing is
+waited for and for a closed sprint; it is null, never `[]`, when the sprint board or the listing did not
+answer. `secretary sprint status` prints it under `work.waiting_on`, every `sprint_list` item carries it,
+and the sprint page draws it as "Waiting on", each entry linking its card and any URL in its detail.
+
 **`waiting`**, in decision order:
 
 | answer | source | when |
@@ -4221,14 +4256,14 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | method | route | operation | answers |
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: pipeline controls and running PO turns, the current health problem, open sprints with their card, heads and budget |
-| GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: its full description, state, attempt, heads with model and effort, product runs, worker and reviewer output, result, event tail |
+| GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`, `po.po_session_titles`) | one card: its full description, state, attempt, heads with model and effort, product runs, worker and reviewer output, result, event tail; and, when the card carries them, the **Delegation** block ("Delegated by" the PO session's title linked to `/po/sessions/<id>`, its short id when untitled or gone, the successor the result goes to now, and each return: state, delivery, when, which session received it), the **Wait** block (the target as a run link, a card link with the awaited states, or a time; waiting since, deadline, state, the frozen result with its evidence link, and each return address with its delivery) and the **E2E** block (each run's SHA, link, state or result and wait card; the budget or cap, the budget mark with its decision card, and the after-merge state and runs). A PO store that does not answer marks the titles unavailable and leaves the rest of the page |
 | GET | `/tasks/{ref}/heads/{run_id}` | `reads.head_view` | one of the card's local-pty heads, read-only: its terminal's tail as redacted plain text and its journal's tail; a run id the card did not record is 404 |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |
 | GET | `/projects` | `reads.system_snapshot` | registered projects |
 | GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
-| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
+| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, **what it waits on** (`work.waiting_on`: a run, the owner or the PO, each linking its card; nothing when the list is empty), the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
@@ -4254,12 +4289,12 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by its `title` when set (then the start of its first message on a line of its own), else by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one), with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
-| GET | `/po/sessions/{session}` | `po.po_session` | one PO session: its title heading the page when set and a rename form beside the header, feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close |
+| GET | `/po/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | one PO session: its title heading the page when set and a rename form beside the header, feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close; and the **Delegated cards** it delegated or inherited as a successor, each with its ref linked, title, kind, column and last return state, from one board listing (a board that refused is said as itself) |
 | POST | `/po/sessions/{session}/messages` | `po.po_send` | queue one message with the PO service; form `request_id, text`; 303 to the session once it is on disk, where it runs at once or waits for the running turn; a closed session is refused (409 `session_closed`) and a stopped service (503 `backend_unavailable`, `the PO service is not running`), nothing written |
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
 | POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | POST | `/po/sessions/{session}/title` | `po.po_rename` | set the session's title, open or closed; form `title`, no request id (a repeat sets the same value); trimmed, one line, at most 120 characters, empty clears it; 303 to the session, or the session rendered with the refusal and the text kept (400 `validation`); unknown session 404 |
-| GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs or a message is queued |
+| GET | `/po/api/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | the session page's document with `delegated`, the `po_delegated` read; polled while a turn runs or a message is queued, the poll asking `?cards=0`, which reads no board and answers `delegated: null` |
 | GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: the unread owner events by default, `?all=1` every event (unread highlighted); open `needs_owner` events first, then newest first, with its class badge and subject link; `?unread=1` or any other value is the unread default; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
 | POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
 | POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |

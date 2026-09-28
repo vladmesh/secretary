@@ -2211,7 +2211,7 @@ def _start_form(projects: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> 
 # -- the task page ------------------------------------------------------------------------------
 
 
-def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
+def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, Any] | None = None) -> str:
     """Criterion 3: state, recent events, the worker's and reviewer's output, and the result.
 
     The card is read as a task first: its title is the heading and its full text -- what the
@@ -2276,6 +2276,7 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
             "</div>",
             '<div class="col">',
             _panel("Heads", _card_heads_panel(ref, snapshot.get("heads") or {}, agents)),
+            *_card_blocks(value, sessions),
             _panel(
                 "Card",
                 _card(card.get("value"), project) + _attempt(snapshot.get("attempt") or {}),
@@ -2551,6 +2552,263 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
         )
         rows.append(["handed to the owner", said])
     return _rows(["", ""], rows)
+
+
+# -- delegation, waits and e2e on a card (secretary-1811) -----------------------------------------
+
+#: The prefix a wait's PO return address carries (`board/wait_card.PO_SESSION_PREFIX`).
+PO_ADDRESS_PREFIX = "po-session:"
+#: The prefix a wait's card return address carries (`board/wait_card.CARD_PREFIX`).
+CARD_ADDRESS_PREFIX = "card:"
+PO_TITLES_UNAVAILABLE = "PO session titles are unavailable"
+
+
+def _block(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _entries(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def po_sessions_named(snapshot: dict[str, Any]) -> list[str]:
+    """Every PO session a card page links to: the origin, its successor, the returns, the wait's addresses."""
+    value = _block(_block(snapshot.get("card")).get("value"))
+    origin = _block(value.get("origin"))
+    named = [origin.get("po_session"), origin.get("current_session")]
+    named += [row.get("session") for row in _entries(origin.get("returns"))]
+    for address in _block(_block(value.get("wait")).get("po_sessions")).values():
+        named += [_block(address).get("addressed"), _block(address).get("received_by")]
+    return list(dict.fromkeys(str(item) for item in named if isinstance(item, str) and item))
+
+
+def _session_titles(sessions: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+    """The sessions the PO store answered for, or None with the reason when it did not."""
+    if sessions is None:
+        return None, ""
+    if not sessions.get("available"):
+        return None, str(sessions.get("reason") or "no reason was recorded")
+    return _block(_block(sessions.get("document")).get("sessions")), ""
+
+
+def _po_session_link(session_id: Any, known: dict[str, Any] | None) -> str:
+    """A PO session as its title linked to its page; its short id when untitled, gone or unknown."""
+    text = str(session_id or "")
+    if not text:
+        return "—"
+    short = f'<span class="id">{escape(text[:8])}</span>'
+    found = _block((known or {}).get(text)) if known is not None else None
+    title = str((found or {}).get("title") or "")
+    label = f"{escape(title)} {short}" if title else short
+    gone = ' <span class="age">(no such session)</span>' if known is not None and text not in known else ""
+    return f'<a href="/po/sessions/{quote(text)}">{label}</a>{gone}'
+
+
+def _origin_panel(origin: dict[str, Any], sessions: dict[str, Any] | None) -> str:
+    """Who delegated this card, where its result goes now, and what was returned to whom."""
+    known, refused = _session_titles(sessions)
+    origin_session = str(origin.get("po_session") or "")
+    current = str(origin.get("current_session") or "")
+    parts = [f"<p>Delegated by {_po_session_link(origin_session, known)}</p>"]
+    if refused:
+        parts.append(f'<p class="unavailable"><b>{escape(PO_TITLES_UNAVAILABLE)}:</b> {escape(refused)}</p>')
+    if origin.get("request_id"):
+        parts.append(f'<p class="age">request <code>{escape(str(origin["request_id"]))}</code></p>')
+    if current and current != origin_session:
+        parts.append(
+            f"<p>The origin session was succeeded: the result goes to {_po_session_link(current, known)}</p>"
+        )
+    returns = _entries(origin.get("returns"))
+    if not returns:
+        parts.append('<p class="empty">nothing has been returned to the PO yet.</p>')
+    else:
+        rows = [
+            [
+                _state_chip(row.get("state")),
+                _or_dash(row.get("status") or "pending"),
+                _or_dash(row.get("delivered_at")),
+                _po_session_link(row.get("session"), known) if row.get("session") else "—",
+            ]
+            for row in returns
+        ]
+        parts.append(_rows(["returned", "delivery", "delivered at", "received by"], rows))
+    return "\n".join(parts)
+
+
+#: The tone a wait's state reads in.
+WAIT_TONES = {
+    "waiting": "accent",
+    "result_ready": "accent",
+    "delivered": "ok",
+    "target_reached": "ok",
+    "deadline_passed": "bad",
+    "source_unreachable": "bad",
+    "cancelled": "warn",
+    "malformed": "bad",
+}
+
+
+def _external(url: Any, label: str | None = None) -> str:
+    """A link out when the value is a web address, the text otherwise."""
+    text = str(url or "")
+    if text.startswith(("https://", "http://")):
+        return f'<a href="{escape(text)}" rel="noreferrer">{escape(label or text)}</a>'
+    return _or_dash(text)
+
+
+def _wait_target(target: dict[str, Any]) -> str:
+    """A run as a link to its page, a card as a link with the states awaited, a time as the time."""
+    kind = str(target.get("kind") or "")
+    if kind == "github_run":
+        url = target.get("link") or target.get("html_url") or target.get("url")
+        label = f"GitHub run {target.get('repo') or '?'}#{target.get('run_id') or '?'}"
+        return _external(url, label) if url else escape(label)
+    if kind == "card":
+        states = (
+            " or ".join(str(state) for state in target.get("states") or [] if state) or "an unrecorded state"
+        )
+        ref = str(target.get("ref") or "")
+        return f"{_link(ref) if ref else '—'} reaching {escape(states)}"
+    if kind == "time":
+        return f"the time {_or_dash(target.get('at'))}"
+    return '<span class="empty">an unreadable target</span>'
+
+
+def _wait_address(address: str, status: str, wait: dict[str, Any], known: dict[str, Any] | None) -> list[str]:
+    if address.startswith(PO_ADDRESS_PREFIX):
+        po = _block(_block(wait.get("po_sessions")).get(address))
+        addressed = po.get("addressed") or address[len(PO_ADDRESS_PREFIX) :]
+        where = f"PO session {_po_session_link(addressed, known)}"
+        received = po.get("received_by")
+        if received and received != addressed:
+            where += f" (taken by its successor {_po_session_link(received, known)})"
+    elif address.startswith(CARD_ADDRESS_PREFIX):
+        where = f"card {_link(address[len(CARD_ADDRESS_PREFIX) :])}"
+    else:
+        where = escape(address)
+    return [where, _chip(status.replace("_", " "), "ok" if status in ("delivered", "accepted") else "")]
+
+
+def _wait_panel(wait: dict[str, Any], sessions: dict[str, Any] | None) -> str:
+    """What this wait waits for, since when and until when, where it stands and where its result went."""
+    state = str(wait.get("state") or "unknown")
+    if state == "malformed" or not isinstance(wait.get("target"), dict):
+        reason = str(wait.get("reason") or "the card carries no well-formed wait spec")
+        return f'{_chip(state.replace("_", " "), WAIT_TONES.get(state, ""))} <span class="reason">{escape(reason)}</span>'
+    known, refused = _session_titles(sessions)
+    rows = [
+        ["target", _wait_target(wait["target"])],
+        ["waiting since", _or_dash(wait.get("waiting_since"))],
+        ["deadline", _or_dash(wait.get("deadline"))],
+        ["state", _chip(state.replace("_", " "), WAIT_TONES.get(state, ""))],
+    ]
+    result = _block(wait.get("result"))
+    if result:
+        summary = escape(str(result.get("summary") or result.get("outcome") or "no summary recorded"))
+        evidence = result.get("evidence")
+        rows.append(["result", summary + (f" · {_external(evidence, 'evidence')}" if evidence else "")])
+    observed = _block(wait.get("last_observation"))
+    if observed.get("text"):
+        rows.append(
+            [
+                "last seen",
+                f'{escape(str(observed["text"]))} <span class="age">{_or_dash(observed.get("at"))}</span>',
+            ]
+        )
+    error = _block(wait.get("last_error"))
+    if error.get("text"):
+        rows.append(["last error", escape(str(error["text"]))])
+    parts = [_rows(["", ""], rows)]
+    deliveries = _block(wait.get("deliveries"))
+    addresses = [str(item) for item in wait.get("return_to") or [] if item] or list(deliveries)
+    if addresses:
+        parts.append(
+            _rows(
+                ["returns to", "delivery"],
+                [
+                    _wait_address(address, str(deliveries.get(address) or "pending"), wait, known)
+                    for address in addresses
+                ],
+            )
+        )
+    if refused:
+        parts.append(f'<p class="unavailable"><b>{escape(PO_TITLES_UNAVAILABLE)}:</b> {escape(refused)}</p>')
+    return "\n".join(parts)
+
+
+def _e2e_run_rows(runs: list[dict[str, Any]]) -> list[list[str]]:
+    rows = []
+    for run in runs:
+        result = _block(run.get("result"))
+        said = str(result.get("summary") or "")
+        state = str(run.get("state") or "unknown")
+        rows.append(
+            [
+                f"<code>{escape(str(run.get('sha') or '')[:12]) or '—'}</code>",
+                _external(run.get("run"), "run")
+                if run.get("run")
+                else '<span class="empty">not identified</span>',
+                escape(state.replace("_", " "))
+                + (f'<div class="reason">{escape(said)}</div>' if said else ""),
+                _link(str(run["wait_card"])) if run.get("wait_card") else "—",
+            ]
+        )
+    return rows
+
+
+def _e2e_panel(e2e: dict[str, Any]) -> str:
+    """Each e2e run of this card with its wait card, the budget it spends, and where after-merge stands."""
+    parts = []
+    spent = (
+        f"{e2e.get('runs_dispatched') if e2e.get('runs_dispatched') is not None else '?'} run(s) dispatched"
+    )
+    if e2e.get("budget"):
+        sprint = str(e2e["budget"])
+        spent += f', charged to <a href="/sprints/{quote(sprint)}">{escape(sprint)}</a>'
+    elif e2e.get("run_cap") is not None:
+        spent += f" of this card's cap of {escape(str(e2e['run_cap']))}"
+    parts.append(f"<p>{spent}</p>")
+    if e2e.get("mark"):
+        decision = str(e2e.get("waiting_on") or "")
+        parts.append(
+            f"<p>{_chip('budget spent', 'warn')} {escape(str(e2e['mark']))}"
+            + (f" · {_link(decision)}" if decision else "")
+            + "</p>"
+        )
+    runs = _entries(e2e.get("runs"))
+    if runs:
+        parts.append(_rows(["sha", "run", "state / result", "wait card"], _e2e_run_rows(runs)))
+    elif not e2e.get("placement"):
+        parts.append('<p class="empty">no e2e run has been dispatched for this card.</p>')
+    if e2e.get("placement") == "after_merge":
+        rows = [["after merge", _or_dash(e2e.get("state") or "no mark on this card")]]
+        if e2e.get("merge_sha"):
+            rows.append(["merge sha", f"<code>{escape(str(e2e['merge_sha'])[:12])}</code>"])
+        if e2e.get("run"):
+            rows.append(["run", _external(e2e["run"])])
+        if e2e.get("carrier"):
+            rows.append(["carried by", _link(str(e2e["carrier"]))])
+        if e2e.get("hotfix"):
+            rows.append(["hotfix", _link(str(e2e["hotfix"]))])
+        if e2e.get("decision"):
+            rows.append(["decision", _link(str(e2e["decision"]))])
+        parts.append(_rows(["", ""], rows))
+        carried = _entries(e2e.get("after_merge_runs"))
+        if carried:
+            parts.append(_rows(["sha", "run", "state / result", "wait card"], _e2e_run_rows(carried)))
+    return "\n".join(parts)
+
+
+def _card_blocks(value: dict[str, Any], sessions: dict[str, Any] | None) -> list[str]:
+    """The delegation, wait and e2e panels of a card page; none for a card that carries none."""
+    panels = []
+    if isinstance(value.get("origin"), dict):
+        panels.append(_panel("Delegation", _origin_panel(value["origin"], sessions)))
+    if isinstance(value.get("wait"), dict):
+        panels.append(_panel("Wait", _wait_panel(value["wait"], sessions)))
+    if isinstance(value.get("e2e"), dict):
+        panels.append(_panel("E2E", _e2e_panel(value["e2e"])))
+    return panels
 
 
 def _attempt(attempt: dict[str, Any]) -> str:
@@ -3639,6 +3897,7 @@ def sprint(document: dict[str, Any]) -> str:
             '<div class="grid">',
             '<div class="col">',
             _panel("Now", _sprint_now(work, observer)),
+            _waiting_on(work.get("waiting_on")),
             _panel("Observer's call", _observer_call(work), more=_recorded_at(work)),
             f'<section class="panel">{_sprint_tabs(ref, value, work)}</section>',
             "</div>",
@@ -3695,6 +3954,43 @@ def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:
     if budget:
         parts.append(_budget_line(budget))
     return "\n".join(parts)
+
+
+#: How a sprint's `waiting_on` kind reads on its page.
+WAITING_ON_LABELS = {"run": "a run", "owner": "the owner", "po": "the PO"}
+
+
+def _waiting_on(items: Any) -> str:
+    """What the sprint waits for, one line per card, each pointing at its card; nothing when nothing is."""
+    entries = _entries(items)
+    if not entries:
+        return ""
+    rows = [
+        [
+            _chip(
+                WAITING_ON_LABELS.get(str(entry.get("kind") or ""), str(entry.get("kind") or "unknown")),
+                "warn",
+            ),
+            _link(str(entry.get("card") or "")),
+            _linked_text(str(entry.get("detail") or "")),
+        ]
+        for entry in entries
+    ]
+    return _panel("Waiting on", _rows(["on", "card", "what"], rows), count=len(rows))
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+
+
+def _linked_text(text: str) -> str:
+    """Escaped text whose web addresses are links: a run a detail line names is one click away."""
+    out, last = [], 0
+    for found in _URL_RE.finditer(text):
+        out.append(escape(text[last : found.start()]))
+        out.append(_external(found.group(0)))
+        last = found.end()
+    out.append(escape(text[last:]))
+    return "".join(out)
 
 
 def _tile(label: str, value: str, reason: str, tone: str = "") -> str:
@@ -4343,6 +4639,7 @@ def po_session(
             if closed
             else _panel("Send", message + controls + '<p class="feedback" id="po-status"></p>'),
             _panel("Feed", feed, more='<a class="more" href="/po">all sessions</a>'),
+            _po_delegated(document.get("delegated")),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
@@ -4355,6 +4652,45 @@ def po_session(
         script=script,
         nav="po",
         crumbs=(("PO", "/po"), (session_id[:8], base)),
+    )
+
+
+def _po_delegated(section: Any) -> str:
+    """The cards this session delegated, or whose results now come to it, with their states (secretary-1811).
+
+    Nothing when the document carries no such block (a poll that did not ask for it); the reason when
+    the board could not be read; a quiet line when the session delegated nothing.
+    """
+    if not isinstance(section, dict):
+        return ""
+    items = section.get("items")
+    if not isinstance(items, list):
+        source = _block(section.get("source"))
+        reason = escape(str(source.get("reason") or "no reason was recorded"))
+        body = (
+            f'<p class="unavailable"><b>could not find out the cards this session delegated:</b> {reason}</p>'
+        )
+        return _panel("Delegated cards", body)
+    if not items:
+        return _panel("Delegated cards", '<p class="empty">this session has delegated no card.</p>', count=0)
+    rows = []
+    for item in _entries(items):
+        last = _block(item.get("last_return"))
+        returned = (
+            f"{_state_chip(last.get('state'))} {_or_dash(last.get('status') or 'pending')}" if last else "—"
+        )
+        relation = "" if item.get("relation") != "inherited" else ' <span class="age">(as successor)</span>'
+        rows.append(
+            [
+                _link(str(item.get("ref") or "")) + relation,
+                _or_dash(item.get("title")),
+                _or_dash(item.get("type")),
+                _state_chip(item.get("state")),
+                returned,
+            ]
+        )
+    return _panel(
+        "Delegated cards", _rows(["card", "title", "kind", "column", "last return"], rows), count=len(rows)
     )
 
 
@@ -4496,7 +4832,7 @@ if (seen && (seen.running || seen.queued > 0)) {
     try {
       let doc;
       try {
-        const response = await fetch('/po/api/sessions/' + encodeURIComponent(SESSION), { cache: 'no-store' });
+        const response = await fetch('/po/api/sessions/' + encodeURIComponent(SESSION) + '?cards=0', { cache: 'no-store' });
         if (!response.ok) { say('could not refresh (' + response.status + ')'); return; }
         doc = await response.json();
       } catch (error) { say('could not refresh (' + ((error && error.message) || 'network error') + ')'); return; }
