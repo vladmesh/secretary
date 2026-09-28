@@ -1199,9 +1199,11 @@ SHA, which only the post-merge CI of `main` publishes) declares `placement: afte
 - a **wait card** titled `E2E after merge: <workflow> on <project> @ <sha>` waits for the run, in the
   carrier's sprint while it is open;
 - the run is charged to the carrier's open sprint (`sprint status` counts it in `e2e: <used> of <budget>
-  (<n> after merge)`), otherwise to every covered card's own cap of 3. With nothing left, no run starts:
-  the usual budget decision card names every covered card, and each says `e2e: budget spent, waiting on
-  <decision>` ([below](#when-the-e2e-run-budget-is-spent));
+  (<n> after merge)`), otherwise to every covered card's own cap of 3, all or none. With nothing left, no
+  run starts: one decision card names every covered card (outside a sprint, with each card's cap and which
+  ones need a raise, and the `task e2e-budget` command for each), and each covered card says `e2e: budget
+  spent, waiting on <decision>` ([below](#when-the-e2e-run-budget-is-spent)). The owner's raise runs the
+  whole batch on the next pass; a decision completed with no raise declines every card of the batch;
 - `production observe` lists every project's queue under `e2e_after_merge`: `pending`, `in_flight`,
   `covered`, `budget_waits` and `refs_to_delete`.
 
@@ -1221,8 +1223,10 @@ When the run ends:
   again: the next run, charged as usual, starts on the next tick. To stop that, pause the pipeline or
   let the budget decision stop it.
 
-The dispatcher deletes the `pipeline-e2e/...` branch once the run was acted on; a branch whose delete got
-no answer stays under `refs_to_delete` until a later tick removes it.
+The dispatcher deletes the `pipeline-e2e/...` branch once the run was acted on. A branch whose delete
+GitHub did not confirm (no answer, or a refusal while the branch still exists) stays under
+`refs_to_delete` and is tried again each tick until it is gone; a branch stuck there is one GitHub keeps
+refusing to delete, so look at its repository's branch protection.
 
 ## What was commanded, and what became of a request
 

@@ -1606,7 +1606,8 @@ cards dispatch on the next tick, and the PO completes the decision card as usual
   origin (the dispatcher carries the card's `po_origin` onto it; no other role but the PO records an
   origin) and no sprint, under `dispatcher-e2e-cap-<card>-<cap>`, so it goes to the card's origin line.
   The raise is `task e2e-budget --ref <card> --role po --authorized-by <event id> [--add <N>]`, authorized
-  the same way, by the same answer line and to the same N, by an owner comment on that card's decision after its handover; it is recorded on the
+  the same way, by the same answer line and to the same N, by an owner comment on that card's decision (or
+  on an after-merge batch decision naming the card spent, [After merge](#after-merge)) after its handover; it is recorded on the
   card (bag field `e2e_cap`, `{raises: [{add, authorized_by, decision, at}]}`, one `e2e_cap_raised`
   audit record each) and raises that card's cap. The wait, the re-check and the decline are as above;
 - a card with no origin has nobody to hand the decision to: it is Blocked with `e2e run cap reached
@@ -1662,8 +1663,11 @@ only, so the branch triggers nothing. `candidate_input`, when declared, receives
 is identified as in the stage above (GitHub's dispatch answer, else the recovery rule on that branch, with
 the settle and the ambiguity rules), and its `head_sha` must equal the target: a run on anything else is
 never attached to the covered cards. The branch is recorded in the intent. Once the run's result was
-acted on the dispatcher deletes it (`DELETE .../git/refs/heads/<branch>`; one already gone counts as
-deleted), and one whose delete got no answer stays in the queue's `cleanup` list until it is gone. The
+acted on the dispatcher deletes it (`DELETE .../git/refs/heads/<branch>`). The branch counts as gone
+only when GitHub answers the delete with success, or answers it 422 or 404 and a follow-up `GET
+git/ref/heads/<branch>` answers 404: GitHub also answers 422 for a delete it refused (validation, a
+protected branch, spam limiting). Any other answer, a 422 whose read still finds the branch or whose read
+fails included, keeps it in the queue's `cleanup` list, asked again each pass until it is gone. The
 dispatch is sent only in the tick that wrote the intent: a dispatcher that died after the intent, the
 branch or the POST looks the run up and never dispatches it again; none found within the identification
 window is an outcome like any other non-verdict (below).
@@ -1677,14 +1681,26 @@ window is an outcome like any other non-verdict (below).
 
 `sprint show` and `sprint status` count after-merge runs with the rest (`used`), and name them:
 `after_merge`, the charged runs whose dispatch id is an after-merge one, and the summary `e2e: <used> of
-<budget> (<n> after merge)`. When nothing is left nothing is dispatched: no intent, no branch. The
-budget decision of the stage above is cut (or joined) with every covered card named under "Waiting for
-e2e", each covered card's mark says `e2e: budget spent, waiting on <decision>`, and cards queued while it
-is open join it with one comment each. Each tick the budget is re-checked first: a raise lets the next
-pass dispatch one run over everything pending; the decision completed without one declines the cards
-waiting on it (a comment, mark `declined`, out of the pending set). Outside a sprint each covered card
-whose cap is spent gets the card-scope decision with its own PO origin; one with no origin is declined
-at once with an `e2e_budget_spent` bell event, and the others go on without it.
+<budget> (<n> after merge)`. When nothing is left nothing is dispatched: no intent, no branch. The batch
+of covered cards is the unit, and one decision card owns all of it:
+
+- in an open sprint, the sprint's budget decision of the stage above is cut (or joined) with every covered
+  card named under "Waiting for e2e";
+- outside one, the dispatcher cuts one decision for the batch, under `dispatcher-e2e-caps-<generation>-<the
+  spent cards, joined by .>` (the generation is the sum of their caps), with no sprint and the PO origin of
+  the newest spent card that has one, else of the newest covered card that has one. It names every covered
+  card with its cap (`cap spent, 3 of 3 runs: needs a raise` or `cap 1 of 3 runs, not spent`) and gives the
+  `task e2e-budget` command for each spent card. That decision authorizes a raise of each card it names
+  spent (`e2e_budget.authorized_raise`), exactly as a card's own decision does; `task e2e-budget` also
+  takes a card whose sprint is closed, since such a card spends its own cap here. With no origin anywhere
+  in the batch nobody can be handed the decision: every covered card is declined at once, and each spent
+  one rings the `e2e_budget_spent` bell.
+
+Every covered card's mark says `e2e: budget spent, waiting on <decision>`, and cards queued while it is open
+join it with one comment each and are marked the same. Each tick the budget is re-checked first: a raise
+(the sprint's budget, or every spent card's cap) lets the next pass attempt one run over everything
+pending; the decision completed without it declines every card waiting on it (a comment, mark `declined`
+with the decision, out of the pending set). None is released silently.
 
 **Waiting.** A wait card on the run ([Wait cards](#wait-cards)), with the adapter's deadline, in the
 charged sprint while it is open (else in none), returning to `card:<carrier>`, created once under

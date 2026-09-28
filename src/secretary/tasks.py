@@ -2401,6 +2401,18 @@ class TaskWriter:
                 )
             return charge
 
+    def _sprint_open(self, sprint: str) -> bool:
+        """Whether a card's sprint is open: a card of a closed sprint spends its own e2e cap after the
+        merge (secretary-1807)."""
+        from secretary.sprints import SprintReader
+
+        try:
+            return str(SprintReader(self.client).show(sprint, include_cards=False).get("status") or "") == "open"
+        except TaskError as exc:
+            if exc.code == "not_found":
+                return False
+            raise
+
     def raise_e2e_cap(
         self,
         *,
@@ -2413,7 +2425,7 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """Raise the e2e cap of one code card outside every sprint, on the owner's word (secretary-1796).
 
-        The sprint's `sprint e2e-budget`, for a card no sprint budgets: role `po` only, and only with
+        The sprint's `sprint e2e-budget`, for a card no open sprint budgets: role `po` only, and only with
         `authorized_by`, the event id of an owner-role comment on this card's e2e budget decision card
         made after its handover whose one answer line is `e2e budget: raise <N>`
         (`e2e_budget.authorized_raise`): the raise is that N, and `add`, when given, has to equal it. It
@@ -2428,7 +2440,7 @@ class TaskWriter:
         current = self.reader.show(reference)
         if str(current.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
             raise TaskError("validation", f"{reference} is not a code card; it has no e2e cap", 2)
-        if str(current.get("sprint") or ""):
+        if str(current.get("sprint") or "") and self._sprint_open(str(current["sprint"])):
             raise TaskError(
                 "validation",
                 f"{reference} belongs to {current['sprint']}, whose e2e budget it spends: raise that with "

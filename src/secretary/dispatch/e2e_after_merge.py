@@ -32,11 +32,14 @@ ambiguity rules), and never dispatches it a second time.
 
 Budget. The run is charged at the intent, exactly as a before-merge run: to the carrier's sprint when
 that sprint is open, otherwise to every covered card's own cap, all together or none. When nothing is
-left nothing is dispatched: the budget decision card of the before-merge stage is cut (or joined), with
-every covered card named, and each covered card shows `e2e: budget spent, waiting on <decision>`. A raise
-lets the next tick dispatch; the decision completed without one declines the waiting cards. A covered
-card outside every sprint with no PO origin has nobody to decide for it: it is declined with an
-`e2e_budget_spent` bell event, and the others go on without it.
+left nothing is dispatched, and the batch is the unit: one decision card owns every covered card. In a
+sprint it is the sprint's budget decision of the before-merge stage, cut or joined; outside one it is the
+batch's own decision (`e2e_budget.batch_decision_request_id`), naming every covered card with its cap and
+authorizing a raise of each spent one. Each covered card shows `e2e: budget spent, waiting on
+<decision>`, and a card queued later joins the same decision. A raise lets the next pass attempt the whole
+batch; the decision completed without one declines every card waiting on it. A batch in which no card
+came from a PO session has nobody to decide for it: every card is declined at once, and each spent one
+rings the `e2e_budget_spent` bell.
 
 Waiting. A `wait` card on the run, with the adapter's deadline, returning to `card:<carrier>`, created
 once under a request id derived from the dispatch id. Its frozen result is read each tick.
@@ -219,7 +222,9 @@ def reconcile_after_merge(
     return outcomes
 
 
-def _advance(runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str) -> list[dict[str, Any]]:
+def _advance(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str
+) -> list[dict[str, Any]]:
     queue = _queue(payload, project)
     outcomes = _progress(runtime, payload, records, project, queue)
     # Last: every dispatcher-owned branch whose run was acted on, this tick's included.
@@ -943,7 +948,8 @@ def _requeue(
 def _cleanup_refs(
     runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Delete every dispatcher-owned branch whose run is over; one that got no answer is tried next tick."""
+    """Delete every dispatcher-owned branch whose run is over. An entry leaves `cleanup` only once the
+    branch is deleted or confirmed absent (`e2e.delete_ref`); every other answer is asked again next pass."""
     outcomes: list[dict[str, Any]] = []
     for item in list(queue["cleanup"]):
         try:
@@ -1023,77 +1029,193 @@ def _budget_spent(
             }
         )
     else:
-        for ref in [str(item) for item in charged.get("spent") or []]:
-            task = tasks[ref]
-            state = e2e_record.e2e_state(task)
-            cap = e2e_budget.card_cap(task)
-            origin = origin_field.po_origin(task)
-            if origin is None:
-                text = (
-                    f"e2e run cap reached ({cap}): {ref} belongs to no open sprint and has been charged "
-                    f"{state.dispatched} e2e runs, so no after-merge run covers it. It came from no PO session "
-                    "either, so only the owner can decide on more runs for it."
-                )
-                owner_events.record(
-                    owner_events.E2E_BUDGET_SPENT,
-                    ref,
-                    text,
-                    f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
-                    to=getattr(getattr(runtime, "reader", None), "client", None),
-                )
-                _decline(runtime, queue, ref, text, decision="")
-                continue
-            charges = [
-                {"card": ref, "dispatch_id": dispatch_id, "at": ""}
-                for dispatch_id in [
-                    *(run.dispatch_id for run in state.runs),
-                    *(state.after_merge.charged if state.after_merge is not None else []),
-                ]
-            ]
-            decision = _decision_card(
-                runtime,
-                task,
-                state,
-                str(by_ref[ref]["merge_sha"]),
-                scope="card",
-                scope_ref=ref,
-                generation=cap,
-                spent_line=(
-                    f"The e2e run cap of {ref}, a card outside every open sprint, is spent: "
-                    f"{state.dispatched} of {cap} runs."
-                ),
-                charges=charges,
-                origin=origin,
-                waiting=[line for line in waiting if line[0] == ref],
+        spent = [str(item) for item in charged.get("spent") or []]
+        origin = next(
+            (
+                found
+                for ref in [*reversed(spent), *reversed(list(by_ref))]
+                if (found := origin_field.po_origin(tasks[ref])) is not None
+            ),
+            None,
+        )
+        if origin is None:
+            return _batch_unowned(
+                runtime, payload, records, project, queue, tasks, by_ref, spent, carrier_ref
             )
-            waits.append(
-                {"decision": decision, "generation": cap, "scope": "card", "scope_ref": ref, "cards": [ref]}
-            )
+        generation = sum(e2e_budget.card_cap(tasks[ref]) for ref in spent)
+        request_id = e2e_budget.batch_decision_request_id(spent, generation)
+        decision = _batch_decision(runtime, project, tasks, by_ref, spent, request_id, origin)
+        waits.append(
+            {
+                "decision": decision,
+                "generation": generation,
+                "scope": "cards",
+                "scope_ref": carrier_ref,
+                "request_id": request_id,
+                "spent": spent,
+                "cards": list(by_ref),
+            }
+        )
     queue["budget_waits"] = waits
     runtime.save_records(payload, records)
-    if waits:
-        first = waits[0]["decision"]
-        for ref in by_ref:
-            if any(entry.get("ref") == ref for entry in queue["pending"]):
-                own = next((wait["decision"] for wait in waits if wait["scope_ref"] == ref), first)
-                _remark(
-                    runtime,
-                    ref,
-                    "",
-                    E2eState(),
-                    state=AM_BUDGET_WAIT,
-                    decision=own,
-                    dispatch_id="",
-                    carrier="",
-                    run_url="",
-                )
+    [wait] = waits
+    for ref in by_ref:
+        _remark(
+            runtime,
+            ref,
+            "",
+            E2eState(),
+            state=AM_BUDGET_WAIT,
+            decision=wait["decision"],
+            dispatch_id="",
+            carrier="",
+            run_url="",
+        )
     return _outcome(
         project,
-        "e2e-after-merge-budget-waiting" if waits else "e2e-after-merge-declined",
+        "e2e-after-merge-budget-waiting",
         ref=carrier_ref,
-        decisions=[wait["decision"] for wait in waits],
+        decisions=[wait["decision"]],
         covered=list(by_ref),
     )
+
+
+def _cap_line(ref: str, task: dict[str, Any], merge_sha: str, spent: list[str]) -> str:
+    """One card of an out-of-sprint batch in its decision: where it merged, and its cap."""
+    used, cap = e2e_record.e2e_state(task).dispatched, e2e_budget.card_cap(task)
+    state = (
+        f"cap spent, {used} of {cap} runs: needs a raise"
+        if ref in spent
+        else f"cap {used} of {cap} runs, not spent"
+    )
+    return f"- {ref} waits ({task.get('title') or ''}) on `{merge_sha}` (its merge; the after-merge e2e run): {state}"
+
+
+def _batch_decision(
+    runtime: Any,
+    project: str,
+    tasks: dict[str, dict[str, Any]],
+    by_ref: dict[str, dict[str, Any]],
+    spent: list[str],
+    request_id: str,
+    origin: dict[str, str],
+) -> str:
+    """The one decision an out-of-sprint batch with spent caps needs: every covered card named with its cap,
+    cut once under `request_id`, which authorizes a raise of each spent card's cap."""
+    known = runtime.audit.committed_event(request_id)
+    if known is not None and known.get("ref"):
+        return str(known["ref"])
+    commands = [
+        f"      python3 -P -m secretary task e2e-budget --ref {ref} --role po --authorized-by <event id>"
+        for ref in spent
+    ]
+    charges: list[str] = []
+    for ref in spent:
+        state = e2e_record.e2e_state(tasks[ref])
+        charges += [f"- {ref}: before-merge run `{run.dispatch_id}` ({run.status()})" for run in state.runs]
+        if state.after_merge is not None:
+            charges += [
+                f"- {ref}: after-merge run `{dispatch_id}`" for dispatch_id in state.after_merge.charged
+            ]
+    description = "\n".join(
+        [
+            (
+                f"The after-merge e2e run of {project} would cover {len(by_ref)} cards outside every open sprint. "
+                "Such a run is charged to every covered card's own e2e cap, all together or none, and "
+                f"{', '.join(spent)} {'has' if len(spent) == 1 else 'have'} no run left, so nothing was "
+                "dispatched. Every e2e run pays for BitLaunch stands, so more runs are a money decision: hand "
+                "this card to the owner (`task handover`), quoting the two answer lines below in the handover "
+                "reason. A cap is raised only on the owner's recorded word, never on the PO's own authority."
+            ),
+            "",
+            "## Waiting for e2e",
+            "",
+            "Every card of the batch waits on this decision, and the whole batch is run or declined together:",
+            "",
+            *(_cap_line(ref, tasks[ref], str(by_ref[ref]["merge_sha"]), spent) for ref in by_ref),
+            "",
+            "Cards queued later while this decision is open join it with a comment.",
+            "",
+            "## Runs spent",
+            "",
+            *(charges or ["- (none recorded)"]),
+            "",
+            "## The question for the owner",
+            "",
+            (
+                f"Raise the e2e cap of {', '.join(spent)} by N runs, or no? The owner answers with a comment on "
+                "this card holding exactly one of these two lines (any case; the rest of the comment is free "
+                "prose):"
+            ),
+            "",
+            f"    {e2e_budget.ANSWER_RAISE_LINE}",
+            f"    {e2e_budget.ANSWER_NO_LINE}",
+            "",
+            "A comment with neither line, with both, or with two raise lines authorizes nothing.",
+            "",
+            "## Applying the owner's answer",
+            "",
+            (
+                f"- `{e2e_budget.ANSWER_RAISE_LINE}`: run this for every card whose cap is spent, each with the "
+                "event id of that comment; the raise is the owner's N. Then complete this card; the next pass "
+                "dispatches one run over the whole batch:"
+            ),
+            "",
+            *commands,
+            "",
+            (
+                f"- `{e2e_budget.ANSWER_NO_LINE}`: complete this card without a raise; every card of the batch is "
+                "then declined, with your completion text."
+            ),
+        ]
+    )
+    created = runtime.writer.create(
+        role="dispatcher",
+        actor=runtime.owner,
+        project=project,
+        task_type="decision",
+        title=f"E2E caps spent: {', '.join(spent)} — more runs for the after-merge run? (money decision for the owner)",
+        description=description,
+        target="ready",
+        sprint="",
+        origin=origin,
+        request_id=request_id,
+    )
+    return str(created["task"]["ref"])
+
+
+def _batch_unowned(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, Any],
+    project: str,
+    queue: dict[str, Any],
+    tasks: dict[str, dict[str, Any]],
+    by_ref: dict[str, dict[str, Any]],
+    spent: list[str],
+    carrier_ref: str,
+) -> dict[str, Any]:
+    """No card of the batch came from a PO session, so no decision can be handed to anyone: the whole
+    batch is declined, and each spent card rings the bell."""
+    text = (
+        f"No after-merge e2e run is dispatched: it would cover {', '.join(by_ref)}, outside every open sprint, "
+        f"and the e2e cap of {', '.join(spent)} is spent. No covered card came from a PO session, so there is "
+        "nobody to hand the money decision to but the owner: re-cut the work in a sprint with an e2e budget, "
+        "or through the PO."
+    )
+    for ref in spent:
+        cap = e2e_budget.card_cap(tasks[ref])
+        owner_events.record(
+            owner_events.E2E_BUDGET_SPENT,
+            ref,
+            text,
+            f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
+            to=getattr(getattr(runtime, "reader", None), "client", None),
+        )
+    for ref in by_ref:
+        _decline(runtime, queue, ref, text, decision="")
+    runtime.save_records(payload, records)
+    return _outcome(project, "e2e-after-merge-declined", ref=carrier_ref, covered=list(by_ref), reason=text)
 
 
 def _decline(runtime: Any, queue: dict[str, Any], ref: str, text: str, *, decision: str) -> None:
@@ -1144,12 +1266,19 @@ def _budget_recheck(
         if wait["scope"] == "sprint":
             current = runtime.reader.sprint_e2e_budget(scope_ref)
             budget = int(current["budget"]) if current else generation
-            room = current is None or int(current["used"]) < budget
+            room = current is None or int(current["used"]) < budget or budget > generation
+            what = f"the e2e budget of {scope_ref} ({budget} runs) is spent"
         else:
-            task = runtime.reader.show(scope_ref)
-            budget = e2e_budget.card_cap(task)
-            room = e2e_record.e2e_state(task).dispatched < budget
-        if room or budget > generation:
+            # The batch runs again only once every spent cap has room: all together or none.
+            spent = {str(ref): runtime.reader.show(str(ref)) for ref in wait.get("spent") or []}
+            short = [
+                ref
+                for ref, task in spent.items()
+                if e2e_record.e2e_state(task).dispatched >= e2e_budget.card_cap(task)
+            ]
+            room = not short
+            what = f"the e2e cap of {', '.join(short)} is spent"
+        if room:
             queue["budget_waits"].remove(wait)
             runtime.save_records(payload, records)
             continue
@@ -1160,11 +1289,10 @@ def _budget_recheck(
                 raise
             decision = None
         if decision is not None and decision.get("state") != "done":
-            if wait["scope"] == "sprint":
-                _join(runtime, payload, records, queue, wait)
+            _join(runtime, payload, records, queue, wait)
             continue
         text = (
-            f"No after-merge e2e run is dispatched: the e2e budget of {scope_ref} ({budget} runs) is spent, and "
+            f"No after-merge e2e run is dispatched: {what}, and "
             f"the decision {wait['decision']} "
             + ("was completed without a raise" if decision is not None else "no longer exists")
             + ". This is the owner's money decision, not a defect of the card's code."
@@ -1191,32 +1319,48 @@ def _join(
     queue: dict[str, Any],
     wait: dict[str, Any],
 ) -> None:
-    """A card queued while the sprint's budget decision is open joins it, and shows the mark."""
+    """A card queued while a budget decision is open joins it, is listed on it, and shows the mark."""
     cards = list(wait.get("cards") or [])
     for entry in queue["pending"]:
         ref = str(entry["ref"])
         if ref in cards:
             continue
         task = runtime.reader.show(ref)
-        _decision_card(
-            runtime,
-            task,
-            e2e_record.e2e_state(task),
-            str(entry["merge_sha"]),
-            scope="sprint",
-            scope_ref=str(wait["scope_ref"]),
-            generation=int(wait["generation"]),
-            spent_line="",
-            charges=[],
-            origin=None,
-            waiting=[
-                (
-                    ref,
-                    str(task.get("title") or ""),
-                    f"`{entry['merge_sha']}` (its merge; the after-merge e2e run)",
-                )
-            ],
-        )
+        if wait["scope"] == "sprint":
+            _decision_card(
+                runtime,
+                task,
+                e2e_record.e2e_state(task),
+                str(entry["merge_sha"]),
+                scope="sprint",
+                scope_ref=str(wait["scope_ref"]),
+                generation=int(wait["generation"]),
+                spent_line="",
+                charges=[],
+                origin=None,
+                waiting=[
+                    (
+                        ref,
+                        str(task.get("title") or ""),
+                        f"`{entry['merge_sha']}` (its merge; the after-merge e2e run)",
+                    )
+                ],
+            )
+        else:
+            runtime.writer.comment(
+                role="dispatcher",
+                actor=runtime.owner,
+                reference=str(wait["decision"]),
+                body=(
+                    _cap_line(ref, task, str(entry["merge_sha"]), [])
+                    + "\n\nIt merged while this decision is open and joins the batch: the same answer applies "
+                    "to it."
+                ),
+                request_id="-".join(
+                    request_token(part)
+                    for part in ("dispatcher", "e2e-budget-join", str(wait["decision"]), ref)
+                ),
+            )
         _remark(runtime, ref, "", E2eState(), state=AM_BUDGET_WAIT, decision=str(wait["decision"]))
         cards.append(ref)
         wait["cards"] = cards

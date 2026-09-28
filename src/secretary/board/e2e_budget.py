@@ -16,7 +16,8 @@ A spent budget is a money decision. The dispatcher cuts a `decision` card for it
 generation (:func:`decision_request_id`; the generation is the budget, or the card's cap, the runs were
 spent against), and the PO hands it to the owner. The budget is raised only on the owner's recorded
 word: `sprint e2e-budget` / `task e2e-budget` with `--authorized-by`, the event id of an owner comment
-on that decision card made after its handover whose one answer line is `e2e budget: raise <N>`; the
+on that decision card (for a card's cap, also the after-merge batch decision that names the card spent,
+:func:`batch_decision_request_id`) made after its handover whose one answer line is `e2e budget: raise <N>`; the
 raise is that N and nothing else (:func:`authorized_raise`, :func:`owner_answer`).
 """
 
@@ -57,6 +58,11 @@ AFTER_MERGE_DISPATCH_INFIX = "-e2e-am-"
 #: The request-id actions of a budget decision card: of a sprint, and of a card outside every sprint.
 SPRINT_DECISION_ACTION = "e2e-budget"
 CARD_DECISION_ACTION = "e2e-cap"
+#: The request-id action of the one decision an after-merge batch outside every open sprint needs when
+#: some of its cards' caps are spent (secretary-1807): `dispatcher-e2e-caps-<generation>-<spent cards>`,
+#: the spent cards joined by `.`. It authorizes a raise of each of those cards' caps.
+BATCH_DECISION_ACTION = "e2e-caps"
+_BATCH_DECISION = re.compile(r"dispatcher-e2e-caps-[0-9]+-(.+)")
 
 
 def _token(value: str) -> str:
@@ -75,6 +81,17 @@ def decision_prefix(scope_ref: str) -> str:
 def decision_request_id(scope_ref: str, generation: int) -> str:
     """The create request id of the decision for one budget generation: one card per generation."""
     return decision_prefix(scope_ref) + str(int(generation))
+
+
+def batch_decision_request_id(spent: Iterable[str], generation: int) -> str:
+    """The create request id of an after-merge batch's decision: one card per (spent cards, their caps)."""
+    return f"dispatcher-{BATCH_DECISION_ACTION}-{int(generation)}-" + ".".join(_token(ref) for ref in spent)
+
+
+def batch_decision_cards(request_id: str) -> list[str]:
+    """The spent cards an after-merge batch decision's create request id names, or none."""
+    matched = _BATCH_DECISION.fullmatch(str(request_id or ""))
+    return matched.group(1).split(".") if matched else []
 
 
 def budget_view(budget: int, used: int, charges: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -227,8 +244,11 @@ def authorized_raise(audit: Any, reader: Any, event_id: str, scope_ref: str, add
     decision = str(event.get("ref") or "")
     events = audit.events(decision)
     created = next((item for item in events if item.get("kind") == "created"), None)
+    created_id = str((created or {}).get("request_id") or "")
     pattern = re.escape(decision_prefix(scope_ref)) + r"[0-9]+"
-    if created is None or not re.fullmatch(pattern, str(created.get("request_id") or "")):
+    # A card's cap is raised on its own decision, or on the after-merge batch decision naming it spent.
+    batched = not scope_ref.startswith("sprint:") and scope_ref in batch_decision_cards(created_id)
+    if created is None or not (re.fullmatch(pattern, created_id) or batched):
         raise _refused(
             f"--authorized-by {event_id} is a comment on {decision or 'no card'}, which is not an e2e budget "
             f"decision card of {scope_ref}"
@@ -258,6 +278,7 @@ __all__ = [
     "AFTER_MERGE_DISPATCH_INFIX",
     "ANSWER_NO_LINE",
     "ANSWER_RAISE_LINE",
+    "BATCH_DECISION_ACTION",
     "CARD_CAP_RAISED",
     "CARD_E2E_CAP",
     "DEFAULT_E2E_BUDGET",
@@ -269,6 +290,8 @@ __all__ = [
     "SPRINT_E2E_CHARGES",
     "SPRINT_E2E_USED",
     "authorized_raise",
+    "batch_decision_cards",
+    "batch_decision_request_id",
     "budget_view",
     "cap_raises",
     "cap_text",

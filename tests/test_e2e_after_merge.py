@@ -28,9 +28,8 @@ from secretary.dispatch.post_merge import reconcile_post_merge_watches, watches
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import new_attempt_id, now_rfc3339
 from secretary.sprints import SprintReader
-from secretary.tasks import is_significant_card_event
-from tests.dispatcher_fixtures import CARD_REF
-from tests.e2e_stage_fixtures import FAILED_LOG, REPO, E2eGitHubHost, E2eStageFixture, SimulatedCrash
+from secretary.tasks import TaskError, is_significant_card_event
+from tests.e2e_stage_fixtures import REPO, E2eGitHubHost, E2eStageFixture, SimulatedCrash
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
 
@@ -74,6 +73,10 @@ class AfterMergeGitHub(E2eGitHubHost):
         self.crash_after_ref = False
         self.ran_on = ""
         self.compares = 0
+        # The coming DELETEs GitHub refuses with 422 while the branch stays: `refused`, or `unreadable`
+        # (the read that would confirm the branch is gone then fails too).
+        self.delete_refusals: list[str] = []
+        self.ref_read_fails = False
 
     def run_capture(self, args: list[str], label: str, *, cwd: Any = None) -> subprocess.CompletedProcess:
         args = list(args)
@@ -92,6 +95,12 @@ class AfterMergeGitHub(E2eGitHubHost):
             return self._ok(args, "{}")
         if args[:4] == ["gh", "api", "--method", "DELETE"]:
             name = args[4].split("/git/refs/heads/", 1)[1]
+            refusal = self.delete_refusals.pop(0) if self.delete_refusals else ""
+            if refusal:
+                # GitHub refuses the delete with 422 (validation, protection, spam) and the branch stays.
+                self.ref_read_fails = refusal == "unreadable"
+                self.ref_log.append(("refused", name, ""))
+                return subprocess.CompletedProcess(args, 1, "", "gh: Validation Failed (HTTP 422)")
             if name not in self.refs:
                 return subprocess.CompletedProcess(args, 1, "", "gh: Reference does not exist (HTTP 422)")
             del self.refs[name]
@@ -105,7 +114,12 @@ class AfterMergeGitHub(E2eGitHubHost):
                 self.compares += 1
                 return self._ok(args, json.dumps({"status": self._compare(match.group(1), match.group(2))}))
             if match := re.fullmatch(r"repos/[^/]+/[^/]+/git/ref/heads/(.+)", path):
-                return self._ok(args, json.dumps({"sha": self.refs.get(match.group(1), "")}))
+                if self.ref_read_fails:
+                    self.ref_read_fails = False
+                    return subprocess.CompletedProcess(args, 1, "", "gh: Server Error (HTTP 500)")
+                if match.group(1) not in self.refs:
+                    return subprocess.CompletedProcess(args, 1, "", "gh: Not Found (HTTP 404)")
+                return self._ok(args, json.dumps({"sha": self.refs[match.group(1)]}))
             if match := re.fullmatch(r"repos/[^/]+/[^/]+/actions/workflows/e2e\.yml/runs\?(.*)", path):
                 query = dict(part.split("=", 1) for part in match.group(1).split("&"))
                 self.run_listings += 1
@@ -449,6 +463,55 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.run_of(cards[-1]).git_ref_state, "deleted")
         self.assertEqual(self.queue(), {}, "nothing left for the project")
 
+    def concluded_with_refused_delete(self, *refusals: str) -> tuple[list[str], Any]:
+        cards = self.three_merged_in_one_run()
+        self.am_tick()
+        run = self.run_of(cards[-1])
+        self.conclude("success", run.wait_ref)
+        self.host.delete_refusals = list(refusals)
+        return cards, run
+
+    def test_a_422_on_a_branch_already_gone_is_confirmed_absent_and_dropped(self) -> None:
+        cards, run = self.concluded_with_refused_delete()
+        del self.host.refs[run.git_ref]  # somebody deleted it first: GitHub answers the DELETE 422
+
+        outcomes = self.am_tick()
+
+        self.assertNotIn("e2e-after-merge-ref-cleanup", [o["action"] for o in outcomes])
+        self.assertEqual(self.queue(), {})
+        self.assertEqual(self.run_of(cards[-1]).git_ref_state, "deleted")
+
+    def test_a_422_while_the_branch_still_exists_stays_recorded_and_is_deleted_later(self) -> None:
+        cards, run = self.concluded_with_refused_delete("refused")
+
+        outcomes = self.am_tick()
+
+        [kept] = [o for o in outcomes if o["action"] == "e2e-after-merge-ref-cleanup"]
+        self.assertEqual(kept["status"], "degraded")
+        self.assertIn("still exists", kept["reason"])
+        self.assertIn(run.git_ref, self.host.refs)
+        self.assertEqual([item["ref"] for item in self.queue()["cleanup"]], [run.git_ref])
+        self.assertEqual(self.run_of(cards[-1]).git_ref_state, "created")
+
+        self.am_tick()
+
+        self.assertNotIn(run.git_ref, self.host.refs)
+        self.assertEqual(self.host.ref_log[-1], ("delete", run.git_ref, ""))
+        self.assertEqual(self.queue(), {})
+        self.assertEqual(self.run_of(cards[-1]).git_ref_state, "deleted")
+
+    def test_a_422_whose_confirming_read_fails_stays_recorded(self) -> None:
+        cards, run = self.concluded_with_refused_delete("unreadable")
+
+        outcomes = self.am_tick()
+
+        [kept] = [o for o in outcomes if o["action"] == "e2e-after-merge-ref-cleanup"]
+        self.assertIn(run.git_ref, kept["reason"])
+        self.assertEqual([item["ref"] for item in self.queue()["cleanup"]], [run.git_ref])
+        self.assertEqual(self.run_of(cards[-1]).git_ref_state, "created")
+        self.am_tick()
+        self.assertEqual(self.queue(), {})
+
     def test_a_run_on_another_sha_is_blocked_and_never_attached(self) -> None:
         cards = self.three_merged_in_one_run()
         self.host.ran_on = _sha("9")
@@ -568,38 +631,144 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             self.assertEqual(e2e_state(self.reader.show(card)).after_merge.charged, [run.dispatch_id])
             self.assertEqual(self.mark(card)["runs_dispatched"], 1)
 
-    def test_outside_a_sprint_one_spent_cap_charges_none_and_waits_on_a_decision(self) -> None:
-        spent = self.done_card(sprint="", origin=True)
+    def older_capped_newer_not(self) -> tuple[str, str, dict[str, Any]]:
+        """The reviewer's batch: outside every sprint, the older card (PO origin) at its cap, the newer one
+        not; one pass charges none, dispatches nothing and cuts one decision for the batch."""
+        capped = self.done_card(sprint="", origin=True)
         fresh = self.done_card(sprint="")
         self.on_main(_sha("a"), _sha("b"))
-        self.merge(spent, _sha("a"))
+        self.merge(capped, _sha("a"))
         self.merge(fresh, _sha("b"))
-        state = e2e_state(self.reader.show(spent))
+        state = e2e_state(self.reader.show(capped))
         # Its own cap was spent by three earlier after-merge runs no sprint paid for.
         state.after_merge = AfterMergeMark(merge_sha=_sha("a"), charged=["x-1", "x-2", "x-3"])
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=spent, state=state.text()
+            role="dispatcher", actor="secretary-pilot", reference=capped, state=state.text()
         )
 
         [waiting] = self.am_tick()
 
         self.assertEqual(waiting["action"], "e2e-after-merge-budget-waiting", waiting)
-        self.assertEqual(self.host.dispatches, [])
-        self.assertEqual(self.host.ref_log, [])
-        self.assertEqual(e2e_state(self.reader.show(fresh)).after_merge.charged, [], "none charged")
-        self.assertEqual(e2e_state(self.reader.show(spent)).after_merge.charged, ["x-1", "x-2", "x-3"])
         [decision] = [card for card in self.reader.list() if card.get("type") == "decision"]
         self.assertEqual(waiting["decisions"], [decision["ref"]])
+        return capped, fresh, decision
+
+    def hand_to_owner(self, decision: str, answer: str) -> str:
+        self.board.move(self.board.key_of(decision), "in_progress")
+        self.writer.handover(
+            role="po",
+            actor="po",
+            reference=decision,
+            to="owner",
+            reason="money",
+            request_id=f"handover-{decision}",
+        )
+        return str(
+            self.writer.comment(
+                role="owner", actor="owner", reference=decision, body=answer, request_id="owner"
+            )["event_id"]
+        )
+
+    def test_outside_a_sprint_one_spent_cap_charges_none_and_one_decision_owns_the_batch(self) -> None:
+        capped, fresh, decision = self.older_capped_newer_not()
+
+        self.assertEqual((self.host.dispatches, self.host.ref_log), ([], []))
+        self.assertEqual(e2e_state(self.reader.show(fresh)).after_merge.charged, [], "none charged")
+        self.assertEqual(e2e_state(self.reader.show(capped)).after_merge.charged, ["x-1", "x-2", "x-3"])
         self.assertEqual(
             origin_field.po_origin(decision), {"session": "po-session-7", "request": "po-request-7"}
         )
-        self.assertIn(f"- {spent} waits", decision["description"])
-        for card in (spent, fresh):
+        self.assertFalse(decision.get("sprint"))
+        # Both are named, each with its cap: the capped one needs the raise.
+        body = decision["description"]
+        [capped_line] = [line for line in body.splitlines() if line.startswith(f"- {capped} waits")]
+        [fresh_line] = [line for line in body.splitlines() if line.startswith(f"- {fresh} waits")]
+        self.assertIn("cap spent, 3 of 3 runs: needs a raise", capped_line)
+        self.assertIn("cap 0 of 3 runs, not spent", fresh_line)
+        self.assertIn(f"task e2e-budget --ref {capped} --role po", body)
+        self.assertNotIn(f"task e2e-budget --ref {fresh} ", body)
+        for card in (capped, fresh):
             self.assertEqual(self.mark(card)["mark"], f"e2e: budget spent, waiting on {decision['ref']}")
-        self.assertEqual(sorted(self.pending()), sorted([spent, fresh]))
-        # Re-checked each tick; nothing is dispatched while the decision is open.
+        self.assertEqual(sorted(self.pending()), sorted([capped, fresh]))
+        # Re-checked each tick; nothing is dispatched or cut again while the decision is open.
         self.assertEqual(self.am_tick()[0]["action"], "e2e-after-merge-budget-waiting")
         self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "decision"]), 1)
+        # A card queued while it is open joins it and is listed there.
+        late = self.done_card(sprint="")
+        self.on_main(_sha("c"))
+        self.merge(late, _sha("c"))
+        self.am_tick()
+        self.am_tick()
+        [joined] = self.comments_on(decision["ref"], f"- {late} waits")
+        self.assertIn("joins the batch", joined)
+        self.assertEqual(self.mark(late)["mark"], f"e2e: budget spent, waiting on {decision['ref']}")
+        self.assertEqual(self.host.dispatches, [])
+
+    def test_a_raise_of_the_spent_cap_runs_the_whole_batch_once(self) -> None:
+        capped, fresh, decision = self.older_capped_newer_not()
+        answer = self.hand_to_owner(decision["ref"], "e2e budget: raise 1")
+
+        self.writer.raise_e2e_cap(role="po", actor="po", reference=capped, authorized_by=answer)
+        # The batch decision authorizes only the cards it names spent.
+        with self.assertRaises(TaskError) as refused:
+            self.writer.raise_e2e_cap(role="po", actor="po", reference=fresh, authorized_by=answer)
+        self.assertEqual(refused.exception.code, "authorization_refused")
+        self.am_tick()
+
+        self.assertEqual(len(self.host.dispatches), 1)
+        run = self.run_of(fresh)
+        self.assertEqual([item["ref"] for item in run.covered], [capped, fresh])
+        self.assertEqual(run.charged_to, "cards")
+        self.assertEqual(
+            e2e_state(self.reader.show(capped)).after_merge.charged, ["x-1", "x-2", "x-3", run.dispatch_id]
+        )
+        self.assertEqual(e2e_state(self.reader.show(fresh)).after_merge.charged, [run.dispatch_id])
+        self.assertEqual(self.pending(), [])
+
+    def test_a_decision_with_no_raise_declines_the_whole_batch(self) -> None:
+        capped, fresh, decision = self.older_capped_newer_not()
+        self.hand_to_owner(decision["ref"], "e2e budget: no")
+        self.writer.complete(
+            role="po",
+            actor="po",
+            reference=decision["ref"],
+            kind="decision",
+            body="## Decision\n\nThe owner said no.\n\n## How to verify\n\n`secretary task show`\n",
+            request_id="po-complete",
+        )
+
+        self.am_tick()
+
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(self.pending(), [])
+        for card in (capped, fresh):
+            view = self.mark(card)
+            self.assertEqual((view["state"], view["decision"]), ("declined", decision["ref"]))
+            [comment] = self.comments_on(card, "## E2E after merge — declined")
+            self.assertIn(f"the decision {decision['ref']} was completed without a raise", comment)
+        self.assertEqual(self.queue(), {})
+
+    def test_a_batch_no_po_session_owns_is_declined_whole_with_the_bell(self) -> None:
+        capped, fresh = self.done_card(sprint=""), self.done_card(sprint="")
+        self.on_main(_sha("a"), _sha("b"))
+        self.merge(capped, _sha("a"))
+        self.merge(fresh, _sha("b"))
+        state = e2e_state(self.reader.show(capped))
+        state.after_merge = AfterMergeMark(merge_sha=_sha("a"), charged=["x-1", "x-2", "x-3"])
+        self.writer.record_e2e_state(
+            role="dispatcher", actor="secretary-pilot", reference=capped, state=state.text()
+        )
+
+        [declined] = self.am_tick()
+
+        self.assertEqual(declined["action"], "e2e-after-merge-declined", declined)
+        self.assertEqual([c for c in self.reader.list() if c.get("type") == "decision"], [])
+        for card in (capped, fresh):
+            self.assertEqual(self.mark(card)["state"], "declined")
+        [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.kind == "e2e_budget_spent"]
+        self.assertEqual(bell.subject_ref, capped)
+        self.assertEqual(self.pending(), [])
 
     def test_a_spent_sprint_budget_dispatches_nothing_and_names_every_covered_card(self) -> None:
         self.spend_sprint(3)
@@ -694,7 +863,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
                 self.merge(card, _sha(digit))
             return made
 
-        made, run = self.run_to("failure", cards=cards)
+        _made, run = self.run_to("failure", cards=cards)
 
         [hotfix] = self.hotfixes()
         self.assertEqual((hotfix["sprint"], hotfix["state"]), (None, "ready"))
@@ -711,7 +880,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
             self.merge(made[0], _sha("a"))
             return made
 
-        made, run = self.run_to("failure", cards=cards)
+        self.run_to("failure", cards=cards)
 
         [hotfix] = self.hotfixes()
         self.assertEqual((hotfix["sprint"], hotfix["state"]), (None, "blocked"))

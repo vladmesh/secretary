@@ -367,10 +367,23 @@ def create_ref(host: Any, repo: str, name: str, sha: str) -> None:
     raise HostError(f"GitHub refused to create branch {name} at {sha} in {repo}: {text}")
 
 
-def delete_ref(host: Any, repo: str, name: str) -> None:
-    """Delete the dispatcher-owned branch `name`; one that is already gone counts as deleted.
+#: What :func:`delete_ref` answers: GitHub deleted the branch, or it is confirmed not to exist.
+REF_DELETED = "deleted"
+REF_ABSENT = "absent"
 
-    `GateTransportError` when GitHub did not answer, `HostError` for any other refusal.
+
+def delete_ref(host: Any, repo: str, name: str) -> str:
+    """Delete the dispatcher-owned branch `name`: :data:`REF_DELETED` or :data:`REF_ABSENT`, else raise.
+
+    Three answers, and only two of them mean the branch is gone:
+
+    - deleted: GitHub answered the `DELETE` with success (204);
+    - absent: the `DELETE` answered 422 or 404, and a follow-up `GET git/ref/heads/<name>` answered 404.
+      GitHub also answers 422 for a delete it refused (validation, a protected or default branch, spam
+      limiting), so a 422 alone proves nothing;
+    - not deleted: anything else, a 422 whose read still finds the branch or whose read failed included.
+      `GateTransportError` when GitHub did not answer, `HostError` otherwise; the caller keeps the branch
+      recorded and asks again.
     """
     completed = _backend_call(
         host,
@@ -378,10 +391,19 @@ def delete_ref(host: Any, repo: str, name: str) -> None:
         "e2e after-merge ref",
     )
     if completed.returncode == 0:
-        return
+        return REF_DELETED
     code, text = _gh_status(completed)
     if code in {"404", "422"}:
-        return
+        read = _backend_call(host, ["gh", "api", f"repos/{repo}/git/ref/heads/{name}"], "e2e after-merge ref")
+        if read.returncode == 0:
+            raise HostError(f"branch {name} still exists in {repo} after its delete answered {code}: {text}")
+        read_code, read_text = _gh_status(read)
+        if read_code == "404":
+            return REF_ABSENT
+        raise HostError(
+            f"branch {name} in {repo}: the delete answered {code} ({text}) and the read that would confirm it is "
+            f"gone failed: {read_text}"
+        )
     if code == "429" or "rate limit" in text.lower() or not code:
         raise GateTransportError(f"e2e after-merge ref {name} was not deleted: {text}")
     raise HostError(f"GitHub refused to delete branch {name} in {repo}: {text}")
@@ -435,6 +457,8 @@ __all__ = [
     "E2E_CLOCK_MARGIN_SECONDS",
     "E2E_IDENTIFY_SECONDS",
     "E2E_RECOVERY_SETTLE_SECONDS",
+    "REF_ABSENT",
+    "REF_DELETED",
     "AdapterE2eDeclarationError",
     "DispatchRefused",
     "DispatchedRun",
