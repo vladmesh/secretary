@@ -662,7 +662,7 @@
                   "owner",
                   "po"
                 ],
-                "description": "run: an active wait card, or a code card whose e2e run has not answered. owner: a card handed to the owner, or an e2e budget decision. po: a decision or operation card In progress and not handed over."
+                "description": "run: an active wait card, a code card whose e2e run has not answered, or a merged card covered by an after-merge run that has not answered or queued for the next one. owner: a card handed to the owner, or an e2e budget decision. po: a decision or operation card In progress and not handed over."
               },
               "card": {
                 "type": "string"

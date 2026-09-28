@@ -111,7 +111,7 @@ from typing import Any
 
 from secretary.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from secretary.board.completion_evidence import is_po_executed
-from secretary.board.e2e_record import AFTER_MERGE
+from secretary.board.e2e_record import AFTER_MERGE, AM_COVERED, AM_PENDING, e2e_state
 from secretary.board.owner_handover import waiting_owner
 from secretary.board.wait_card import RESULT_READY as WAIT_RESULT_READY
 from secretary.board.wait_card import TARGET_CARD, TARGET_RUN, TARGET_TIME
@@ -249,8 +249,9 @@ WAITING_UNKNOWN = "unknown"
 WAITING_STATES = (WAITING_WORKING, WAITING_WAITING, WAITING_BLOCKED, WAITING_ENDED, WAITING_UNKNOWN)
 
 #: What a sprint waits for, one entry per waiting card (`work.waiting_on`, secretary-1811): a run (an
-#: active wait card, or a code card whose e2e run has not answered), the owner (a card handed over, or
-#: an e2e budget decision), or the PO (a decision/operation card In progress and not handed over).
+#: active wait card, a code card whose e2e run has not answered, or a merged card covered by an
+#: after-merge run or queued for the next one), the owner (a card handed over, or an e2e budget
+#: decision), or the PO (a decision/operation card In progress and not handed over).
 WAITING_ON_RUN = "run"
 WAITING_ON_OWNER = "owner"
 WAITING_ON_PO = "po"
@@ -258,6 +259,8 @@ WAITING_ON_KINDS = (WAITING_ON_RUN, WAITING_ON_OWNER, WAITING_ON_PO)
 
 #: The e2e run states (`E2eRun.status`) in which the run has not answered yet.
 E2E_IN_FLIGHT = frozenset({"dispatching", "identifying", "wait_card_pending", "waiting"})
+#: The detail of a merged card queued for its project's next after-merge e2e run (no run covers it yet).
+AFTER_MERGE_QUEUED = "queued for the next after-merge run"
 
 #: How a sprint row carries its declared observer, kept as three states for the same reason
 #: :func:`secretary.sprints._observer` keeps them: the repairs differ. A row with no field at all is
@@ -2146,8 +2149,10 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
     """What one card of a sprint waits for, as `work.waiting_on` entries; `[]` for a card that does not.
 
     Tolerates any value in the card's blocks: a missing, partial or legacy `wait`, `e2e` or handover
-    mark contributes nothing rather than raising. A done card waits for nothing, except on the
-    after-merge e2e run that covers it and a budget decision that run's batch is held on.
+    mark contributes nothing rather than raising. A done card waits for nothing, except on its
+    after-merge e2e: the run that covers it (every covered card, not only the carrier of the run's
+    record), the next run while it is queued, and a budget decision that batch is held on. One run is
+    said once per card: the carrier's run record and its own covered mark are the same wait.
     """
     reference = str(card.get("ref") or "")
     state = str(card.get("state") or "")
@@ -2170,13 +2175,37 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
         said(WAITING_ON_RUN, wait_line(wait))
     e2e = card.get("e2e") if isinstance(card.get("e2e"), dict) else {}
     runs = [*(_list(e2e.get("runs")) if live else []), *_list(e2e.get("after_merge_runs"))]
+    # The keys (run URL, dispatch id) of the runs already said, and of the carried runs that answered.
+    said_runs: set[str] = set()
+    concluded: set[str] = set()
     for run in runs:
-        if isinstance(run, dict) and run.get("state") in E2E_IN_FLIGHT:
-            sha = str(run.get("sha") or "")[:12] or "an unrecorded SHA"
+        if not isinstance(run, dict):
+            continue
+        keys = {str(run.get(name) or "") for name in ("run", "dispatch_id")} - {""}
+        if run.get("state") not in E2E_IN_FLIGHT:
+            concluded |= keys
+            continue
+        if keys & said_runs:
+            continue
+        said_runs |= keys
+        sha = str(run.get("sha") or "")[:12] or "an unrecorded SHA"
+        said(
+            WAITING_ON_RUN,
+            f"e2e run {run.get('run') or '(not identified yet)'} on {sha}: {str(run.get('state')).replace('_', ' ')}",
+        )
+    covering = e2e_state(card).after_merge
+    if covering is not None and covering.state == AM_COVERED:
+        keys = {covering.run_url, covering.dispatch_id} - {""}
+        if not keys & (said_runs | concluded):
+            said_runs |= keys
+            run_text = covering.run_url or f"{covering.dispatch_id or '?'} (not identified yet)"
             said(
                 WAITING_ON_RUN,
-                f"e2e run {run.get('run') or '(not identified yet)'} on {sha}: {str(run.get('state')).replace('_', ' ')}",
+                f"after-merge e2e run {run_text} carried by {covering.carrier or 'an unrecorded card'}, "
+                f"covering merge {covering.merge_sha[:12]}",
             )
+    elif covering is not None and covering.state == AM_PENDING:
+        said(WAITING_ON_RUN, AFTER_MERGE_QUEUED)
     if e2e.get("mark") and (live or e2e.get("placement") == AFTER_MERGE):
         said(WAITING_ON_OWNER, str(e2e.get("mark")))
     if not live:

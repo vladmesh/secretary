@@ -98,6 +98,37 @@ def _e2e_metadata(*, state: str = "waiting", budget_wait: str = "") -> dict[str,
     return {"task_type": "code", "e2e": json.dumps(document)}
 
 
+AM_RUN_URL = f"https://github.com/{REPO}/actions/runs/5150"
+AM_DISPATCH = "secretary-551-e2e-am-1-00000001"
+
+
+def _after_merge_run(**changes: object) -> dict:
+    """The carrier's record of a coalesced after-merge run over secretary-550 and secretary-551."""
+    run = {
+        "dispatch_id": AM_DISPATCH,
+        "sha": "c0ffee0000000000000000000000000000000000",
+        "repo": REPO,
+        "branch": "e2e/after-merge/secretary-551",
+        "workflow": "e2e.yml",
+        "intent_at": "2026-09-28T10:00:00Z",
+        "dispatch": "sent",
+        "run_id": 5150,
+        "run_url": AM_RUN_URL,
+        "head_sha": "c0ffee0000000000000000000000000000000000",
+        "wait_ref": "secretary-559",
+        "placement": "after_merge",
+        "covered": [
+            {"ref": "secretary-550", "merge_sha": "a" * 40},
+            {"ref": "secretary-551", "merge_sha": "b" * 40},
+        ],
+    }
+    if changes.get("resolution"):
+        run["result"] = {"outcome": "target_reached", "conclusion": "success", "summary": "green", "key": "k"}
+        run["acted"] = True
+    run.update(changes)
+    return run
+
+
 def _handed() -> dict[str, str]:
     return {
         WAITING_OWNER: "2026-09-27T12:00:00+00:00",
@@ -301,6 +332,57 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
         self.assertIn("payment card", detail[("owner", "secretary-542")])
         self.assertIn("secretary-599", detail[("owner", "secretary-543")])
         self.assertIn("with the PO", detail[("po", "secretary-544")])
+
+    def _merged(self, key: int, ref: str, sprint: str, mark: dict, carried: list | None = None) -> None:
+        document: dict = {"runs": [], "after_merge": mark}
+        if carried:
+            document["after_merge_runs"] = carried
+        self._card(key, ref, sprint, "done", task_type="code", e2e=json.dumps(document))
+
+    def test_a_coalesced_after_merge_run_is_waited_on_by_every_card_it_covers(self) -> None:
+        """secretary-1811 rework: the carrier and the card it covers, once each, with the same run URL."""
+        reference = self.reference_of(self.create())
+        covered = {
+            "merge_sha": "a" * 40,
+            "state": "covered",
+            "dispatch_id": AM_DISPATCH,
+            "run_url": AM_RUN_URL,
+            "carrier": "secretary-551",
+        }
+        self._merged(50, "secretary-550", reference, covered)
+        self._merged(51, "secretary-551", reference, {**covered, "merge_sha": "b" * 40}, [_after_merge_run()])
+        self._merged(52, "secretary-552", reference, {"merge_sha": "c" * 40, "state": "pending"})
+
+        document = self._run(reference)
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+        waiting_on = document["work"]["waiting_on"]
+        self.assertEqual(
+            sorted((entry["kind"], entry["card"]) for entry in waiting_on),
+            [("run", "secretary-550"), ("run", "secretary-551"), ("run", "secretary-552")],
+        )
+        detail = {entry["card"]: entry["detail"] for entry in waiting_on}
+        self.assertIn(AM_RUN_URL, detail["secretary-550"])
+        self.assertIn(AM_RUN_URL, detail["secretary-551"])
+        self.assertEqual(detail["secretary-552"], "queued for the next after-merge run")
+
+    def test_after_a_green_after_merge_run_neither_card_waits(self) -> None:
+        reference = self.reference_of(self.create())
+        green = {
+            "merge_sha": "a" * 40,
+            "state": "green",
+            "dispatch_id": AM_DISPATCH,
+            "run_url": AM_RUN_URL,
+            "carrier": "secretary-551",
+        }
+        self._merged(50, "secretary-550", reference, green)
+        self._merged(
+            51,
+            "secretary-551",
+            reference,
+            {**green, "merge_sha": "b" * 40},
+            [_after_merge_run(resolution="green")],
+        )
+        self.assertEqual(self._run(reference)["work"]["waiting_on"], [])
 
     def test_a_sprint_waiting_on_nothing_prints_an_empty_list(self) -> None:
         reference = self.reference_of(self.create())

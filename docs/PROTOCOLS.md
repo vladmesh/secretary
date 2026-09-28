@@ -4032,11 +4032,15 @@ stored (secretary-1811). It is a list rather than a section; the document's `car
 | --- | --- | --- |
 | `run` | a `wait` card not Done or Blocked whose `wait.state` is `waiting` or `result_ready` | `waits for <run URL, card reaching states, or time> since <t>, deadline <d>` (and `result ready, delivery pending`) |
 | `run` | a card not Done with an e2e run still `dispatching`, `identifying`, `wait_card_pending` or `waiting`; or any card carrying such an after-merge run | `e2e run <run URL> on <sha>: <state>` |
+| `run` | a merged card whose after-merge mark is `covered` -- every card a coalesced run covers, not only its carrier -- unless the carrier's own record of that run has answered | `after-merge e2e run <run URL> carried by <carrier>, covering merge <sha>` (the dispatch id while the run is not identified) |
+| `run` | a merged card whose after-merge mark is `pending` (queued, no run covers it yet) | `queued for the next after-merge run` |
 | `owner` | a card carrying the `waiting_owner` mark ([Handover to the owner](#handover-to-the-owner)) | `<kind> handed to the owner: <reason>` |
 | `owner` | a card waiting on an e2e budget decision (`e2e.mark`) | the mark, `e2e: budget spent, waiting on <decision>` |
 | `po` | a `decision` or `operation` card In progress without the mark | `<kind> card with the PO` |
 
-One card may carry more than one entry (a run and a budget mark). The list is empty when nothing is
+One card may carry more than one entry (a run and a budget mark), but one run is said once per card:
+the carrier's run record and its own `covered` mark are one entry, deduplicated by (card, run URL or
+dispatch id). A `green`, `red` or `declined` after-merge mark waits for nothing. The list is empty when nothing is
 waited for and for a closed sprint; it is null, never `[]`, when the sprint board or the listing did not
 answer. `secretary sprint status` prints it under `work.waiting_on`, every `sprint_list` item carries it,
 and the sprint page draws it as "Waiting on", each entry linking its card and any URL in its detail.

@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from typing import Any, ClassVar
 
+from secretary.board.e2e_record import e2e_view
 from secretary.po import token as po_token
 from secretary.web import pages
 from secretary.web.app import WebApp
@@ -573,6 +574,93 @@ class CardWaitsTests(unittest.TestCase):
                     self.assertEqual(entry["card"], card["ref"])
                     self.assertIn(fragment, entry["detail"])
                     self.assertIn(entry["kind"], WAITING_ON_KINDS)
+
+
+def merged(
+    ref: str, mark: dict[str, Any] | None, *, carried: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """A merged card as `TaskReader` gives it: the `e2e` field in its bag, and the view built from it."""
+    document: dict[str, Any] = {"runs": []}
+    if mark is not None:
+        document["after_merge"] = mark
+    if carried:
+        document["after_merge_runs"] = carried
+    card = {"ref": ref, "type": "code", "state": "done", "sprint": "sprint:1469"}
+    card["extensions"] = {"extra": {"e2e": json.dumps(document)}}
+    card["e2e"] = e2e_view(card)
+    return card
+
+
+AM_RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/5150"
+
+
+def am_run(state: str = "waiting", **changes: Any) -> dict[str, Any]:
+    """One after-merge run record as the carrier holds it (`E2eRun`, `placement: after_merge`)."""
+    record = {
+        "dispatch_id": "secretary-561-e2e-am-1-0001",
+        "sha": "cafe0000cafe0000cafe0000cafe0000cafe0000",
+        "repo": "vladmesh/secretary",
+        "branch": "e2e/after-merge/1",
+        "workflow": "e2e.yml",
+        "intent_at": "2026-09-28T10:00:00Z",
+        "dispatch": "sent",
+        "run_id": 5150,
+        "run_url": AM_RUN_URL,
+        "head_sha": "cafe0000cafe0000cafe0000cafe0000cafe0000",
+        "wait_ref": "secretary-570",
+        "placement": "after_merge",
+        "covered": [
+            {"ref": "secretary-560", "merge_sha": "a" * 40},
+            {"ref": "secretary-561", "merge_sha": "b" * 40},
+        ],
+    }
+    if state != "waiting":
+        record["result"] = {"outcome": "target_reached", "conclusion": state, "summary": state, "key": "k"}
+    record.update(changes)
+    return record
+
+
+def am_mark(state: str, merge: str = "a" * 40, **changes: Any) -> dict[str, Any]:
+    mark = {"merge_sha": merge, "state": state}
+    if state != "pending":
+        mark.update(dispatch_id="secretary-561-e2e-am-1-0001", run_url=AM_RUN_URL, carrier="secretary-561")
+    mark.update(changes)
+    return mark
+
+
+class AfterMergeWaitsTests(unittest.TestCase):
+    """secretary-1811 rework: every card a coalesced after-merge run covers waits on that run."""
+
+    def test_a_covered_card_that_is_not_the_carrier_waits_on_the_run(self) -> None:
+        [entry] = card_waits(merged("secretary-560", am_mark("covered")))
+        self.assertEqual(entry["kind"], "run")
+        self.assertIn(AM_RUN_URL, entry["detail"])
+        self.assertIn("carried by secretary-561", entry["detail"])
+
+    def test_the_carrier_says_its_run_once(self) -> None:
+        carrier = merged("secretary-561", am_mark("covered", "b" * 40), carried=[am_run()])
+        [entry] = card_waits(carrier)
+        self.assertEqual((entry["kind"], entry["card"]), ("run", "secretary-561"))
+        self.assertIn(AM_RUN_URL, entry["detail"])
+
+    def test_a_covered_run_not_yet_identified_is_named_by_its_dispatch_id(self) -> None:
+        [entry] = card_waits(merged("secretary-560", am_mark("covered", run_url="")))
+        self.assertIn("secretary-561-e2e-am-1-0001 (not identified yet)", entry["detail"])
+
+    def test_a_pending_card_is_queued_for_the_next_run(self) -> None:
+        [entry] = card_waits(merged("secretary-562", am_mark("pending")))
+        self.assertEqual((entry["kind"], entry["detail"]), ("run", "queued for the next after-merge run"))
+
+    def test_green_red_and_declined_wait_for_nothing(self) -> None:
+        for state in ("green", "red", "declined"):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    card_waits(merged("secretary-560", am_mark(state, hotfix="secretary-590"))), []
+                )
+
+    def test_a_carrier_whose_run_answered_does_not_wait_on_it_while_its_mark_still_says_covered(self) -> None:
+        carrier = merged("secretary-561", am_mark("covered", "b" * 40), carried=[am_run("success")])
+        self.assertEqual(card_waits(carrier), [])
 
 
 class PoSessionTitleTests(unittest.TestCase):
