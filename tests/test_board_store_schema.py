@@ -35,9 +35,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from secretary import upgrade
-from secretary.board import migrate, provision, schema
+from secretary.board import migrate, provision, schema, schema_gate
 from secretary.board.backend import record_key
-from secretary.board.store import BoardStoreConfig, BoardStoreError
+from secretary.board.store import BoardStoreConfig
 
 IMAGE = "postgres:16"
 DATABASE = "board_store_test"
@@ -294,14 +294,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             connection.exec_driver_sql("SELECT to_regclass('public.schema_migrations')").fetchone()[0],
             "the hand-rolled version table is gone; Alembic's is the version",
         )
-        self.assertEqual(migrate.assert_schema_revision(connection), migrate.head_revision())
-
-    def test_the_version_assertion_refuses_a_schema_this_build_does_not_speak(self) -> None:
-        connection = self.owner_connection()
-        self.run_migrations(connection)
-
-        with self.assertRaisesRegex(BoardStoreError, "refusing to write"):
-            migrate.assert_schema_revision(connection, expected="0004_something_later")
+        self.assertEqual(schema_gate.classify(tuple(row[0] for row in stamped)).state, schema_gate.CURRENT)
 
     def test_a_second_run_applies_nothing_and_leaves_the_schema_alone(self) -> None:
         connection = self.owner_connection()
@@ -1716,7 +1709,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
         command.upgrade(config, "0023_sprint_e2e_budget")
         connection.commit()
         store = OwnerEventStore(self.credentials("app"))
-        self.assertTrue(record("e2e_budget_spent", "secretary-1", "cap spent", "e-0", to=store))
+        # The operational store refuses a store at 0023 (`board.schema_gate`), so the earlier event
+        # is seeded as that revision's own row.
+        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            self.assertFalse(record("e2e_budget_spent", "secretary-1", "cap spent", "e-0", to=store))
+        connection.exec_driver_sql(
+            "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
+            "VALUES ('e2e_budget_spent', 'needs_owner', 'secretary-1', 'cap spent', now(), 'e-0')"
+        )
+        connection.commit()
 
         self.assertEqual(self.run_migrations(connection), ("0024_e2e_after_merge_kind",))
 

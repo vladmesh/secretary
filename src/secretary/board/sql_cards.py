@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board import schema_gate
 from secretary.board.backend import card_transport_key, record_key_kind
 from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.sql_product_issues import ProductIssueRecords
@@ -133,6 +134,19 @@ class SqlCardError(TaskError):
 
     def __init__(self, message: str) -> None:
         super().__init__("backend_error", message, 1)
+
+
+class CardSchemaOwed(schema_gate.SchemaOwed, TaskError):
+    """The store owes migrations this build's code reads through (`board.schema_gate`).
+
+    Raised when a connection opens, before any statement that depends on the schema, so every
+    reader and writer over this client — cards, sprints, products/issues, the SQL audit and
+    `SqlBoardHost` — answers it as one named `TaskError`.
+    """
+
+    def __init__(self, assessment: schema_gate.SchemaAssessment) -> None:
+        self.assessment = assessment
+        TaskError.__init__(self, schema_gate.SCHEMA_OWED, assessment.describe(), 1)
 
 
 def _driver_error(action: str, exc: BaseException) -> TaskError:
@@ -422,9 +436,29 @@ class SqlCardClient:
             with _translated("open a connection"):
                 import psycopg
 
-                return psycopg.connect(self.credentials.conninfo(), autocommit=False)
+                connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+            self._admit(connection)
+            return connection
         except BaseException:
             self._give_back(None)
+            raise
+
+    @staticmethod
+    def _admit(connection: Any) -> None:
+        """The schema gate, once per new connection: pooled ones were admitted when they opened.
+
+        A refused connection is closed rather than pooled, so nothing remembers the refusal: the
+        next borrow opens and reads again, and succeeds once the migrations are applied. The read's
+        transaction is ended here, so an admitted connection enters the pool idle.
+        """
+        try:
+            with _translated("read its schema revision"):
+                schema_gate.require(connection, CardSchemaOwed)
+                if _transaction_state(connection) not in (None, "IDLE"):
+                    connection.rollback()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                connection.close()
             raise
 
     def _give_back(self, connection: Any) -> None:
@@ -1269,4 +1303,4 @@ class SqlCardClient:
         return result
 
 
-__all__ = ["BOARD_COLUMNS", "BOARD_ID", "BOARD_NAME", "SqlCardClient", "SqlCardError"]
+__all__ = ["BOARD_COLUMNS", "BOARD_ID", "BOARD_NAME", "CardSchemaOwed", "SqlCardClient", "SqlCardError"]

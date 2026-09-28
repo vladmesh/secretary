@@ -32,6 +32,7 @@ outside it (§3.11).
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
 | `board/migrations/` | Alembic environment and revisions `0001`–`0023` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
+| `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
 | `board/backend.py` | `board_client`, entity identities and record keys (§2.2) |
@@ -1091,7 +1092,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0024_e2e_after_merge_kind`). PostgreSQL restore compares against `head_revision()`.
+  (`0024_e2e_after_merge_kind`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1101,6 +1102,23 @@ kind is refused.
 - **Where it runs:** bootstrap, and `step_board_store` in `secretary upgrade` (§5.8 order).
   No file → skipped; current → unchanged; broken or tracked file, unreachable server or failed
   revision → failed, before service restart.
+- **Schema gate (`board/schema_gate.py`):** every operational connection reads `alembic_version`
+  once when it opens, before any schema-dependent statement: each new connection of
+  `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each
+  `PoStore` operation and each `OwnerEventStore` connection of its own (one joined to a client
+  transaction was admitted with that client's connection). Exactly
+  `EXPECTED_SCHEMA_REVISION` is current: one read, no Alembic import. A revision of this build's
+  lineage short of it, or no version table at all, is refused with code `schema_owed` naming the
+  actual and expected revisions and the owed migrations in application order, in each caller's own
+  error family (`CardSchemaOwed` is a `TaskError`, `PoSchemaOwed` a `PoStoreError`,
+  `OwnerEventsSchemaOwed` an `OwnerEventsUnavailable`). A refused connection is closed, never
+  pooled, so the next read checks again and succeeds once the upgrade applied the migrations. A
+  revision the lineage does not contain is a later build's schema and is read as additive, not
+  refused: the previous build's dispatcher finishes its release against it. Destructive migrations
+  are not supported by this. `secretary doctor` reports the same assessment
+  ([Protocols](PROTOCOLS.md#board-schema-gate)). Exempt, because they exist to inspect or apply an
+  owed schema: `migrate` (bootstrap and `step_board_store`), `provision` (container and role
+  probes), `postgres_recovery` (dump preflight and restore target, which migrate first).
 - **Drift check:** `tests/test_board_store_schema.py` migrates a real `postgres:16`, checks the
   §3.13 catalogue and requires an empty Alembic autogenerate diff against the models.
 

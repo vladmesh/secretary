@@ -26,6 +26,7 @@ integration-board tests/test_board_boot_race.py
 unit tests/test_board_store.py
 unit tests/test_extension_bag.py
 integration-board tests/test_board_store_schema.py
+integration-board tests/test_board_schema_gate_backend.py
 integration-board tests/test_po_runner.py
 integration-board tests/test_web_po_operations.py
 integration-board tests/test_product_issues_sql_backend.py
@@ -173,6 +174,7 @@ integration-board tests/test_sql_board_bulk_reads.py
 integration-board tests/test_sql_card_reconnect_backend.py
 unit tests/test_sql_card_reconnect.py
 unit tests/test_sql_card_pool.py
+unit tests/test_schema_gate.py
 integration-board tests/test_sql_audit_reads.py
 integration-heads tests/test_stale_staged_settlement.py
 integration-heads tests/test_budget_candidates.py

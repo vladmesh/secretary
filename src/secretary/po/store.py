@@ -27,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board.schema_gate import SchemaAssessment, SchemaOwed, require
+
 CLIS = ("claude", "codex")
 # The reasoning effort that passes the CLI no effort flag: it runs with its own configured one.
 DEFAULT_EFFORT = "default"
@@ -57,6 +59,14 @@ REQUEST_LOCK_CLASS = 0x504F5251
 
 class PoStoreError(RuntimeError):
     """The PO session store refused or could not answer."""
+
+
+class PoSchemaOwed(SchemaOwed, PoStoreError):
+    """The board store owes migrations this build reads PO sessions through (`board.schema_gate`)."""
+
+    def __init__(self, assessment: SchemaAssessment) -> None:
+        self.assessment = assessment
+        PoStoreError.__init__(self, assessment.describe())
 
 
 class SessionNotFound(PoStoreError):
@@ -212,11 +222,16 @@ class PoStore:
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[Any]:
-        """One connection and one transaction: committed on success, rolled back on any error."""
+        """One connection and one transaction: committed on success, rolled back on any error.
+
+        The schema gate reads first, inside the same transaction, so a store that owes migrations
+        is refused as :class:`PoSchemaOwed` before any PO table is touched.
+        """
         import psycopg
 
         try:
             with psycopg.connect(self.credentials.conninfo()) as connection:
+                require(connection, PoSchemaOwed)
                 yield connection
         except psycopg.errors.UniqueViolation as exc:
             if exc.diag.constraint_name == ONE_RUNNING_INDEX:
@@ -606,6 +621,7 @@ __all__ = [
     "SESSION_OPEN",
     "FeedEntry",
     "PoRequest",
+    "PoSchemaOwed",
     "PoStore",
     "PoStoreError",
     "RequestConflict",

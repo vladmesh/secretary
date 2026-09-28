@@ -14,11 +14,11 @@ CHECK constraints (`board/schema.py`), from the same lists.
 
 **The writer never fails its caller.** :func:`record` is idempotent under its dedup key (a unique
 column: a repeat inserts nothing) and swallows every failure after logging it: a store that does not
-answer, a board without migration `0018` (merged code runs before the upgrade applies the migration),
-a store that is not configured at all. A producer's own work never depends on the bell. The one
-exception is :func:`record_strict`, for a caller whose work is complete only with its event (a
-delegated card's returned result, secretary-1792): the same write, answered as written, already
-present or failed instead of swallowed, so that caller repeats it.
+answer, a board that owes migrations (merged code runs before the upgrade applies them; the schema
+gate refuses it as `OwnerEventsSchemaOwed`), a store that is not configured at all. A producer's own
+work never depends on the bell. The one exception is :func:`record_strict`, for a caller whose work
+is complete only with its event (a delegated card's returned result, secretary-1792): the same write,
+answered as written, already present or failed instead of swallowed, so that caller repeats it.
 
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark
 (`board.owner_handover`) is never marked read by a click or by "mark all read": :meth:`mark_read`
@@ -39,6 +39,7 @@ from typing import Any
 
 from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.owner_handover import MARK_KEYS
+from secretary.board.schema_gate import SchemaAssessment, SchemaOwed, require
 
 TABLE = "owner_events"
 
@@ -103,7 +104,15 @@ class OwnerEventError(RuntimeError):
 
 
 class OwnerEventsUnavailable(OwnerEventError):
-    """The board store did not answer, or has no `owner_events` table yet (migration 0018)."""
+    """The board store did not answer, or owes the migrations this build reads it through."""
+
+
+class OwnerEventsSchemaOwed(SchemaOwed, OwnerEventsUnavailable):
+    """The board store owes migrations this build reads owner events through (`board.schema_gate`)."""
+
+    def __init__(self, assessment: SchemaAssessment) -> None:
+        self.assessment = assessment
+        OwnerEventsUnavailable.__init__(self, assessment.describe())
 
 
 class OwnerEventNotFound(OwnerEventError):
@@ -238,6 +247,12 @@ class OwnerEventStore:
 
     @contextlib.contextmanager
     def _connection(self) -> Iterator[Any]:
+        """A savepoint in the client's open transaction, or a short connection of its own.
+
+        The client's connection passed the schema gate when it opened; an own connection reads it
+        first, so a store that owes migrations is refused as :class:`OwnerEventsSchemaOwed` before
+        `owner_events` is touched.
+        """
         import psycopg
 
         try:
@@ -248,11 +263,8 @@ class OwnerEventStore:
                     yield connection
                 return
             with psycopg.connect(self.credentials.conninfo(), connect_timeout=5) as connection:
+                require(connection, OwnerEventsSchemaOwed)
                 yield connection
-        except psycopg.errors.UndefinedTable:
-            raise OwnerEventsUnavailable(
-                "the board store has no owner_events table yet: migration 0018 is not applied"
-            ) from None
         except psycopg.Error as exc:
             raise OwnerEventsUnavailable(f"the board store did not answer an owner event operation: {exc}") from exc
 
@@ -464,6 +476,7 @@ __all__ = [
     "OwnerEventError",
     "OwnerEventNotFound",
     "OwnerEventStore",
+    "OwnerEventsSchemaOwed",
     "OwnerEventsUnavailable",
     "ReadRefused",
     "card_holds_mark",
