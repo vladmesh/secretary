@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from secretary import head_health
@@ -80,14 +84,16 @@ class HeadHealthTests(unittest.TestCase):
         self.assertEqual(result.status, "exhausted")
         self.assertFalse(result.launch_allowed)
 
-    def test_probe_failure_is_unknown_and_allows_launch(self) -> None:
+    def test_a_probe_timeout_is_timed_out_and_blocks_launch(self) -> None:
+        """secretary-1799 changed this contract: a timeout used to be `unknown` and launchable,
+        which sent every 2026-09-25 review back into the dead Codex provider."""
         with mock.patch(
             "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
-        self.assertEqual(result.status, "unknown")
-        self.assertTrue(result.launch_allowed)
+        self.assertEqual(result.status, head_health.PROBE_TIMED_OUT)
+        self.assertFalse(result.launch_allowed)
 
 
 # The registry the walk below reads: two families, each head naming the other family's counterpart,
@@ -336,17 +342,17 @@ class BrokenProbeStatusTests(unittest.TestCase):
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
         self.assertFalse(result.launch_allowed)
 
-    def test_a_timeout_is_still_unknown_and_still_allows_a_launch(self) -> None:
-        """A probe that started and hung says nothing about the account, and that semantics is
-        deliberately unchanged: `unknown` still means "nothing is known" and still lets a claim
-        through."""
+    def test_a_timeout_is_timed_out_and_no_longer_allows_a_launch(self) -> None:
+        """A probe that started and hung says nothing about the account, but since secretary-1799
+        it is not `unknown` either: `unknown` is kept for a probe that answered with something
+        unclassifiable, and a provider that cannot answer a ping in time is not launched into."""
         with mock.patch(
             "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
-        self.assertEqual(result.status, "unknown")
-        self.assertTrue(result.launch_allowed)
+        self.assertEqual(result.status, head_health.PROBE_TIMED_OUT)
+        self.assertFalse(result.launch_allowed)
 
     def test_an_unexplained_provider_refusal_is_still_unknown(self) -> None:
         result = self.check(subprocess.CompletedProcess("probe", 1, "", "the model declined\n"))
@@ -392,3 +398,246 @@ class BrokenProbeChainTests(unittest.TestCase):
 
         self.assertEqual(choice.head, "")
         self.assertFalse(choice.resolved)
+
+
+class _ChainCatalog:
+    """Two heads on two resources, each with the registry's own probe command."""
+
+    PROFILES: ClassVar[dict[str, dict]] = {
+        "codex-reviewer": {"resource": "openai-sub", "fallback": ["claude-opus"]},
+        "claude-opus": {"resource": "claude-sub", "fallback": []},
+    }
+
+    def head_profile(self, head: str):
+        return self.PROFILES[head]
+
+    def resource(self, resource: str):
+        return {"probe": f"python3 -P -m secretary.runtime.resource_probe --resource {resource}"}
+
+    def head_fallback(self, head: str):
+        return self.PROFILES[head]["fallback"] if head in self.PROFILES else None
+
+
+def _probe_by_resource(answers):
+    """The outer probe command, answered per resource by `answers[resource](timeout)`."""
+
+    def run_isolated(argv, *, timeout, env):
+        resource = argv[-1].rsplit(" ", 1)[-1]
+        return answers[resource](timeout)
+
+    return run_isolated
+
+
+class ProbeTimeoutAndProviderTests(unittest.TestCase):
+    """secretary-1799 / issue:88142506: the probe waits for Codex's slow refusal and a timeout
+    admits no launch."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.codex_home = self.root / "codex-home"
+        self.codex_home.mkdir()
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for name in list(os.environ):
+            if name.startswith("TA_PROBE_TIMEOUT_S"):
+                del os.environ[name]
+
+    def _login(self, mode: str) -> None:
+        auth = {"auth_mode": mode, "OPENAI_API_KEY": None, "tokens": {"id_token": "t"}}
+        (self.codex_home / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+
+    def _inner(self, provider_answers_after: float, text: str) -> tuple[int, str]:
+        """Run the real `openai-sub` probe against a Codex that answers after N seconds."""
+        from secretary.runtime import resource_probe
+
+        def codex(cmd, *, capture_output, text: bool, timeout, env):
+            if timeout < provider_answers_after:
+                raise subprocess.TimeoutExpired(cmd, timeout, output="Reconnecting... 3/5\n")
+            return subprocess.CompletedProcess(cmd, 1, "", answer)
+
+        answer = text
+        home = mock.Mock(path=str(self.codex_home))
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(resource_probe, "installation_codex_home", return_value=home),
+            mock.patch.object(resource_probe.subprocess, "run", side_effect=codex),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = resource_probe.main(["--resource", "openai-sub"])
+        return code, stderr.getvalue()
+
+    def _walk(self, openai_answer) -> head_health.HeadChoice:
+        def ready(_timeout):
+            return subprocess.CompletedProcess("probe", 0, "pong", "")
+
+        health = HeadHealth(_ChainCatalog(), self.root / "data")
+        with mock.patch(
+            "secretary.head_health._proc.run_isolated",
+            side_effect=_probe_by_resource({"openai-sub": openai_answer, "claude-sub": ready}),
+        ):
+            return resolve_head_chain("codex-reviewer", health.check, _ChainCatalog().head_fallback)
+
+    def test_the_outer_timeout_is_always_greater_than_the_inner_one(self) -> None:
+        from secretary.runtime.resource_probe import probe_timeout_s
+
+        self.assertEqual(probe_timeout_s("openai-sub"), 75)
+        for resource in ("claude-sub", "openrouter", "another"):
+            self.assertEqual(probe_timeout_s(resource), 20)
+        for overrides in (
+            {},
+            {"TA_PROBE_TIMEOUT_S": "40"},
+            {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "120", "TA_PROBE_TIMEOUT_S_CLAUDE_SUB": "5"},
+        ):
+            with mock.patch.dict(os.environ, overrides):
+                for resource in ("openai-sub", "claude-sub", "openrouter", "another"):
+                    with self.subTest(overrides=overrides, resource=resource):
+                        self.assertGreater(
+                            head_health.probe_timeout_seconds(resource), probe_timeout_s(resource)
+                        )
+        with mock.patch.dict(os.environ, {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "120"}):
+            self.assertEqual(probe_timeout_s("openai-sub"), 120)
+
+    def test_the_probe_command_is_run_under_its_resource_outer_timeout(self) -> None:
+        seen: list[float] = []
+
+        def run_isolated(argv, *, timeout, env):
+            seen.append(timeout)
+            return subprocess.CompletedProcess("probe", 0, "", "")
+
+        with mock.patch("secretary.head_health._proc.run_isolated", side_effect=run_isolated):
+            head_health.run_probe("openai-sub", "probe", 1.0)
+        self.assertEqual(seen, [head_health.probe_timeout_seconds("openai-sub")])
+        self.assertGreater(seen[0], 75)
+
+    def test_a_slow_401_after_20s_and_before_75s_is_unavailable_and_the_chain_is_walked(self) -> None:
+        self._login("chatgpt")
+        refusal = (
+            "Reconnecting... 5/5\nERROR: unexpected status 401 Unauthorized: Incorrect API key provided: "
+            "sk-svcac" + "*" * 30 + "fvMA. You can find your API key at https://platform.openai.com, "
+            "url: https://chatgpt.com/backend-api/codex/responses, cf-ray: a40da28f7896ec3e-VNO"
+        )
+        code, err = self._inner(45, refusal)
+
+        self.assertEqual(code, 1)
+        self.assertIn("status=provider-unavailable", err)
+        choice = self._walk(lambda timeout: subprocess.CompletedProcess("probe", code, "", err))
+
+        self.assertEqual(choice.head, "claude-opus")
+        [(head, readiness)] = choice.rejected
+        self.assertEqual((head, readiness.status), ("codex-reviewer", "unavailable"))
+        self.assertFalse(readiness.launch_allowed)
+        self.assertNotIn("sk-svcac", readiness.reason)
+
+    def test_the_same_slow_401_under_the_old_20s_limit_is_a_timeout_not_a_launch(self) -> None:
+        self._login("chatgpt")
+        with mock.patch.dict(os.environ, {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "20"}):
+            code, err = self._inner(45, "unexpected status 401 Unauthorized: Incorrect API key provided")
+        self.assertIn("status=timeout", err)
+
+        choice = self._walk(lambda timeout: subprocess.CompletedProcess("probe", code, "", err))
+
+        self.assertEqual(choice.head, "claude-opus")
+        self.assertEqual(choice.rejected[0][1].status, head_health.PROBE_TIMED_OUT)
+
+    def test_a_real_timeout_is_timed_out_not_launchable_and_the_chain_is_walked(self) -> None:
+        def hang(timeout):
+            raise subprocess.TimeoutExpired("probe", timeout)
+
+        choice = self._walk(hang)
+
+        self.assertEqual(choice.head, "claude-opus")
+        [(head, readiness)] = choice.rejected
+        self.assertEqual((head, readiness.status), ("codex-reviewer", head_health.PROBE_TIMED_OUT))
+        self.assertFalse(readiness.launch_allowed)
+        self.assertIn("timed out after 85s", readiness.reason)
+
+    def test_an_answered_unclassifiable_probe_is_still_unknown_and_launchable(self) -> None:
+        choice = self._walk(lambda timeout: subprocess.CompletedProcess("probe", 1, "", "the model declined"))
+        self.assertEqual(choice.head, "codex-reviewer")
+        self.assertEqual(choice.readiness.status, "unknown")
+
+    def test_a_logged_out_account_is_still_unauthenticated(self) -> None:
+        from secretary.runtime import resource_probe
+        from secretary.runtime.codex_preflight import CodexHomeLoginMissing
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                resource_probe, "installation_codex_home", side_effect=CodexHomeLoginMissing(self.codex_home)
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = resource_probe.main(["--resource", "openai-sub"])
+        for label, (answer_code, answer) in {
+            "no login at all": (code, stderr.getvalue()),
+            "codex says so": self._inner_with_login("chatgpt", "Error: Not logged in. Run `codex login`."),
+            "401 on an API-key login": self._inner_with_login(
+                "apikey", "unexpected status 401 Unauthorized: Incorrect API key provided: sk-abc"
+            ),
+        }.items():
+            with self.subTest(label):
+                self.assertNotIn("status=provider-unavailable", answer)
+                choice = self._walk(
+                    lambda timeout, c=answer_code, a=answer: subprocess.CompletedProcess("probe", c, "", a)
+                )
+                self.assertEqual(choice.rejected[0][1].status, "unauthenticated")
+
+    def _inner_with_login(self, mode: str, text: str) -> tuple[int, str]:
+        self._login(mode)
+        return self._inner(0, text)
+
+    def test_5xx_and_an_exhausted_reconnect_loop_are_the_provider_not_the_account(self) -> None:
+        for text in (
+            "ERROR: unexpected status 502 Bad Gateway; try to login again later",
+            "Reconnecting... 5/5 (stream disconnected before completion); authentication pending",
+        ):
+            with self.subTest(text=text):
+                with mock.patch(
+                    "secretary.head_health._proc.run_isolated",
+                    return_value=subprocess.CompletedProcess("probe", 1, "", text),
+                ):
+                    verdict = head_health.run_probe("openai-sub", "probe", 1.0)
+                self.assertEqual(verdict.status, "unavailable")
+                self.assertFalse(verdict.launch_allowed)
+
+    def test_a_recorded_verdict_replaces_the_cached_probe_and_holds_without_a_probe(self) -> None:
+        health = HeadHealth(_ChainCatalog(), self.root / "data")
+        with mock.patch(
+            "secretary.head_health._proc.run_isolated",
+            return_value=subprocess.CompletedProcess("probe", 0, "", ""),
+        ) as run:
+            self.assertEqual(health.check("codex-reviewer").status, "ready")
+            health.record("openai-sub", "unavailable", "provider error on the first turn")
+            recorded = health.check("codex-reviewer")
+        self.assertEqual(recorded.status, "unavailable")
+        self.assertTrue(recorded.cached)
+        run.assert_called_once()
+
+    def test_doctor_shows_timed_out_like_the_other_non_ready_statuses(self) -> None:
+        from secretary.cli import PROVIDER_RED_STATES, _recovery_findings
+
+        self.assertIn(head_health.PROBE_TIMED_OUT, PROVIDER_RED_STATES)
+        findings = _recovery_findings(
+            {
+                "resources": [
+                    {
+                        "resource": "openai-sub",
+                        "state": head_health.PROBE_TIMED_OUT,
+                        "reason": "probe timed out",
+                    },
+                    {"resource": "claude-sub", "state": "unavailable", "reason": "down"},
+                    {"resource": "openrouter", "state": "ready", "reason": "ok"},
+                ]
+            }
+        )
+        self.assertEqual(
+            [
+                (finding["resource"], finding["state"])
+                for finding in findings
+                if finding["code"] == "resource_readiness"
+            ],
+            [("openai-sub", head_health.PROBE_TIMED_OUT), ("claude-sub", "unavailable")],
+        )

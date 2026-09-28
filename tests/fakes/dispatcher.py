@@ -883,6 +883,26 @@ class FakeHost:
     def poll_codex_provider_ingress(self, run) -> None:
         return None
 
+    def provider_failure(self, _task, record, kind) -> dict:
+        """A scripted first-turn provider failure, bound to one exact run (secretary-1799).
+
+        A test names the run whose session ended on a provider error in `failed_runs` (run id ->
+        `ProviderError`, typically parsed by the real reader from a real-shape rollout); every other
+        run -- the fallback head launched in its place included -- answers that nothing failed.
+        """
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        run_id = str((run or {}).get("run_id") or "")
+        error = self.__dict__.get("failed_runs", {}).get(run_id)
+        if error is None:
+            return {"state": "none"}
+        return {
+            "state": "failed",
+            "run_id": run_id,
+            "head": record.review_head if kind == "review" else record.head,
+            "resource": "",
+            "error": error.to_json(),
+        }
+
     def provider_progress(self, _task, record, kind) -> dict[str, str]:
         """A fake provider's opaque cursor is still explicitly bound to its HeadRun.
 

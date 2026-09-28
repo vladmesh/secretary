@@ -207,7 +207,8 @@ class HeadHealthReadsTheEntryTests(unittest.TestCase):
                     timeout_s=20.0,
                     exception="TimeoutExpired: timed out",
                 ),
-                "unknown",
+                # secretary-1799: the inner probe's own timeout is `timed_out`, not `unknown`.
+                head_health.PROBE_TIMED_OUT,
             ),
         }
         for label, (result, status) in cases.items():

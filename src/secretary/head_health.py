@@ -15,9 +15,16 @@ from typing import Any
 from secretary import _proc
 from secretary._fsutil import write_json
 from secretary.dispatch.types import HostError
+from secretary.runtime.provider_errors import KIND_RECONNECT, KIND_SERVER, classify_provider_error
+from secretary.runtime.resource_probe import probe_timeout_s
 
 PROBE_TTL_SECONDS = 300
+# The outer timeout of the default probe. A resource's own outer timeout is its inner probe timeout
+# plus `PROBE_TIMEOUT_MARGIN_SECONDS` (`probe_timeout_seconds`), never less than this.
 PROBE_TIMEOUT_SECONDS = 20
+# How much longer the outer timeout waits than the inner one: interpreter start-up, and the inner
+# probe's own classification and output after its provider call returned or timed out.
+PROBE_TIMEOUT_MARGIN_SECONDS = 10
 # A head named in a fallback chain that the registry no longer describes. It is a readiness status
 # rather than a silent skip because it is the same kind of fact as a red resource — this head
 # cannot be launched — and the tick has to be able to say so.
@@ -29,10 +36,21 @@ MISSING_HEAD = "missing"
 # provider said something). It blocks the claim: a resource nobody can probe is a resource nobody
 # has gated, and the fallback chain has to be walked instead of silently trusted.
 PROBE_BROKEN = "probe_broken"
-# The two statuses a claim may be launched on. `unknown` is deliberately here: a timeout or an
-# unclassifiable provider refusal is not evidence that the account is dead, and holding every card
-# on one ambiguous answer costs more than an occasional wasted attempt.
+# A probe that got no answer in time: the outer command was killed, or the inner probe reported its
+# own provider call timed out. Not `unknown` (secretary-1799): on 2026-09-25 Codex answered every
+# turn with a 401 after its reconnect loop, the probe gave up first, the timeout read `unknown`,
+# `unknown` let the claim through, and every review went back into the dead provider instead of
+# down its fallback chain. A provider that cannot answer a ping in the probe's time is not one to
+# launch a head into, so this status blocks the claim and the chain is walked.
+PROBE_TIMED_OUT = "timed_out"
+# The two statuses a claim may be launched on. `unknown` is deliberately here, and only for a probe
+# that answered with something nobody could classify: that is not evidence that the account is
+# dead, and holding every card on one ambiguous answer costs more than an occasional wasted attempt.
 LAUNCH_ALLOWED_STATUSES = frozenset({"ready", "unknown"})
+# The inner probe's own failure statuses (`secretary.runtime.resource_probe`), as its one-line
+# report spells them. Read by name, before any wording: the inner probe already knows which it was.
+INNER_TIMEOUT_MARKER = "status=timeout"
+INNER_PROVIDER_UNAVAILABLE_MARKER = "status=provider-unavailable"
 # What a failed *launch* of the probe looks like in the output the shell hands back. None of these
 # is something a reachable provider says about an account, so they are read only after the
 # provider-failure markers below have had their say.
@@ -91,28 +109,51 @@ class HeadReadiness:
         }
 
 
-def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
+def probe_timeout_seconds(resource: str) -> int:
+    """The outer timeout around this resource's probe command: always above its inner timeout.
+
+    The inner timeout is the probe module's (`resource_probe.probe_timeout_s`, 75 s for
+    `openai-sub`, 20 s otherwise, configurable per resource); the outer one adds a margin so the
+    inner classifier always gets to answer before its command is killed. Killing it first is what
+    turned the 2026-09-25 401 into a bare timeout.
+    """
+    return max(PROBE_TIMEOUT_SECONDS, probe_timeout_s(resource) + PROBE_TIMEOUT_MARGIN_SECONDS)
+
+
+def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = None) -> HeadReadiness:
     """Execute one resource probe and classify what came back. Writes nothing.
 
     Separate from `HeadHealth` because `secretary doctor` asks the same question read-only: it
     reports on a probe without owning the dispatcher's TTL cache.
     """
+    limit = timeout if timeout is not None else probe_timeout_seconds(resource)
     try:
         # Its own process group, so a timeout takes the provider CLI under the shell down too: the
         # production tick's unit no longer kills what it leaves behind (secretary-1699).
-        completed = _proc.run_isolated(
-            ["/bin/sh", "-c", probe], timeout=PROBE_TIMEOUT_SECONDS, env=probe_env()
-        )
+        completed = _proc.run_isolated(["/bin/sh", "-c", probe], timeout=limit, env=probe_env())
     except subprocess.TimeoutExpired:
-        # A probe that started and then hung says nothing about the account either way.
-        return HeadReadiness(resource, "unknown", "probe timed out", now)
+        # A probe that started and got no answer in time. Not a verdict on the account, and not a
+        # resource a claim may be launched into either (`PROBE_TIMED_OUT`).
+        return HeadReadiness(resource, PROBE_TIMED_OUT, f"probe timed out after {int(limit)}s", now)
     except OSError as exc:
         return HeadReadiness(resource, PROBE_BROKEN, f"probe could not be started: {type(exc).__name__}", now)
     except Exception as exc:  # a broken probe must not turn into a false resource outage
         return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
     if completed.returncode == 0:
         return HeadReadiness(resource, "ready", "probe succeeded", now)
-    text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
+    raw = " ".join((completed.stdout or "", completed.stderr or ""))
+    text = raw.lower()
+    if INNER_TIMEOUT_MARKER in text:
+        return HeadReadiness(resource, PROBE_TIMED_OUT, "provider gave the probe no answer in time", now)
+    # The provider's own failure, named before the account's: a 5xx, a reconnect loop that ran out,
+    # or the inner probe saying the provider refused a valid login (the 2026-09-25 401). An operator
+    # reading `unauthenticated` would log in again, which fixes none of these.
+    provider = classify_provider_error(raw)
+    if INNER_PROVIDER_UNAVAILABLE_MARKER in text or (
+        provider is not None and provider.kind in (KIND_SERVER, KIND_RECONNECT)
+    ):
+        detail = f": {provider.summary}" if provider is not None and provider.summary else ""
+        return HeadReadiness(resource, "unavailable", f"resource provider is unavailable{detail}", now)
     if any(
         marker in text
         for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")
@@ -285,8 +326,13 @@ class HeadHealth:
 
     A failed probe is not proof that the provider is down.  A definite authentication or provider
     failure stops a launch, and so does a probe that could not be launched at all (``PROBE_BROKEN``,
-    a defect of this installation rather than of the account); an ambiguous failure is recorded as
-    ``unknown`` and retries after the normal TTL.
+    a defect of this installation rather than of the account) and one that got no answer in time
+    (``PROBE_TIMED_OUT``); an answered but unclassifiable failure is recorded as ``unknown`` and
+    retries after the normal TTL.
+
+    The dispatcher also writes here without a probe (``record``): a head whose first turn ended on a
+    provider error is a fresher verdict on its resource than any probe (secretary-1799), so it
+    replaces the cached entry and holds for the same TTL.
     """
 
     def __init__(self, catalog: Any, data_dir: Path) -> None:
@@ -297,7 +343,6 @@ class HeadHealth:
         try:
             profile = self.catalog.head_profile(head)
             resource = str(profile["resource"])
-            probe = str(self.catalog.resource(resource).get("probe") or "")
         # HostError is how the catalog says "no such head"; a health probe answers that the same
         # way it answers every other unreadable configuration — unknown, not a crash on the
         # claim-time walk that is only asking whether this candidate is usable.
@@ -305,12 +350,12 @@ class HeadHealth:
             return HeadReadiness(
                 "", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time()
             )
-        if not probe:
-            return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())
-
         cache = self._load()
         entry = cache.get(resource)
         now = time.time()
+        # A fresh recorded verdict answers before the probe command is even looked at: it may have
+        # come from a head's own provider error rather than from a probe (`record`), and it holds
+        # for its TTL on a resource with no probe as much as on one with a probe.
         if isinstance(entry, dict) and now - float(entry.get("checked_at") or 0) < PROBE_TTL_SECONDS:
             return HeadReadiness(
                 resource,
@@ -319,6 +364,14 @@ class HeadHealth:
                 float(entry["checked_at"]),
                 True,
             )
+        try:
+            probe = str(self.catalog.resource(resource).get("probe") or "")
+        except (AttributeError, HostError, KeyError, TypeError, ValueError) as exc:
+            return HeadReadiness(
+                "", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time()
+            )
+        if not probe:
+            return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())
 
         verdict = self._run(resource, probe, now)
         cache[resource] = verdict.to_json()
@@ -328,6 +381,20 @@ class HeadHealth:
             # The preflight still has a useful verdict when its observability cache cannot be
             # written.  A later dispatcher write will surface a broader data-dir failure.
             pass
+        return verdict
+
+    def record(self, resource: str, status: str, reason: str, *, now: float | None = None) -> HeadReadiness:
+        """Record a verdict on `resource` observed outside a probe, replacing its cached entry.
+
+        Replacing the entry is the cache invalidation: the next `check` within the TTL answers with
+        this verdict instead of a probe result from before it, and the probe runs again once the TTL
+        has passed. A cache that cannot be written raises, because the caller's next step (walking
+        the fallback chain past this resource) depends on the verdict having landed.
+        """
+        verdict = HeadReadiness(resource, status, reason, time.time() if now is None else now)
+        cache = self._load()
+        cache[resource] = verdict.to_json()
+        self._save(cache)
         return verdict
 
     def snapshot(self) -> dict[str, Any]:

@@ -8,7 +8,18 @@ with no probe here. This module only answers; it keeps no cache and writes no fi
 the one owner of the verdict, its vocabulary and its TTL cache.
 
 A probe that cannot run proves nothing about the resource being up, so a timeout, a missing
-binary, a missing key or any transport error is a failure here, never an exception.
+binary, a missing key or any transport error is a failure here, never an exception. Two failure
+statuses are read by name by `head_health`: `status=timeout` (the provider gave no answer inside
+the timeout, which is `timed_out` there) and `status=provider-unavailable` (the provider answered
+with its own failure while the local login is valid, which is `unavailable` there).
+
+Timeouts are per resource (secretary-1799). Codex refuses slowly: on the 2026-09-25 outage it
+reconnected its websocket five times, fell back to HTTPS, reconnected five more and only then
+printed the 401, well past the old flat 20 s. `probe_timeout_s` is 75 s for `openai-sub` and 20 s
+for the others; `TA_PROBE_TIMEOUT_S` moves the default and `TA_PROBE_TIMEOUT_S_<RESOURCE>` (the
+id upper-cased, `-` as `_`, e.g. `TA_PROBE_TIMEOUT_S_OPENAI_SUB`) sets one resource. The outer
+timeout `head_health` puts around the probe command is derived from the same number, so the
+classifier in here always gets to answer before the command is killed.
 """
 
 from __future__ import annotations
@@ -22,17 +33,55 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from secretary.runtime.codex_home import installation_codex_home
 from secretary.runtime.codex_preflight import CodexHomeLoginMissing
+from secretary.runtime.provider_errors import KIND_AUTH, KIND_RECONNECT, KIND_SERVER, classify_provider_error
 from secretary.runtime.redact import redact
 
 # A single slow or broken probe is killed rather than hanging the dispatcher's tick. Both
 # env-overridable so a live check can tighten them.
 PROBE_TIMEOUT_S = int(os.environ.get("TA_PROBE_TIMEOUT_S", "20"))
 PROBE_REASON_TEXT_LIMIT = int(os.environ.get("TA_PROBE_REASON_TEXT_LIMIT", "400"))
+#: The default inner timeout of a resource with no entry below.
+DEFAULT_PROBE_TIMEOUT_S = 20
+#: Resources whose provider answers more slowly than the default, and how long they get.
+RESOURCE_PROBE_TIMEOUTS_S: dict[str, int] = {"openai-sub": 75}
+#: The inner failure status of a provider that answered with its own failure (see the docstring).
+STATUS_PROVIDER_UNAVAILABLE = "provider-unavailable"
+
+
+def _env_seconds(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def probe_timeout_env_name(resource_id: str) -> str:
+    """The environment variable that sets one resource's probe timeout."""
+    return "TA_PROBE_TIMEOUT_S_" + "".join(c if c.isalnum() else "_" for c in resource_id.upper())
+
+
+def probe_timeout_s(resource_id: str) -> int:
+    """How long this resource's probe waits for its provider, read from the environment per call.
+
+    Per-resource variable first, then the resource's own default, then `TA_PROBE_TIMEOUT_S`, then
+    20 s. Read per call rather than at import so the dispatcher and the probe it spawns, which
+    share one environment, can never disagree about it.
+    """
+    specific = _env_seconds(probe_timeout_env_name(resource_id))
+    if specific is not None:
+        return specific
+    if resource_id in RESOURCE_PROBE_TIMEOUTS_S:
+        return RESOURCE_PROBE_TIMEOUTS_S[resource_id]
+    return _env_seconds("TA_PROBE_TIMEOUT_S") or DEFAULT_PROBE_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -75,17 +124,19 @@ def _run_subprocess_probe(
     *,
     env: Mapping[str, str] | None = None,
     display_command: str | None = None,
+    timeout_s: int | None = None,
 ) -> ProbeResult:
     shown = display_command or _display_command(command)
+    timeout = timeout_s or PROBE_TIMEOUT_S
     try:
-        p = subprocess.run(command, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, env=env)
+        p = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
         return ProbeResult(
             False,
             probe_class,
             command=shown,
             status="timeout",
-            timeout_s=float(e.timeout or PROBE_TIMEOUT_S),
+            timeout_s=float(e.timeout or timeout),
             stdout=e.output,
             stderr=e.stderr,
             exception=_exception_text(e),
@@ -177,7 +228,9 @@ def probe_claude_sub() -> ProbeResult:
     subscription, no per-profile credential): a failure exactly when the subscription is
     rate-limited or the CLI cannot reach the API."""
     return _run_subprocess_probe(
-        ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"], "builtin:claude-sub"
+        ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"],
+        "builtin:claude-sub",
+        timeout_s=probe_timeout_s("claude-sub"),
     )
 
 
@@ -219,7 +272,7 @@ def probe_openrouter() -> ProbeResult:
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=probe_timeout_s("openrouter")) as resp:
             status = getattr(resp, "status", None)
             if status is not None and 200 <= status < 300:
                 return ProbeResult(True, "builtin:openrouter", command=command)
@@ -246,7 +299,7 @@ def probe_openrouter() -> ProbeResult:
             "builtin:openrouter",
             command=command,
             status="timeout",
-            timeout_s=float(PROBE_TIMEOUT_S),
+            timeout_s=float(probe_timeout_s("openrouter")),
             exception=_exception_text(e),
         )
     except Exception as e:  # noqa: BLE001 — any transport outcome is just a failed probe
@@ -271,12 +324,59 @@ def probe_openai_sub() -> ProbeResult:
         return ProbeResult(False, "builtin:openai-sub", status="no-login", exception=_exception_text(e))
     env = {**os.environ, "CODEX_HOME": home}
     cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "ping"]
-    return _run_subprocess_probe(
+    result = _run_subprocess_probe(
         cmd,
         "builtin:openai-sub",
         env=env,
         display_command=f"CODEX_HOME={home} {_display_command(cmd)}",
+        timeout_s=probe_timeout_s("openai-sub"),
     )
+    if result.status == "non-zero-exit" and codex_provider_side_failure(
+        _as_text(result.stdout) + "\n" + _as_text(result.stderr), Path(home)
+    ):
+        return replace(result, status=STATUS_PROVIDER_UNAVAILABLE)
+    return result
+
+
+def _as_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def codex_chatgpt_login(home: Path) -> bool:
+    """Whether this CODEX_HOME holds a ChatGPT-mode login (`auth.json` with `auth_mode: chatgpt`).
+
+    Read for its mode only; no token leaves this function.
+    """
+    try:
+        auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return (
+        isinstance(auth, dict)
+        and str(auth.get("auth_mode") or "").lower() == "chatgpt"
+        and bool(auth.get("tokens"))
+    )
+
+
+def codex_provider_side_failure(text: str, home: Path) -> bool:
+    """Whether a failed `codex exec` was refused by the provider rather than for the account.
+
+    A 5xx and an exhausted reconnect loop are always the provider's. A 401/403 is the provider's
+    only while the local login is a valid ChatGPT one: on 2026-09-25 the ChatGPT/Codex backend
+    answered every request with `401 Unauthorized: Incorrect API key provided: sk-svcac…` although
+    no API key was in use at all -- a backend fault, and logging in again would not have fixed it.
+    With no such login, a 401 is the account's and stays `unauthenticated`.
+    """
+    found = classify_provider_error(text)
+    if found is None:
+        return False
+    if found.kind in (KIND_SERVER, KIND_RECONNECT):
+        return True
+    if found.kind == KIND_AUTH:
+        return codex_chatgpt_login(home) and "incorrect api key provided" in text.lower()
+    return False
 
 
 BUILTIN_PROBES: dict[str, Callable[[], ProbeResult]] = {

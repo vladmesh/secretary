@@ -97,6 +97,8 @@ files = [
     "src/secretary/runtime/role_env.py",
     "src/secretary/runtime/redact.py",
     "src/secretary/runtime/resource_probe.py",
+    "src/secretary/runtime/provider_errors.py",
+    "src/secretary/dispatch/provider_failure.py",
     "src/secretary/runtime/agent_prompt_transport.py",
     "src/secretary/runtime/tui_delivery.py",
     "src/secretary/runtime/head_runtimes.py",

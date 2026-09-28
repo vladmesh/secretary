@@ -189,3 +189,6 @@ STOPPED_BY_REVIEW_VERDICT = "review-verdict"
 # escalation that follows the second stall. The head may well still be running, which is exactly
 # why the record has to name who decided it should not be.
 STOPPED_BY_WATCHDOG = "watchdog"
+# A head whose first turn ended on a provider error, ended so its role can move to the next head of
+# its fallback chain (secretary-1799). Not the watchdog: nothing waited for it to fall silent.
+STOPPED_BY_PROVIDER_FAILURE = "provider-failure"
