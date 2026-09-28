@@ -6,7 +6,9 @@ before-merge stage (`dispatch/e2e_stage.py`): they go through review, Assessment
 project with no e2e. This module runs the workflow afterwards.
 
 Queueing. When the post-merge watch (`dispatch/post_merge.py`) records a card's merge commit green, the
-card joins its project's pending set (:func:`enqueue`), with its merge SHA. A red, absent or timed-out
+card joins its project's pending set (:func:`enqueue`), with its merge SHA. The watch is dropped only once
+the card is queued, or its project is established not to be `after_merge`; while the adapter or its
+declaration cannot be read the watch stays, and each pass retries the enqueue alone. A red, absent or timed-out
 post-merge CI queues nothing. The pending sets live in the dispatcher's production state
 (:data:`AFTER_MERGE_KEY`), beside the post-merge watches, one per project:
 `{pending: [...], run: {...} | None, budget_waits: [...], cleanup: [...]}`. Each card also carries its
@@ -63,6 +65,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -154,34 +157,74 @@ def _outcome(
     return {"status": status, "step": STEP, "action": action, "project": project, "pilot_ref": ref, **fields}
 
 
-def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class Enqueued:
+    """What :func:`enqueue` made of a resolved post-merge watch.
+
+    `settled`: the watch may be dropped, because its card is queued (now or before) or its project is
+    established not to run its e2e after the merge. False when that could not be established (the adapter
+    or its e2e declaration could not be read, or the card could not): the watch is kept, with its
+    published CI fact, and the next pass asks again. `outcome` is what the tick reports, if anything.
+    """
+
+    settled: bool
+    outcome: dict[str, Any] | None = None
+
+
+def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> Enqueued:
     """Queue the card of a post-merge watch whose merge commit's CI is recorded green, when its project
-    declares `placement: after_merge`. Idempotent: a card already queued or covered is not added twice."""
+    declares `placement: after_merge`.
+
+    Idempotent per card and merge SHA: a card already pending, covered by the run in flight, or already
+    marked on the board for this merge SHA (it was queued, and has moved on) is not added again, so a
+    replay after a save that kept both the queued card and the watch queues it once.
+    """
     result = watch.get("result") if isinstance(watch.get("result"), dict) else {}
     if result.get("result") != "green":
-        return None
+        return Enqueued(True)
     project = str(watch.get("project") or "")
     ref = str(watch.get("ref") or "")
     merge_sha = str(result.get("merge_sha") or watch.get("merge_sha") or "")
     try:
         declaration = declared_e2e(runtime.host, project)
     except HostError as exc:
-        return _outcome(
-            project,
-            "e2e-after-merge-not-queued",
-            ref=ref,
-            status="degraded",
-            reason=f"the e2e declaration cannot be read: {scrub_host_output(str(exc))}",
+        return Enqueued(
+            False,
+            _outcome(
+                project,
+                "e2e-after-merge-not-queued",
+                ref=ref,
+                status="degraded",
+                reason=(
+                    f"the e2e declaration cannot be read: {scrub_host_output(str(exc))}; the post-merge watch is "
+                    "kept and the card is queued once it can be"
+                ),
+            ),
         )
     if declaration is None or not declaration.after_merge or not ref or not merge_sha:
-        return None
+        return Enqueued(True)
     queue = _queue(payload, project)
     run = queue.get("run") or {}
     known = {str(entry.get("ref")) for entry in queue["pending"]} | {
         str(entry.get("ref")) for entry in run.get("entries") or []
     }
     if ref in known:
-        return None
+        return Enqueued(True)
+    try:
+        mark = e2e_record.e2e_state(runtime.reader.show(ref)).after_merge
+    except TaskError as exc:
+        return Enqueued(
+            False,
+            _outcome(
+                project,
+                "e2e-after-merge-not-queued",
+                ref=ref,
+                status="degraded",
+                reason=f"the card cannot be read: {exc.code}: {exc.message}; the post-merge watch is kept",
+            ),
+        )
+    if mark is not None and mark.merge_sha == merge_sha:
+        return Enqueued(True)
     queue["pending"].append(
         {
             "ref": ref,
@@ -193,7 +236,7 @@ def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> dic
             "marked": False,
         }
     )
-    return _outcome(project, "e2e-after-merge-queued", ref=ref, merge_sha=merge_sha)
+    return Enqueued(True, _outcome(project, "e2e-after-merge-queued", ref=ref, merge_sha=merge_sha))
 
 
 def reconcile_after_merge(
@@ -1388,6 +1431,7 @@ __all__ = [
     "DISPATCH_INFIX",
     "STEP",
     "UNOWNED_HOTFIX_REASON",
+    "Enqueued",
     "after_merge_snapshot",
     "enqueue",
     "queues",

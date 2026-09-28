@@ -1632,8 +1632,15 @@ publishes them only on a push to `main`. Its candidate branch never has them. A 
 review, Assessment and release as a card of a project with no e2e.
 
 **Queueing.** When the [post-merge watch](#post-merge-ci) records a card's merge commit `green`, the
-card joins its project's pending set with its merge SHA, in the save that drops the watch
-(`e2e_after_merge.enqueue`); `red`, `absent` and `timeout` queue nothing (red is handled as before). The
+card joins its project's pending set with its merge SHA (`e2e_after_merge.enqueue`); `red`, `absent` and
+`timeout` queue nothing (red is handled as before). A green watch is dropped only once the card is
+queued, or its project is established not to be `after_merge`: the queued card is saved first, then the
+drop. While the adapter or its `validation.e2e` cannot be read (unavailable, or malformed) the watch is
+kept, marked `published` so its fact is not published again, the tick reports a degraded
+`e2e-after-merge-not-queued` outcome, and each pass retries the enqueue alone; no new timer bounds it. The
+enqueue is idempotent per card and merge SHA (a card already pending, covered by the run in flight, or
+marked on the board for that merge SHA is not queued again), so a replay after a save lost between the
+two queues the card once. The
 pending sets live in the dispatcher's production state (`e2e_after_merge`, one queue per project:
 `pending`, the `run` in flight, `budget_waits`, `cleanup`), beside the post-merge watches; `production
 observe` lists them. Each queued card is marked on the board too (below).
@@ -2178,8 +2185,8 @@ operation card the PO completed, a release that merged nothing, automerge off, a
 Done) wakes as before. The wake text states the result
 with its runs, and for `red` the failed checks and classification; a red result is never worded as a
 plain Done. A `green` result of a project whose e2e stage is declared `placement: after_merge` also
-queues the card for that project's next after-merge e2e run ([After merge](#after-merge)), in the save
-that drops the watch.
+queues the card for that project's next after-merge e2e run ([After merge](#after-merge)); such a watch
+is dropped only once the card is queued, or its project is established not to be `after_merge`.
 
 An Assessment entry is one decision visit. The first observer `task decide` is canonical for that
 visit; a redelivered turn repeating the same kind returns that decision without another comment, and

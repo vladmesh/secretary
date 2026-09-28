@@ -27,6 +27,7 @@ from secretary.dispatch.e2e_after_merge import queues, reconcile_after_merge
 from secretary.dispatch.post_merge import reconcile_post_merge_watches, watches
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import new_attempt_id, now_rfc3339
+from secretary.dispatch.types import HostError
 from secretary.sprints import SprintReader
 from secretary.tasks import TaskError, is_significant_card_event
 from tests.e2e_stage_fixtures import REPO, E2eGitHubHost, E2eStageFixture, SimulatedCrash
@@ -259,6 +260,21 @@ class AfterMergeFixture(E2eStageFixture):
             self.runtime.save_records(payload, records)
         return outcomes
 
+    def watch_pass(self) -> list[dict[str, Any]]:
+        """One pass of the post-merge watches as they stand, with no new merge."""
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            records = self.runtime.production_state.records(payload)
+            outcomes = reconcile_post_merge_watches(self.runtime, payload, records)
+            self.runtime.save_records(payload, records)
+        return outcomes
+
+    def watched(self) -> list[str]:
+        return sorted(watches(self.runtime.production_state.load()))
+
+    def published(self, ref: str) -> list[str]:
+        return self.comments_on(ref, "Post-merge CI GREEN")
+
     def am_tick(self, runtime: DispatcherRuntime | None = None) -> list[dict[str, Any]]:
         """One after-merge pass, as the production tick makes it after the post-merge watches."""
         runtime = runtime or self.runtime
@@ -353,6 +369,80 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
         other = self.done_card()
         self.merge(other, _sha("b"))
         self.assertEqual(self.pending(), [card])
+
+    def test_an_unreadable_adapter_keeps_the_watch_until_the_card_is_queued(self) -> None:
+        card = self.done_card()
+        self.on_main(_sha("a"))
+        with mock.patch.object(
+            self.catalog, "adapter", side_effect=HostError("adapters/secretary.yaml is unavailable")
+        ):
+            outcomes = self.merge(card, _sha("a"))
+            # Still unreadable on the next pass: kept again, nothing published twice.
+            again = self.watch_pass()
+
+        [kept] = [o for o in outcomes if o.get("action") == "e2e-after-merge-not-queued"]
+        self.assertEqual(kept["status"], "degraded")
+        self.assertIn("adapters/secretary.yaml is unavailable", kept["reason"])
+        self.assertIn("e2e-after-merge-not-queued", [o.get("action") for o in again])
+        self.assertEqual(self.watched(), [card])
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(len(self.published(card)), 1, "the green fact is published once")
+
+        # The adapter is back: the next pass queues the card once and drops the watch.
+        back = self.watch_pass()
+
+        self.assertIn("e2e-after-merge-queued", [o.get("action") for o in back])
+        self.assertEqual(self.pending(), [card])
+        self.assertEqual(self.watched(), [])
+        self.assertEqual(len(self.published(card)), 1)
+        self.watch_pass()
+        self.assertEqual(self.pending(), [card])
+
+    def test_a_malformed_e2e_declaration_keeps_the_watch(self) -> None:
+        card = self.done_card()
+        self.on_main(_sha("a"))
+        self.catalog._adapter["validation"]["e2e"] = {**AFTER_MERGE, "placement": "sideways"}
+
+        outcomes = self.merge(card, _sha("a"))
+
+        [kept] = [o for o in outcomes if o.get("action") == "e2e-after-merge-not-queued"]
+        self.assertIn("placement 'sideways'", kept["reason"])
+        self.assertEqual(self.watched(), [card])
+        self.assertEqual(self.pending(), [])
+        # Repaired, the card is queued and the watch goes.
+        self.catalog._adapter["validation"]["e2e"] = dict(AFTER_MERGE)
+        self.watch_pass()
+        self.assertEqual((self.pending(), self.watched()), ([card], []))
+
+    def test_a_replayed_enqueue_after_a_partial_save_queues_once(self) -> None:
+        card = self.done_card()
+        self.on_main(_sha("a"))
+        save = self.runtime.save_records
+
+        def lost_after_the_queue(payload: dict[str, Any], records: dict[str, Any]) -> None:
+            # The dispatcher dies at the save that would drop the watch: the queued card is on disk.
+            if card not in watches(payload):
+                raise OSError("the dispatcher died before the watch drop was saved")
+            save(payload, records)
+
+        with (
+            mock.patch.object(self.runtime, "save_records", side_effect=lost_after_the_queue),
+            self.assertRaises(OSError),
+        ):
+            self.merge(card, _sha("a"))
+        self.assertEqual((self.pending(), self.watched()), ([card], [card]))
+
+        self.watch_pass()
+
+        self.assertEqual((self.pending(), self.watched()), ([card], []))
+        # Once the card has moved on (covered, then green), a lost watch drop replayed still queues nothing.
+        self.am_tick()
+        run = self.run_of(card)
+        self.conclude("success", run.wait_ref)
+        self.am_tick()
+        self.merge(card, _sha("a"))
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.watched(), [])
 
     def test_three_merges_during_a_run_are_covered_by_exactly_one_next_run(self) -> None:
         first = self.done_card()

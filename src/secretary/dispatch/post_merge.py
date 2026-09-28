@@ -25,7 +25,10 @@ same fact under the same request ids: one card event (the observer wake, see
 `secretary.tasks.is_significant_card_event`) and, for a sprint card, one dispatcher comment on the
 sprint. The watch is dropped only after both are on the board. A `green` watch of a project whose e2e
 stage is declared `placement: after_merge` queues its card for that project's next after-merge e2e run
-(`dispatch/e2e_after_merge.py`) in the same save that drops the watch; no other result queues anything.
+(`dispatch/e2e_after_merge.py`); no other result queues anything. Such a watch is dropped only once the
+card is queued, or its project is established not to be `after_merge`: while the adapter or its
+declaration cannot be read it is kept, marked `published` so its fact is not published again, and the
+next pass retries the enqueue alone.
 """
 
 from __future__ import annotations
@@ -177,28 +180,36 @@ def reconcile_post_merge_watches(
             # Durable before it is published: a replay publishes this fact, never a re-read one.
             watch["result"] = result
             runtime.save_records(payload, records)
-        try:
-            publish(runtime, watch)
-        except (TaskError, HostError, OSError, ValueError, TypeError) as exc:
-            outcomes.append(
-                {
-                    "status": "degraded",
-                    "step": "post-merge-ci",
-                    "action": "post-merge-ci-publish-failed",
-                    "pilot_ref": ref,
-                    "reason": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            continue
-        # A green merge of a project whose e2e runs after the merge joins that project's pending set,
-        # in the save that drops the watch (secretary-1807).
+        if not watch.get("published"):
+            try:
+                publish(runtime, watch)
+            except (TaskError, HostError, OSError, ValueError, TypeError) as exc:
+                outcomes.append(
+                    {
+                        "status": "degraded",
+                        "step": "post-merge-ci",
+                        "action": "post-merge-ci-publish-failed",
+                        "pilot_ref": ref,
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            watch["published"] = True
+        # A green merge of a project whose e2e runs after the merge joins that project's pending set
+        # (secretary-1807). The watch outlives an enqueue that could not establish the project's
+        # placement: it is kept, published, and the next pass retries the enqueue alone.
         from secretary.dispatch.e2e_after_merge import enqueue
 
         queued = enqueue(runtime, payload, watch)
+        if queued.outcome is not None:
+            outcomes.append(queued.outcome)
+        # The queued card is saved before the watch is dropped; a replay of a save lost in between
+        # queues it once (`enqueue` is idempotent per card and merge SHA).
+        runtime.save_records(payload, records)
+        if not queued.settled:
+            continue
         del live[ref]
         runtime.save_records(payload, records)
-        if queued is not None:
-            outcomes.append(queued)
         outcomes.append(
             {
                 "status": "ok",
@@ -236,7 +247,12 @@ def resolve(runtime: Any, watch: dict[str, Any], *, now: float | None = None) ->
 
 
 def _fact(
-    watch: dict[str, Any], result: str, waited: int, *, reason: str = "", runs: list[dict[str, str]] | None = None
+    watch: dict[str, Any],
+    result: str,
+    waited: int,
+    *,
+    reason: str = "",
+    runs: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     fact: dict[str, Any] = {
         "result": result,
