@@ -607,7 +607,9 @@ long wait is a [wait card](#wait-cards).
 (`SECRETARY_PO_SESSION`) and the request id of the input the turn answers (`SECRETARY_PO_REQUEST`), both
 set by the PO service in every turn. There is no flag for it: the CLI reads the two variables for `--role
 po` only, any other role's create ignores them, and `TaskWriter.create(origin=...)` refuses an origin
-for any role but `po` (`validation`). Outside a PO turn no origin is recorded. The origin is one typed
+for any role but `po` (`validation`), with two dispatcher exceptions that carry an existing card's origin
+onto a card cut for it: the decision a spent e2e cap needs, and the hotfix of a red after-merge e2e run
+([After merge](#after-merge)). Outside a PO turn no origin is recorded. The origin is one typed
 field of the extension bag, `extensions.extra.po_origin` (JSON `{session, request}`), written once by
 create and part of its request identity (`po_origin` in the create payload: the same turn's retry
 replays, another turn's is a conflict); nothing writes it afterwards. `task show` and `task list` carry
@@ -703,7 +705,7 @@ refused at create; a legacy one is Blocked at claim.
 ### Owner events and the bell
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
-(revision `0018_owner_events`; `0021_delegated_card_settled` and `0023_sprint_e2e_budget` add a kind), written and read only through
+(revision `0018_owner_events`; `0021_delegated_card_settled`, `0023_sprint_e2e_budget` and `0024_e2e_after_merge_kind` add a kind), written and read only through
 `secretary.board.owner_events`. A row is
 `id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
 `created_at`, `read_at` (null while unread) and `dedup_key` (unique).
@@ -715,7 +717,8 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | --- | --- | --- | --- | --- |
 | `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), after the handover commits | the card | `card_handed_to_owner:<card>:<handover event id>` |
 | `steward_needs_human` | `needs_owner` | `TaskWriter.move` of a steward report card to Blocked by role `steward` whose reason carries a non-empty "Needs a human" section | the report card | `steward_needs_human:<card>:<move event id>` |
-| `e2e_budget_spent` | `needs_owner` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason | the card | `e2e_budget_spent:<card>:<cap>` |
+| `e2e_budget_spent` | `needs_owner` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason. Also the after-merge stage ([After merge](#after-merge)), when a covered card outside every open sprint, with no PO origin, has its cap spent and is declined | the card | `e2e_budget_spent:<card>:<cap>` |
+| `e2e_after_merge` | `needs_owner` | the dispatcher's after-merge e2e ([After merge](#after-merge)): a run that ended with no verdict (another conclusion, a wait outcome other than `target_reached`, refused, unidentified, ambiguous, run on another SHA); or a red run whose hotfix card no open sprint and no PO origin owns, after that card is Blocked | the run's carrier (the newest covered card), or the hotfix card | `e2e_after_merge:<dispatch id>`, `e2e_after_merge:hotfix:<dispatch id>` |
 | `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
 | `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
 | `budget_signal` | `notice` | `SprintWriter.record_budget` once the sprint's budget reaches its signal threshold | the sprint | `budget_signal:<sprint>` |
@@ -1392,13 +1395,15 @@ validation:
     deadline: 6h          # optional duration, default 6h: the wait card's deadline
     candidate_input: sha  # optional: the input that receives the candidate SHA
     dispatch_id_input: sid # optional: the input that receives the dispatch id (see below)
+    placement: before_merge # optional: before_merge (default) or after_merge (see [After merge](#after-merge))
 ```
 
 It is read with the adapter (`InstanceCatalog.adapter`), and a malformed one fails that read with
 `AdapterE2eDeclarationError`, a typed adapter error naming the adapter and the problem: an unknown key,
 no or a bad `workflow`, `inputs` that is not a mapping of input names to scalars, a bad `deadline`, a bad
 `candidate_input` or `dispatch_id_input`, a static input or `candidate_input` sharing the
-`dispatch_id_input` name, or `ci` other than `github`. The card's gate
+`dispatch_id_input` name, a `placement` other than `before_merge` or `after_merge`, or `ci` other than
+`github`. The card's gate
 then fails with that reason, and nothing is skipped silently. The adapter schema says the same. A
 project with no `e2e` key behaves exactly as before.
 
@@ -1406,7 +1411,8 @@ The workflow needs no input of the dispatcher's: it is dispatched with exactly i
 plus `candidate_input` when declared, plus `dispatch_id_input` when declared (GitHub refuses an input the
 workflow does not declare, HTTP 422).
 
-**Placement.** For a `code` card of a declaring project, the stage runs in `park_green_verdict`: after a
+**Placement.** For a `code` card of a project declaring the default `placement: before_merge`, the stage
+runs in `park_green_verdict`: after a
 green review verdict, or right after green CI when the card's review is `skipped`, and before the park in
 Assessment or the no-observer release. A red review never reaches the stage, so rework rounds spend
 no runs. The release audit (`release_parked`) runs the same stage: a card parked without a green run
@@ -1613,6 +1619,115 @@ budget the card spends, or null); `mark` and `waiting_on` while it waits on a bu
 run `sha`, `dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wait_card_pending`,
 `waiting`, the conclusion, the wait outcome, or `dispatch_refused`), `run`, `identified_by` (`answer` or
 `recovery`, with `recovery_rule`), `reconciled_to`, `wait_card`, `dispatched_at`, `result`.
+
+### After merge
+
+Some e2e workflows can only run on a commit whose releases the post-merge CI of `main` published: the
+Codegen mega's `stand-e2e.yml` waits for the worker and service releases of its exact SHA, and codegen
+publishes them only on a push to `main`. Its candidate branch never has them. A project declares that with
+`placement: after_merge` (secretary-1807, the PO's decision secretary-1805; `dispatch/e2e_after_merge.py`).
+
+**No stage before the merge.** A card of such a project never runs the stage above: it goes through
+review, Assessment and release as a card of a project with no e2e.
+
+**Queueing.** When the [post-merge watch](#post-merge-ci) records a card's merge commit `green`, the
+card joins its project's pending set with its merge SHA, in the save that drops the watch
+(`e2e_after_merge.enqueue`); `red`, `absent` and `timeout` queue nothing (red is handled as before). The
+pending sets live in the dispatcher's production state (`e2e_after_merge`, one queue per project:
+`pending`, the `run` in flight, `budget_waits`, `cleanup`), beside the post-merge watches; `production
+observe` lists them. Each queued card is marked on the board too (below).
+
+**One run in flight per project, coalesced.** Each tick, after the post-merge watches, every project's
+queue advances on its own (`reconcile_after_merge`); one project never waits on another. While a project
+has a run in flight its pending cards wait. When it has none and the set is not empty:
+
+- the target is the newest merge SHA in the set (by merge time); every card in the set has green
+  post-merge CI, or it would not be there;
+- the run covers every pending card whose merge SHA is the target or an ancestor of it (GitHub's
+  compare, `ahead` or `identical`); a card off that line stays pending, and so does every card merged
+  later;
+- the covered cards and the SHA are recorded before the dispatch, in the intent: the run record (dispatch
+  id `<carrier>-e2e-am-<n>-<random>`) lives on the newest covered card, the *carrier*, in its `e2e` field
+  under `after_merge_runs`, with `covered` (`{ref, merge_sha}` each), the branch, and what paid for it;
+  every covered card's mark says `covered` with that dispatch id. All of it is one write,
+  `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. The production state
+  names the run in flight before that write, so a dispatcher that dies in between finds no intent on the
+  carrier and puts the cards back, with nothing charged and nothing dispatched.
+
+**Exact SHA, on a branch the dispatcher owns.** `workflow_dispatch` takes a branch or a tag, not a SHA,
+and `main` may have moved past the target. The dispatcher creates the branch `pipeline-e2e/<dispatch
+id>` at the target (`POST repos/{repo}/git/refs`; a branch that already exists is accepted only at that
+SHA) and dispatches on it. The name is unique per run, and codegen's `ci.yml` runs on a push to `main`
+only, so the branch triggers nothing. `candidate_input`, when declared, receives the target SHA. The run
+is identified as in the stage above (GitHub's dispatch answer, else the recovery rule on that branch, with
+the settle and the ambiguity rules), and its `head_sha` must equal the target: a run on anything else is
+never attached to the covered cards. The branch is recorded in the intent. Once the run's result was
+acted on the dispatcher deletes it (`DELETE .../git/refs/heads/<branch>`; one already gone counts as
+deleted), and one whose delete got no answer stays in the queue's `cleanup` list until it is gone. The
+dispatch is sent only in the tick that wrote the intent: a dispatcher that died after the intent, the
+branch or the POST looks the run up and never dispatches it again; none found within the identification
+window is an outcome like any other non-verdict (below).
+
+**Budget.** The run is charged at the intent, atomically, exactly as a run of the stage above:
+
+- the newest covered card's sprint is open: to that sprint (`sprint_e2e_charges`, the carrier as `card`);
+- otherwise: to every covered card's own cap, all charged together or none. Each covered card records the
+  dispatch id in its mark's `charged`, and those count in its `runs_dispatched` against its cap
+  (3 plus its raises).
+
+`sprint show` and `sprint status` count after-merge runs with the rest (`used`), and name them:
+`after_merge`, the charged runs whose dispatch id is an after-merge one, and the summary `e2e: <used> of
+<budget> (<n> after merge)`. When nothing is left nothing is dispatched: no intent, no branch. The
+budget decision of the stage above is cut (or joined) with every covered card named under "Waiting for
+e2e", each covered card's mark says `e2e: budget spent, waiting on <decision>`, and cards queued while it
+is open join it with one comment each. Each tick the budget is re-checked first: a raise lets the next
+pass dispatch one run over everything pending; the decision completed without one declines the cards
+waiting on it (a comment, mark `declined`, out of the pending set). Outside a sprint each covered card
+whose cap is spent gets the card-scope decision with its own PO origin; one with no origin is declined
+at once with an `e2e_budget_spent` bell event, and the others go on without it.
+
+**Waiting.** A wait card on the run ([Wait cards](#wait-cards)), with the adapter's deadline, in the
+charged sprint while it is open (else in none), returning to `card:<carrier>`, created once under
+`dispatcher-e2e-wait-<dispatch id>`. Its frozen result is read each tick; there is no other poller.
+
+**Outcomes.**
+
+- Conclusion `success`: one comment `## E2E after merge — green` on every covered card, with the run
+  link, the SHA and the list of covered cards with their merge SHAs; each mark says `green`.
+- Conclusion `failure`: exactly one `code` hotfix card, cut by the dispatcher under
+  `dispatcher-e2e-am-hotfix-<dispatch id>` (so a replay after a crash creates nothing new; this request id
+  is the only way the dispatcher creates a code card). Its description carries the run URL, the
+  conclusion, the failed jobs and steps, the bounded `--log-failed` fragment, the SHA, and every covered
+  card with its merge SHA, frozen on the run before the create. It goes to, in this order:
+  - the newest covered card's sprint while it is open, with a `hotfix` budget event; the sprint's
+    observer wakes on its create as on a Blocked card of the sprint (`tasks.is_dispatcher_hotfix`);
+  - otherwise outside every sprint with the newest covered card's PO origin, so its Done or Blocked
+    returns to that session ([PO delegation](#po-delegation));
+  - otherwise it is created and Blocked at once, reason `after-merge e2e red, no sprint or origin owns
+    it` (`blocked_reason: other`), with one `e2e_after_merge` bell event.
+
+  Every covered card gets one `## E2E after merge — red` comment naming the hotfix, and its mark says
+  `red -> <hotfix card>`. The cards do not go back to the pending set: the hotfix, once merged, is covered
+  by the next run.
+- Anything else: another conclusion (`cancelled`, `timed_out`, ...), a wait outcome other than
+  `target_reached` (`deadline_passed`, `source_unreachable`, `cancelled`), a refused dispatch or branch,
+  a run never identified, several candidates, or a run on another SHA (the run's state is `blocked`: it
+  is never attached). No hotfix. One `## E2E after merge — <requeued|blocked>` comment on every covered
+  card with the outcome, one `e2e_after_merge` bell event on the carrier, and the covered cards go back
+  to the pending set; the next run covers them and is charged as usual.
+
+The resolution (`green`, `red`, `requeued`, `blocked`) is written on the run before any of its effects,
+each effect is idempotent (comments and the hotfix under request ids derived from the dispatch id, the
+bell under its dedup key), and the run is marked acted on only after all of them.
+
+**`task show`.** A covered card's `e2e` block carries `placement: after_merge`, `state` (`pending`,
+`covered by <run>`, `green`, `red -> <hotfix card>`, `e2e: budget spent, waiting on <decision>`,
+`declined`), `merge_sha`, `run` (the link), `covered_by` (the dispatch id), `carrier`, `hotfix`,
+`decision` and `note` (the last outcome that sent it back, or why it was declined), and `mark` with
+`waiting_on` while it waits on a budget decision. The carrier also lists `after_merge_runs`: per run the
+dispatch id, SHA, workflow, `ref` (the branch) and `ref_state` (`created`, `deleted`), `covered`,
+`charged_to` (the sprint, or `cards`), `state` (the resolution once acted on), `run`, `wait_card`,
+`hotfix`, `reason` and `result`.
 
 ## Products and issues
 
@@ -2046,7 +2161,9 @@ wake, the post-merge result is. A Done with no merge (research and infra cards, 
 operation card the PO completed, a release that merged nothing, automerge off, a manual PO or steward
 Done) wakes as before. The wake text states the result
 with its runs, and for `red` the failed checks and classification; a red result is never worded as a
-plain Done.
+plain Done. A `green` result of a project whose e2e stage is declared `placement: after_merge` also
+queues the card for that project's next after-merge e2e run ([After merge](#after-merge)), in the save
+that drops the watch.
 
 An Assessment entry is one decision visit. The first observer `task decide` is canonical for that
 visit; a redelivered turn repeating the same kind returns that decision without another comment, and

@@ -484,6 +484,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0024_e2e_after_merge_kind",
                 "0023_sprint_e2e_budget",
                 "0022_origin_returns",
                 "0021_delegated_card_settled",

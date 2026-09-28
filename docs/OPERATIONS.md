@@ -724,7 +724,8 @@ What each kind means:
 | --- | --- | --- | --- |
 | `card_handed_to_owner` | needs the owner | the PO handed a `decision`/`operation` card to you with a reason | answer on the card page (the comment form posts as the owner) or in the sprint's PO session; it clears when the PO completes the card |
 | `steward_needs_human` | needs the owner | the steward's report card went Blocked with a "Needs a human" section | read the report card; mark the event read once handled |
-| `e2e_budget_spent` | needs the owner | a code card outside every sprint, cut by nobody's PO session, spent its 3 e2e runs and was Blocked | re-cut the work in a sprint with an e2e budget, or through the PO; mark the event read once handled |
+| `e2e_budget_spent` | needs the owner | a code card outside every sprint, cut by nobody's PO session, spent its 3 e2e runs and was Blocked (or, for an after-merge project, was left out of the after-merge run) | re-cut the work in a sprint with an e2e budget, or through the PO; mark the event read once handled |
+| `e2e_after_merge` | needs the owner | an after-merge e2e run on `main` ended with no verdict (cancelled, timed out, deadline passed, unreadable, refused, not identified, ran on another SHA), and its cards are pending again; or a red one's hotfix card had no open sprint and no PO session to go to and is Blocked | read the run and the comment on the cards; for a Blocked hotfix, decide who fixes it (unblock it into a sprint, or hand it to the PO); mark the event read once handled |
 | `sprint_closed` | notice | a sprint was closed | read its closeout on the sprint page |
 | `sprint_stopped` | notice | a sprint's budget reached the hard limit and it was stopped | decide whether to reopen it |
 | `budget_signal` | notice | a sprint's budget reached its signal threshold | look at why its cards keep going round |
@@ -1179,6 +1180,49 @@ refused included. If a PO session cut it, the same decision card goes to that se
 same way, and the raise is `secretary task e2e-budget --ref <card> --role po --authorized-by <event
 id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
 reached (3)` and the bell shows `e2e_budget_spent`.
+
+### E2E after the merge
+
+A project whose e2e workflow can only run on `main` (the Codegen mega waits for the releases of its exact
+SHA, which only the post-merge CI of `main` publishes) declares `placement: after_merge` in
+`validation.e2e`. Contract in [Protocols](PROTOCOLS.md#after-merge). What you see:
+
+- its cards do **not** wait for e2e before the merge: they go through review, Assessment and release as
+  before, with no `e2e` wait;
+- once a card's merge commit shows **Post-merge CI GREEN**, `task show --ref <card>` carries `e2e` with
+  `placement: after_merge` and `state: pending`;
+- at most one run per project is in flight. When none is, the dispatcher starts one on the newest green
+  merge SHA, covering every pending card merged up to it; each covered card then says `state: covered by
+  <run link>`, and the newest of them (the *carrier*) lists the run under `after_merge_runs`, with the
+  branch `pipeline-e2e/<dispatch id>` it was dispatched on and the cards it covers. Cards merged while it
+  runs wait for the next run, which covers all of them at once;
+- a **wait card** titled `E2E after merge: <workflow> on <project> @ <sha>` waits for the run, in the
+  carrier's sprint while it is open;
+- the run is charged to the carrier's open sprint (`sprint status` counts it in `e2e: <used> of <budget>
+  (<n> after merge)`), otherwise to every covered card's own cap of 3. With nothing left, no run starts:
+  the usual budget decision card names every covered card, and each says `e2e: budget spent, waiting on
+  <decision>` ([below](#when-the-e2e-run-budget-is-spent));
+- `production observe` lists every project's queue under `e2e_after_merge`: `pending`, `in_flight`,
+  `covered`, `budget_waits` and `refs_to_delete`.
+
+When the run ends:
+
+- **green**: every covered card gets `## E2E after merge — green` with the run link, the SHA and the
+  covered cards, and says `state: green`;
+- **red**: one `code` card titled `Hotfix: after-merge e2e red on main @ <sha> (<workflow>)`, with the
+  run, the failed jobs and steps, the log fragment, the SHA and every covered card with its merge SHA.
+  It goes to the carrier's sprint while that is open (its observer wakes on it), else to the carrier's
+  PO session, else it is Blocked at once (`after-merge e2e red, no sprint or origin owns it`) and the
+  bell shows `e2e_after_merge`. Each covered card gets `## E2E after merge — red` and says `state: red ->
+  <hotfix card>`;
+- **anything else** (cancelled, timed out, deadline passed, the run unreadable, refused, not identified,
+  or run on another SHA): no hotfix. Each covered card gets `## E2E after merge — requeued` (or `—
+  blocked` when the run was never attached), the bell shows `e2e_after_merge`, and the cards are pending
+  again: the next run, charged as usual, starts on the next tick. To stop that, pause the pipeline or
+  let the budget decision stop it.
+
+The dispatcher deletes the `pipeline-e2e/...` branch once the run was acted on; a branch whose delete got
+no answer stays under `refs_to_delete` until a later tick removes it.
 
 ## What was commanded, and what became of a request
 

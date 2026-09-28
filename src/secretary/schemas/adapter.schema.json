@@ -63,7 +63,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["workflow"],
-          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'). Needs ci 'github'. The run is identified from GitHub's dispatch answer (return_run_details), so the workflow needs no extra input.",
+          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'), or, with placement after_merge, on main after the merge. Needs ci 'github'. The run is identified from GitHub's dispatch answer (return_run_details), so the workflow needs no extra input.",
           "properties": {
             "workflow": {
               "oneOf": [
@@ -93,6 +93,10 @@
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
               "description": "Optional: the workflow_dispatch input that receives the dispatcher's dispatch id. When declared, crash recovery attaches only a run whose run-name carries it. No static input and not candidate_input may share its name."
+            },
+            "placement": {
+              "enum": ["before_merge", "after_merge"],
+              "description": "Where the stage runs. before_merge (the default): on each code card's candidate, before it becomes releasable. after_merge: for a workflow that can only run on a commit whose releases the post-merge CI of main published; cards merge with no e2e, and once a merge commit's post-merge CI is green the dispatcher runs the workflow on main, on a branch it owns (pipeline-e2e/<dispatch id>) pointed at the newest green merge SHA, covering every card merged since the last run, with at most one run in flight per project (docs/PROTOCOLS.md 'After merge'). candidate_input then receives that SHA."
             }
           }
         }

@@ -43,6 +43,7 @@ from secretary.dispatch.pause_ops import auto_resume_expired_freeze
 from secretary.dispatch.origin_returns import reconcile_origin_returns
 from secretary.dispatch.po_cards import completion_state
 from secretary.dispatch.wait_cards import pending_wait_blockers
+from secretary.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from secretary.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from secretary.dispatch.state import (
     DispatcherRecord,
@@ -318,6 +319,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "post_merge_watches": sorted(
             (payload.get(WATCHES_KEY) or {}).keys() if isinstance(payload.get(WATCHES_KEY), dict) else ()
         ),
+        "e2e_after_merge": after_merge_snapshot(payload),
         "observers": observer_snapshot(payload),
         "resource_health": runtime.head_health.snapshot(),
         "divergences": list(payload.get("controlled_divergences") or []),
@@ -445,6 +447,11 @@ def _production_tick_work(
     try:
         outcomes += reconcile_post_merge_watches(runtime, payload, records)
     except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
+        errors.append(_unexpected_error("", exc))
+    # Right after the watches that queue them: each project's after-merge e2e run (secretary-1807).
+    try:
+        outcomes += reconcile_after_merge(runtime, payload, records)
+    except Exception as exc:  # noqa: BLE001 - an after-merge queue that cannot advance must not stop the tick
         errors.append(_unexpected_error("", exc))
     try:
         outcomes += _reconcile_sprint_budget(runtime)

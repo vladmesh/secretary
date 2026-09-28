@@ -50,6 +50,10 @@ E2E_CAP_FIELD = "e2e_cap"
 SPRINT_BUDGET_RAISED = "e2e_budget_raised"
 CARD_CAP_RAISED = "e2e_cap_raised"
 
+#: The infix of an after-merge run's dispatch id (`<carrier>-e2e-am-<n>-<random>`, secretary-1807): a
+#: sprint's charges read it to count its after-merge runs.
+AFTER_MERGE_DISPATCH_INFIX = "-e2e-am-"
+
 #: The request-id actions of a budget decision card: of a sprint, and of a card outside every sprint.
 SPRINT_DECISION_ACTION = "e2e-budget"
 CARD_DECISION_ACTION = "e2e-cap"
@@ -84,10 +88,13 @@ def budget_view(budget: int, used: int, charges: Iterable[Mapping[str, Any]]) ->
     for item in listed:
         if item["card"] and item["card"] not in cards:
             cards.append(item["card"])
+    after_merge = sum(1 for item in listed if AFTER_MERGE_DISPATCH_INFIX in item["dispatch_id"])
     return {
         "budget": int(budget),
         "used": int(used),
-        "summary": f"e2e: {int(used)} of {int(budget)}",
+        "summary": f"e2e: {int(used)} of {int(budget)}" + (f" ({after_merge} after merge)" if after_merge else ""),
+        # Of the runs used, those an after-merge run spent (secretary-1807).
+        "after_merge": after_merge,
         "cards": cards,
         "charges": listed,
     }
@@ -248,6 +255,7 @@ def authorized_raise(audit: Any, reader: Any, event_id: str, scope_ref: str, add
 
 
 __all__ = [
+    "AFTER_MERGE_DISPATCH_INFIX",
     "ANSWER_NO_LINE",
     "ANSWER_RAISE_LINE",
     "CARD_CAP_RAISED",

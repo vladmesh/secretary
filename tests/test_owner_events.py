@@ -63,8 +63,9 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(set(CLASSES), {NEEDS_OWNER, NOTICE})
         self.assertEqual(
             {kind for kind in KINDS if class_of(kind) == NEEDS_OWNER},
-            # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise.
-            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent"},
+            # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise;
+            # `e2e_after_merge` since 0024 (secretary-1807): an after-merge e2e run that needs the owner.
+            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent", "e2e_after_merge"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
                      "po_turn_failed", "provider_red", "delegated_card_settled"):
@@ -73,7 +74,7 @@ class EntityTests(unittest.TestCase):
             class_of("card_moved")
 
     def test_the_schema_and_the_revision_spell_the_same_vocabularies(self) -> None:
-        """The CHECKs of `board/schema.py`, 0018 and 0023 are the lists this module derives classes from."""
+        """The CHECKs of `board/schema.py`, 0018 and 0024 are the lists this module derives classes from."""
         table = schema.metadata.tables["owner_events"]
         import sqlalchemy as sa
 
@@ -91,9 +92,10 @@ class EntityTests(unittest.TestCase):
         revision = importlib.import_module("secretary.board.migrations.versions.0018_owner_events")
         source = Path(revision.__file__).read_text(encoding="utf-8")
         # 0021 restated the kind vocabulary with `delegated_card_settled` (secretary-1792); 0023 restates
-        # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796). The class
-        # vocabulary is still the one 0018 created.
-        restated = importlib.import_module("secretary.board.migrations.versions.0023_sprint_e2e_budget")
+        # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796); 0024 restates
+        # both again with `e2e_after_merge`, a `needs_owner` kind (secretary-1807). The class vocabulary is
+        # still the one 0018 created.
+        restated = importlib.import_module("secretary.board.migrations.versions.0024_e2e_after_merge_kind")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
         restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
@@ -104,7 +106,7 @@ class EntityTests(unittest.TestCase):
                 name,
             )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
-        self.assertEqual(restated.down_revision, "0022_origin_returns")
+        self.assertEqual(restated.down_revision, "0023_sprint_e2e_budget")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()
