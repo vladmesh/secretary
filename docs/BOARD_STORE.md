@@ -30,8 +30,9 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0023` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0024` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
+| `board/release_migrations.py` | the release's target bundle, its eligibility and bounded apply (§7.4) |
 | `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
 | `board/store.py` | `board-store.env` parsing, resolution and git exclusion (§5.4) |
 | `board/provision.py` | Compose definition, container/volume reconciliation, role verification (§5.1–§5.5) |
@@ -1098,10 +1099,38 @@ kind is refused.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
   revision file.
 - **Lock:** `pg_advisory_lock(ADVISORY_LOCK_KEY)` on the migration session for the whole run,
-  released once at the end.
+  released once at the end. Owed revisions are read under it and run one at a time, each committed
+  before the next; a failure is `MigrationFailed` naming the revision, what was committed before it
+  and the server's cause. A failed run is rolled back *before* the unlock, and a cleanup that cannot
+  run invalidates the session (the lock ends with it) instead of replacing the original failure.
 - **Where it runs:** bootstrap, and `step_board_store` in `secretary upgrade` (§5.8 order).
   No file → skipped; current → unchanged; broken or tracked file, unreachable server or failed
-  revision → failed, before service restart.
+  revision → failed, before service restart. These apply every owed revision, whatever it declares.
+- **At release (`board/release_migrations.py`, `dispatch/production_checkout.py`):** when the
+  dispatcher releases a card whose merge moves the production checkout it runs from
+  (`production_runtime.product_root`), both release paths (push, and GitHub's post-merge refresh)
+  pin the fetched target to its full commit id, refuse a checkout that cannot fast-forward to it,
+  then apply the target's owed revisions and only then `merge --ff-only <commit>`. The running
+  build is the old one, so the revisions come from the target: `git archive <commit>
+  src/secretary/board/migrations` out of the checkout's own objects, extracted into a temporary
+  directory and run as the script location of the same `migrate.apply`, owner connection and lock.
+  The version table must then hold the target's head. The connection has a connect timeout and a
+  session `lock_timeout` (`SECRETARY_RELEASE_MIGRATION_LOCK_TIMEOUT_SECONDS`, default 30) bounding
+  the advisory-lock wait and every DDL lock wait. Nothing owed: one lock, one read, unchanged. Any
+  refusal (`release_schema_refused`: `bundle_unreadable`, `store_unavailable`, `lock_timeout`,
+  `destructive`, `unclassified`, `migration_failed`, `unknown_revision`, `not_verified`) leaves the
+  checkout on its old commit; the release Blocks the card with that typed reason, keeps the remote
+  merge as delivered, and creates one `operation` card for the sprint's PO
+  (`dispatch/release_activation.py`). Other projects' checkouts and the instance repository keep
+  their plain fast-forward.
+- **Release eligibility (for revision authors):** the release applies a revision unattended only if
+  it declares, at module level, `release_safety = "additive"`: the previous release keeps working
+  against the migrated store, because the revision only adds tables, nullable or defaulted
+  columns, indexes, grants or widened CHECK vocabularies, and drops, renames or narrows nothing the
+  previous release reads or writes. Declare `release_safety = "destructive"` otherwise. A
+  destructive or undeclared revision (`0001`–`0024` declare nothing) is refused before any owed
+  revision runs, and that release is a person's `secretary upgrade`. A revision is loaded by the
+  *previous* build at release, so it imports from the product only what that build already ships.
 - **Schema gate (`board/schema_gate.py`):** every operational connection reads `alembic_version`
   once when it opens, before any schema-dependent statement: each new connection of
   `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each

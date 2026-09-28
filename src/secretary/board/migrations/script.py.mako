@@ -15,6 +15,8 @@ revision = ${repr(up_revision)}
 down_revision = ${repr(down_revision)}
 branch_labels = ${repr(branch_labels)}
 depends_on = ${repr(depends_on)}
+# Declare release_safety = "additive" or "destructive" (docs/BOARD_STORE.md §7.4). A release applies
+# only an additive revision unattended; an undeclared one is refused there like a destructive one.
 
 
 def upgrade() -> None:

@@ -13,9 +13,10 @@ from secretary.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
-from secretary.dispatch import attempt_accounting, e2e_stage, post_merge
+from secretary.dispatch import attempt_accounting, e2e_stage, post_merge, release_activation
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.helpers import scrub_host_output
+from secretary.dispatch.production_checkout import ProductionActivationRefused
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
 from secretary.dispatch.types import GateTransportError, HostError, MergeLanding
@@ -418,6 +419,12 @@ def release_effect(
     if has_candidate(task):
         try:
             landing = runtime.host.complete_green(task, record)
+        except ProductionActivationRefused as exc:
+            # Delivered to the remote, not activated on production: its own reason, one operation
+            # for the PO, and the card Blocked (secretary-1824).
+            return release_activation.block_refused_activation(
+                runtime, task, record, records, payload, attempt_id, exc, step=step
+            )
         except HostError as exc:
             # A rejected merge must land the card in Blocked rather than escape the tick: an
             # escaping error leaves the verdict standing and every later tick retries the merge.
