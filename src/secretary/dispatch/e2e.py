@@ -10,12 +10,20 @@ A project declares one e2e check in its adapter, beside its mechanical gate (sec
         deadline: 6h              # optional; how long the run may take, 6h when absent
         candidate_input: sha      # optional; the input that receives the candidate SHA
         dispatch_id_input: sid    # optional; the input that receives the dispatch id
+        placement: before_merge   # optional; `after_merge` runs it on main after the merge
 
 `parse_e2e` is the one reading of it, and a malformed declaration raises
 :class:`AdapterE2eDeclarationError`, a typed adapter error: the adapter read fails (`InstanceCatalog.
 adapter`), so the card's gate fails with the reason, instead of the stage being skipped. An adapter
 with no `e2e` key reads as None and nothing changes. `e2e` needs `ci: github`: only the github gate
 publishes the candidate branch the workflow is dispatched on.
+
+`placement` is `before_merge` (the default: the stage runs on the card's candidate, `dispatch/e2e_stage.py`)
+or `after_merge` (secretary-1807): for a project whose e2e workflow can only run on a commit whose releases
+the post-merge CI of `main` published, the card merges with no e2e, and the dispatcher runs the workflow on
+`main` afterwards, once for every card merged since the last run (`dispatch/e2e_after_merge.py`). Such a run
+is dispatched on a branch the dispatcher owns, `pipeline-e2e/<dispatch id>`, pointed at the exact target
+SHA (:func:`create_ref`) and deleted when the run is over (:func:`delete_ref`).
 
 The run is identified by **GitHub's own answer**: the dispatch is sent with `return_run_details: true`
 (REST, explicitly, so it does not depend on the host's `gh` version), and the 200 answer names the
@@ -46,6 +54,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from secretary.board.e2e_record import AFTER_MERGE, BEFORE_MERGE, PLACEMENTS
 from secretary.board.wait_card import WaitSpecError, parse_duration, parse_utc
 from secretary.dispatch.gate import _HTTP_STATUS_RE, _backend_call, _failed_log, _gh_api, _LogFragment
 from secretary.dispatch.helpers import _tail
@@ -62,7 +71,9 @@ E2E_RECOVERY_SETTLE_SECONDS = max(
 #: How long after its intent a dispatched run may stay unidentified before the card is Blocked.
 E2E_IDENTIFY_SECONDS = max(60, int(os.environ.get("SECRETARY_E2E_IDENTIFY_SECONDS", str(15 * 60))))
 
-_KEYS = frozenset({"workflow", "inputs", "deadline", "candidate_input", "dispatch_id_input"})
+_KEYS = frozenset({"workflow", "inputs", "deadline", "candidate_input", "dispatch_id_input", "placement"})
+#: The prefix of the branch an after-merge run is dispatched on: `pipeline-e2e/<dispatch id>`.
+AFTER_MERGE_REF_PREFIX = "pipeline-e2e/"
 _WORKFLOW_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.ya?ml$")
 _INPUT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,99}$")
 #: Conclusions of a failed job whose steps and log are the evidence of a red run.
@@ -92,6 +103,11 @@ class E2eDeclaration:
     deadline: str = DEFAULT_DEADLINE
     candidate_input: str = ""
     dispatch_id_input: str = ""
+    placement: str = BEFORE_MERGE
+
+    @property
+    def after_merge(self) -> bool:
+        return self.placement == AFTER_MERGE
 
     def dispatch_inputs(self, dispatch_id: str, sha: str) -> dict[str, str]:
         """Every input one dispatch sends: the static ones, and the SHA and the id where declared."""
@@ -175,7 +191,16 @@ def parse_e2e(validation: Any, *, adapter: str = "") -> E2eDeclaration | None:
         raise AdapterE2eDeclarationError(
             adapter, f"candidate_input {candidate_input!r} is also a static input; it takes the candidate SHA"
         )
-    return E2eDeclaration(workflow, inputs, str(deadline).strip(), candidate_input, dispatch_id_input)
+    placement = raw.get("placement", BEFORE_MERGE)
+    if placement is None:
+        placement = BEFORE_MERGE
+    if not isinstance(placement, str) or placement not in PLACEMENTS:
+        raise AdapterE2eDeclarationError(
+            adapter, f"placement {placement!r} is neither {' nor '.join(PLACEMENTS)}"
+        )
+    return E2eDeclaration(
+        workflow, inputs, str(deadline).strip(), candidate_input, dispatch_id_input, placement
+    )
 
 
 def declared_e2e(host: Any, project: str) -> E2eDeclaration | None:
@@ -300,6 +325,103 @@ def run_head_sha(host: Any, repo: str, run_id: int) -> str:
     return str(head)
 
 
+def _gh_status(completed: Any) -> tuple[str, str]:
+    """`(HTTP status, text)` of a failed `gh api` call."""
+    text = _tail((completed.stderr or completed.stdout or "").strip()) or "(no output)"
+    status = _HTTP_STATUS_RE.search(text)
+    return ((status.group(1) or status.group(2)) if status else ""), text
+
+
+def create_ref(host: Any, repo: str, name: str, sha: str) -> None:
+    """Point the dispatcher-owned branch `name` at `sha` (`POST .../git/refs`).
+
+    A branch that already exists is accepted only when it already points at `sha` (the same intent
+    repeated after a crash); anything else is a :class:`HostError`. `GateTransportError` when GitHub did
+    not answer.
+    """
+    completed = _backend_call(
+        host,
+        [
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repo}/git/refs",
+            "-f",
+            f"ref=refs/heads/{name}",
+            "-f",
+            f"sha={sha}",
+        ],
+        "e2e after-merge ref",
+    )
+    if completed.returncode == 0:
+        return
+    code, text = _gh_status(completed)
+    if code == "422":
+        current = _gh_api(host, f"repos/{repo}/git/ref/heads/{name}", jq="{sha: .object.sha}")
+        if isinstance(current, dict) and current.get("sha") == sha:
+            return
+        raise HostError(f"branch {name} already exists in {repo} and does not point at {sha}: {text}")
+    if code == "429" or "rate limit" in text.lower() or not code:
+        raise GateTransportError(f"e2e after-merge ref {name} was not created: {text}")
+    raise HostError(f"GitHub refused to create branch {name} at {sha} in {repo}: {text}")
+
+
+#: What :func:`delete_ref` answers: GitHub deleted the branch, or it is confirmed not to exist.
+REF_DELETED = "deleted"
+REF_ABSENT = "absent"
+
+
+def delete_ref(host: Any, repo: str, name: str) -> str:
+    """Delete the dispatcher-owned branch `name`: :data:`REF_DELETED` or :data:`REF_ABSENT`, else raise.
+
+    Three answers, and only two of them mean the branch is gone:
+
+    - deleted: GitHub answered the `DELETE` with success (204);
+    - absent: the `DELETE` answered 422 or 404, and a follow-up `GET git/ref/heads/<name>` answered 404.
+      GitHub also answers 422 for a delete it refused (validation, a protected or default branch, spam
+      limiting), so a 422 alone proves nothing;
+    - not deleted: anything else, a 422 whose read still finds the branch or whose read failed included.
+      `GateTransportError` when GitHub did not answer, `HostError` otherwise; the caller keeps the branch
+      recorded and asks again.
+    """
+    completed = _backend_call(
+        host,
+        ["gh", "api", "--method", "DELETE", f"repos/{repo}/git/refs/heads/{name}"],
+        "e2e after-merge ref",
+    )
+    if completed.returncode == 0:
+        return REF_DELETED
+    code, text = _gh_status(completed)
+    if code in {"404", "422"}:
+        read = _backend_call(host, ["gh", "api", f"repos/{repo}/git/ref/heads/{name}"], "e2e after-merge ref")
+        if read.returncode == 0:
+            raise HostError(f"branch {name} still exists in {repo} after its delete answered {code}: {text}")
+        read_code, read_text = _gh_status(read)
+        if read_code == "404":
+            return REF_ABSENT
+        raise HostError(
+            f"branch {name} in {repo}: the delete answered {code} ({text}) and the read that would confirm it is "
+            f"gone failed: {read_text}"
+        )
+    if code == "429" or "rate limit" in text.lower() or not code:
+        raise GateTransportError(f"e2e after-merge ref {name} was not deleted: {text}")
+    raise HostError(f"GitHub refused to delete branch {name} in {repo}: {text}")
+
+
+def is_ancestor(host: Any, repo: str, ancestor: str, descendant: str) -> bool:
+    """Whether `ancestor` is `descendant` or one of its ancestors, by GitHub's compare of the two."""
+    if ancestor == descendant:
+        return True
+    answer = _gh_api(host, f"repos/{repo}/compare/{ancestor}...{descendant}", jq="{status}")
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if not status:
+        raise GateTransportError(
+            f"GitHub answered the compare of {ancestor[:12]}...{descendant[:12]} with no status"
+        )
+    return str(status) in {"ahead", "identical"}
+
+
 @dataclass(frozen=True)
 class RedEvidence:
     """What a red run shows: its failed jobs with their failed steps, and one bounded log fragment."""
@@ -330,17 +452,23 @@ def red_evidence(host: Any, repo: str, run_id: int, run_url: str) -> RedEvidence
 
 
 __all__ = [
+    "AFTER_MERGE_REF_PREFIX",
     "DEFAULT_DEADLINE",
     "E2E_CLOCK_MARGIN_SECONDS",
     "E2E_IDENTIFY_SECONDS",
     "E2E_RECOVERY_SETTLE_SECONDS",
+    "REF_ABSENT",
+    "REF_DELETED",
     "AdapterE2eDeclarationError",
     "DispatchRefused",
     "DispatchedRun",
     "E2eDeclaration",
     "RedEvidence",
+    "create_ref",
     "declared_e2e",
+    "delete_ref",
     "dispatch_workflow",
+    "is_ancestor",
     "matching_runs",
     "parse_e2e",
     "red_evidence",

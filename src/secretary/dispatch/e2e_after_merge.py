@@ -1,0 +1,1439 @@
+"""The e2e stage after the merge: one run on `main` for every card merged since the last (secretary-1807).
+
+A project whose e2e workflow can only run on a commit whose releases the post-merge CI of `main`
+published declares `validation.e2e.placement: after_merge` (`dispatch/e2e.py`). Its cards never run the
+before-merge stage (`dispatch/e2e_stage.py`): they go through review, Assessment and release as a
+project with no e2e. This module runs the workflow afterwards.
+
+Queueing. When the post-merge watch (`dispatch/post_merge.py`) records a card's merge commit green, the
+card joins its project's pending set (:func:`enqueue`), with its merge SHA. The watch is dropped only once
+the card is queued, or its project is established not to be `after_merge`; while the adapter or its
+declaration cannot be read the watch stays, and each pass retries the enqueue alone. A red, absent or timed-out
+post-merge CI queues nothing. The pending sets live in the dispatcher's production state
+(:data:`AFTER_MERGE_KEY`), beside the post-merge watches, one per project:
+`{pending: [...], run: {...} | None, budget_waits: [...], cleanup: [...]}`. Each card also carries its
+place on the board (`e2e.after_merge`, `board/e2e_record.py`).
+
+One run in flight per project, coalesced. While a project has a run in flight its pending cards wait.
+When none is and the set is not empty, the target is the newest pending merge SHA (every pending card
+already has green post-merge CI), and the run covers every pending card whose merge SHA is the target
+or one of its ancestors (GitHub's compare). Cards merged later, or off that line, stay pending. The run
+record, with the covered cards and the SHA, is the intent, written on every covered card in the
+transaction that charges it (`TaskWriter.record_after_merge_intent`), before anything reaches GitHub;
+its *carrier* is the newest covered card, which holds the record. Other projects never wait on it.
+
+Exact SHA. `workflow_dispatch` takes a branch, not a SHA, and `main` may have moved past the target. So
+the dispatcher creates a branch it owns, `pipeline-e2e/<dispatch id>` (codegen's `ci.yml` runs on a push
+to `main` only, so the branch triggers nothing), pointed at the target, and dispatches on it. The run's
+`head_sha` is checked against the target; a run on anything else is never attached. The branch is
+deleted once the run's result was acted on, and a branch whose delete got no answer stays in the
+project's `cleanup` list until it is gone. The dispatch is sent only in the tick that wrote the intent:
+a dispatcher that died between the intent (or the branch) and the dispatch finds the run by the
+recovery rule of the before-merge stage (event, branch, SHA, creation time, the settle and the
+ambiguity rules), and never dispatches it a second time.
+
+Budget. The run is charged at the intent, exactly as a before-merge run: to the carrier's sprint when
+that sprint is open, otherwise to every covered card's own cap, all together or none. When nothing is
+left nothing is dispatched, and the batch is the unit: one decision card owns every covered card. In a
+sprint it is the sprint's budget decision of the before-merge stage, cut or joined; outside one it is the
+batch's own decision (`e2e_budget.batch_decision_request_id`), naming every covered card with its cap and
+authorizing a raise of each spent one. Each covered card shows `e2e: budget spent, waiting on
+<decision>`, and a card queued later joins the same decision. A raise lets the next pass attempt the whole
+batch; the decision completed without one declines every card waiting on it. A batch in which no card
+came from a PO session has nobody to decide for it: every card is declined at once, and each spent one
+rings the `e2e_budget_spent` bell.
+
+Waiting. A `wait` card on the run, with the adapter's deadline, returning to `card:<carrier>`, created
+once under a request id derived from the dispatch id. Its frozen result is read each tick.
+
+Outcomes:
+
+- conclusion `success`: one `## E2E after merge — green` comment on every covered card;
+- conclusion `failure`: one `code` hotfix card, idempotent per run, with the run, its conclusion, the
+  failed jobs and steps, the bounded `--log-failed` fragment, the SHA and every covered card with its
+  merge SHA: in the carrier's sprint when it is open (a `hotfix` budget event, and the sprint observer
+  wakes on it as on a Blocked card); otherwise outside every sprint with the carrier's PO origin; with
+  neither, created and Blocked at once (`after-merge e2e red, no sprint or origin owns it`) with one
+  `e2e_after_merge` bell event;
+- anything else (another conclusion, a wait outcome other than `target_reached`, a refused dispatch, a
+  run never identified, several candidates, a run on another SHA): no hotfix, a comment on every
+  covered card, one `e2e_after_merge` bell event, and the covered cards go back to the pending set; the
+  next run is charged as usual.
+"""
+
+from __future__ import annotations
+
+import secrets
+import time
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+from secretary.board import e2e_budget, e2e_record, owner_events, wait_card
+from secretary.board import po_origin as origin_field
+from secretary.board.e2e_record import (
+    AFTER_MERGE,
+    AM_BLOCKED,
+    AM_BUDGET_WAIT,
+    AM_COVERED,
+    AM_DECLINED,
+    AM_GREEN,
+    AM_PENDING,
+    AM_RED,
+    AM_REQUEUED,
+    FAILURE,
+    REFUSED,
+    SENT,
+    SUCCESS,
+    AfterMergeMark,
+    E2eRun,
+    E2eState,
+)
+from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
+from secretary.dispatch.e2e import (
+    AFTER_MERGE_REF_PREFIX,
+    E2E_CLOCK_MARGIN_SECONDS,
+    E2E_IDENTIFY_SECONDS,
+    E2E_RECOVERY_SETTLE_SECONDS,
+    DispatchRefused,
+    E2eDeclaration,
+    create_ref,
+    declared_e2e,
+    delete_ref,
+    dispatch_workflow,
+    is_ancestor,
+    matching_runs,
+    run_head_sha,
+)
+from secretary.dispatch.e2e_stage import (
+    IDENTIFIED_BY_ANSWER,
+    IDENTIFIED_BY_RECOVERY,
+    _decision_card,
+    _red_evidence,
+    stage_request_id,
+    utcnow,
+)
+from secretary.dispatch.gate import _name_with_owner
+from secretary.dispatch.helpers import safe_one_line, scrub_host_output
+from secretary.dispatch.state import request_token
+from secretary.dispatch.types import HostError
+from secretary.tasks import TaskError
+
+#: The dispatcher production-state key of every project's after-merge queue.
+AFTER_MERGE_KEY = "e2e_after_merge"
+STEP = "e2e-after-merge"
+#: The dispatch-id infix of an after-merge run: `<carrier>-e2e-am-<n>-<random>`.
+DISPATCH_INFIX = e2e_budget.AFTER_MERGE_DISPATCH_INFIX
+#: The Blocked reason of a hotfix card nobody owns.
+UNOWNED_HOTFIX_REASON = "after-merge e2e red, no sprint or origin owns it"
+#: How much of the red run's evidence a hotfix card carries at most.
+_EVIDENCE_LIMIT = 12000
+
+
+# --- the queue ------------------------------------------------------------------------------------
+
+
+def queues(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every project's after-merge queue in the dispatcher production state, created on first use."""
+    raw = payload.get(AFTER_MERGE_KEY)
+    if not isinstance(raw, dict):
+        raw = {}
+        payload[AFTER_MERGE_KEY] = raw
+    return raw
+
+
+def _queue(payload: dict[str, Any], project: str) -> dict[str, Any]:
+    queue = queues(payload).setdefault(project, {})
+    queue.setdefault("pending", [])
+    queue.setdefault("run", None)
+    queue.setdefault("budget_waits", [])
+    queue.setdefault("cleanup", [])
+    return queue
+
+
+def _outcome(
+    project: str, action: str, *, ref: str = "", status: str = "ok", **fields: Any
+) -> dict[str, Any]:
+    return {"status": status, "step": STEP, "action": action, "project": project, "pilot_ref": ref, **fields}
+
+
+@dataclass(frozen=True)
+class Enqueued:
+    """What :func:`enqueue` made of a resolved post-merge watch.
+
+    `settled`: the watch may be dropped, because its card is queued (now or before) or its project is
+    established not to run its e2e after the merge. False when that could not be established (the adapter
+    or its e2e declaration could not be read, or the card could not): the watch is kept, with its
+    published CI fact, and the next pass asks again. `outcome` is what the tick reports, if anything.
+    """
+
+    settled: bool
+    outcome: dict[str, Any] | None = None
+
+
+def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> Enqueued:
+    """Queue the card of a post-merge watch whose merge commit's CI is recorded green, when its project
+    declares `placement: after_merge`.
+
+    Idempotent per card and merge SHA: a card already pending, covered by the run in flight, or already
+    marked on the board for this merge SHA (it was queued, and has moved on) is not added again, so a
+    replay after a save that kept both the queued card and the watch queues it once.
+    """
+    result = watch.get("result") if isinstance(watch.get("result"), dict) else {}
+    if result.get("result") != "green":
+        return Enqueued(True)
+    project = str(watch.get("project") or "")
+    ref = str(watch.get("ref") or "")
+    merge_sha = str(result.get("merge_sha") or watch.get("merge_sha") or "")
+    try:
+        declaration = declared_e2e(runtime.host, project)
+    except HostError as exc:
+        return Enqueued(
+            False,
+            _outcome(
+                project,
+                "e2e-after-merge-not-queued",
+                ref=ref,
+                status="degraded",
+                reason=(
+                    f"the e2e declaration cannot be read: {scrub_host_output(str(exc))}; the post-merge watch is "
+                    "kept and the card is queued once it can be"
+                ),
+            ),
+        )
+    if declaration is None or not declaration.after_merge or not ref or not merge_sha:
+        return Enqueued(True)
+    queue = _queue(payload, project)
+    run = queue.get("run") or {}
+    known = {str(entry.get("ref")) for entry in queue["pending"]} | {
+        str(entry.get("ref")) for entry in run.get("entries") or []
+    }
+    if ref in known:
+        return Enqueued(True)
+    try:
+        mark = e2e_record.e2e_state(runtime.reader.show(ref)).after_merge
+    except TaskError as exc:
+        return Enqueued(
+            False,
+            _outcome(
+                project,
+                "e2e-after-merge-not-queued",
+                ref=ref,
+                status="degraded",
+                reason=f"the card cannot be read: {exc.code}: {exc.message}; the post-merge watch is kept",
+            ),
+        )
+    if mark is not None and mark.merge_sha == merge_sha:
+        return Enqueued(True)
+    queue["pending"].append(
+        {
+            "ref": ref,
+            "merge_sha": merge_sha,
+            "sprint": str(watch.get("sprint") or ""),
+            "merged_at": float(watch.get("started_at") or time.time()),
+            "repo": str(watch.get("repo") or ""),
+            "base": str(watch.get("base") or ""),
+            "marked": False,
+        }
+    )
+    return Enqueued(True, _outcome(project, "e2e-after-merge-queued", ref=ref, merge_sha=merge_sha))
+
+
+def reconcile_after_merge(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Advance every project's after-merge queue once: a project never waits on another."""
+    outcomes: list[dict[str, Any]] = []
+    for project in sorted(queues(payload)):
+        try:
+            outcomes += _advance(runtime, payload, records, project)
+        except (TaskError, HostError, OSError, ValueError, TypeError, KeyError) as exc:
+            outcomes.append(
+                _outcome(
+                    project,
+                    "e2e-after-merge-failed",
+                    status="degraded",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+        queue = queues(payload).get(project)
+        if isinstance(queue, dict) and not any(
+            queue.get(key) for key in ("pending", "run", "budget_waits", "cleanup")
+        ):
+            del queues(payload)[project]
+            runtime.save_records(payload, records)
+    return outcomes
+
+
+def _advance(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str
+) -> list[dict[str, Any]]:
+    queue = _queue(payload, project)
+    outcomes = _progress(runtime, payload, records, project, queue)
+    # Last: every dispatcher-owned branch whose run was acted on, this tick's included.
+    return outcomes + _cleanup_refs(runtime, payload, records, project, queue)
+
+
+def _progress(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
+) -> list[dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
+    _mark_queued(runtime, payload, records, queue)
+    if queue["run"]:
+        settled, done = _settle(runtime, payload, records, project, queue)
+        if settled is not None:
+            outcomes.append(settled)
+        if not done:
+            return outcomes
+    if queue["budget_waits"]:
+        held = _budget_recheck(runtime, payload, records, project, queue)
+        if held is not None:
+            return [*outcomes, held]
+    if queue["pending"]:
+        started = _start(runtime, payload, records, project, queue)
+        if started is not None:
+            outcomes.append(started)
+    return outcomes
+
+
+def _mark_queued(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], queue: dict[str, Any]
+) -> None:
+    """Every newly queued card shows it is pending; a card that is not a code card leaves the queue."""
+    changed = False
+    for entry in list(queue["pending"]):
+        if entry.get("marked"):
+            continue
+        task = runtime.reader.show(str(entry["ref"]))
+        if str(task.get("type") or "code") != "code":
+            queue["pending"].remove(entry)
+            changed = True
+            continue
+        state = e2e_record.e2e_state(task)
+        previous = state.after_merge
+        state.after_merge = AfterMergeMark(
+            merge_sha=str(entry["merge_sha"]),
+            state=AM_PENDING,
+            charged=list(previous.charged) if previous is not None else [],
+        )
+        _persist(runtime, str(entry["ref"]), state)
+        entry["marked"] = True
+        changed = True
+    if changed:
+        runtime.save_records(payload, records)
+
+
+def _persist(runtime: Any, ref: str, state: E2eState) -> None:
+    runtime.writer.record_e2e_state(role="dispatcher", actor=runtime.owner, reference=ref, state=state.text())
+
+
+def _remark(runtime: Any, ref: str, carrier_ref: str, carrier_state: E2eState, **changes: Any) -> None:
+    """Rewrite one covered card's mark; the carrier's goes into the state that also holds the run."""
+    if ref == carrier_ref:
+        state = carrier_state
+    else:
+        state = e2e_record.e2e_state(runtime.reader.show(ref))
+    mark = state.after_merge or AfterMergeMark(merge_sha=str(changes.get("merge_sha") or ""))
+    for name, value in changes.items():
+        setattr(mark, name, value)
+    state.after_merge = mark
+    _persist(runtime, ref, state)
+
+
+def _sprint_open(runtime: Any, sprint: str) -> bool:
+    if not sprint:
+        return False
+    try:
+        return str(runtime.sprints.show(sprint, include_cards=False).get("status") or "") == "open"
+    except TaskError as exc:
+        if exc.code == "not_found":
+            return False
+        raise
+
+
+def _repo(runtime: Any, project: str, entries: list[dict[str, Any]]) -> str:
+    for entry in entries:
+        if entry.get("repo"):
+            return str(entry["repo"])
+    from secretary.dispatch.post_merge import _repo_dir
+
+    repo_dir = _repo_dir(runtime, project)
+    if repo_dir is None:
+        raise HostError(f"project {project} has no registered checkout to name its repository from")
+    return _name_with_owner(runtime.host, str(repo_dir))
+
+
+# --- starting a run ---------------------------------------------------------------------------------
+
+
+def _start(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Pick the target and the covered cards, charge and write the intent, then dispatch once."""
+    try:
+        declaration = declared_e2e(runtime.host, project)
+    except HostError as exc:
+        return _outcome(
+            project,
+            "e2e-after-merge-declaration-unreadable",
+            status="degraded",
+            reason=scrub_host_output(str(exc)),
+        )
+    if declaration is None or not declaration.after_merge:
+        return _decline_all(
+            runtime,
+            payload,
+            records,
+            project,
+            queue,
+            "the project's adapter no longer declares an after-merge e2e stage, so no run covers it",
+        )
+    pending = sorted(queue["pending"], key=lambda entry: float(entry.get("merged_at") or 0))
+    target = pending[-1]
+    try:
+        repo = _repo(runtime, project, pending)
+        covered = [
+            entry
+            for entry in pending
+            if is_ancestor(runtime.host, repo, str(entry["merge_sha"]), str(target["merge_sha"]))
+        ]
+    except HostError as exc:
+        # Nothing is written and nothing dispatched yet: the next tick asks again.
+        return _outcome(
+            project,
+            "e2e-after-merge-picking",
+            status="degraded",
+            reason=f"the target could not be chosen: {scrub_host_output(str(exc))}",
+        )
+    carrier_ref = str(target["ref"])
+    tasks = {str(entry["ref"]): runtime.reader.show(str(entry["ref"])) for entry in covered}
+    states = {ref: e2e_record.e2e_state(task) for ref, task in tasks.items()}
+    carrier_state = states[carrier_ref]
+    sprint = str(tasks[carrier_ref].get("sprint") or "")
+    sprint = sprint if _sprint_open(runtime, sprint) else ""
+    sha = str(target["merge_sha"])
+    dispatch_id = (
+        f"{carrier_ref}{DISPATCH_INFIX}{len(carrier_state.after_merge_runs) + 1}-{secrets.token_hex(4)}"
+    )
+    git_ref = AFTER_MERGE_REF_PREFIX + dispatch_id
+    run = E2eRun(
+        dispatch_id=dispatch_id,
+        sha=sha,
+        repo=repo,
+        branch=git_ref,
+        workflow=declaration.workflow,
+        intent_at=wait_card.utc_text(utcnow()),
+        deadline=declaration.deadline,
+        placement=AFTER_MERGE,
+        covered=[{"ref": str(entry["ref"]), "merge_sha": str(entry["merge_sha"])} for entry in covered],
+        git_ref=git_ref,
+        charged_to=sprint or "cards",
+    )
+    for entry in covered:
+        ref = str(entry["ref"])
+        previous = states[ref].after_merge
+        charged = list(previous.charged) if previous is not None else []
+        states[ref].after_merge = AfterMergeMark(
+            merge_sha=str(entry["merge_sha"]),
+            state=AM_COVERED,
+            dispatch_id=dispatch_id,
+            carrier=carrier_ref,
+            charged=charged if sprint else [*charged, dispatch_id],
+        )
+    carrier_state.after_merge_runs.append(run)
+    # The run is in flight in the production state before its intent is on the board: a dispatcher
+    # that dies in between finds no intent on the carrier and puts the cards back.
+    queue["run"] = {"carrier": carrier_ref, "dispatch_id": dispatch_id, "sha": sha, "entries": covered}
+    queue["pending"] = [entry for entry in queue["pending"] if entry not in covered]
+    runtime.save_records(payload, records)
+    charged = runtime.writer.record_after_merge_intent(
+        role="dispatcher",
+        actor=runtime.owner,
+        states={ref: state.text() for ref, state in states.items()},
+        sprint=sprint,
+        dispatch_id=dispatch_id,
+        carrier=carrier_ref,
+    )
+    if not charged.get("charged"):
+        queue["pending"] = [*covered, *queue["pending"]]
+        queue["run"] = None
+        runtime.save_records(payload, records)
+        return _budget_spent(runtime, payload, records, project, queue, tasks, covered, sprint, charged)
+    _push_and_dispatch(runtime, carrier_ref, carrier_state, run, declaration)
+    settled, _done = _settle(runtime, payload, records, project, queue)
+    return settled or _outcome(project, "e2e-after-merge-dispatching", ref=carrier_ref, sha=sha)
+
+
+def _push_and_dispatch(
+    runtime: Any, carrier_ref: str, state: E2eState, run: E2eRun, declaration: E2eDeclaration
+) -> None:
+    """Point the dispatcher-owned branch at the target, then dispatch on it: once, in the intent's tick."""
+    try:
+        create_ref(runtime.host, run.repo, run.git_ref, run.sha)
+    except HostError as exc:
+        run.dispatch = REFUSED
+        run.dispatch_detail = safe_one_line(scrub_host_output(str(exc)), limit=1000)
+        _close(
+            run,
+            f"The branch `{run.git_ref}` could not be pointed at `{run.sha[:12]}`: {run.dispatch_detail}. "
+            "Nothing was dispatched.",
+        )
+        _persist(runtime, carrier_ref, state)
+        return
+    run.git_ref_state = "created"
+    _persist(runtime, carrier_ref, state)
+    try:
+        dispatched = dispatch_workflow(
+            runtime.host, run.repo, declaration, branch=run.git_ref, dispatch_id=run.dispatch_id, sha=run.sha
+        )
+    except DispatchRefused as exc:
+        run.dispatch = REFUSED
+        run.dispatch_detail = safe_one_line(scrub_host_output(str(exc)), limit=1000)
+        _close(
+            run,
+            f"The e2e workflow `{run.workflow}` could not be dispatched on `{run.git_ref}` @ `{run.sha[:12]}`: "
+            f"{run.dispatch_detail}. No run started.",
+        )
+    except HostError as exc:
+        # No answer, or a rate limit: the run is looked up from here on; never dispatched again.
+        run.dispatch_detail = f"unconfirmed: {safe_one_line(scrub_host_output(str(exc)), limit=500)}"
+    else:
+        run.dispatch = SENT
+        if dispatched.run_id:
+            run.run_id = dispatched.run_id
+            run.run_url = f"https://github.com/{run.repo}/actions/runs/{dispatched.run_id}"
+            run.identified_by = IDENTIFIED_BY_ANSWER
+    _persist(runtime, carrier_ref, state)
+
+
+def _close(run: E2eRun, reason: str) -> None:
+    """The run is not attached to the covered cards: they go back to the pending set."""
+    run.closing = stage_request_id("e2e-am-closed", run.dispatch_id)
+    run.closing_reason = reason
+
+
+# --- a run in flight --------------------------------------------------------------------------------
+
+
+def _settle(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
+) -> tuple[dict[str, Any] | None, bool]:
+    """Take the run in flight as far as it goes this tick: `(outcome, done)`; done once it is acted on
+    and the project may start its next run."""
+    inflight = queue["run"]
+    carrier_ref = str(inflight["carrier"])
+    entries = list(inflight.get("entries") or [])
+    state = e2e_record.e2e_state(runtime.reader.show(carrier_ref))
+    run = state.after_merge_run(str(inflight["dispatch_id"]))
+    if run is None:
+        # The intent never reached the board: nothing was charged or dispatched; the cards wait again.
+        queue["pending"] = [*entries, *queue["pending"]]
+        queue["run"] = None
+        runtime.save_records(payload, records)
+        return None, True
+    if not run.acted:
+        if not run.closing and run.result is None:
+            if not run.run_id or not run.head_sha:
+                pending = _identify(runtime, project, carrier_ref, state, run)
+                if pending is not None:
+                    return pending, False
+            if not run.closing and not run.wait_ref:
+                try:
+                    _create_wait(runtime, project, carrier_ref, state, run)
+                except TaskError as exc:
+                    _close(
+                        run,
+                        f"The run {run.run_url} was dispatched, but its wait card could not be created: "
+                        f"{exc.code}: {exc.message}",
+                    )
+                    _persist(runtime, carrier_ref, state)
+            if not run.closing:
+                try:
+                    wait = runtime.reader.show(run.wait_ref)
+                except TaskError as exc:
+                    if exc.code != "not_found":
+                        raise
+                    _close(run, f"The wait card {run.wait_ref} of the run {run.run_url} no longer exists.")
+                    _persist(runtime, carrier_ref, state)
+                else:
+                    result = wait_card.wait_state(wait).result
+                    if result is None:
+                        view = wait_card.wait_view(wait) or {}
+                        return (
+                            _outcome(
+                                project,
+                                "e2e-after-merge-waiting",
+                                ref=carrier_ref,
+                                sha=run.sha,
+                                run=run.run_url,
+                                wait_card=run.wait_ref,
+                                deadline=view.get("deadline"),
+                                covered=[item["ref"] for item in run.covered],
+                            ),
+                            False,
+                        )
+                    fact = result.get("fact") if isinstance(result.get("fact"), dict) else {}
+                    run.result = {
+                        "outcome": str(result.get("outcome") or ""),
+                        "conclusion": str(fact.get("conclusion") or ""),
+                        "summary": str(result.get("summary") or ""),
+                        "evidence": str(result.get("evidence") or run.run_url),
+                        "key": str(result.get("key") or ""),
+                    }
+                    _persist(runtime, carrier_ref, state)
+        acted = _act(runtime, project, carrier_ref, state, run, entries, queue)
+    else:
+        # Acted on before a crash lost the queue's save: a requeue puts its cards back once more.
+        if run.resolution in {AM_REQUEUED, AM_BLOCKED}:
+            known = {str(entry.get("ref")) for entry in queue["pending"]}
+            queue["pending"] = [
+                *({**entry, "marked": True} for entry in entries if str(entry.get("ref")) not in known),
+                *queue["pending"],
+            ]
+        acted = _outcome(
+            project, "e2e-after-merge-" + (run.resolution or "acted"), ref=carrier_ref, sha=run.sha
+        )
+    if run.git_ref_state != "deleted" and not any(
+        item.get("dispatch_id") == run.dispatch_id for item in queue["cleanup"]
+    ):
+        queue["cleanup"].append(
+            {"repo": run.repo, "ref": run.git_ref, "dispatch_id": run.dispatch_id, "carrier": carrier_ref}
+        )
+    queue["run"] = None
+    runtime.save_records(payload, records)
+    return acted, True
+
+
+def _identify(
+    runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2eRun
+) -> dict[str, Any] | None:
+    """Name the run and check its SHA, by the before-merge stage's rules; None once both are on record
+    (or the run is closed), else the tick's outcome."""
+    intent = wait_card.parse_utc(run.intent_at, "intent_at")
+    error = ""
+    head_sha = ""
+    try:
+        if run.run_id:
+            head_sha = run_head_sha(runtime.host, run.repo, run.run_id)
+        else:
+            settle_at = intent + timedelta(seconds=E2E_CLOCK_MARGIN_SECONDS + E2E_RECOVERY_SETTLE_SECONDS)
+            if utcnow() < settle_at:
+                return _outcome(
+                    project,
+                    "e2e-after-merge-identifying",
+                    ref=carrier_ref,
+                    sha=run.sha,
+                    dispatch_id=run.dispatch_id,
+                    recovery_settles_at=wait_card.utc_text(settle_at),
+                )
+            declaration = declared_e2e(runtime.host, project)
+            titled = bool(declaration is not None and declaration.dispatch_id_input)
+            found = matching_runs(
+                runtime.host,
+                run.repo,
+                run.workflow,
+                branch=run.git_ref,
+                sha=run.sha,
+                since=intent,
+                dispatch_id=run.dispatch_id if titled else "",
+            )
+            if len(found) > 1:
+                listed = ", ".join(
+                    f"{candidate.get('html_url') or candidate['id']} (created {candidate.get('created_at')})"
+                    for candidate in sorted(found, key=lambda candidate: int(candidate["id"]))
+                )
+                _close(
+                    run,
+                    f"The after-merge e2e run dispatched at {run.intent_at} on `{run.git_ref}` cannot be told "
+                    f"apart: {len(found)} `{run.workflow}` workflow_dispatch runs at `{run.sha[:12]}` were "
+                    f"created since: {listed}. None is taken as its result, and nothing is dispatched again.",
+                )
+                _persist(runtime, carrier_ref, state)
+                return None
+            if found:
+                run.run_id = int(found[0]["id"])
+                run.run_url = f"https://github.com/{run.repo}/actions/runs/{run.run_id}"
+                run.identified_by = IDENTIFIED_BY_RECOVERY
+                run.recovery_rule = (
+                    f"the only workflow_dispatch run of {run.workflow} on {run.git_ref} at {run.sha} created "
+                    f"at or after {wait_card.utc_text(intent - timedelta(seconds=E2E_CLOCK_MARGIN_SECONDS))}"
+                    + (f", its title carrying {run.dispatch_id}" if titled else "")
+                    + f", looked up at {wait_card.utc_text(utcnow())}"
+                )
+                head_sha = str(found[0].get("head_sha") or "")
+                _persist(runtime, carrier_ref, state)
+                runtime.writer.comment(
+                    role="dispatcher",
+                    actor=runtime.owner,
+                    reference=carrier_ref,
+                    body=(
+                        f"After-merge e2e run {run.run_url} was identified by recovery, not by GitHub's "
+                        f"dispatch answer (that answer was lost): {run.recovery_rule}."
+                    ),
+                    request_id=stage_request_id("e2e-am-recovered", run.dispatch_id),
+                )
+    except HostError as exc:
+        head_sha, error = "", safe_one_line(scrub_host_output(str(exc)), limit=500)
+    if not head_sha:
+        window_end = intent + timedelta(seconds=E2E_IDENTIFY_SECONDS)
+        if utcnow() < window_end:
+            return _outcome(
+                project,
+                "e2e-after-merge-identifying",
+                ref=carrier_ref,
+                sha=run.sha,
+                dispatch_id=run.dispatch_id,
+                **({"run": run.run_url} if run.run_url else {}),
+                **({"error": error} if error else {}),
+            )
+        what = (
+            f"its run {run.run_url} could not be read"
+            if run.run_id
+            else f"no `{run.workflow}` workflow_dispatch run on `{run.git_ref}` at that SHA was found"
+        )
+        _close(
+            run,
+            f"The after-merge e2e run dispatched at {run.intent_at} for `{run.sha[:12]}` (dispatch id "
+            f"`{run.dispatch_id}`) could not be identified: {what} within {E2E_IDENTIFY_SECONDS // 60} minutes"
+            + (f" ({run.dispatch_detail})" if run.dispatch_detail else "")
+            + (f"; last error: {error}" if error else "")
+            + ". Nothing was dispatched a second time.",
+        )
+        _persist(runtime, carrier_ref, state)
+        return None
+    run.head_sha = head_sha
+    if head_sha != run.sha:
+        _close(
+            run,
+            f"The after-merge e2e run {run.run_url} ran on `{head_sha[:12]}`, not on the target `{run.sha[:12]}`: "
+            f"`{run.git_ref}` moved between the dispatch and the run. It is not attached to the covered cards.",
+        )
+    else:
+        for item in run.covered:
+            _remark(runtime, item["ref"], carrier_ref, state, run_url=run.run_url)
+    _persist(runtime, carrier_ref, state)
+    return None
+
+
+def _create_wait(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2eRun) -> None:
+    """The wait card for this run, created once: its request id is derived from the dispatch id."""
+    sprint = run.charged_to if run.charged_to != "cards" and _sprint_open(runtime, run.charged_to) else ""
+    covered = ", ".join(item["ref"] for item in run.covered)
+    created = runtime.writer.create(
+        role="dispatcher",
+        actor=runtime.owner,
+        project=project,
+        task_type="wait",
+        title=f"E2E after merge: {run.workflow} on {project} @ {run.sha[:12]}",
+        description=(
+            f"The dispatcher waits here for the after-merge `{run.workflow}` run it dispatched on "
+            f"`{run.git_ref}` @ `{run.sha}` (dispatch id `{run.dispatch_id}`), covering {covered}. Its result "
+            f"returns to {carrier_ref}, the newest covered card, whose e2e record names this card."
+        ),
+        target="ready",
+        sprint=sprint,
+        wait={"run": run.run_url, "deadline": run.deadline, "returns": [wait_card.CARD_PREFIX + carrier_ref]},
+        request_id=stage_request_id("e2e-wait", run.dispatch_id),
+    )
+    run.wait_ref = str(created["task"]["ref"])
+    _persist(runtime, carrier_ref, state)
+
+
+# --- outcomes -----------------------------------------------------------------------------------------
+
+
+def _covered_lines(run: E2eRun) -> list[str]:
+    return [f"- {item['ref']}: merged as `{item['merge_sha']}`" for item in run.covered]
+
+
+def _act(
+    runtime: Any,
+    project: str,
+    carrier_ref: str,
+    state: E2eState,
+    run: E2eRun,
+    entries: list[dict[str, Any]],
+    queue: dict[str, Any],
+) -> dict[str, Any]:
+    """What the run's end does to the covered cards; the resolution is recorded before any effect, and
+    every effect is idempotent, so a replay after a crash repeats them under the same ids."""
+    result = run.result or {}
+    if not run.resolution:
+        if run.closing:
+            run.resolution = AM_BLOCKED
+        elif result.get("outcome") == wait_card.TARGET_REACHED and run.conclusion == SUCCESS:
+            run.resolution = AM_GREEN
+        elif result.get("outcome") == wait_card.TARGET_REACHED and run.conclusion == FAILURE:
+            run.resolution = AM_RED
+            summary, log, _fingerprint = _red_evidence(runtime, run)
+            # The evidence is frozen on the run, so a replayed hotfix create carries the same words.
+            run.closing_reason = _hotfix_description(run, summary, log)
+        else:
+            run.resolution = AM_REQUEUED
+        _persist(runtime, carrier_ref, state)
+    if run.resolution == AM_GREEN:
+        _green(runtime, carrier_ref, state, run)
+    elif run.resolution == AM_RED:
+        _red(runtime, project, carrier_ref, state, run)
+    else:
+        _requeue(runtime, carrier_ref, state, run, entries, queue)
+    run.acted = True
+    _persist(runtime, carrier_ref, state)
+    return _outcome(
+        project,
+        "e2e-after-merge-" + run.resolution,
+        ref=carrier_ref,
+        sha=run.sha,
+        run=run.run_url,
+        covered=[item["ref"] for item in run.covered],
+        **({"hotfix": run.hotfix} if run.hotfix else {}),
+    )
+
+
+def _green(runtime: Any, carrier_ref: str, state: E2eState, run: E2eRun) -> None:
+    covered = ", ".join(item["ref"] for item in run.covered)
+    for item in run.covered:
+        runtime.writer.comment(
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=item["ref"],
+            body="\n".join(
+                [
+                    "## E2E after merge — green",
+                    "",
+                    (
+                        f"The e2e workflow `{run.workflow}` run {run.run_url} concluded success on `main` @ "
+                        f"`{run.sha}` (dispatched on `{run.git_ref}`, wait card {run.wait_ref}). It covers "
+                        f"{covered}; this card merged as `{item['merge_sha']}`."
+                    ),
+                    "",
+                    "Covered cards:",
+                    *_covered_lines(run),
+                ]
+            ),
+            request_id=stage_request_id("e2e-am-green-" + item["ref"], run.dispatch_id),
+        )
+        _remark(runtime, item["ref"], carrier_ref, state, state=AM_GREEN, run_url=run.run_url, note="")
+
+
+def _hotfix_description(run: E2eRun, summary: str, log: str) -> str:
+    text = "\n".join(
+        [
+            f"The after-merge e2e run of `{run.workflow}` on `main` concluded **{run.conclusion}**: {summary}.",
+            "",
+            f"- run: {run.run_url}",
+            f"- conclusion: {run.conclusion}",
+            f"- SHA: `{run.sha}` (dispatched on `{run.git_ref}`, dispatch id `{run.dispatch_id}`)",
+            f"- wait card: {run.wait_ref}",
+            "",
+            "## Covered cards",
+            "",
+            (
+                "Every card merged since the last after-merge run, with its merge commit; the failure is "
+                "attributed to all of them:"
+            ),
+            "",
+            *_covered_lines(run),
+            "",
+            "## Log (`gh run view --log-failed`, bounded)",
+            "",
+            "```",
+            log,
+            "```",
+            "",
+            "## What to do",
+            "",
+            (
+                "Find which covered change broke the e2e run and fix it on `main`. The next after-merge run "
+                "covers this hotfix once it merges."
+            ),
+        ]
+    )
+    return text if len(text) <= _EVIDENCE_LIMIT else text[: _EVIDENCE_LIMIT - 1] + "…"
+
+
+def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2eRun) -> None:
+    """One `code` hotfix card per run, then each covered card names it."""
+    if not run.hotfix:
+        run.hotfix = _hotfix(runtime, project, carrier_ref, run)
+        _persist(runtime, carrier_ref, state)
+    for item in run.covered:
+        runtime.writer.comment(
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=item["ref"],
+            body=(
+                f"## E2E after merge — red\n\nThe e2e workflow `{run.workflow}` run {run.run_url} concluded "
+                f"{run.conclusion} on `main` @ `{run.sha}`, a run covering this card (merged as "
+                f"`{item['merge_sha']}`). The hotfix card is {run.hotfix}.\n\nCovered cards:\n"
+                + "\n".join(_covered_lines(run))
+            ),
+            request_id=stage_request_id("e2e-am-red-" + item["ref"], run.dispatch_id),
+        )
+        _remark(
+            runtime, item["ref"], carrier_ref, state, state=AM_RED, hotfix=run.hotfix, run_url=run.run_url
+        )
+
+
+def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
+    """Create the run's one hotfix card, owned by the carrier's open sprint, else its PO origin, else
+    nobody (Blocked at once, and the bell). A create already committed is only read back."""
+    request_id = stage_request_id("e2e-am-hotfix", run.dispatch_id)
+    known = runtime.audit.committed_event(request_id)
+    carrier = runtime.reader.show(carrier_ref)
+    sprint = str(carrier.get("sprint") or "")
+    if known is not None and known.get("ref"):
+        hotfix = str(known["ref"])
+        payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+        owned = bool(payload.get("sprint") or payload.get("po_origin"))
+    else:
+        sprint = sprint if _sprint_open(runtime, sprint) else ""
+        origin = None if sprint else origin_field.po_origin(carrier)
+        created = runtime.writer.create(
+            role="dispatcher",
+            actor=runtime.owner,
+            project=project,
+            task_type="code",
+            title=f"Hotfix: after-merge e2e red on main @ {run.sha[:12]} ({run.workflow})",
+            description=run.closing_reason,
+            target="ready",
+            sprint=sprint,
+            budget_event="hotfix" if sprint else "",
+            origin=origin,
+            request_id=request_id,
+        )
+        hotfix = str(created["task"]["ref"])
+        owned = bool(sprint or origin)
+    if not owned:
+        text = (
+            f"{UNOWNED_HOTFIX_REASON}: the after-merge e2e run {run.run_url} concluded {run.conclusion} on "
+            f"`main` @ `{run.sha[:12]}`, covering {', '.join(item['ref'] for item in run.covered)}. The hotfix "
+            f"card {hotfix} has no open sprint and no PO session to go to: the owner decides who fixes it."
+        )
+        if runtime.reader.show(hotfix).get("state") == "ready":
+            runtime.writer.move(
+                role="dispatcher",
+                actor=runtime.owner,
+                reference=hotfix,
+                target="blocked",
+                reason=text,
+                request_id=stage_request_id("e2e-am-hotfix-blocked", run.dispatch_id),
+                terminal_taxonomy=normalize_terminal_taxonomy(
+                    disposition="blocked", blocked_reason="other"
+                ).to_record(),
+            )
+        _bell(runtime, hotfix, text, f"{owner_events.E2E_AFTER_MERGE}:hotfix:{run.dispatch_id}")
+    return hotfix
+
+
+def _bell(runtime: Any, subject: str, text: str, key: str) -> None:
+    owner_events.record(
+        owner_events.E2E_AFTER_MERGE,
+        subject,
+        text,
+        key,
+        to=getattr(getattr(runtime, "reader", None), "client", None),
+    )
+
+
+def _requeue(
+    runtime: Any,
+    carrier_ref: str,
+    state: E2eState,
+    run: E2eRun,
+    entries: list[dict[str, Any]],
+    queue: dict[str, Any],
+) -> None:
+    """No hotfix: a comment on every covered card, one bell, and the cards go back to the pending set."""
+    result = run.result or {}
+    if run.closing:
+        what = run.closing_reason
+    elif result.get("outcome") == wait_card.TARGET_REACHED:
+        what = (
+            f"The after-merge e2e run {run.run_url} on `main` @ `{run.sha[:12]}` concluded "
+            f"{run.conclusion or 'with no conclusion'}."
+        )
+    else:
+        what = (
+            f"The after-merge e2e run {run.run_url or run.dispatch_id} on `main` @ `{run.sha[:12]}` was not "
+            f"waited out: its wait card {run.wait_ref} ended {result.get('outcome')} "
+            f"({result.get('summary') or ''})."
+        )
+    note = safe_one_line(what, limit=500)
+    for item in run.covered:
+        runtime.writer.comment(
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=item["ref"],
+            body=(
+                f"## E2E after merge — {run.resolution}\n\n{what}\n\nThat is not this change's code: no hotfix "
+                "card is cut. The covered cards are pending again, and the next after-merge run of the project "
+                "covers them (charged as usual).\n\nCovered cards:\n" + "\n".join(_covered_lines(run))
+            ),
+            request_id=stage_request_id("e2e-am-requeued-" + item["ref"], run.dispatch_id),
+        )
+        _remark(
+            runtime, item["ref"], carrier_ref, state, state=AM_PENDING, note=note, dispatch_id="", run_url=""
+        )
+    _bell(
+        runtime,
+        carrier_ref,
+        f"After-merge e2e run of {', '.join(item['ref'] for item in run.covered)} needs the owner: {what}",
+        f"{owner_events.E2E_AFTER_MERGE}:{run.dispatch_id}",
+    )
+    known = {str(entry.get("ref")) for entry in queue["pending"]}
+    queue["pending"] = [
+        *({**entry, "marked": True} for entry in entries if str(entry.get("ref")) not in known),
+        *queue["pending"],
+    ]
+
+
+def _cleanup_refs(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Delete every dispatcher-owned branch whose run is over. An entry leaves `cleanup` only once the
+    branch is deleted or confirmed absent (`e2e.delete_ref`); every other answer is asked again next pass."""
+    outcomes: list[dict[str, Any]] = []
+    for item in list(queue["cleanup"]):
+        try:
+            delete_ref(runtime.host, str(item["repo"]), str(item["ref"]))
+        except HostError as exc:
+            outcomes.append(
+                _outcome(
+                    project,
+                    "e2e-after-merge-ref-cleanup",
+                    ref=str(item.get("carrier") or ""),
+                    status="degraded",
+                    reason=f"branch {item['ref']} not deleted yet: {scrub_host_output(str(exc))}",
+                )
+            )
+            continue
+        carrier = str(item.get("carrier") or "")
+        if carrier:
+            state = e2e_record.e2e_state(runtime.reader.show(carrier))
+            run = state.after_merge_run(str(item.get("dispatch_id") or ""))
+            if run is not None and run.git_ref_state != "deleted":
+                run.git_ref_state = "deleted"
+                _persist(runtime, carrier, state)
+        queue["cleanup"].remove(item)
+        runtime.save_records(payload, records)
+    return outcomes
+
+
+# --- the budget -----------------------------------------------------------------------------------------
+
+
+def _budget_spent(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, Any],
+    project: str,
+    queue: dict[str, Any],
+    tasks: dict[str, dict[str, Any]],
+    covered: list[dict[str, Any]],
+    sprint: str,
+    charged: dict[str, Any],
+) -> dict[str, Any]:
+    """Nothing left to charge the run to: the decision card(s), the marks, and the cards wait."""
+    by_ref = {str(entry["ref"]): entry for entry in covered}
+    # `covered` is in merge order: its last card is the target's, the carrier.
+    carrier_ref = str(covered[-1]["ref"])
+    waiting = [
+        (
+            ref,
+            str(tasks[ref].get("title") or ""),
+            f"`{by_ref[ref]['merge_sha']}` (its merge; the after-merge e2e run)",
+        )
+        for ref in by_ref
+    ]
+    waits: list[dict[str, Any]] = []
+    if sprint:
+        budget = int(charged.get("budget") or 0)
+        decision = _decision_card(
+            runtime,
+            tasks[carrier_ref],
+            e2e_record.e2e_state(tasks[carrier_ref]),
+            str(by_ref[carrier_ref]["merge_sha"]),
+            scope="sprint",
+            scope_ref=sprint,
+            generation=budget,
+            spent_line=f"The e2e run budget of {sprint} is spent: {int(charged.get('used') or 0)} of {budget} runs.",
+            charges=[item for item in charged.get("charges") or [] if isinstance(item, dict)],
+            origin=None,
+            waiting=waiting,
+        )
+        waits.append(
+            {
+                "decision": decision,
+                "generation": budget,
+                "scope": "sprint",
+                "scope_ref": sprint,
+                "cards": list(by_ref),
+            }
+        )
+    else:
+        spent = [str(item) for item in charged.get("spent") or []]
+        origin = next(
+            (
+                found
+                for ref in [*reversed(spent), *reversed(list(by_ref))]
+                if (found := origin_field.po_origin(tasks[ref])) is not None
+            ),
+            None,
+        )
+        if origin is None:
+            return _batch_unowned(
+                runtime, payload, records, project, queue, tasks, by_ref, spent, carrier_ref
+            )
+        generation = sum(e2e_budget.card_cap(tasks[ref]) for ref in spent)
+        request_id = e2e_budget.batch_decision_request_id(spent, generation)
+        decision = _batch_decision(runtime, project, tasks, by_ref, spent, request_id, origin)
+        waits.append(
+            {
+                "decision": decision,
+                "generation": generation,
+                "scope": "cards",
+                "scope_ref": carrier_ref,
+                "request_id": request_id,
+                "spent": spent,
+                "cards": list(by_ref),
+            }
+        )
+    queue["budget_waits"] = waits
+    runtime.save_records(payload, records)
+    [wait] = waits
+    for ref in by_ref:
+        _remark(
+            runtime,
+            ref,
+            "",
+            E2eState(),
+            state=AM_BUDGET_WAIT,
+            decision=wait["decision"],
+            dispatch_id="",
+            carrier="",
+            run_url="",
+        )
+    return _outcome(
+        project,
+        "e2e-after-merge-budget-waiting",
+        ref=carrier_ref,
+        decisions=[wait["decision"]],
+        covered=list(by_ref),
+    )
+
+
+def _cap_line(ref: str, task: dict[str, Any], merge_sha: str, spent: list[str]) -> str:
+    """One card of an out-of-sprint batch in its decision: where it merged, and its cap."""
+    used, cap = e2e_record.e2e_state(task).dispatched, e2e_budget.card_cap(task)
+    state = (
+        f"cap spent, {used} of {cap} runs: needs a raise"
+        if ref in spent
+        else f"cap {used} of {cap} runs, not spent"
+    )
+    return f"- {ref} waits ({task.get('title') or ''}) on `{merge_sha}` (its merge; the after-merge e2e run): {state}"
+
+
+def _batch_decision(
+    runtime: Any,
+    project: str,
+    tasks: dict[str, dict[str, Any]],
+    by_ref: dict[str, dict[str, Any]],
+    spent: list[str],
+    request_id: str,
+    origin: dict[str, str],
+) -> str:
+    """The one decision an out-of-sprint batch with spent caps needs: every covered card named with its cap,
+    cut once under `request_id`, which authorizes a raise of each spent card's cap."""
+    known = runtime.audit.committed_event(request_id)
+    if known is not None and known.get("ref"):
+        return str(known["ref"])
+    commands = [
+        f"      python3 -P -m secretary task e2e-budget --ref {ref} --role po --authorized-by <event id>"
+        for ref in spent
+    ]
+    charges: list[str] = []
+    for ref in spent:
+        state = e2e_record.e2e_state(tasks[ref])
+        charges += [f"- {ref}: before-merge run `{run.dispatch_id}` ({run.status()})" for run in state.runs]
+        if state.after_merge is not None:
+            charges += [
+                f"- {ref}: after-merge run `{dispatch_id}`" for dispatch_id in state.after_merge.charged
+            ]
+    description = "\n".join(
+        [
+            (
+                f"The after-merge e2e run of {project} would cover {len(by_ref)} cards outside every open sprint. "
+                "Such a run is charged to every covered card's own e2e cap, all together or none, and "
+                f"{', '.join(spent)} {'has' if len(spent) == 1 else 'have'} no run left, so nothing was "
+                "dispatched. Every e2e run pays for BitLaunch stands, so more runs are a money decision: hand "
+                "this card to the owner (`task handover`), quoting the two answer lines below in the handover "
+                "reason. A cap is raised only on the owner's recorded word, never on the PO's own authority."
+            ),
+            "",
+            "## Waiting for e2e",
+            "",
+            "Every card of the batch waits on this decision, and the whole batch is run or declined together:",
+            "",
+            *(_cap_line(ref, tasks[ref], str(by_ref[ref]["merge_sha"]), spent) for ref in by_ref),
+            "",
+            "Cards queued later while this decision is open join it with a comment.",
+            "",
+            "## Runs spent",
+            "",
+            *(charges or ["- (none recorded)"]),
+            "",
+            "## The question for the owner",
+            "",
+            (
+                f"Raise the e2e cap of {', '.join(spent)} by N runs, or no? The owner answers with a comment on "
+                "this card holding exactly one of these two lines (any case; the rest of the comment is free "
+                "prose):"
+            ),
+            "",
+            f"    {e2e_budget.ANSWER_RAISE_LINE}",
+            f"    {e2e_budget.ANSWER_NO_LINE}",
+            "",
+            "A comment with neither line, with both, or with two raise lines authorizes nothing.",
+            "",
+            "## Applying the owner's answer",
+            "",
+            (
+                f"- `{e2e_budget.ANSWER_RAISE_LINE}`: run this for every card whose cap is spent, each with the "
+                "event id of that comment; the raise is the owner's N. Then complete this card; the next pass "
+                "dispatches one run over the whole batch:"
+            ),
+            "",
+            *commands,
+            "",
+            (
+                f"- `{e2e_budget.ANSWER_NO_LINE}`: complete this card without a raise; every card of the batch is "
+                "then declined, with your completion text."
+            ),
+        ]
+    )
+    created = runtime.writer.create(
+        role="dispatcher",
+        actor=runtime.owner,
+        project=project,
+        task_type="decision",
+        title=f"E2E caps spent: {', '.join(spent)} — more runs for the after-merge run? (money decision for the owner)",
+        description=description,
+        target="ready",
+        sprint="",
+        origin=origin,
+        request_id=request_id,
+    )
+    return str(created["task"]["ref"])
+
+
+def _batch_unowned(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, Any],
+    project: str,
+    queue: dict[str, Any],
+    tasks: dict[str, dict[str, Any]],
+    by_ref: dict[str, dict[str, Any]],
+    spent: list[str],
+    carrier_ref: str,
+) -> dict[str, Any]:
+    """No card of the batch came from a PO session, so no decision can be handed to anyone: the whole
+    batch is declined, and each spent card rings the bell."""
+    text = (
+        f"No after-merge e2e run is dispatched: it would cover {', '.join(by_ref)}, outside every open sprint, "
+        f"and the e2e cap of {', '.join(spent)} is spent. No covered card came from a PO session, so there is "
+        "nobody to hand the money decision to but the owner: re-cut the work in a sprint with an e2e budget, "
+        "or through the PO."
+    )
+    for ref in spent:
+        cap = e2e_budget.card_cap(tasks[ref])
+        owner_events.record(
+            owner_events.E2E_BUDGET_SPENT,
+            ref,
+            text,
+            f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
+            to=getattr(getattr(runtime, "reader", None), "client", None),
+        )
+    for ref in by_ref:
+        _decline(runtime, queue, ref, text, decision="")
+    runtime.save_records(payload, records)
+    return _outcome(project, "e2e-after-merge-declined", ref=carrier_ref, covered=list(by_ref), reason=text)
+
+
+def _decline(runtime: Any, queue: dict[str, Any], ref: str, text: str, *, decision: str) -> None:
+    """The card leaves the pending set: no after-merge run will cover it."""
+    runtime.writer.comment(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        body=f"## E2E after merge — declined\n\n{text}",
+        request_id="-".join(
+            request_token(part) for part in ("dispatcher", "e2e-am-declined", ref, decision or "cap")
+        ),
+    )
+    _remark(
+        runtime,
+        ref,
+        "",
+        E2eState(),
+        state=AM_DECLINED,
+        decision=decision,
+        note=safe_one_line(text, limit=500),
+    )
+    queue["pending"] = [entry for entry in queue["pending"] if str(entry.get("ref")) != ref]
+
+
+def _decline_all(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, Any],
+    project: str,
+    queue: dict[str, Any],
+    text: str,
+) -> dict[str, Any]:
+    refs = [str(entry["ref"]) for entry in queue["pending"]]
+    for ref in refs:
+        _decline(runtime, queue, ref, text, decision="")
+    runtime.save_records(payload, records)
+    return _outcome(project, "e2e-after-merge-declined", covered=refs, reason=text)
+
+
+def _budget_recheck(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Cards waiting on a budget decision: None once every wait is over, else the tick's outcome."""
+    for wait in list(queue["budget_waits"]):
+        scope_ref = str(wait["scope_ref"])
+        generation = int(wait["generation"])
+        if wait["scope"] == "sprint":
+            current = runtime.reader.sprint_e2e_budget(scope_ref)
+            budget = int(current["budget"]) if current else generation
+            room = current is None or int(current["used"]) < budget or budget > generation
+            what = f"the e2e budget of {scope_ref} ({budget} runs) is spent"
+        else:
+            # The batch runs again only once every spent cap has room: all together or none.
+            spent = {str(ref): runtime.reader.show(str(ref)) for ref in wait.get("spent") or []}
+            short = [
+                ref
+                for ref, task in spent.items()
+                if e2e_record.e2e_state(task).dispatched >= e2e_budget.card_cap(task)
+            ]
+            room = not short
+            what = f"the e2e cap of {', '.join(short)} is spent"
+        if room:
+            queue["budget_waits"].remove(wait)
+            runtime.save_records(payload, records)
+            continue
+        try:
+            decision = runtime.reader.show(str(wait["decision"]))
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            decision = None
+        if decision is not None and decision.get("state") != "done":
+            _join(runtime, payload, records, queue, wait)
+            continue
+        text = (
+            f"No after-merge e2e run is dispatched: {what}, and "
+            f"the decision {wait['decision']} "
+            + ("was completed without a raise" if decision is not None else "no longer exists")
+            + ". This is the owner's money decision, not a defect of the card's code."
+        )
+        for ref in [str(ref) for ref in wait.get("cards") or []]:
+            if any(str(entry.get("ref")) == ref for entry in queue["pending"]):
+                _decline(runtime, queue, ref, text, decision=str(wait["decision"]))
+        queue["budget_waits"].remove(wait)
+        runtime.save_records(payload, records)
+    if not queue["budget_waits"]:
+        return None
+    return _outcome(
+        project,
+        "e2e-after-merge-budget-waiting",
+        decisions=[str(wait["decision"]) for wait in queue["budget_waits"]],
+        covered=[str(entry["ref"]) for entry in queue["pending"]],
+    )
+
+
+def _join(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, Any],
+    queue: dict[str, Any],
+    wait: dict[str, Any],
+) -> None:
+    """A card queued while a budget decision is open joins it, is listed on it, and shows the mark."""
+    cards = list(wait.get("cards") or [])
+    for entry in queue["pending"]:
+        ref = str(entry["ref"])
+        if ref in cards:
+            continue
+        task = runtime.reader.show(ref)
+        if wait["scope"] == "sprint":
+            _decision_card(
+                runtime,
+                task,
+                e2e_record.e2e_state(task),
+                str(entry["merge_sha"]),
+                scope="sprint",
+                scope_ref=str(wait["scope_ref"]),
+                generation=int(wait["generation"]),
+                spent_line="",
+                charges=[],
+                origin=None,
+                waiting=[
+                    (
+                        ref,
+                        str(task.get("title") or ""),
+                        f"`{entry['merge_sha']}` (its merge; the after-merge e2e run)",
+                    )
+                ],
+            )
+        else:
+            runtime.writer.comment(
+                role="dispatcher",
+                actor=runtime.owner,
+                reference=str(wait["decision"]),
+                body=(
+                    _cap_line(ref, task, str(entry["merge_sha"]), [])
+                    + "\n\nIt merged while this decision is open and joins the batch: the same answer applies "
+                    "to it."
+                ),
+                request_id="-".join(
+                    request_token(part)
+                    for part in ("dispatcher", "e2e-budget-join", str(wait["decision"]), ref)
+                ),
+            )
+        _remark(runtime, ref, "", E2eState(), state=AM_BUDGET_WAIT, decision=str(wait["decision"]))
+        cards.append(ref)
+        wait["cards"] = cards
+        runtime.save_records(payload, records)
+
+
+def after_merge_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """`production observe`'s view of every project's after-merge queue."""
+    raw = payload.get(AFTER_MERGE_KEY)
+    return {
+        project: {
+            "pending": [str(entry.get("ref")) for entry in queue.get("pending") or []],
+            "in_flight": (queue.get("run") or {}).get("dispatch_id") or None,
+            "covered": [str(entry.get("ref")) for entry in (queue.get("run") or {}).get("entries") or []],
+            "budget_waits": [str(wait.get("decision")) for wait in queue.get("budget_waits") or []],
+            "refs_to_delete": [str(item.get("ref")) for item in queue.get("cleanup") or []],
+        }
+        for project, queue in sorted((raw if isinstance(raw, dict) else {}).items())
+        if isinstance(queue, dict)
+    }
+
+
+__all__ = [
+    "AFTER_MERGE_KEY",
+    "DISPATCH_INFIX",
+    "STEP",
+    "UNOWNED_HOTFIX_REASON",
+    "Enqueued",
+    "after_merge_snapshot",
+    "enqueue",
+    "queues",
+    "reconcile_after_merge",
+]

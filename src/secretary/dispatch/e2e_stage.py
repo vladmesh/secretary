@@ -1,12 +1,14 @@
 """The e2e stage: an adapter-declared GitHub workflow run on a code card's candidate (secretary-1795).
 
-Placement. For a `code` card of a project whose adapter declares `validation.e2e` (`dispatch/e2e.py`),
-the stage runs on the exact SHA that the merge gate's green receipt validated (`validated_sha`; the
+Placement. For a `code` card of a project whose adapter declares `validation.e2e` (`dispatch/e2e.py`)
+with the default `placement: before_merge`, the stage runs on the exact SHA that the merge gate's green receipt validated (`validated_sha`; the
 stage never reads HEAD itself, and the gate read may refresh the base), and before the card becomes
 releasable: in `review_verdict.park_green_verdict`, after the green review verdict (or right after
 green CI when the card's review is `skipped`) and before the park in Assessment or the release; and
 again in the release audit (`release_lifecycle.release_parked`), where a SHA that already has a green
-run is not dispatched again. A red review never reaches it, so rework rounds spend no runs.
+run is not dispatched again. A red review never reaches it, so rework rounds spend no runs. A project
+that declares `placement: after_merge` never runs this stage: its cards merge as with no e2e, and
+`dispatch/e2e_after_merge.py` runs the workflow on `main` afterwards (secretary-1807).
 
 Dispatch, exactly once per candidate SHA. The card's `e2e` field (`board/e2e_record.py`) is the
 stage's record. A run record is written as an intent (card, SHA, dispatch id) before the
@@ -164,7 +166,9 @@ def run_stage(
             outcome="e2e declaration unreadable",
             blocked_reason="gate",
         )
-    if declaration is None:
+    if declaration is None or declaration.after_merge:
+        # An `after_merge` project runs its e2e on main after the merge (`dispatch/e2e_after_merge.py`):
+        # the card goes through review, Assessment and release as a project with no e2e.
         return None
     state = e2e_record.e2e_state(task)
     last = state.runs[-1] if state.runs else None
@@ -909,25 +913,30 @@ def _decision_card(
     spent_line: str,
     charges: list[dict[str, Any]],
     origin: dict[str, str] | None,
+    waiting: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """The decision card of this budget generation: cut once, under a request id derived from it.
 
-    A card reaching a generation whose decision already exists joins it with one comment.
+    `waiting` is every card that waits on it, `(ref, title, the SHA its run is for)`; by default the
+    one card and `sha`. A card reaching a generation whose decision already exists joins it with one
+    comment.
     """
-    ref = task["ref"]
+    waiting = waiting or [(task["ref"], str(task.get("title") or ""), f"`{sha}`")]
     request_id = e2e_budget.decision_request_id(scope_ref, generation)
     known = runtime.audit.committed_event(request_id)
     if known is not None and known.get("ref"):
         decision = str(known["ref"])
         shown = runtime.reader.show(decision)
-        if f"- {ref} waits " not in str(shown.get("description") or ""):
+        for ref, title, where in waiting:
+            if f"- {ref} waits " in str(shown.get("description") or ""):
+                continue
             runtime.writer.comment(
                 role="dispatcher",
                 actor=runtime.owner,
                 reference=decision,
                 body=(
-                    f"{ref} ({task.get('title') or ''}) also waits for its e2e run on `{sha}`, and joins this "
-                    "decision: the same answer applies to it."
+                    f"{ref} ({title}) also waits for its e2e run on {where}, and joins this decision: the "
+                    "same answer applies to it."
                 ),
                 request_id="-".join(
                     request_token(part) for part in ("dispatcher", "e2e-budget-join", decision, ref)
@@ -941,7 +950,14 @@ def _decision_card(
         task_type="decision",
         title=f"E2E budget spent: {scope_ref} — more runs? (money decision for the owner)",
         description=_decision_description(
-            runtime, task, state, sha, scope=scope, scope_ref=scope_ref, spent_line=spent_line, charges=charges
+            runtime,
+            task,
+            state,
+            scope=scope,
+            scope_ref=scope_ref,
+            spent_line=spent_line,
+            charges=charges,
+            waiting=waiting,
         ),
         target="ready",
         sprint=scope_ref if scope == "sprint" else "",
@@ -955,12 +971,12 @@ def _decision_description(
     runtime: Any,
     task: dict[str, Any],
     state: E2eState,
-    sha: str,
     *,
     scope: str,
     scope_ref: str,
     spent_line: str,
     charges: list[dict[str, Any]],
+    waiting: list[tuple[str, str, str]],
 ) -> str:
     """What the PO and the owner read: who waits, what was spent with its links and results, the question."""
     ref = task["ref"]
@@ -973,7 +989,14 @@ def _decision_description(
                 states[card] = e2e_record.e2e_state(runtime.reader.show(card))
             except TaskError:
                 states[card] = E2eState()
-        run = next((item for item in states[card].runs if item.dispatch_id == charge.get("dispatch_id")), None)
+        run = next(
+            (
+                item
+                for item in [*states[card].runs, *states[card].after_merge_runs]
+                if item.dispatch_id == charge.get("dispatch_id")
+            ),
+            None,
+        )
         if run is None:
             lines.append(f"- {card}: dispatch `{charge.get('dispatch_id')}` at {charge.get('at')}: no run record")
             continue
@@ -995,7 +1018,7 @@ def _decision_description(
             "",
             "## Waiting for e2e",
             "",
-            f"- {ref} waits ({task.get('title') or ''}) on `{sha}`",
+            *(f"- {card} waits ({title}) on {where}" for card, title, where in waiting),
             "",
             "Cards that reach the stage later while the budget is spent join this decision with a comment.",
             "",

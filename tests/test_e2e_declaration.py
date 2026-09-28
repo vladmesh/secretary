@@ -99,6 +99,25 @@ class DeclarationTests(unittest.TestCase):
         self.assertEqual(declaration.dispatch_inputs("d-1", "a" * 40), {})
         self.assertEqual(parse_e2e(github({"workflow": "e2e.yaml", "inputs": None})).workflow, "e2e.yaml")
 
+    def test_placement_defaults_to_before_merge_and_takes_after_merge(self) -> None:
+        """secretary-1807: `after_merge` is the one other placement; anything else is refused typed."""
+        default = parse_e2e(github({"workflow": "e2e.yml"}))
+        assert default is not None
+        self.assertEqual((default.placement, default.after_merge), ("before_merge", False))
+        self.assertEqual(parse_e2e(github({"workflow": "e2e.yml", "placement": None})), default)
+        self.assertEqual(parse_e2e(github({"workflow": "e2e.yml", "placement": "before_merge"})), default)
+        after = parse_e2e(
+            github(
+                {"workflow": "stand-e2e.yml", "inputs": {"suite": "mega-noop"}, "placement": "after_merge"}
+            )
+        )
+        assert after is not None
+        self.assertEqual((after.placement, after.after_merge), ("after_merge", True))
+        self.assertEqual(after.dispatch_inputs("d-1", "a" * 40), {"suite": "mega-noop"})
+        for bad in ("after-merge", "AFTER_MERGE", "", 1, True, ["after_merge"]):
+            with self.subTest(placement=bad), self.assertRaisesRegex(AdapterE2eDeclarationError, "placement"):
+                parse_e2e(github({"workflow": "e2e.yml", "placement": bad}), adapter="codegen")
+
     def test_no_e2e_key_is_no_declaration(self) -> None:
         self.assertIsNone(parse_e2e({"ci": "github", "required_checks": ["test"]}))
         self.assertIsNone(parse_e2e({"ci": "local", "command": "make test"}))
@@ -196,6 +215,8 @@ class AdapterSchemaTests(unittest.TestCase):
                 "candidate_input": "sha",
             },
             {"workflow": "e2e.yml", "dispatch_id_input": "secretary_dispatch_id"},
+            {"workflow": "stand-e2e.yml", "inputs": {"suite": "mega-noop"}, "placement": "after_merge"},
+            {"workflow": "e2e.yml", "placement": "before_merge"},
         ):
             with self.subTest(e2e=e2e):
                 self.assertEqual(validate(self.adapter(github(e2e)), "adapter", "a.yaml"), [])
@@ -210,6 +231,7 @@ class AdapterSchemaTests(unittest.TestCase):
             github({"workflow": "e2e.yml", "inputs": {"suite": ["a"]}}),
             github({"workflow": "e2e.yml", "deadline": "soon"}),
             github({"workflow": "e2e.yml", "candidate_input": "a b"}),
+            github({"workflow": "e2e.yml", "placement": "after-merge"}),
             {"ci": "local", "command": "make test", "e2e": {"workflow": "e2e.yml"}},
         ):
             with self.subTest(validation=validation):
@@ -243,7 +265,9 @@ class DispatcherWaitRightsTests(unittest.TestCase):
                 parse_returns([address])
 
     def test_the_dispatcher_cuts_no_other_kind(self) -> None:
-        # A decision it does cut: the one a spent e2e budget needs (secretary-1796, tests/test_e2e_budget.py).
+        # A decision it does cut: the one a spent e2e budget needs (secretary-1796, tests/test_e2e_budget.py);
+        # and a code card only under a red after-merge run's hotfix request id (secretary-1807,
+        # tests/test_e2e_after_merge.py), which none of these carries.
         for kind in ("code", "research", "infra", "operation"):
             with self.subTest(kind=kind), self.assertRaises(TaskError) as raised:
                 self.writer.create(

@@ -58,9 +58,10 @@ PO_TURN_FAILED = "po_turn_failed"
 PROVIDER_RED = "provider_red"
 DELEGATED_CARD_SETTLED = "delegated_card_settled"
 E2E_BUDGET_SPENT = "e2e_budget_spent"
+E2E_AFTER_MERGE = "e2e_after_merge"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021 and 0023) are these two lists. A
+#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023 and 0024) are these two lists. A
 #: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
@@ -68,6 +69,10 @@ KIND_CLASS: dict[str, str] = {
     # A card outside every sprint, with no PO session to hand the decision to, spent its per-card
     # e2e cap and was Blocked (0023, secretary-1796): only the owner can pay for more runs.
     E2E_BUDGET_SPENT: NEEDS_OWNER,
+    # An after-merge e2e run ended with nothing the pipeline can act on by itself (cancelled, timed
+    # out, its deadline passed, unreadable, refused), or went red with no sprint and no PO origin to
+    # own the hotfix (0024, secretary-1807).
+    E2E_AFTER_MERGE: NEEDS_OWNER,
     SPRINT_CLOSED: NOTICE,
     SPRINT_STOPPED: NOTICE,
     BUDGET_SIGNAL: NOTICE,
@@ -438,6 +443,7 @@ __all__ = [
     "CARD_HANDED_TO_OWNER",
     "CLASSES",
     "DELEGATED_CARD_SETTLED",
+    "E2E_AFTER_MERGE",
     "E2E_BUDGET_SPENT",
     "FAILED",
     "HEAD_DEAD",

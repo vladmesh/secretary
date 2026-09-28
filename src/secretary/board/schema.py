@@ -962,12 +962,13 @@ class OwnerEvent(Base):
         sa.CheckConstraint(
             "kind IN ('card_handed_to_owner','steward_needs_human','sprint_closed','sprint_stopped',"
             "'budget_signal','observer_dead','head_dead','po_turn_failed','provider_red',"
-            "'delegated_card_settled','e2e_budget_spent')",
+            "'delegated_card_settled','e2e_budget_spent','e2e_after_merge')",
             name="owner_event_kind_in_vocabulary",
         ),
         sa.CheckConstraint("class IN ('needs_owner','notice')", name="owner_event_class_in_vocabulary"),
         sa.CheckConstraint(
-            "(class = 'needs_owner') = (kind IN ('card_handed_to_owner','steward_needs_human','e2e_budget_spent'))",
+            "(class = 'needs_owner') = (kind IN ('card_handed_to_owner','steward_needs_human','e2e_budget_spent',"
+            "'e2e_after_merge'))",
             name="owner_event_class_follows_kind",
         ),
         sa.UniqueConstraint("dedup_key", name="owner_event_dedup_key_is_unique"),

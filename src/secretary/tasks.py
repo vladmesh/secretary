@@ -519,6 +519,19 @@ def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
     return fact
 
 
+def is_dispatcher_hotfix(event: dict[str, Any]) -> bool:
+    """Whether an event is the dispatcher's create of a sprint `hotfix` card (secretary-1807).
+
+    The dispatcher cuts one for a red after-merge e2e run in the open sprint of the newest card that
+    run covered; the sprint's observer wakes on it the way it wakes on a Blocked card of the sprint.
+    """
+    if str(event.get("kind") or "") != "created" or str(event.get("outcome") or "") != "success":
+        return False
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(actor.get("role") or "") == "dispatcher" and payload.get("budget_event") == "hotfix"
+
+
 def is_merged_release(event: dict[str, Any]) -> bool:
     """Whether a Done transition is a dispatcher release whose merge landed on the base.
 
@@ -553,6 +566,9 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     if str(actor.get("role") or "") == "observer":
         return False
     if post_merge_ci_fact(event) is not None:
+        return True
+    if is_dispatcher_hotfix(event):
+        # A red after-merge e2e run's hotfix card, cut in the sprint: a decision, as a Blocked card is.
         return True
     moved = recorded_card_transition(event)
     if moved is None:
@@ -1241,14 +1257,18 @@ class TaskWriter:
         steward_report: bool,
     ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply. The dispatcher creates
-        # nothing but the wait card of a code card's e2e run (secretary-1795); every other kind it names
-        # is refused below, before anything is read.
+        # nothing but the wait card of a code card's e2e run (secretary-1795), the decision a spent e2e
+        # budget needs (secretary-1796), and the `code` hotfix of a red after-merge e2e run, under that
+        # run's hotfix request id (secretary-1807); every other kind it names is refused below, before
+        # anything is read.
         task_type = task_type.strip()
+        dispatcher_creates = task_type in {TaskType.WAIT.value, TaskType.DECISION.value} or (
+            task_type == TaskType.CODE.value
+            and str(request_id or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+        )
         role = self._role(
             role,
-            CREATE_ROLES | {Role.DISPATCHER}
-            if task_type in {TaskType.WAIT.value, TaskType.DECISION.value}
-            else CREATE_ROLES,
+            CREATE_ROLES | {Role.DISPATCHER} if dispatcher_creates else CREATE_ROLES,
             actor=actor,
         )
         project = project.strip()
@@ -1299,8 +1319,13 @@ class TaskWriter:
         # The PO turn this create runs in: only the PO has one, and only its environment names it.
         origin_record = _origin_request(origin)
         # The dispatcher carries a card's origin onto the decision its spent e2e cap needs, so the
-        # decision goes to the PO session that cut the card (secretary-1796); it originates nothing else.
-        carried_origin = role == Role.DISPATCHER.value and task_type == TaskType.DECISION.value
+        # decision goes to the PO session that cut the card (secretary-1796), and onto the hotfix `code`
+        # card a red after-merge e2e run needs outside every sprint (secretary-1807); it originates
+        # nothing else.
+        carried_origin = role == Role.DISPATCHER.value and task_type in {
+            TaskType.DECISION.value,
+            TaskType.CODE.value,
+        }
         if origin_record and role != Role.PO.value and not carried_origin:
             raise TaskError(
                 "validation", f"only the PO records the PO session a card came from; {role} cannot", 2
@@ -2324,6 +2349,70 @@ class TaskWriter:
             )
             return charge
 
+    def record_after_merge_intent(
+        self,
+        *,
+        role: str,
+        actor: str,
+        states: dict[str, str],
+        sprint: str,
+        dispatch_id: str,
+        carrier: str,
+    ) -> dict[str, Any]:
+        """Write an after-merge e2e run's intent on every card it covers, charged first (secretary-1807).
+
+        One transaction for the whole run: the charge, then each covered card's `e2e` field (`states`,
+        the new text per card; the carrier's holds the run record). With `sprint` the run is charged to
+        that sprint as `record_e2e_intent` charges one, under the carrier's name. Without it the run is
+        charged to every covered card's own cap: each is read here, and when any of them has no run
+        left nothing at all is written and the answer names them (`charged: false`, `spent`). All
+        charged together, or none.
+        """
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        if carrier not in states:
+            raise TaskError("validation", f"the carrier {carrier} is not among the covered cards", 2)
+        tasks = {reference: self.reader.show(reference) for reference in states}
+        for reference, task in tasks.items():
+            if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
+                raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
+        with self._mutation():
+            charge: dict[str, Any] = {"charged": True}
+            if sprint:
+                charge = self.client.call(
+                    "chargeSprintE2e",
+                    sprint_ref=sprint,
+                    task_ref=carrier,
+                    dispatch_id=dispatch_id,
+                    at=datetime.now(UTC).isoformat(),
+                )
+                if not charge.get("charged"):
+                    return charge
+            else:
+                spent = [
+                    reference
+                    for reference, task in tasks.items()
+                    if e2e_record.e2e_state(task).dispatched >= e2e_budget.card_cap(task)
+                ]
+                if spent:
+                    return {"charged": False, "spent": spent}
+            for reference, text in states.items():
+                self.client.call(
+                    "saveTaskMetadata", task_id=_task_number(tasks[reference]), values={e2e_record.E2E_FIELD: text}
+                )
+            return charge
+
+    def _sprint_open(self, sprint: str) -> bool:
+        """Whether a card's sprint is open: a card of a closed sprint spends its own e2e cap after the
+        merge (secretary-1807)."""
+        from secretary.sprints import SprintReader
+
+        try:
+            return str(SprintReader(self.client).show(sprint, include_cards=False).get("status") or "") == "open"
+        except TaskError as exc:
+            if exc.code == "not_found":
+                return False
+            raise
+
     def raise_e2e_cap(
         self,
         *,
@@ -2336,7 +2425,7 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """Raise the e2e cap of one code card outside every sprint, on the owner's word (secretary-1796).
 
-        The sprint's `sprint e2e-budget`, for a card no sprint budgets: role `po` only, and only with
+        The sprint's `sprint e2e-budget`, for a card no open sprint budgets: role `po` only, and only with
         `authorized_by`, the event id of an owner-role comment on this card's e2e budget decision card
         made after its handover whose one answer line is `e2e budget: raise <N>`
         (`e2e_budget.authorized_raise`): the raise is that N, and `add`, when given, has to equal it. It
@@ -2351,7 +2440,7 @@ class TaskWriter:
         current = self.reader.show(reference)
         if str(current.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
             raise TaskError("validation", f"{reference} is not a code card; it has no e2e cap", 2)
-        if str(current.get("sprint") or ""):
+        if str(current.get("sprint") or "") and self._sprint_open(str(current["sprint"])):
             raise TaskError(
                 "validation",
                 f"{reference} belongs to {current['sprint']}, whose e2e budget it spends: raise that with "
@@ -3158,14 +3247,21 @@ class TaskWriter:
         """Why the dispatcher may not take one of its two wait edges here, or `""` (secretary-1790).
 
         In progress -> Done is a wait card's `target_reached`, once its result is frozen; Ready ->
-        Blocked is a card held by a wait card (`blocked_by`) that ended another way. The dispatcher
-        takes neither edge for any other card.
+        Blocked is a card held by a wait card (`blocked_by`) that ended another way, or the hotfix
+        card the dispatcher itself cut for a red after-merge e2e run that no open sprint and no PO
+        origin owns (secretary-1807). The dispatcher takes neither edge for any other card.
         """
         if (source, target) == ("in_progress", "done"):
             result = wait_card.wait_state(task).result if is_wait(task) else None
             if result is None or result.get("outcome") != wait_card.TARGET_REACHED:
                 return "the dispatcher moves an In progress card to Done only as a wait card's target_reached"
         if (source, target) == ("ready", "blocked"):
+            created = self.audit.events(str(task.get("ref") or ""), kind="created")
+            if any(
+                str(event.get("request_id") or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+                for event in created
+            ):
+                return ""
             for blocker in _blocker_refs(task):
                 try:
                     if is_wait(self.reader.show(blocker)):
