@@ -23,6 +23,7 @@ from secretary.board.terminal_taxonomy import (
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.claim import claim_ready_task
+from secretary.dispatch.provider_failure import is_provider_unavailable_return
 from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
@@ -1876,7 +1877,9 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
             # blocked taxonomy disposition during budget recovery.
             return budget_event_type(read_terminal_taxonomy(payload, disposition=None))
         if target == "ready" and source in ACTIVE_STATES:
-            return "preempt"
+            # A worker whose provider failed with no launchable head in its chain waits in Ready
+            # for that provider (secretary-1799): not a restart, so nothing is charged for it.
+            return None if is_provider_unavailable_return(request_id) else "preempt"
         if target == "in_progress" and "gate-red" in request_id:
             return "red_ci"
     if event.get("kind") == "created":

@@ -116,6 +116,9 @@ from secretary.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
 from secretary.dispatch.post_merge import pr_merge_commit
+from secretary.dispatch.provider_failure import (
+    provider_failure_for_persisted_run as _provider_failure_for_persisted_run,
+)
 from secretary.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
@@ -1754,6 +1757,29 @@ class CommandHostRuntime:
                     self._commit_worker_run(record, updated)
                 lifecycle_run = updated
         return _provider_progress_for_run(lifecycle_run)
+
+    def provider_failure(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, Any]:
+        """Whether this role's exact HeadRun ended its first turn on a provider error (secretary-1799).
+
+        Read-only, and bound like `provider_progress`: a persisted run that names another workspace,
+        card or role answers nothing. The reader is `provider_failure.provider_failure_for_run`.
+        """
+        if self.mode == "noop":
+            return {"state": "unavailable", "reason": "noop host"}
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        try:
+            lifecycle_run = head_ops.HeadRun.from_json(run)
+        except (head_ops.HeadRunError, TypeError, ValueError):
+            return {"state": "unavailable", "reason": "persisted HeadRun is unavailable"}
+        expected_role = "reviewer" if kind == "review" else "worker"
+        if (
+            lifecycle_run.workspace != record.workspace
+            or lifecycle_run.task_ref.kind != "card"
+            or lifecycle_run.task_ref.ref != str(task.get("ref") or "")
+            or (lifecycle_run.role and lifecycle_run.role != expected_role)
+        ):
+            return {"state": "identity_mismatch", "reason": "persisted HeadRun binding mismatches role"}
+        return _provider_failure_for_persisted_run(run, local_pty_root=self._local_pty_root())
 
     def head_children(self, head_pid: int) -> dict[str, Any]:
         """The live descendants of a head's heartbeat-proven pid, with their movement counters.

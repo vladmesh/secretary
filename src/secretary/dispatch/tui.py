@@ -431,6 +431,29 @@ def provider_progress_for_persisted_run(run: Any) -> dict[str, str]:
 
 
 def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
+    bound = _codex_bound_source(run)
+    if isinstance(bound, dict):
+        return bound
+    source, _path, stat, lines = bound
+    cursor = f"{lines[-1].number}:{lines[-1].digest}"
+    return _observed(
+        "codex-session",
+        _source_fingerprint(source),
+        cursor,
+        stat.st_mtime,
+        run_id,
+        fingerprint,
+    )
+
+
+def _codex_bound_source(
+    run: HeadRun,
+) -> tuple[dict[str, Any], Path, os.stat_result, list[Any]] | dict[str, str]:
+    """This run's bound Codex session journal, re-proved and read, or the typed reason it is not.
+
+    The one verification both run-bound Codex readers share: the provider cursor and the first-turn
+    provider-failure reader (secretary-1799) must never disagree about which journal is this head's.
+    """
     from secretary.codex_provider_events import _initial_range_matches, _read_source
 
     source = run.fanout_policy.get("provider_source")
@@ -465,9 +488,17 @@ def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str
     meta, lines = parsed
     if str(meta.get("session_id") or "") != str(source.get("session_id") or "") or not lines:
         return _unavailable("Codex bound provider source identity changed", "codex-session", identity=True)
-    cursor = f"{lines[-1].number}:{lines[-1].digest}"
+    return source, path_resolved, stat, lines
+
+
+def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
+    bound = _claude_bound_source(run)
+    if isinstance(bound, dict):
+        return bound
+    source, _path, stat = bound
+    cursor = f"{int(stat.st_size)}:{int(stat.st_mtime_ns)}"
     return _observed(
-        "codex-session",
+        "claude-session",
         _source_fingerprint(source),
         cursor,
         stat.st_mtime,
@@ -476,7 +507,8 @@ def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str
     )
 
 
-def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
+def _claude_bound_source(run: HeadRun) -> tuple[dict[str, Any], Path, os.stat_result] | dict[str, str]:
+    """This run's bound Claude session transcript, re-proved, or the typed reason it is not."""
     source = _progress_source(run)
     if source.get("kind") != "claude_session_jsonl" or source.get("state") != "bound":
         return _unavailable("Claude provider source has no bound v1 baseline", "claude-session")
@@ -502,15 +534,7 @@ def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: st
             raise OSError
     except (OSError, TypeError, ValueError):
         return _unavailable("Claude bound provider source cannot be verified", "claude-session")
-    cursor = f"{int(stat.st_size)}:{int(stat.st_mtime_ns)}"
-    return _observed(
-        "claude-session",
-        _source_fingerprint(source),
-        cursor,
-        stat.st_mtime,
-        run_id,
-        fingerprint,
-    )
+    return source, path_resolved, stat
 
 
 def _progress_source(run: HeadRun) -> dict[str, Any]:

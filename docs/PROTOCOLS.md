@@ -722,7 +722,7 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | `observer_dead` | `notice` | the dispatcher's observer reconcile: a head positively dead at the start of the tick that the tick did not relaunch (backoff, drain, a failed bring-up) | the sprint | `observer_dead:<sprint>:<launch count>` |
 | `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
 | `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
-| `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
+| `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable`, `timed_out` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
 | `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
 
 **The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
@@ -1045,6 +1045,88 @@ handle/leaf binding and workspace with a capped durable retry schedule. Until a 
 delivery, recovery does not freeze or signal the worker, write reviewer routing or lifecycle
 attribution, clear the intent, or replace the head. Confirmation crosses the ordinary launch adoption
 boundary once; `unavailable`, malformed and stale-handle evidence keep their own conservative paths.
+
+### Provider failure on a head's first turn
+
+A worker or reviewer head whose first turn ends on a provider error, with no report or verdict, has
+failed on its provider. That is a provider verdict, not a stall (secretary-1799,
+`src/secretary/dispatch/provider_failure.py`). The provider errors in scope are an HTTP 401/403, a 429,
+any 5xx (529 included), and a connection the client gave up on after its own retries ("Reconnecting...
+5/5", "exceeded retry limit", "stream disconnected before completion"). A turn that ends on anything else
+(a context window, a tool failure, a refusal) keeps its old path.
+
+Sources, read by `CommandHostRuntime.provider_failure` from the role's exact HeadRun, never from the
+workspace at large:
+
+- Codex: the run's bound rollout journal. A turn runs from `task_started` to `task_complete`; the
+  failure is a `task_complete` whose `error.message` is a provider error (or an in-turn `error` event
+  closed by a `task_complete` with no agent message).
+- Claude: the run's bound session transcript. The failure is an `isApiErrorMessage` record
+  (`apiErrorStatus`, typed `error`) that is the transcript's last user/assistant record. When no
+  transcript can be bound, the bottom of the head's PTY screen is read instead (the supervisor's output
+  buffer rendered to a screen), and only when the supervisor journal says the head is idle after turn 1.
+
+First turn means the head never completed a clean turn: every completed turn so far ended on an error
+and the last one on a provider error. A head that has completed a clean turn, reported or given a verdict
+is out of scope and behaves as before.
+
+**Precedence.** `wait_vitality.wait_watchdog` asks this before the vitality verdict, on every wait tick:
+the tick that first observes the turn's end acts on it, without waiting for any stall timer, and no
+`{kind}-stall-suspected`, `{kind}-respawned`, report nudge or stall escalation is produced for that head.
+From the error to the relaunch takes one tick.
+
+**On detection, in this order:**
+
+1. The head's resource is recorded `unavailable` in `<data>/dispatcher/resource_health.json`
+   (`HeadHealth.record`), with the reason, replacing its cached probe verdict. It holds for the probe
+   TTL; the probe runs again after that.
+2. The head is stopped (reviewer: initiator `provider-failure`; worker: the confirmed replacement stop).
+3. The same role is relaunched on the next launchable head of the card's chain: `resolve_head_chain`
+   from the card's head override (`head_override` / `review_head_override`), else the role default. The
+   report generation, TASK.md and the green candidate stay as they are.
+4. One card comment and the tick outcome (`worker-provider-fallback` / `review-provider-fallback`) name
+   the head, the resource, the error summary (secrets and request identifiers removed) and the head
+   switched to (`switched_to`).
+
+None of this charges a round, a respawn, the red-review counter or the sprint budget, and none of it
+moves a card to Blocked.
+
+**Empty chain.** Worker phase: the card moves to Ready with the reason `provider unavailable: <resource>`
+(action token `provider-unavailable-ready`, which the sprint budget does not count as a preempt); the
+claim-time walk claims it again once a head of its chain is launchable. Reviewer phase: the card stays in
+Validate with no reviewer (`review-provider-unavailable`, the record's `review_provider_hold` carries the
+reason); `start_review` walks the chain again on every tick, spends no infrastructure retry, and launches
+the reviewer on the first head that can run, with one comment. The worker's candidate, gate receipt and
+report are not discarded.
+
+### Resource probe statuses
+
+`secretary.head_health` owns the verdict on a head resource. A claim, a reviewer launch and a fallback
+walk launch only on `ready` or `unknown`; every other status walks the fallback chain.
+
+| Status | Meaning | Launch |
+|---|---|---|
+| `ready` | the probe succeeded | yes |
+| `unknown` | the probe answered with something nobody could classify, or has no probe command | yes |
+| `timed_out` | the provider gave the probe no answer in time (outer command killed, or the inner probe's own `status=timeout`) | no |
+| `unavailable` | the provider failed: 5xx, reconnect exhaustion, a 429 rate limit, or a head's first-turn provider error recorded by the dispatcher | no |
+| `unauthenticated` | the account was refused: a missing login, an expired key, a 401/403 for the account | no |
+| `exhausted` | the quota is spent | no |
+| `probe_broken` | the probe command could not be launched | no |
+| `missing` | a chain entry the registry does not describe | no |
+
+A 401 "Incorrect API key provided" from the ChatGPT/Codex backend while `CODEX_HOME/auth.json` is a
+ChatGPT-mode login is the provider's fault, not the account's: the inner `openai-sub` probe reports it as
+`status=provider-unavailable` and it reads `unavailable`. A 401 with an API-key login, or no login at all,
+stays `unauthenticated`. Reasons carry no secret.
+
+Timeouts are per resource. The inner probe (`secretary.runtime.resource_probe.probe_timeout_s`) waits 75 s
+for `openai-sub`, whose client reconnects about ten times before it prints a refusal, and 20 s for the
+others. `TA_PROBE_TIMEOUT_S` moves the default and `TA_PROBE_TIMEOUT_S_<RESOURCE>` (id upper-cased, `-`
+as `_`, e.g. `TA_PROBE_TIMEOUT_S_OPENAI_SUB`) sets one resource. The outer timeout around the probe
+command (`head_health.probe_timeout_seconds`) is the inner one plus 10 s, so the inner classifier always
+answers first. `secretary doctor` shows `timed_out` like the other non-ready statuses: a
+`resource_readiness` finding and a `provider_red` owner event.
 
 ### A settled head is not a delivered prompt
 
@@ -2336,8 +2418,10 @@ carrying both heads). A verdict `outcome` is `green` or `red` from the reviewer;
 bounce closes the attempt with its own value (`gate_red`, `merge-gate_red`, `review-freeze_red`). If
 the reviewer returned green and the merge gate then bounced, both events stay.
 
-Head choice is made once, at claim time, with no substitution at launch. It reads the card override
-or `role_defaults`, then resource health. A preferred head whose resource is red or spent is replaced
+Head choice is made at claim time, with no substitution at launch, except when a head's first turn
+ends on a provider error ([provider failure](#provider-failure-on-a-heads-first-turn)): the role is then
+relaunched on its chain and the new head is journalled as that attempt's active head. It reads the card
+override or `role_defaults`, then resource health. A preferred head whose resource is red or spent is replaced
 by the first launchable head along the registry's fallback chain for it (breadth-first, cycles read
 once); a chain entry the registry no longer describes is dropped. `head_source` records where the id
 came from: `card`, `role_default`, `fallback`, or `record` (pinned in the dispatcher record at an

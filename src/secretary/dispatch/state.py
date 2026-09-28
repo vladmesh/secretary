@@ -945,6 +945,12 @@ class DispatcherRecord:
     # reviewer does take the checkout, so the count covers one outage rather than the card's life.
     review_infra_failures: int = 0
     review_infra_error: str = ""
+    # A reviewer whose first turn ended on a provider error and whose fallback chain had no
+    # launchable head (secretary-1799): the card stays in Validate with no reviewer, and this is the
+    # visible reason it waits. While it is set, `start_review` walks the chain again on every tick
+    # and launches the reviewer on the first head that can run, charging no infrastructure retry.
+    # Cleared by that launch.
+    review_provider_hold: str = ""
     # Reviewer prompt deliveries this card lost, and the bounded evidence of the last one, from
     # the same delivery boundary the observer's wakes go through. Unlike the counter above these
     # are not reset by a reviewer that later takes the checkout: a card whose first reviewer never
@@ -1079,6 +1085,8 @@ class DispatcherRecord:
             "review_launch_aborts": self.review_launch_aborts,
             "review_infra_failures": self.review_infra_failures,
             "review_infra_error": self.review_infra_error,
+            # Only while a reviewer waits for a provider, so every other record keeps its shape.
+            **({"review_provider_hold": self.review_provider_hold} if self.review_provider_hold else {}),
             "review_delivery_failures": self.review_delivery_failures,
             "review_delivery_evidence": self.review_delivery_evidence.to_json(),
             "worker_delivery_failures": self.worker_delivery_failures,
@@ -1174,6 +1182,7 @@ class DispatcherRecord:
             review_launch_aborts=int(payload.get("review_launch_aborts") or 0),
             review_infra_failures=int(payload.get("review_infra_failures") or 0),
             review_infra_error=str(payload.get("review_infra_error") or ""),
+            review_provider_hold=str(payload.get("review_provider_hold") or ""),
             review_delivery_failures=int(payload.get("review_delivery_failures") or 0),
             review_delivery_evidence=PersistedDeliveryEvidence.from_value(
                 payload.get("review_delivery_evidence")

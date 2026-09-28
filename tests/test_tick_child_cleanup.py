@@ -102,9 +102,11 @@ class TickChildCleanupTests(unittest.TestCase):
     def test_a_timed_out_head_health_probe_takes_the_provider_cli_with_it(self):
         """The probe is `sh -c <registry probe>`; the provider CLI under it must not survive."""
         probe = HANGING_SHELL.format(pid_file=self.pid_file)
-        with mock.patch.object(head_health, "PROBE_TIMEOUT_SECONDS", 0.5):
-            readiness = head_health.run_probe("openai-sub", probe, time.time())
-        self.assertEqual(readiness.status, "unknown")
+        # The outer timeout is per resource since secretary-1799 (inner probe timeout plus a margin,
+        # 85 s for `openai-sub`), so it is shortened here through the explicit argument, and a
+        # timeout now reads `timed_out` rather than `unknown`.
+        readiness = head_health.run_probe("openai-sub", probe, time.time(), timeout=0.5)
+        self.assertEqual(readiness.status, head_health.PROBE_TIMED_OUT)
         self.assertTrue(_gone(self.descendant()), "the probe's descendant outlived its timeout")
 
     def test_a_command_that_succeeds_takes_its_background_child_with_it(self):

@@ -40,6 +40,7 @@ from secretary.dispatch.host import DESTRUCTIVE_VERDICTS
 from secretary.dispatch.launch import STAGE_RESPAWN, WORKER_ROLE
 from secretary.dispatch.launch import clear_launch_intent as _clear_launch_intent
 from secretary.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
+from secretary.dispatch.provider_failure import provider_failure_outcome as _provider_failure_outcome
 from secretary.dispatch.review import start_review as _start_review
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
@@ -103,6 +104,15 @@ def wait_watchdog(
             "action": f"{kind}-heartbeat-identity-mismatch",
             "reason": "the heartbeat names a live process with a mismatching launch identity",
         }
+    # A first turn that ended on a provider error is a provider verdict, and it outranks every
+    # stall reading below (secretary-1799): a head idle at its prompt after a 401 is not late, it
+    # was refused, and the answer is the next head of its chain, not a nudge, a respawn into the
+    # same provider or Blocked. Decided on the tick that first sees the turn's end.
+    provider_outcome = _provider_failure_outcome(
+        runtime, task, record, records, payload, attempt_id, kind=kind
+    )
+    if provider_outcome is not None:
+        return provider_outcome
     activity = status.get("last_activity")
     progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
     if activity:

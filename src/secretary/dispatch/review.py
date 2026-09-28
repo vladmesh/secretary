@@ -456,6 +456,12 @@ def recover_review_launch(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
+    if record.review_provider_hold:
+        # The held reviewer was stopped, confirmed, before the hold was written, and nothing has
+        # been launched since: there is no head whose liveness could say otherwise.
+        return start_review(
+            runtime, task, records, record, attempt_id, action="review-restarted", payload=payload
+        )
     try:
         status = runtime.host.review_status(task, record)
     except Exception as exc:  # noqa: BLE001 — preserve ambiguous launches after any host failure
@@ -776,6 +782,60 @@ def _escalate_stuck_review_launch(
     )
 
 
+def _walk_review_provider_hold(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    record: DispatcherRecord,
+    attempt_id: str,
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """A reviewer held for a provider: the head it launches on now, or the hold outcome (secretary-1799).
+
+    The card stays in Validate with no reviewer and nothing is counted while no head of the
+    reviewer's chain can run; the first tick one can, the hold is released onto that head and the
+    ordinary launch below proceeds. None means "launch now".
+    """
+    from secretary.dispatch.provider_failure import review_hold_choice
+
+    ref = task["ref"]
+    choice = review_hold_choice(runtime, task, record)
+    if choice is None:
+        record.state = "review_starting"
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return {
+            "status": "degraded",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-provider-unavailable",
+            "head": record.review_head,
+            "reason": record.review_provider_hold,
+        }
+    held = record.review_provider_hold
+    record.review_head = choice.head
+    record.preferred_review_head = choice.preferred if choice.substituted else ""
+    record.review_provider_hold = ""
+    runtime.writer.comment(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        body=(
+            f"Provider recovered (reviewer): {choice.head} can be launched ({choice.reason}), so the "
+            f"reviewer held since `{held}` is launched on it now."
+        ),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id,
+            "review-provider-hold-released",
+            ref,
+            f"{choice.head}-{int(time.time())}",
+        ),
+    )
+    return None
+
+
 def start_review(
     runtime: Any,
     task: dict[str, Any],
@@ -787,6 +847,10 @@ def start_review(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
+    if record.review_provider_hold:
+        held = _walk_review_provider_hold(runtime, task, records, record, attempt_id, payload=payload)
+        if held is not None:
+            return held
     try:
         readiness = runtime.head_readiness(record.review_head)
     except HostError as exc:

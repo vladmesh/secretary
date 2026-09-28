@@ -382,6 +382,19 @@ The wait tick decides from the persisted episode's verdict. The reduction runs o
 including not-live shapes: a heartbeat naming a gone process reduces to `Dead`; an unreadable status over
 a live process is an observation failure that waits.
 
+One verdict outranks the table below: **provider failure** (secretary-1799,
+`dispatch/provider_failure.py`). Before the episode is reduced, `wait_watchdog` asks the host whether the
+head's first turn ended on a provider error (401/403, 429, 5xx, a reconnect loop that gave up), read from
+the run's own Codex rollout or Claude transcript, or the bottom of its PTY screen when no transcript is
+bound. If it did, the head is not stalled, it was refused, and no stall reading applies: its resource is
+recorded `unavailable`, the head is stopped, and the role is relaunched on the next launchable head of
+its fallback chain on that same tick, or the card waits for a provider (worker in Ready, reviewer in
+Validate). No nudge, respawn, round or Blocked. A head idle at its prompt after such an error would
+otherwise read `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min under the idle-turn rule and be
+respawned into the same provider (the 2026-09-25 case). The details are in
+[PROTOCOLS.md](PROTOCOLS.md#provider-failure-on-a-heads-first-turn), with the probe statuses
+(`timed_out` included) in [Resource probe statuses](PROTOCOLS.md#resource-probe-statuses).
+
 | Verdict | Wait-tick action |
 |---|---|
 | `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence renews the outer `worker_waiting_since` window. A recovered suspension lands here with the ladder cleared. |
@@ -422,7 +435,9 @@ Not guarded, because they do not act on vitality:
 - card-lifecycle stops: Done/Blocked transitions, drain, the review bring-up's confirmed worker freeze
   (`_adopt_launch_intent`);
 - launch-recovery stops in `secretary.dispatch.launch.resolve_launch_intent`, which act on durable launch
-  intents and heartbeat identity.
+  intents and heartbeat identity;
+- the provider-failure stop (`dispatch.provider_failure`), which acts on the run's own provider error
+  record, not on vitality, and runs ahead of it.
 
 Tests: refusal classes in `tests/test_head_vitality_guard.py`; call-site coverage in
 `tests/test_head_vitality_guard_sites.py` (guarded paths with the guard forced to refuse and through the
@@ -513,6 +528,7 @@ live round, so a verdict that can stop a head needs strong admitted evidence.
 | A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Secretary1517Tests`, `Secretary1517WaitTickTests` |
 | A status with no provider channel (`reason: "pid"`, `"disconnected"`) after the provider answered once is stamped `absent@provider_cursor`, takes the `dark_ceiling` window, and a confirmation is held behind the outer ceiling. | `ProviderLessStatusShapesTests` |
 | Pid-only `Running` with no progress evidence ages to `SuspectedStall` then `ConfirmedStall`. | `Issue06dcf6cbUmbrellaLivenessContractTests` |
+| A first turn that ended on a provider error falls back on the tick that sees it: no `SuspectedStall` action, no respawn, no Blocked; the resource is recorded `unavailable` and the role moves down its chain (or waits for a provider on an empty chain). | `ProviderFailureFallbackTests` (`tests/test_dispatcher_provider_failure.py`), `tests/test_provider_failure.py` |
 | Journal `Turn=Idle` on a claude/codex run with an owed answer ⇒ `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min from the idle start, child activity notwithstanding; the same silent-child journal on another adapter stays healthy under the child hold; an open turn keeps the ladder and the child hold; a continued worker that works is never suspected; every hostile journal value makes the reading unavailable. | `Secretary1727ReplayTests`, `IdleTurnStallRuleTests`, `IdleTurnAdapterPremiseTests`, `ResumedWorkerThatWorksTests`, `HostileJournalValueTests` |
 
 Reducer timelines live in `tests/test_head_vitality_regression.py` and
