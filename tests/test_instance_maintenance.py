@@ -283,6 +283,27 @@ class DockerCleanupTests(unittest.TestCase):
             self.assertFalse(instance_maintenance._owner_dead(101))
         self.assertFalse(instance_maintenance._owner_dead(os.getpid()))
 
+    def test_volume_prune_uses_effective_client_api_and_accepts_docker_separator(self):
+        calls = []
+
+        def docker(*args):
+            calls.append(args)
+            if args[:2] == ("container", "ls"):
+                return ""
+            if args[0] == "version":
+                self.assertEqual(args[-1], "{{.Client.APIVersion}}")
+                return "1.41"
+            if args[:2] == ("builder", "prune"):
+                return "Total reclaimed space: 0B"
+            self.fail(f"unsafe volume prune call: {args}")
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker):
+            result = instance_maintenance.cleanup_docker()
+        self.assertIsNone(result["anonymous_volumes"]["removed"])
+        self.assertIn("Docker API below 1.42", result["findings"][0])
+        self.assertEqual(instance_maintenance._deleted_volume_count(
+            "Deleted Volumes:\nabc\n\nTotal reclaimed space: 1B\n"), 1)
+
     def test_dead_owner_only_and_native_prunes_are_bounded_and_idempotent(self):
         ids = [format(index, "064x") for index in range(1, 7)]
         labels = {
@@ -315,11 +336,11 @@ class DockerCleanupTests(unittest.TestCase):
             if args[:2] == ("volume", "prune"):
                 self.assertEqual(args, ("volume", "prune", "--force"))
                 volume_runs += 1
-                return ("Deleted Volumes:\n" + "a" * 64 + "\nTotal reclaimed space: 1B\n"
+                return ("Deleted Volumes:\n" + "a" * 64 + "\n\nTotal reclaimed space: 1B\n"
                         if volume_runs == 1 else "Total reclaimed space: 0B")
             if args[:2] == ("builder", "prune"):
                 self.assertEqual(args[-1], "until=168h")
-                self.assertNotIn("--all", args)
+                self.assertIn("--all", args)
                 return "Total reclaimed space: 4MB\n" if volume_runs == 1 else "Total reclaimed space: 0B\n"
             self.fail(args)
 

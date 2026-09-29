@@ -207,7 +207,9 @@ def _deleted_volume_count(output: str) -> int:
     for line in lines[1:]:
         if line.startswith("Total reclaimed space:"):
             return len(names)
-        if not line or len(line) > 255:
+        if not line:
+            continue
+        if len(line) > 255:
             raise CleanupError("volume prune result malformed")
         names.append(line)
     raise CleanupError("volume prune result incomplete")
@@ -221,7 +223,9 @@ def cleanup_docker() -> dict[str, Any]:
     except CleanupError as exc:
         inventory.findings.append(str(exc))
     try:
-        version = _docker("version", "--format", "{{.Server.APIVersion}}").strip()
+        # The client API is the version that controls the request semantics. A newer daemon does
+        # not make an older client safe: before API 1.42, volume prune also removed named volumes.
+        version = _docker("version", "--format", "{{.Client.APIVersion}}").strip()
         parts = version.split(".")
         if len(parts) != 2 or not all(part.isdecimal() for part in parts) or tuple(map(int, parts)) < (1, 42):
             raise CleanupError("Docker API below 1.42 or unknown; anonymous-only prune unavailable")
@@ -229,7 +233,7 @@ def cleanup_docker() -> dict[str, Any]:
     except CleanupError as exc:
         inventory.findings.append(str(exc))
     try:
-        output = _docker("builder", "prune", "--force", "--filter",
+        output = _docker("builder", "prune", "--force", "--all", "--filter",
                          f"until={BUILD_CACHE_MAX_AGE_HOURS}h")
         match = re.search(r"Total reclaimed space:\s*([0-9.]+\s*[kMGTPE]?B)", output)
         if match is None:
