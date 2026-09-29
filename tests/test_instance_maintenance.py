@@ -265,6 +265,41 @@ class MaintenanceRunTests(_WithoutSuiteGitConfig):
 class DockerCleanupTests(unittest.TestCase):
     """A fake native boundary proves selection without touching a Docker daemon."""
 
+    def test_build_cache_prune_accepts_docker_29_total(self):
+        def docker(*args):
+            if args[:2] == ("container", "ls"):
+                return ""
+            if args[0] == "version":
+                return "1.51"
+            if args[:2] == ("volume", "prune"):
+                return "Total reclaimed space: 0B\n"
+            if args[:2] == ("builder", "prune"):
+                self.assertEqual(args[-1], "until=168h")
+                return "CACHE ID\tCACHE TYPE\tSIZE\nTotal:\t6.1GB\n"
+            self.fail(args)
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["build_cache"]["reclaimed"], "6.1GB")
+        self.assertEqual(result["findings"], [])
+
+    def test_build_cache_prune_rejects_unrecognized_total(self):
+        def docker(*args):
+            if args[:2] == ("container", "ls"):
+                return ""
+            if args[0] == "version":
+                return "1.51"
+            if args[:2] == ("volume", "prune"):
+                return "Total reclaimed space: 0B\n"
+            if args[:2] == ("builder", "prune"):
+                return "Total:\tunknown\n"
+            self.fail(args)
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["build_cache"]["reclaimed"], "unknown")
+        self.assertEqual(result["findings"], ["build cache prune result malformed"])
+
     def test_native_command_pins_local_socket_and_current_api(self):
         with mock.patch.dict(os.environ, {"DOCKER_HOST": "tcp://remote:2375",
                                               "DOCKER_CONTEXT": "remote", "DOCKER_API_VERSION": "1.41"}), \
