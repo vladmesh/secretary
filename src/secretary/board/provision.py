@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import time
@@ -13,13 +14,14 @@ from secretary import _proc
 from secretary._fsutil import write_text_atomic
 from secretary.board import store
 from secretary.board.store import BoardStoreConfig, BoardStoreError
+from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 
 POSTGRES_MAJOR = 16
 IMAGE = f"postgres:{POSTGRES_MAJOR}"
 PROJECT = "secretary-board-store"
 VOLUME = "board-db"
 DEFAULT_COMPOSE_PATH = Path("/opt/secretary/postgres-compose.yml")
-COMPOSE_TEXT = f"""services:
+LEGACY_COMPOSE_TEXT = f"""services:
   postgres:
     image: {IMAGE}
     restart: unless-stopped
@@ -34,6 +36,19 @@ COMPOSE_TEXT = f"""services:
 volumes:
   {VOLUME}:
 """
+COMPOSE_TEXT = LEGACY_COMPOSE_TEXT.replace(
+    "    restart: unless-stopped\n",
+    f"    restart: unless-stopped\n    labels:\n      {PRODUCTION_BOARD_LABEL}: 'true'\n",
+)
+
+
+def test_compose_text(owner_pid: int) -> str:
+    if owner_pid != os.getpid() or owner_pid <= 0:
+        raise BoardStoreError("test board owner must be the current process")
+    return LEGACY_COMPOSE_TEXT.replace(
+        "    restart: unless-stopped\n",
+        f"    restart: unless-stopped\n    labels:\n      {TEST_BOARD_LABEL}: '{owner_pid}'\n",
+    )
 
 
 @dataclass(frozen=True)
@@ -58,6 +73,8 @@ class ComposeInstallation:
             return f"{self.path} matches the shipped Compose definition at mode {oct(self.mode or 0)}"
         if self.status == "missing":
             return f"{self.path} is missing"
+        if self.status == "legacy":
+            return f"{self.path} matches the previous shipped Compose definition"
         if self.status == "not-regular":
             return f"{self.path} is not a regular file"
         if self.status == "drift":
@@ -67,7 +84,7 @@ class ComposeInstallation:
         return f"{self.path} could not be inspected: {self.detail}"
 
 
-def inspect_compose(path: Path = DEFAULT_COMPOSE_PATH) -> ComposeInstallation:
+def inspect_compose(path: Path = DEFAULT_COMPOSE_PATH, *, expected_text: str = COMPOSE_TEXT) -> ComposeInstallation:
     """Answer whether the installed Compose definition is the shipped one, without writing."""
     try:
         if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -75,11 +92,12 @@ def inspect_compose(path: Path = DEFAULT_COMPOSE_PATH) -> ComposeInstallation:
         if not path.exists():
             return ComposeInstallation(path, "missing")
         mode = stat.S_IMODE(path.stat().st_mode)
-        if path.read_text(encoding="utf-8") != COMPOSE_TEXT:
+        content = path.read_text(encoding="utf-8")
+        if content != expected_text and not (expected_text == COMPOSE_TEXT and content == LEGACY_COMPOSE_TEXT):
             return ComposeInstallation(path, "drift", mode)
         if mode & 0o077:
             return ComposeInstallation(path, "permissions", mode)
-        return ComposeInstallation(path, "ok", mode)
+        return ComposeInstallation(path, "legacy" if content != expected_text else "ok", mode)
     except OSError as exc:
         return ComposeInstallation(path, "unreadable", detail=str(exc))
     except UnicodeError:
@@ -155,8 +173,8 @@ def _exists(kind: str, name: str) -> bool:
     )
 
 
-def _write_compose(path: Path, *, dry_run: bool) -> bool:
-    installed = inspect_compose(path)
+def _write_compose(path: Path, *, dry_run: bool, expected_text: str = COMPOSE_TEXT) -> bool:
+    installed = inspect_compose(path, expected_text=expected_text)
     if installed.status == "not-regular":
         raise BoardStoreError("board store compose definition must be a regular file")
     if installed.status == "drift":
@@ -169,14 +187,17 @@ def _write_compose(path: Path, *, dry_run: bool) -> bool:
         return False
     try:
         if not dry_run:
-            write_text_atomic(path, COMPOSE_TEXT)
+            write_text_atomic(path, expected_text)
             path.chmod(0o600)
     except OSError as exc:
         raise BoardStoreError(f"could not reconcile board store compose definition: {exc}") from None
     return True
 
 
-def _inspect_container(container: str, *, volume_name: str, host_port: int = 5432) -> None:
+def _inspect_container(
+    container: str, *, volume_name: str, host_port: int = 5432,
+    project: str = PROJECT, owner_pid: int | None = None, legacy: bool = False,
+) -> None:
     try:
         payload = json.loads(_run(["docker", "inspect", container], timeout=30))[0]
     except (json.JSONDecodeError, IndexError, TypeError):
@@ -189,6 +210,19 @@ def _inspect_container(container: str, *, volume_name: str, host_port: int = 543
         (item.get("Type"), item.get("Name"), item.get("Destination")) for item in payload.get("Mounts", [])
     }
     problems = []
+    labels = payload.get("Config", {}).get("Labels") or {}
+    if not isinstance(labels, dict):
+        labels = {}
+    if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != "postgres":
+        problems.append("Compose project or service does not match")
+    if owner_pid is not None:
+        if labels.get(TEST_BOARD_LABEL) != str(owner_pid) or PRODUCTION_BOARD_LABEL in labels:
+            problems.append("test ownership label does not match")
+    elif legacy:
+        if TEST_BOARD_LABEL in labels or PRODUCTION_BOARD_LABEL in labels:
+            problems.append("legacy container has an ownership label")
+    elif labels.get(PRODUCTION_BOARD_LABEL) != "true" or TEST_BOARD_LABEL in labels:
+        problems.append("production ownership label does not match")
     if image != IMAGE:
         problems.append(f"image is {image!r}, expected {IMAGE}")
     if restart != "unless-stopped":
@@ -225,6 +259,7 @@ def provision(
     dry_run: bool = False,
     compose_path: Path = DEFAULT_COMPOSE_PATH,
     project: str = PROJECT,
+    test_owner_pid: int | None = None,
 ) -> ProvisionOutcome | None:
     """Create a fresh store or reconcile a configured one without rotating credentials.
 
@@ -233,6 +268,14 @@ def provision(
     entrypoint environment is not an authority for the password already stored in that volume.
     """
     instance = Path(instance_dir)
+    if test_owner_pid is not None:
+        if project == PROJECT or compose_path == DEFAULT_COMPOSE_PATH:
+            raise BoardStoreError("test board requires a private Compose project and path")
+        expected_text = test_compose_text(test_owner_pid)
+    else:
+        if project != PROJECT:
+            raise BoardStoreError("private Compose projects require explicit test ownership")
+        expected_text = COMPOSE_TEXT
     config_path = store.store_path(instance)
     volume_name = _volume_name(project)
     actions: list[str] = []
@@ -244,8 +287,19 @@ def provision(
             f"board store volume {volume_name} exists without board-store.env; refusing new credentials"
         )
     config = store.resolve(instance) if present else None
-    if _write_compose(compose_path, dry_run=dry_run):
-        actions.append("materialize PostgreSQL compose definition")
+    installed = inspect_compose(compose_path, expected_text=expected_text)
+    if installed.status == "legacy" and present and not dry_run:
+        old_container = _run(_compose_argv(compose_path, project, config_path, "ps", "--all", "--quiet", "postgres"))
+        if old_container:
+            if len(old_container.splitlines()) != 1:
+                raise BoardStoreError("ambiguous legacy board store containers")
+            _inspect_container(old_container, volume_name=volume_name, host_port=config.port,
+                               project=project, legacy=True)
+    if _write_compose(compose_path, dry_run=dry_run, expected_text=expected_text):
+        actions.append("upgrade legacy PostgreSQL compose definition" if installed.status == "legacy"
+                       else "materialize PostgreSQL compose definition")
+        if installed.status == "legacy":
+            actions.append("reconcile PostgreSQL container with production ownership marker")
     if not present:
         actions.append("materialize board-store.env")
         if dry_run:
@@ -256,14 +310,20 @@ def provision(
     assert config is not None
     container = _run(_compose_argv(compose_path, project, config_path, "ps", "--all", "--quiet", "postgres"))
     if container:
-        _inspect_container(container, volume_name=volume_name, host_port=config.port)
+        if len(container.splitlines()) != 1:
+            raise BoardStoreError("ambiguous board store containers")
+        _inspect_container(container, volume_name=volume_name, host_port=config.port,
+                           project=project, owner_pid=test_owner_pid, legacy=installed.status == "legacy")
     else:
         actions.append("create PostgreSQL container and volume")
     _run(_compose_argv(compose_path, project, config_path, "up", "--detach", "postgres"))
     container = _run(_compose_argv(compose_path, project, config_path, "ps", "--all", "--quiet", "postgres"))
     if not container:
         raise BoardStoreError("Docker Compose did not create the board store container")
-    _inspect_container(container, volume_name=volume_name, host_port=config.port)
+    if len(container.splitlines()) != 1:
+        raise BoardStoreError("ambiguous board store containers")
+    _inspect_container(container, volume_name=volume_name, host_port=config.port,
+                       project=project, owner_pid=test_owner_pid)
     _wait_ready(config)
     return ProvisionOutcome(tuple(actions))
 

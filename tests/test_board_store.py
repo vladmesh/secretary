@@ -8,6 +8,7 @@ PostgreSQL made of it, and asking Alembic whether the result still matches the m
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import unittest
@@ -31,6 +32,8 @@ from secretary.board.store import (
     resolve_with_lifecycle,
     store_path,
 )
+from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from tests import container_cleanup
 
 COMPLETE = {
     "SECRETARY_DB_HOST": "127.0.0.1",
@@ -212,6 +215,8 @@ class ProvisionDefinitionTests(unittest.TestCase):
         self.assertIn("restart: unless-stopped", provision.COMPOSE_TEXT)
         self.assertIn("127.0.0.1:${SECRETARY_DB_PORT}:5432", provision.COMPOSE_TEXT)
         self.assertIn("board-db:/var/lib/postgresql/data", provision.COMPOSE_TEXT)
+        self.assertIn(f"{PRODUCTION_BOARD_LABEL}: 'true'", provision.COMPOSE_TEXT)
+        self.assertNotIn(TEST_BOARD_LABEL, provision.COMPOSE_TEXT)
         self.assertNotIn("SECRETARY_DB_APP_PASSWORD", provision.COMPOSE_TEXT)
         self.assertNotIn("SECRETARY_DB_READ_PASSWORD", provision.COMPOSE_TEXT)
 
@@ -250,6 +255,86 @@ class ProvisionDefinitionTests(unittest.TestCase):
 
             self.assertEqual(compose.read_text(encoding="utf-8"), "services: {}\n")
 
+    def test_legacy_definition_dry_run_reports_upgrade_without_writing_or_docker(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_store(root)
+            compose = root / "compose.yml"
+            compose.write_text(provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            with mock.patch.object(provision, "_run") as run:
+                outcome = provision.provision(root, compose_path=compose, dry_run=True)
+            self.assertIn("would upgrade legacy", outcome.render(dry_run=True))
+            self.assertEqual(compose.read_text(encoding="utf-8"), provision.LEGACY_COMPOSE_TEXT)
+            run.assert_not_called()
+
+    def test_legacy_container_is_checked_before_definition_changes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_store(root)
+            compose = root / "compose.yml"
+            compose.write_text(provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            with (mock.patch.object(provision, "_run", return_value="container-id"),
+                  mock.patch.object(provision, "_inspect_container", side_effect=BoardStoreError("drift")),
+                  self.assertRaisesRegex(BoardStoreError, "drift")):
+                provision.provision(root, compose_path=compose)
+            self.assertEqual(compose.read_text(encoding="utf-8"), provision.LEGACY_COMPOSE_TEXT)
+
+    def test_legacy_upgrade_and_labelled_rerun(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_store(root)
+            compose = root / "compose.yml"
+            compose.write_text(provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            inspection = []
+            def inspect(_container, **kwargs):
+                inspection.append(kwargs)
+            with (mock.patch.object(provision, "_run", side_effect=lambda args, **kw: "container-id" if "ps" in args else ""),
+                  mock.patch.object(provision, "_inspect_container", side_effect=inspect),
+                  mock.patch.object(provision, "_wait_ready")):
+                first = provision.provision(root, compose_path=compose)
+                second = provision.provision(root, compose_path=compose)
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            self.assertEqual(compose.read_text(encoding="utf-8"), provision.COMPOSE_TEXT)
+            self.assertTrue(inspection[0]["legacy"])
+            self.assertFalse(inspection[-1].get("legacy", False))
+
+    def test_private_compose_requires_current_pid_and_never_uses_production_marker(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_store(root)
+            path = root / "test-compose.yml"
+            with self.assertRaisesRegex(BoardStoreError, "explicit test ownership"):
+                provision.provision(root, compose_path=path, project="private")
+            with self.assertRaisesRegex(BoardStoreError, "current process"):
+                provision.provision(root, compose_path=path, project="private", test_owner_pid=os.getpid() + 1)
+            text = provision.test_compose_text(os.getpid())
+            self.assertIn(f"{TEST_BOARD_LABEL}: '{os.getpid()}'", text)
+            self.assertNotIn(PRODUCTION_BOARD_LABEL, text)
+            with (mock.patch.object(provision, "_run", side_effect=lambda args, **kw: "container-id" if "ps" in args else ""),
+                  mock.patch.object(provision, "_inspect_container") as inspect,
+                  mock.patch.object(provision, "_wait_ready")):
+                provision.provision(root, compose_path=path, project="private", test_owner_pid=os.getpid())
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+            self.assertEqual(inspect.call_args.kwargs["owner_pid"], os.getpid())
+
+    def test_container_inspection_requires_matching_production_marker_and_compose_identity(self) -> None:
+        payload = {"Config": {"Image": provision.IMAGE, "Labels": {
+            "com.docker.compose.project": provision.PROJECT, "com.docker.compose.service": "postgres"}},
+            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}, "PortBindings": {
+                "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
+            "Mounts": [{"Type": "volume", "Name": "secretary-board-store_board-db",
+                        "Destination": "/var/lib/postgresql/data"}]}
+        with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
+            with self.assertRaisesRegex(BoardStoreError, "production ownership"):
+                provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+        payload["Config"]["Labels"][PRODUCTION_BOARD_LABEL] = "true"
+        with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
+            provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+
     def test_reconcile_passes_only_the_private_file_path_not_credentials_on_argv(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -279,6 +364,85 @@ class ProvisionDefinitionTests(unittest.TestCase):
         self.assertIn(str(config_path), arguments)
         for secret in ("owner-secret", "app-secret", "read-secret"):
             self.assertNotIn(secret, arguments)
+
+
+class TestContainerCleanupTests(unittest.TestCase):
+    def test_direct_container_requires_exact_id_and_current_pid(self) -> None:
+        for labels in ({}, {TEST_BOARD_LABEL: str(os.getpid() + 1)},
+                       {TEST_BOARD_LABEL: str(os.getpid()), PRODUCTION_BOARD_LABEL: "true"}):
+            with self.subTest(labels=labels):
+                calls = []
+                def docker(*args):
+                    calls.append(args)
+                    return json.dumps([{"Id": "exact-id", "Config": {"Labels": labels}}])
+                with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
+                    with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+                        container_cleanup.remove_test_container("exact-id")
+                self.assertEqual(calls, [("container", "inspect", "exact-id")])
+
+        calls = []
+        def docker(*args):
+            calls.append(args)
+            return json.dumps([{"Id": "exact-id", "Config": {"Labels": {
+                TEST_BOARD_LABEL: str(os.getpid())}}}]) if args[0] == "container" else ""
+        with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
+            container_cleanup.remove_test_container("exact-id")
+        self.assertEqual(calls[-1], ("rm", "-f", "exact-id"))
+
+    def test_missing_or_ambiguous_compose_target_does_not_sweep(self) -> None:
+        with mock.patch.object(container_cleanup, "_docker", return_value="one\ntwo") as docker:
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                container_cleanup.cleanup_test_project("private")
+            self.assertEqual(docker.call_count, 1)
+
+        with mock.patch.object(container_cleanup, "_docker", return_value="") as docker:
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                container_cleanup.cleanup_test_project("private")
+            self.assertEqual(docker.call_count, 1)
+
+        with mock.patch.object(container_cleanup, "_docker", side_effect=RuntimeError("No such container")):
+            with self.assertRaisesRegex(RuntimeError, "No such container"):
+                container_cleanup.remove_test_container("missing-id")
+
+    def test_foreign_compose_container_leaves_resources_alone(self) -> None:
+        calls = []
+        def docker(*args):
+            calls.append(args)
+            if args[0] == "ps":
+                return "exact-id"
+            return json.dumps([{"Id": "exact-id", "Config": {"Labels": {
+                TEST_BOARD_LABEL: str(os.getpid() + 1),
+                "com.docker.compose.project": "private",
+                "com.docker.compose.service": "postgres"}}}])
+        with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
+            with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+                container_cleanup.cleanup_test_project("private")
+        self.assertEqual([call[0] for call in calls], ["ps", "container"])
+
+    def test_compose_cleanup_removes_only_verified_container_and_disposable_resources(self) -> None:
+        calls = []
+        def docker(*args):
+            calls.append(args)
+            if args[0] == "ps":
+                return "exact-id"
+            if args[:2] == ("container", "inspect"):
+                return json.dumps([{"Id": "exact-id", "Config": {"Labels": {
+                    TEST_BOARD_LABEL: str(os.getpid()),
+                    "com.docker.compose.project": "private",
+                    "com.docker.compose.service": "postgres"}}}])
+            if len(args) > 1 and args[1] == "inspect":
+                key = "network" if args[0] == "network" else "volume"
+                return json.dumps([{"Name": args[2], "Labels": {
+                    "com.docker.compose.project": "private",
+                    f"com.docker.compose.{key}": "default" if key == "network" else "board-db"}}])
+            return ""
+        with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
+            container_cleanup.cleanup_test_project("private")
+        self.assertEqual([call for call in calls if "rm" in call], [
+            ("rm", "-f", "exact-id"),
+            ("network", "rm", "private_default"),
+            ("volume", "rm", "private_board-db"),
+        ])
 
 
 class SchemaModelTests(unittest.TestCase):

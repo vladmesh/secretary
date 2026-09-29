@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -38,6 +39,8 @@ from secretary import upgrade
 from secretary.board import migrate, provision, schema, schema_gate
 from secretary.board.backend import record_key
 from secretary.board.store import BoardStoreConfig
+from secretary.runtime.container_labels import TEST_BOARD_LABEL
+from tests.container_cleanup import cleanup_test_project, remove_test_container
 
 IMAGE = "postgres:16"
 DATABASE = "board_store_test"
@@ -140,6 +143,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "run",
             "--rm",
             "-d",
+            "--label",
+            f"{TEST_BOARD_LABEL}={os.getpid()}",
             "-e",
             f"POSTGRES_DB={DATABASE}",
             "-e",
@@ -150,7 +155,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "127.0.0.1::5432",
             IMAGE,
         )
-        cls.addClassCleanup(lambda: docker("rm", "-f", cls.container))
+        cls.addClassCleanup(lambda: remove_test_container(cls.container))
         published = json.loads(docker("inspect", "-f", "{{json .NetworkSettings.Ports}}", cls.container))
         cls.port = int(published["5432/tcp"][0]["HostPort"])
         cls._await_server()
@@ -1044,28 +1049,19 @@ class BoardStoreSchemaTests(unittest.TestCase):
             )
             config_path.chmod(0o600)
 
+            completed = False
+
             def cleanup() -> None:
-                config = root / "board-store.env"
-                if config.exists() and compose.exists():
-                    docker(
-                        "compose",
-                        "--project-name",
-                        project,
-                        "--env-file",
-                        str(config),
-                        "--file",
-                        str(compose),
-                        "down",
-                        "--volumes",
-                        "--remove-orphans",
-                    )
+                cleanup_test_project(project, container_expected=completed)
 
             try:
                 first = provision.provision(
                     root,
                     compose_path=compose,
                     project=project,
+                    test_owner_pid=os.getpid(),
                 )
+                completed = True
                 self.assertIsNotNone(first)
                 self.assertTrue(first.changed)
                 secret_values = list(provision.store.resolve(root).as_environ().values())[4::2]
@@ -1083,7 +1079,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 finally:
                     engine.dispose()
 
-                second = provision.provision(root, compose_path=compose, project=project)
+                second = provision.provision(root, compose_path=compose, project=project,
+                                             test_owner_pid=os.getpid())
                 self.assertIsNotNone(second)
                 self.assertFalse(second.changed)
                 self.assertEqual(migrate.migrate_instance(root), ())
