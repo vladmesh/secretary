@@ -31,7 +31,8 @@ MAX_BYTES = 2 * 1024 * 1024
 
 
 def utc(now: float) -> str:
-    return datetime.fromtimestamp(now, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    # Preserve fractional ordering between a completion and a same-second restart.
+    return datetime.fromtimestamp(now, UTC).isoformat(timespec="auto").replace("+00:00", "Z")
 
 
 def identity(instance: Path, data_dir: Path) -> dict[str, str]:

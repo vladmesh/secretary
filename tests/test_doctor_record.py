@@ -241,6 +241,13 @@ class DoctorRecordTests(unittest.TestCase):
             reading = records.read_latest(self.instance, self.data, now=now)
             self.assertEqual(reading["state"], "available")
             self.assertIsNone(reading["collecting"])
+        completed["completed_at"] = records.utc(now + .1)
+        for start in (now + .05, now + .1):
+            with self.subTest(start=start):
+                records.publish(self.path, self.envelope(completed, {"run_at": records.utc(start), "mode": "offline"}))
+                reading = records.read_latest(self.instance, self.data, now=now + records.STUCK_SECONDS + 1)
+                self.assertEqual(reading["state"], "available")
+                self.assertIsNone(reading["collecting"])
 
     def test_released_collecting_record_is_unknown_and_still_has_a_stuck_threshold(self):
         now = 1_800_000_000
@@ -387,6 +394,61 @@ class DoctorRecordTests(unittest.TestCase):
                         self.assertAlmostEqual(problem["elapsed_seconds"], elapsed)
                         self.assertEqual(problem["threshold_seconds"], records.STUCK_SECONDS)
                         self.assertIn("secretary-doctor.service", problem["message"])
+
+    def test_same_second_restart_keeps_current_progress_and_stuck_finding(self):
+        app, doctor = self.web_fixture()
+        now = self.web_clock
+        started = now + .5
+        prior = self.baseline(started=now - 10)
+        prior["completed_at"] = records.utc(now + .1)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                records.publish(self.path, prior)
+                if version == 2:
+                    # Seed the completion through the producer as well as the released v1 format.
+                    with mock.patch.object(records.time, "time", side_effect=(now - 10, now + .1)), \
+                         mock.patch.object(records, "collect", return_value=(1, prior["result"])):
+                        self.assertEqual(records.record(self.instance), 0)
+                self.web_clock = now + .1
+                doctor._cached = None
+                before = self.assert_web_state(app, doctor, "yellow", codes=["recovery_bypass"])
+                with mock.patch.object(records.time, "time", return_value=started), \
+                     mock.patch.object(records, "collect", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+                    records.record(self.instance)
+                stored = self.document()
+                self.assertEqual(stored["completed"], self.envelope(prior, None)["completed"])
+                reading = records.read_latest(self.instance, self.data, now=started)
+                self.assertIsNotNone(reading["collecting"], stored)
+                self.assertEqual(stored["completed"]["completed_at"], "2027-01-15T08:00:00.100000Z")
+                self.assertEqual(stored["collecting"]["run_at"], "2027-01-15T08:00:00.500000Z")
+                count = self.web_count
+                for index, elapsed in enumerate((0, records.STUCK_SECONDS, records.STUCK_SECONDS + .01), 1):
+                    with self.subTest(elapsed=elapsed):
+                        self.web_clock = started + elapsed
+                        doctor._cached = None
+                        stuck = elapsed > records.STUCK_SECONDS
+                        codes = ["recovery_bypass"] + (["doctor.collection_stuck"] if stuck else [])
+                        document = self.assert_web_state(app, doctor, "red" if stuck else "yellow", codes=codes)
+                        reading = document["doctor"]
+                        self.assertEqual(reading["state"], "available")
+                        self.assertEqual(reading["findings"], prior["result"]["findings"])
+                        self.assertEqual(reading["run_at"], prior["run_at"])
+                        self.assertEqual(reading["completed_at"], prior["completed_at"])
+                        self.assertAlmostEqual(reading["age_seconds"], self.web_clock - (now - 10))
+                        self.assertEqual(reading["collecting"]["run_at"], stored["collecting"]["run_at"])
+                        self.assertAlmostEqual(reading["collecting"]["elapsed_seconds"], elapsed)
+                        self.assertEqual(reading["collecting"]["stuck"], stuck)
+                        self.assertEqual(document["problems"][0], before["problems"][0])
+                        self.assertEqual(document["doctor_run_at"], before["doctor_run_at"])
+                        self.assertEqual(self.web_count, count + index, "all views share one refreshed reading")
+                        for route in ("/", "/doctor"):
+                            page = app.handle("GET", route).body.decode()
+                            self.assertIn(f"run in progress since {stored['collecting']['run_at']}", page)
+                        if stuck:
+                            problem = document["problems"][-1]
+                            self.assertAlmostEqual(problem["elapsed_seconds"], elapsed)
+                            self.assertEqual(problem["threshold_seconds"], records.STUCK_SECONDS)
+                self.assertEqual(self.document(), stored, "reads cannot alter either recorded timestamp")
 
     def test_missing_and_actual_first_collection_are_unknown_without_hiding_status_problems(self):
         app, doctor = self.web_fixture()

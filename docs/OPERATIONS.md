@@ -2299,7 +2299,9 @@ expires normally. No result history is stored.
 
 Precedence is shared by all consumers: completed findings and freshness come from `completed` alone.
 Collection metadata is current only when its start is strictly later than that completion; an older
-or equal marker cannot make the completed run look stuck or override its mode. Both parts are
+or equal marker cannot make the completed run look stuck or override its mode. Producer UTC timestamps
+retain microsecond precision so sequential invocations within the same second remain distinguishable;
+released whole-second timestamps remain readable. Both parts are
 validated under the same installation identity. An ordinary current marker adds no problem and
 the dashboard and `/doctor` show `run in progress since <run_at>` beside the completed reading.
 After more than 60 seconds it adds the separate red `doctor.collection_stuck` finding, with elapsed
