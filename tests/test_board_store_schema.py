@@ -1802,6 +1802,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
         # Run the actual previous src tree, not a mock of its schema assessment. CI
         # fetches full history. During development the added revision is still uncommitted.
         repository = Path(__file__).resolve().parents[1]
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "--is-shallow-repository"], cwd=repository, text=True
+            ).strip(),
+            "false",
+            "the prior-runtime proof requires full Git history (actions/checkout fetch-depth: 0)",
+        )
         revision_path = "src/secretary/board/migrations/versions/0025_card_waits_for_person.py"
         parents = subprocess.check_output(
             ["git", "log", "--diff-filter=A", "--format=%P", "-1", "--", revision_path], cwd=repository, text=True
