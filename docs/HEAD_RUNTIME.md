@@ -5,6 +5,55 @@ socket and journal (`LocalPtyHeadRuntime`). A head profile may say so with `runt
 or name no runtime. Heads used to run as Orca panes (`orca-legacy`); since A20 step 2 that name is
 only a marker on old durable records, which stay readable and are never launched.
 
+## Worker and reviewer Docker cleanup guard
+
+The shared role launcher puts a product-owned executable named `docker` before native Docker
+for workers and reviewers, in the role environment and again after the login shell reads its
+profiles. Workspace Python and Ruff still come from `.secretary-task-env/venv`. The guard uses
+the configured product's managed Python and source tree with isolated Python startup; candidate
+modules, interpreters and inherited guard bindings do not choose its implementation. The launcher
+resolves native Docker before adding this PATH prefix and calls that absolute executable directly.
+Missing or unexecutable guard, product interpreter or backend refuses the launch or command.
+PO and dispatcher Docker paths retain their existing behavior.
+
+`docker rm`, `stop` and `kill`, including their `docker container` aliases, require every explicit
+target to have `secretary.test-board=<positive decimal owner PID>` and no
+`secretary.production-board` marker. PID values use ASCII digits without a sign, whitespace or
+leading zero. The production value reserved for the later lifecycle is
+`secretary.production-board=true`; the presence of that key protects a container even if its value
+is malformed or a valid test label is also present. The canonical names live in
+`secretary.runtime.container_labels`; the PostgreSQL board test fixture supplies the existing
+test PID label. An image, name, Compose project or absent/malformed metadata grants no ownership.
+Unlabelled production containers are protected immediately, without provisioning changes.
+
+Native Docker resolves the command's endpoint using its global flags, environment and selected
+context. The guard pins that host for native container inspection and execution, inspects the
+whole allowed batch before making any destructive call, and replaces target names and ID prefixes
+with inspected full container IDs. Reusing a name cannot redirect cleanup. Any unsafe or unresolved
+target refuses the whole invocation. Force/volumes, stop timeouts and stop/kill signals are supported;
+unknown flags, combined short flags and ambiguous syntax are refused. Named contexts with stored
+TLS material or TLS verification overrides are conservatively refused for destructive operations;
+use explicit `--host` and TLS CLI settings for that scope. Read-only calls retain native arguments,
+output and status. Allowed destructive calls retain native output, status and signal handling.
+
+Compose `down`, `rm`, `stop` and `kill` and all prune forms, including container, system, volume,
+image, network, builder and buildx prune, are refused regardless of force, filters or global-option
+placement. Select owned test containers and use explicit IDs with `docker container rm|stop|kill`.
+There is no Compose selector engine or cleanup permission inferred from a filter. A refusal exits
+125 with a `docker-guard:` diagnostic; the role launch boundary uses its `role-env:` diagnostic.
+
+This protects against accidental commands in trusted worker/reviewer roles. Absolute Docker paths,
+raw socket access, deliberate PATH/environment changes and malicious evasion remain outside the
+threat model; it provides no isolation from a malicious head. Forwarding a command grants no
+exception to the CI-only Docker/integration rule. Production label transitions, other fixture
+ownership, reaping, volumes/cache cleanup and reader recovery remain separate work. No production
+Compose, upgrade behavior, credentials or data volume changes are made here. The later PO proof
+uses an owned production-labelled decoy through an actual head, with the real board untouched.
+
+`tests.test_docker_guard` belongs to the existing component CI suite and the adapter's local broad
+suite. It exercises the executable and both shared worker/reviewer wrappers against a fake native
+CLI with a call transcript, including a login profile that replaces PATH. It uses no daemon.
+
 The lifecycle boundary is in [Architecture](ARCHITECTURE.md#head-runtime-ownership); liveness is in
 [Head vitality](HEAD_VITALITY.md). This page records how `local-pty` replaced Orca: the parity it had
 to reach, and the A20 exit checklist that removed Orca from the product, step by step.

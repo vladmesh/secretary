@@ -15,6 +15,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from secretary.runtime import docker_guard
 from secretary.runtime.paths import PRODUCT_ENV, default_instance_path
 
 # The one module every launcher runs as `python3 -P -m <this> exec --role ...`.
@@ -193,6 +194,41 @@ class RoleEnvError(RuntimeError):
     """The role runtime env cannot be built without leaking or missing required names."""
 
 
+def docker_guard_dir() -> Path:
+    return runtime_product_root() / "src" / "secretary" / "runtime" / "docker-bin"
+
+
+def _docker_bindings(env: dict[str, str]) -> dict[str, str]:
+    """Resolve native Docker before adding the guard, skipping previous guard PATH entries."""
+    for directory in env.get("PATH", "").split(os.pathsep):
+        if not directory or not Path(directory).is_absolute():
+            continue
+        candidate = Path(directory) / "docker"
+        if candidate.resolve().parent.name == "docker-bin":
+            continue
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            backend = str(candidate.resolve())
+            break
+    else:
+        # Still bind the guard when Docker is absent. Executing it refuses, never falls through.
+        backend = ""
+    return {
+        docker_guard.BACKEND_ENV: backend,
+        docker_guard.PYTHON_ENV: str(managed_venv_bin() / "python3"),
+        docker_guard.SOURCE_ENV: runtime_pythonpath(),
+    }
+
+
+def _require_docker_guard(env: dict[str, str]) -> None:
+    guard = docker_guard_dir() / "docker"
+    if not guard.is_file() or not os.access(guard, os.X_OK):
+        raise RoleEnvError(f"Docker guard is unavailable at {guard}; repair the product installation")
+    require_managed_interpreter()
+    backend = Path(env[docker_guard.BACKEND_ENV])
+    if not backend.is_file() or not os.access(backend, os.X_OK):
+        raise RoleEnvError("native Docker backend is unavailable; repair the role launch PATH")
+
+
 def _parse_assignment(line: str) -> tuple[str, str] | None:
     line = line.strip()
     if not line or line.startswith("#"):
@@ -272,7 +308,11 @@ def runtime_env(
         elif key in base:
             env[key] = base[key]
 
+    # These are derived by the trusted launcher, never inherited or supplied by runtime.env.
+    for key in docker_guard.BINDINGS:
+        env.pop(key, None)
     if role in RUFF_ROLES:
+        env.update(_docker_bindings(env))
         if workspace is not None:
             environment = Path(workspace).expanduser() / WORKSPACE_ENV_DIR
             venv_bin = environment / "bin"
@@ -285,6 +325,7 @@ def runtime_env(
         # trusted command boundary, not ambient authority for every command the head subsequently
         # runs. Candidate imports come from its environment or the broad-check bootstrap.
         env.pop("PYTHONPATH", None)
+        env["PATH"] = str(docker_guard_dir()) + os.pathsep + env.get("PATH", "")
     elif role in PRODUCT_VENV_ROLES:
         venv_bin = managed_venv_bin()
         env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
@@ -329,10 +370,20 @@ def role_shell_command(
     the venv prefix in the command itself: the workspace venv for worker and reviewer tooling, the
     product's managed venv for the roles that run the product's own CLI.
     """
+    guard_prefix = ""
+    if role in RUFF_ROLES:
+        guard = docker_guard_dir() / "docker"
+        guard_prefix = (
+            f"test -x {shlex.quote(str(guard))} || "
+            "{ printf '%s\\n' 'docker-guard: executable unavailable; repair the role launch' >&2; exit 125; }; "
+        )
     if role in PRODUCT_VENV_ROLES:
         venv_bin = managed_venv_bin()
-    elif role in RUFF_ROLES and workspace is not None:
-        venv_bin = Path(workspace).expanduser() / WORKSPACE_ENV_DIR / "bin"
+    elif role in RUFF_ROLES:
+        prefix = str(docker_guard_dir())
+        if workspace is not None:
+            prefix += os.pathsep + str(Path(workspace).expanduser() / WORKSPACE_ENV_DIR / "bin")
+        return f"{guard_prefix}PATH={shlex.quote(prefix)}${{PATH:+:$PATH}}; export PATH; {command}"
     else:
         return command
     return f"PATH={shlex.quote(str(venv_bin))}${{PATH:+:$PATH}}; export PATH; {command}"
@@ -419,6 +470,8 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         if ns.role in PRODUCT_VENV_ROLES:
             require_managed_interpreter()
         env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
+        if ns.role in RUFF_ROLES:
+            _require_docker_guard(env)
     except RoleEnvError as e:
         print(f"role-env: {e}", file=sys.stderr)
         return 125

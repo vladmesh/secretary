@@ -29,6 +29,7 @@ from secretary.board import migrate, schema
 from secretary.board.backend import record_key, sprint_reference_number
 from secretary.board.sql_cards import SqlCardClient, _task_number_of
 from secretary.board.store import BoardStoreConfig
+from secretary.runtime.container_labels import TEST_BOARD_LABEL
 
 IMAGE = "postgres:16"
 OWNER = "secretary_owner"
@@ -74,7 +75,7 @@ class PostgresBoard:
             "--rm",
             "-d",
             "--label",
-            f"secretary.test-board={os.getpid()}",
+            f"{TEST_BOARD_LABEL}={os.getpid()}",
             "-e",
             "POSTGRES_DB=postgres",
             "-e",
@@ -235,7 +236,9 @@ class PostgresBoard:
                 ]
                 if tables:
                     conn.execute(
-                        "TRUNCATE " + ", ".join(f'"{table}"' for table in tables) + " RESTART IDENTITY CASCADE"
+                        "TRUNCATE "
+                        + ", ".join(f'"{table}"' for table in tables)
+                        + " RESTART IDENTITY CASCADE"
                     )
                 for sequence in sequences:
                     conn.execute(f'ALTER SEQUENCE "{sequence}" RESTART')
@@ -306,11 +309,7 @@ def seed_client(
     client = client_class(config.for_role("owner"), instance_dir)
     columns = _seed_columns(seed)
     lanes = _seed_lanes(seed)
-    projects = {
-        str(meta.get("project"))
-        for meta in seed.metadata.values()
-        if str(meta.get("project") or "")
-    }
+    projects = {str(meta.get("project")) for meta in seed.metadata.values() if str(meta.get("project") or "")}
     with client.transaction():
         for project in sorted(projects):
             client._execute(
@@ -337,9 +336,13 @@ def seed_client(
             meta = dict(seed.metadata.get(int(row["id"]), {}))
             if meta.get("record_type") in {"product", "issue"}:
                 transport_keys[int(row["id"])] = client.call(
-                    "createTask", project_id=1, title=str(row.get("title") or reference),
-                    description=str(row.get("description") or ""), column_id=1,
-                    swimlane_id=0, reference=reference,
+                    "createTask",
+                    project_id=1,
+                    title=str(row.get("title") or reference),
+                    description=str(row.get("description") or ""),
+                    column_id=1,
+                    swimlane_id=0,
+                    reference=reference,
                 )
                 client.call("saveTaskMetadata", task_id=number, values=meta)
                 if int(row.get("is_active", 1) or 0) == 0:
@@ -362,9 +365,7 @@ def seed_client(
                 and meta.get("record_type") not in {"product", "issue"}
             ):
                 ensure_sprint_row(client, meta.get("sprint_ref"))
-                client.call(
-                    "saveTaskMetadata", task_id=transport_keys[int(identifier)], values=dict(meta)
-                )
+                client.call("saveTaskMetadata", task_id=transport_keys[int(identifier)], values=dict(meta))
         for identifier in sorted(public_numbers):
             for comment in _seed_comments(seed, identifier):
                 insert_comment_row(
@@ -601,9 +602,7 @@ class CardStoreClient(SqlCardClient):
 
     def add_comment(self, key: int, body: str, *, created: int | None = None) -> None:
         with self.transaction():
-            insert_comment_row(
-                self, key, body, _epoch(created) if created is not None else datetime.now(UTC)
-            )
+            insert_comment_row(self, key, body, _epoch(created) if created is not None else datetime.now(UTC))
 
     def row(self, key: int) -> dict[str, Any]:
         """The card row the board answers for this key, live or archived."""
@@ -729,12 +728,19 @@ class CardStoreClient(SqlCardClient):
             values={key: str(value) for key, value in values.items()},
         )
 
-    def add_record(self, reference: str, title: str, metadata: dict[str, Any], *, closed: bool = False) -> int:
+    def add_record(
+        self, reference: str, title: str, metadata: dict[str, Any], *, closed: bool = False
+    ) -> int:
         """A Product or an Issue, through the same vocabulary a Product/Issue writer uses."""
         with self.transaction():
             created = self._arrange(
-                "createTask", project_id=1, title=title, description="", column_id=1,
-                swimlane_id=0, reference=reference,
+                "createTask",
+                project_id=1,
+                title=title,
+                description="",
+                column_id=1,
+                swimlane_id=0,
+                reference=reference,
             )
             self._arrange("saveTaskMetadata", task_id=created, values=dict(metadata))
             if closed:
@@ -773,7 +779,9 @@ def card_store(
         test.addCleanup(scratch.cleanup)
         instance_dir = scratch.name
     config = board.fresh_database()
-    client = seed_client(config, seed if seed is not None else CardSeed(), instance_dir, client_class=client_class)
+    client = seed_client(
+        config, seed if seed is not None else CardSeed(), instance_dir, client_class=client_class
+    )
     # The seeding went through the client's own vocabulary; a test's call log starts after it.
     for log in ("calls", "batch_calls"):
         if isinstance(getattr(client, log, None), list):
