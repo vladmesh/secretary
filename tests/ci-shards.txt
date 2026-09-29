@@ -117,6 +117,7 @@ integration-memory tests/test_memory_client_config.py
 integration-board tests/test_memory_flatten.py
 integration-memory tests/test_memory_health.py
 integration-memory tests/test_memory_pack.py
+unit tests/test_shipped_memory_pack.py
 integration-memory tests/test_memory_po_bridge.py
 integration-memory tests/test_memory_permissions.py
 integration-memory tests/test_memory_service.py
