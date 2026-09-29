@@ -1,8 +1,8 @@
 """The owner's bell: owner events read from the board, and marked read (secretary-1770).
 
-Every answer comes from the board store's `owner_events` table through
-:class:`secretary.board.owner_events.OwnerEventStore`, read at the moment it is asked: this layer holds
-nothing between two requests, so the count on the bell and the list on the page are the board's.
+Every answer comes from one statement snapshot of the board store's `owner_events` table through
+:class:`secretary.board.owner_events.OwnerEventStore`. A response pins the list, count and scoped
+human waits together; nothing is held between requests.
 
 A board without the table (migration `0018` not applied yet) or a store that does not answer reads as
 no events, with the source state `unavailable` and the reason: the bell says it cannot count, and no
@@ -15,8 +15,11 @@ The rules are the store's (`board.owner_events`): a click marks one event read, 
 
 from __future__ import annotations
 
+import copy
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +51,7 @@ class OwnerEventLayer:
         self.instance = Path(instance)
         self._store = store
         self._clock = clock
+        self._pin: ContextVar[dict[str, Any] | None] = ContextVar(f"owner-events-{id(self)}", default=None)
 
     def _events(self) -> Any:
         if self._store is not None:
@@ -60,30 +64,44 @@ class OwnerEventLayer:
 
     # -- reads -----------------------------------------------------------------------------
 
+    @contextmanager
+    def one_reading(self):
+        token = self._pin.set({})
+        try:
+            yield
+        finally:
+            self._pin.reset(token)
+
+    def snapshot(self) -> dict[str, Any]:
+        """One board statement for count/list/scoped waits, pinned for one rendered response."""
+        pin = self._pin.get()
+        if pin is not None and "reading" in pin:
+            return copy.deepcopy(pin["reading"])
+        try:
+            document = {"state": AVAILABLE, "reason": None, **self._events().snapshot()}
+        except OwnerEventError as exc:
+            document = {"state": UNAVAILABLE, "reason": str(exc), "events": [], "unread_events": [], "unread": 0, "human_waits": []}
+        if pin is not None:
+            pin["reading"] = document
+        return copy.deepcopy(document)
+
     def owner_event_list(self, *, unread_only: bool = False) -> dict[str, Any]:
         """Every event, open `needs_owner` ones first then newest first; `unread_only` keeps the unread."""
         now = self._clock()
-        try:
-            store = self._events()
-            events = store.events(unread_only=unread_only)
-            unread = store.unread_count()
-        except OwnerEventError as exc:
-            return self._document(now, state=UNAVAILABLE, reason=str(exc), events=[], unread=0, unread_only=unread_only)
+        snapshot = self.snapshot()
         return self._document(
             now,
-            state=AVAILABLE,
-            reason=None,
-            events=[event.to_json() for event in events],
-            unread=unread,
+            state=snapshot["state"],
+            reason=snapshot["reason"],
+            events=snapshot["unread_events"] if unread_only else snapshot["events"],
+            unread=snapshot["unread"],
             unread_only=unread_only,
         )
 
     def unread_count(self) -> dict[str, Any]:
         """The bell: how many events are unread, or why that cannot be said."""
-        try:
-            return {"state": AVAILABLE, "reason": None, "count": int(self._events().unread_count())}
-        except OwnerEventError as exc:
-            return {"state": UNAVAILABLE, "reason": str(exc), "count": 0}
+        snapshot = self.snapshot()
+        return {"state": snapshot["state"], "reason": snapshot["reason"], "count": snapshot["unread"]}
 
     # -- writes ----------------------------------------------------------------------------
 

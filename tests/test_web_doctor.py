@@ -82,7 +82,7 @@ def health_snapshot(status: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "kind": "health",
         "observed_at": "2026-09-20T12:00:00Z",
-        "health": {"source": available(), "status": health_summary(status)},
+        "health": {"source": available(), "status": health_summary(status), "doctor": {"state": "available", "findings": [], "run_at": "2026-09-20T11:59:30Z"}},
     }
 
 
@@ -341,7 +341,7 @@ class TheDoctorPageTests(TransportFixture):
 
     def test_the_page_says_what_it_reads_and_what_it_does_not(self) -> None:
         page = self.get("/doctor")
-        self.assertIn("reads recorded state only", page)
+        self.assertIn("latest periodically recorded", page)
         self.assertIn("opens no SSH and touches no provider", page)
 
 
@@ -469,6 +469,14 @@ class OneReadingTests(SprintProtocolFixture):
     def setUp(self) -> None:
         super().setUp()
         self.clock = NOW
+        from secretary.infra.doctor_record import RESULT_PATH, identity, publish, utc
+        (self.data_dir / RESULT_PATH).parent.mkdir(parents=True)
+        publish(self.data_dir / RESULT_PATH, {
+            "schema_version": 1, "installation": identity(self.instance, self.data_dir),
+            "run_at": utc(NOW), "completed_at": utc(NOW), "exit_code": 0,
+            "outcome": "result", "reason": None, "mode": "live",
+            "result": {"schema_version": 1, "ok": True, "findings": []},
+        })
         self.collected = 0
         self.status: dict[str, Any] = NOTHING_WRONG
 
@@ -480,6 +488,78 @@ class OneReadingTests(SprintProtocolFixture):
         self.reads, self.doctor = health_layers(
             str(self.instance), data_dir=str(self.data_dir), offline=True, now=lambda: self.clock
         )
+
+    def stored(self, *, findings=None, **changes):
+        import json
+
+        from secretary.infra.doctor_record import RESULT_PATH, publish
+
+        path = self.data_dir / RESULT_PATH
+        document = json.loads(path.read_text())
+        if findings is not None:
+            document["result"]["findings"] = findings
+            document["result"]["ok"] = not findings
+            document["exit_code"] = 1 if findings else 0
+        document.update(changes)
+        publish(path, document)
+        self.doctor._cached = None
+
+    def test_union_preserves_status_and_doctor_findings_identity_and_the_recorded_run_time(self):
+        from secretary.infra.doctor_record import utc
+        finding = {"code": "recovery_bypass", "message": "ambient Git credential configuration exists",
+                   "capability": "checkpoint-git-authentication", "kind": "credential-helper"}
+        self.stored(findings=[finding])
+        doctor_only = self.doctor.doctor_snapshot()
+        self.assertEqual(doctor_only["colour"], "yellow")
+        self.assertEqual(doctor_only["problems"][0]["capability"], finding["capability"])
+        for path in ("/", "/doctor"):
+            page = self.app().handle("GET", path).body.decode()
+            self.assertIn("lamp lamp-yellow", page)
+            self.assertIn(utc(NOW), page)
+        self.assertIn(finding["capability"], self.app().handle("GET", "/doctor").body.decode())
+        self.status = EVERY_PROBLEM
+        self.clock += CACHE_SECONDS + 1
+        combined = self.doctor.doctor_snapshot()
+        self.assertEqual(combined["colour"], "red")
+        self.assertIn("unit.failed", [problem["code"] for problem in combined["problems"]])
+        self.assertIn("recovery_bypass", [problem["code"] for problem in combined["problems"]])
+        self.assertEqual(combined["doctor_run_at"], utc(NOW))
+        self.assertNotEqual(combined["observed_at"], combined["doctor_run_at"])
+        self.assertEqual(self.panel()["combined"]["findings"], combined["problems"])
+        self.stored(findings=[{"code": "a_future_doctor_code", "message": "a new finding", "name": "thing"}])
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "red")
+        self.status = NOTHING_WRONG
+        self.doctor._cached = None
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "yellow")
+
+    def test_missing_corrupt_expired_failed_wrong_installation_and_unavailable_are_explicit(self):
+        from secretary.infra.doctor_record import RESULT_PATH, utc
+        self.status = EVERY_PROBLEM
+        path = self.data_dir / RESULT_PATH
+        original = path.read_bytes()
+        cases = (
+            ("missing", None), ("malformed", b"{broken"),
+            ("stale", {"run_at": utc(NOW - 181), "completed_at": utc(NOW - 180)}),
+            ("failed", {"outcome": "failed", "reason": "deadline exceeded", "result": None, "exit_code": None}),
+            ("collecting", {"outcome": "collecting", "reason": "unfinished attempt", "completed_at": None, "result": None, "exit_code": None}),
+            ("wrong_installation", {"installation": {"instance": "another", "data_dir": "another"}}),
+            ("unavailable", {"outcome": "unavailable", "reason": "bus unavailable", "exit_code": 2}),
+        )
+        for expected, value in cases:
+            with self.subTest(expected=expected):
+                path.write_bytes(original)
+                if value is None:
+                    path.unlink()
+                elif isinstance(value, bytes):
+                    path.write_bytes(value)
+                else:
+                    self.stored(**value)
+                self.doctor._cached = None
+                document = self.doctor.doctor_snapshot()
+                self.assertEqual(document["doctor"]["state"], expected)
+                self.assertEqual(document["colour"], "red")
+                self.assertIn("unit.failed", [item["code"] for item in document["problems"]])
+                self.assertIn("recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode())
 
     def panel(self) -> dict[str, Any]:
         return self.reads.system_snapshot()["installation"]["health"]

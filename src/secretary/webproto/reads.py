@@ -246,11 +246,16 @@ class ReadLayer(ProtocolBoundary):
         """
         now = self._clock()
         report = self.report()
+        from secretary.infra.doctor_record import read_latest
+
+        data_dir = self.data_dir(report)
+        health = self._health(report, data_dir, now=now)
+        health["doctor"] = read_latest(report.instance_path, data_dir, now=now, offline=self.offline)
         return {
             "schema_version": SCHEMA_VERSION,
             "kind": "health",
             "observed_at": sources.isoformat(now),
-            "health": self._health(report, self.data_dir(report), now=now),
+            "health": health,
         }
 
     def task_snapshot(self, ref: str, *, events: int = TASK_SNAPSHOT_EVENTS) -> dict[str, Any]:

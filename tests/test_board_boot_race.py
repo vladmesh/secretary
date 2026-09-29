@@ -444,6 +444,10 @@ class UnitSpecTests(unittest.TestCase):
             "runs `git gc` on the instance repository outside any tick; it dispatches no role and "
             "its bounded pack is exactly what the control-group kill should clean up"
         ),
+        "secretary-doctor.service": (
+            "records a bounded doctor subprocess outside any tick; it dispatches no role and "
+            "its probes must be killed with the collector's control group"
+        ),
     }
     # What a unit's ExecStart runs to launch heads: the mechanical roles' gate and the tick.
     HEAD_LAUNCHER_ENTRYPOINTS = ("secretary-agent-gate.sh", "production-tick")
@@ -498,7 +502,8 @@ class UnitSpecTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(name, oneshots)
                 body = (UNITS / name).read_text(encoding="utf-8")
-                self.assertNotIn("KillMode=", body)
+                kill_modes = [line for line in body.splitlines() if line.startswith("KillMode=")]
+                self.assertIn(kill_modes, ([], ["KillMode=control-group"]))
                 for launcher in self.HEAD_LAUNCHER_ENTRYPOINTS:
                     self.assertNotIn(launcher, body)
 

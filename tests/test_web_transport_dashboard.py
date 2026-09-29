@@ -385,7 +385,8 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("running — the dispatcher claims cards and raises heads", page)
         self.assertIn('data-action="/api/pause/drain"', page)
         self.assertIn("sprint:7", page)
-        self.assertIn("attention required", page)
+        # A waiting state without a scoped owner event is neutral (sprint:1471 comment 8).
+        self.assertNotIn("attention required", page)
         # Usage windows are the bottom bar's alone: the dashboard draws no second copy of them.
         self.assertNotIn("Usage limits", page)
         # The chat placeholder became the PO indicator (secretary-1631); an app built without the PO

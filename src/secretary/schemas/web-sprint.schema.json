@@ -697,6 +697,36 @@
               "$ref": "#/$defs/head_profile"
             }
           }
+        },
+        "attention": {
+          "type": "object",
+          "required": [
+            "state",
+            "event_ids",
+            "reason"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "waiting",
+                "none",
+                "unknown"
+              ]
+            },
+            "event_ids": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "description": "Scoped open needs_owner event identities from the same owner-event snapshot as the bell; unknown when the board or event source is unavailable."
         }
       }
     },

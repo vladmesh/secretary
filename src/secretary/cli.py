@@ -173,8 +173,11 @@ def run_automations(argv: list[str]) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from secretary.infra.doctor_record import add_subcommand as add_doctor_record
+
     parser = StructuredArgumentParser(prog="secretary")
     subparsers = parser.add_subparsers(dest="command")
+    add_doctor_record(subparsers)
     add_dispatcher_subcommands(subparsers)
     add_pause_commands(subparsers)
     add_head_status_command(subparsers)

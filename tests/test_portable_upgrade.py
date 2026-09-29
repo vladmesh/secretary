@@ -470,7 +470,19 @@ class PackagedRuntimeParityTests(PortableFixture):
             data_dir=self.data,
             runtime_user="operator",
         )
-        self.assertEqual(len(packaged), 16)
+        self.assertEqual(len(packaged), 18)
+        from secretary.infra.doctor_record import TIMEOUT_SECONDS
+
+        service = self.units.files["secretary-doctor.service"].decode()
+        timer = self.units.files["secretary-doctor.timer"].decode()
+        self.assertIn(f"ExecStart={self.product}/.venv/bin/secretary doctor-record --instance {self.instance} --data-dir {self.data}", service)
+        self.assertIn(f"EnvironmentFile=-{self.instance}/runtime.env", service)
+        self.assertIn("User=operator", service)
+        outer = int(next(line.split("=", 1)[1] for line in service.splitlines() if line.startswith("TimeoutStartSec=")))
+        self.assertGreater(outer, TIMEOUT_SECONDS)
+        self.assertIn("KillMode=control-group", service)
+        self.assertIn("OnUnitInactiveSec=60s", timer)
+        self.assertIn("Unit=secretary-doctor.service", timer)
         self.assertEqual(self.units.files, {unit.name: unit.content for unit in packaged})
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
@@ -482,7 +494,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                 self.assertIn(b"User=operator", unit.content)
             if unit.oneshot and not unit.installable:
                 self.assertNotIn(unit.name, self.units.active)
-        for component in ("steward", "retro", "steward-deep-sweep"):
+        for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
             self.assertIn(f"secretary-{component}.timer", self.units.enabled)
             self.assertIn(
                 f"Unit=secretary-{component}.service".encode(),
@@ -498,7 +510,7 @@ class PackagedRuntimeParityTests(PortableFixture):
     def test_inactive_and_disabled_timers_fail_both_consumers_and_reconcile_unchanged_bytes(self):
         manifest = (self.data / "host-managed.json").read_bytes()
         before = dict(self.units.files)
-        for component in ("steward", "retro", "steward-deep-sweep"):
+        for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
             for enabled, action in ((True, "start"), (False, "enable")):
                 name = f"secretary-{component}.timer"
                 with self.subTest(name=name, enabled=enabled):
@@ -546,7 +558,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                 self.units._publish()
 
     def test_existing_materializer_updates_steward_and_retro_templates_and_layout(self):
-        for component in ("steward", "retro"):
+        for component in ("steward", "retro", "doctor"):
             name = f"secretary-{component}.service"
             template = self.product / "packaging" / "systemd" / name
             template.write_bytes(template.read_bytes() + b"\n# changed catalogue input\n")
@@ -562,7 +574,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         ):
             result = upgrade.step_host(self.context())
         self.assertEqual(result.status, "changed", result.detail)
-        for component in ("steward", "retro"):
+        for component in ("steward", "retro", "doctor"):
             self.assertIn(str(other_home).encode(), self.units.files[f"secretary-{component}.service"])
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
@@ -601,6 +613,30 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertTrue(result.failed, result.detail)
         self.assertIn("start", result.detail)
         self.assertTrue(self.verify().failed)
+
+    def test_doctor_component_opt_out_and_foreign_pair_use_existing_ownership_rules(self):
+        config = self.instance / "instance.yaml"
+        original = config.read_text()
+        pair = {"secretary-doctor.service", "secretary-doctor.timer"}
+        before = {name: self.units.files[name] for name in pair}
+        config.write_text(original + "  foreign_units: [secretary-doctor.service, secretary-doctor.timer]\n")
+        self.units.active.discard("secretary-doctor.timer")
+        self.units._publish()
+        result = upgrade.step_host(self.context())
+        self.assertFalse(result.failed, result.detail)
+        self.assertFalse(any(name in pair for _, name in self.units.calls))
+        self.assertEqual({name: self.units.files[name] for name in pair}, before)
+        expected, collected, diffs = self.doctor_inventory()
+        self.assertNotIn("secretary-doctor.timer", expected.unit_runtime)
+        self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
+        self.assertEqual(diffs["units"].unmanaged_on_host, [])
+        self.assertFalse(self.verify().failed)
+        # A disabled component in a fresh install owns/renders neither unit.
+        config.write_text(original + "  components:\n    doctor: {enabled: false}\n")
+        result = upgrade.step_host(self.context())
+        self.assertFalse(result.failed, result.detail)
+        self.assertTrue(pair.isdisjoint(self.units.files))
+        self.assertFalse(self.verify().failed)
 
     def test_required_long_running_service_is_repaired_and_verified(self):
         name = "secretary-memory.service"
@@ -757,7 +793,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
         self.assertTrue(pair <= {resource.name for resource in managed})
-        self.assertEqual(len(self.units.files), 16)
+        self.assertEqual(len(self.units.files), 18)
         files = dict(self.units.files)
         manifest = (self.data / "host-managed.json").read_bytes()
         state = self.data / "dispatcher" / "production-state.json"

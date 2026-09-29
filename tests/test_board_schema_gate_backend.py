@@ -42,6 +42,7 @@ OWED = (
     "0022_origin_returns",
     "0023_sprint_e2e_budget",
     "0024_e2e_after_merge_kind",
+    "0025_card_waits_for_person",
 )
 
 

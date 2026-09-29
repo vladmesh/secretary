@@ -34,6 +34,7 @@ from secretary.web.doctor import DoctorLayer
 from secretary.web.statuses import status_for
 from secretary.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
+from secretary.webproto.owner_events import OwnerEventLayer
 from secretary.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME
 from secretary.webproto.po_auth import COOKIE_PATH as PO_COOKIE_PATH
 from secretary.webproto.reads import TASK_SNAPSHOT_EVENTS
@@ -327,6 +328,7 @@ class WebApp:
             pages.bell_source(self._bell_section if self.owner_events is not None else None),
             pages.from_post(method == "POST"),
             self._one_health_reading(),
+            self.owner_events.one_reading() if isinstance(self.owner_events, OwnerEventLayer) else nullcontext(),
         ):
             return self._handle(method, path, query=query, body=body, headers=headers)
 

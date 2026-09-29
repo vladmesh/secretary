@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from secretary.board import e2e_budget, e2e_record, owner_events, wait_card
+from secretary.board import po_origin as origin_field
 from secretary.board.audit_contract import card_transition_of, is_protocol_event
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
@@ -34,16 +36,39 @@ from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
+)
+from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+)
+from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
-    null_if_empty as _null_if_empty,
+)
+from secretary.board.legacy_codec import (
+    null_if_empty as _null_if_empty,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     positive_int as _positive_int,
-    split_heads as _split_heads,
+)
+from secretary.board.legacy_codec import (
+    split_heads as _split_heads,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     text as _text,
 )
-from secretary.board import owner_events
+from secretary.board.models import (
+    Actor,
+    CardState,
+    EntityKind,
+    Event,
+    EventKind,
+    RelatedRefs,
+)
 from secretary.board.outcome_round_context import OutcomeRoundContext
 from secretary.board.owner_handover import (
     CLEAR_MARK,
@@ -55,13 +80,20 @@ from secretary.board.owner_handover import (
     render_handover_comment,
     waiting_owner,
 )
-from secretary.board.models import (
-    Actor,
-    CardState,
-    EntityKind,
-    Event,
-    EventKind,
-    RelatedRefs,
+from secretary.board.production_rights import (
+    ACTIVATION_OPERATION_REQUEST_PREFIX,
+    NO_PRODUCTION,
+    TOUCHES_PRODUCTION,
+)
+from secretary.board.production_rights import (
+    create_refusal as production_create_refusal,
+)
+from secretary.board.production_rights import (
+    touches_production as card_production,
+)
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    validate_rework_prerequisites,
 )
 from secretary.board.roles import (
     BOARD_ROLES,
@@ -95,30 +127,11 @@ from secretary.board.task_routing import (
     default_review,
     impact_bounds_refusal,
 )
-from secretary.board.production_rights import (
-    ACTIVATION_OPERATION_REQUEST_PREFIX,
-    NO_PRODUCTION,
-    TOUCHES_PRODUCTION,
-)
-from secretary.board.production_rights import (
-    create_refusal as production_create_refusal,
-)
-from secretary.board.production_rights import (
-    touches_production as card_production,
-)
-from secretary.board.protocol_artifacts import (
-    ArtifactOwnershipViolation,
-    validate_rework_prerequisites,
-)
 from secretary.board.transitions import BoardProtocolError
-from secretary.board import po_origin as origin_field
-from secretary.board import e2e_budget, e2e_record
-from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
 )
-from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.runtime.redact import redact
 from secretary.runtime.references import (
@@ -127,6 +140,7 @@ from secretary.runtime.references import (
     next_reference,
     reference_allocation_lock,
 )
+from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 
 if TYPE_CHECKING:
     from secretary.board.sql_cards import SqlCardClient
@@ -2148,8 +2162,9 @@ class TaskWriter:
         payload as `po_session`, as `complete` records it (secretary-1792); it permits nothing.
 
         One write: the `waiting_owner` mark on the card (`board.owner_handover`) and a PO comment
-        `[handover:owner]` with the reason, in the transaction of one `handed_to_owner` audit record,
-        so the three land together or not at all. The card stays In progress. The request id makes it
+        `[handover:owner]` with the reason, the required unread owner event and predecessor PO-wait
+        settlement, in the transaction of one `handed_to_owner` audit record. They land together
+        or not at all. The card stays In progress. The request id makes it
         idempotent: a repeat answers the recorded handover and writes nothing, and the same id with
         another card or reason is refused. Every refusal (role, recipient, reason, kind, column, a
         mark already there) is decided before anything is written; the card ones are decided on the
@@ -2161,6 +2176,7 @@ class TaskWriter:
         reason = self._redact_for_board(reason).strip()
         if not reason:
             raise TaskError("validation", "a handover needs a reason: what the owner has to decide or do", 2)
+        request_id = request_id or str(uuid.uuid4())
         since = _now()
         identity = {"to": OWNER, "reason_sha256": _digest(reason)}
 
@@ -2200,6 +2216,17 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> None:
             number = _task_number(task)
+            occurrence = self.audit.pending_event(request_id)
+            if occurrence is None:
+                raise TaskError("backend_error", "handover has no staged occurrence", 1)
+            owner_events.record_required_wait(
+                owner_events.CARD_HANDED_TO_OWNER,
+                reference,
+                f"{reference} is handed to the owner: {reason}",
+                f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{occurrence['event_id']}",
+                to=self.client,
+            )
+            owner_events.record_person_wait({**task, "state": "done"}, "", to=self.client)
             self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
             self.client.call(
                 "createComment",
@@ -2208,19 +2235,9 @@ class TaskWriter:
                 content=f"[{role.value}]\n{render_handover_comment(reason)}",
             )
 
-        result = self._write(
+        return self._write(
             HANDED_TO_OWNER, role, actor, reference, request_id, payload, mutation, identity=identity
         )
-        # The bell's half of the handover: one `needs_owner` event per handover record, written after
-        # the handover committed, so a store without it (or without 0018) costs the bell, not the card.
-        owner_events.record(
-            owner_events.CARD_HANDED_TO_OWNER,
-            reference,
-            f"{reference} is handed to the owner: {reason}",
-            f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{result.get('event_id') or request_id}",
-            to=self.client,
-        )
-        return result
 
     def cancel(
         self,
@@ -3416,16 +3433,14 @@ class TaskWriter:
         # A card handed to the owner waits for the owner only while it is In progress: whatever
         # moves it on (`task complete` above all) takes the mark off in the same transaction.
         clear_mark = CLEAR_MARK if source == "in_progress" and carries_mark_fields(task) else {}
+        if clear_mark:
+            owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
         if target in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
             )
         elif clear_mark:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=clear_mark)
-        if clear_mark:
-            # The stay-unread rule's one end: the card no longer waits for the owner, so its
-            # `needs_owner` events are read now, in this transaction (a savepoint on PostgreSQL).
-            owner_events.settle(str(task.get("ref") or ""), to=self.client)
         if source == "validate" and target not in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
@@ -3462,6 +3477,11 @@ class TaskWriter:
         """
         try:
             with self._mutation():
+                def finish_with_wait(entity: Any) -> None:
+                    if finish is not None:
+                        finish(entity)
+                    owner_events.record_person_wait(self.reader.show(reference), request_id, to=self.client)
+
                 return self.board_host.transition(
                     TransitionRequest(
                         EntityKind.CARD,
@@ -3489,7 +3509,7 @@ class TaskWriter:
                             **({PO_SESSION_KEY: po_session} if po_session else {}),
                         },
                     ),
-                    finish=finish,
+                    finish=finish_with_wait,
                 )
         except BoardEventPending:
             raise self._post_effect_refusal("the card transition") from None
@@ -4555,11 +4575,19 @@ class TaskWriter:
         `recover_*` entry points have nothing to do there (§7.3).
         """
         scope = getattr(self.client, "transaction", None)
-        if scope is None:
-            yield
-            return
-        with scope():
-            yield
+        try:
+            with scope() if scope is not None else contextlib.nullcontext():
+                yield
+        except (owner_events.OwnerEventError, BoardEventPending) as exc:
+            cause = exc.__cause__ if isinstance(exc, BoardEventPending) else exc
+            if not isinstance(cause, owner_events.OwnerEventError):
+                raise
+            outcome = "mutation rolled back" if scope is not None else "mutation refused"
+            raise TaskError(
+                "backend_error",
+                f"{cause}; {outcome}; restore owner-event availability and retry the same request ID",
+                1,
+            ) from cause
 
     def _post_effect_refusal(self, subject: str) -> TaskError:
         """The refusal a mutation inside `_mutation()` owes when it fails after its board effect.

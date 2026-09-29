@@ -24,6 +24,7 @@ on the screen exactly as they typed it.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -733,6 +734,7 @@ def _doctor_lamp(section: dict[str, Any] | None) -> str:
     title = LAMP_WORDS[colour]
     if problems:
         title = f"{title}: {problems[0].get('message') or ''}"
+    title += f"; doctor run at {document.get('doctor_run_at') or 'unknown'}"
     return (
         f'<a class="lamp lamp-{colour}" href="/doctor" title="{escape(title)}" '
         f'aria-label="{escape("installation health: " + colour)}">doctor{count}</a>'
@@ -1326,8 +1328,8 @@ def _attention(installation: dict[str, Any]) -> str:
     status = health.get("status")
     source = _source_block(health.get("source"), what="whether this installation is healthy")
     parts = [source]
-    if isinstance(status, dict) and status:
-        problems = [str(item) for item in status.get("problems") or []]
+    if isinstance(health.get("combined") or status, dict) and (health.get("combined") or status):
+        problems = [str(item) for item in (health.get("combined") or status).get("problems") or []]
         if problems:
             more = f' <span class="muted">and {len(problems) - 1} more</span>' if len(problems) > 1 else ""
             parts.append(
@@ -1350,12 +1352,15 @@ def _health_panel(installation: dict[str, Any]) -> str:
     status = health.get("status")
     parts: list[str] = []
     if not isinstance(status, dict) or not status:
-        return '<p class="empty">there is no health reading to show.</p>'
-    problems = [str(item) for item in status.get("problems") or []]
+        status = {}
+    recorded = health.get("doctor") or {}
+    if recorded:
+        parts.append(f'<p class="muted">Recorded doctor: {escape(str(recorded.get("state")))}; run at {escape(str(recorded.get("run_at") or "unknown"))}.</p>')
+    problems = [str(item) for item in (health.get("combined") or status).get("problems") or []]
     if problems:
-        parts.append(
-            '<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>"
-        )
+        combined = health.get("combined") or {}
+        parts.append(_doctor_list(combined["findings"]) if combined.get("findings") else
+                     '<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>")
     else:
         parts.append('<p class="muted">nothing needs attention.</p>')
     checkpoint = status.get("checkpoint") or {}
@@ -1441,9 +1446,8 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
     ref = str(item.get("ref") or "")
     projects = item.get("projects") if isinstance(item.get("projects"), list) else []
     project = ", ".join(str(value) for value in projects) or str(item.get("product") or "—")
-    waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
-    stage = str(waiting.get("state") or item.get("status") or "unknown")
-    attention = _chip("attention required", "warn") if stage in {"waiting", "blocked", "unknown"} else ""
+    human_wait = item.get("attention") if isinstance(item.get("attention"), dict) else {}
+    attention = _chip("attention required", "warn") if human_wait.get("state") == "waiting" and human_wait.get("event_ids") else ""
     budget = item.get("budget") if isinstance(item.get("budget"), dict) else {}
     heads = _sprint_heads(item, compact=True)
     return "".join(
@@ -1462,7 +1466,7 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
 
 
 #: The tone a gate state reads in, beside its own word.
-GATE_TONES: dict[str, str] = {"green": "ok", "red": "bad", "pending": "warn", "running": "accent"}
+GATE_TONES: dict[str, str] = {"green": "ok", "red": "bad", "pending": "", "running": "accent"}
 
 
 def _current_card_box(item: dict[str, Any]) -> str:
@@ -1538,7 +1542,7 @@ def _waiting_chip(item: dict[str, Any]) -> str:
     state = str(waiting.get("state") or "")
     if not state:
         return ""
-    tone = {"working": "accent", "waiting": "warn", "blocked": "bad", "ended": "", "unknown": "warn"}.get(
+    tone = {"working": "accent", "waiting": "", "blocked": "", "ended": "", "unknown": ""}.get(
         state, ""
     )
     return (
@@ -1743,8 +1747,16 @@ def doctor(section: dict[str, Any] | None) -> str:
             f"{escape(str(document.get('reason') or 'no reason was recorded'))}<br>"
             "An unread installation is not a healthy one, so this is red and not green.</p>"
         )
+    recorded = document.get("doctor") or {}
+    parts.append(
+        f'<p>Recorded doctor: {escape(str(recorded.get("state") or "unknown"))}; '
+        f'mode {escape(str(recorded.get("mode") or "unknown"))}; '
+        f'run at {escape(str(recorded.get("run_at") or "unknown"))}; '
+        f'completed at {escape(str(recorded.get("completed_at") or "unknown"))}; '
+        f'exit {escape(str(recorded.get("exit_code")))}</p>'
+    )
     if isinstance(document.get("source"), dict):
-        parts.append(_source_block(document["source"], what="whether this installation is healthy"))
+        parts.append(_source_block(document["source"], what="status health"))
     if problems:
         for severity, heading in SEVERITY_GROUPS:
             group = [problem for problem in problems if problem.get("severity") == severity]
@@ -1770,7 +1782,7 @@ def doctor(section: dict[str, Any] | None) -> str:
             "every check this installation records answered, and none of them is a finding.</p>"
         )
     parts.append(
-        '<p class="muted">This page reads recorded state only. It runs no <code>secretary doctor</code>, '
+        '<p class="muted">This page combines status health with the latest periodically recorded <code>secretary doctor</code> findings. The read time above is the web reading time. This page launches no doctor, '
         "opens no SSH and touches no provider.</p>"
     )
     return _page("Doctor", "\n".join(part for part in parts if part), nav="")
@@ -1785,7 +1797,11 @@ def _doctor_list(problems: list[dict[str, Any]]) -> str:
     rows = [
         [
             f"<code>{escape(str(problem.get('code') or '—'))}</code>",
-            escape(str(problem.get("message") or "")),
+            escape(str(problem.get("message") or "")) + (
+                "<br><code>" + escape(json.dumps({key: value for key, value in problem.items()
+                                              if key not in {"code", "message", "severity", "source"}}, sort_keys=True)) + "</code>"
+                if any(key not in {"code", "message", "severity", "source"} for key in problem) else ""
+            ),
         ]
         for problem in problems
     ]

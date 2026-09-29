@@ -104,6 +104,7 @@ REVISIONS = (
     "0022_origin_returns",
     "0023_sprint_e2e_budget",
     "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
 )
 
 
@@ -480,6 +481,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -740,6 +742,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
 
@@ -1122,6 +1125,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1165,6 +1169,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
 
@@ -1248,6 +1253,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
 
@@ -1269,6 +1275,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0022_origin_returns",
                 "0023_sprint_e2e_budget",
                 "0024_e2e_after_merge_kind",
+                "0025_card_waits_for_person",
             ),
         )
 
@@ -1371,7 +1378,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"),
         )
 
         self.assertEqual(
@@ -1424,7 +1431,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("secretary.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         # Every column a sprint had loads unchanged; 0023 appends its e2e budget columns (3 and 0).
         sprints = connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall()
@@ -1504,7 +1511,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -1536,7 +1543,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
@@ -1563,7 +1570,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "secretary-7", task_type="wait")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
         self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
@@ -1612,7 +1619,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             insert(DELEGATED_CARD_SETTLED, "notice", "k-3")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))
@@ -1658,7 +1665,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.exec_driver_sql("UPDATE sprints SET status = 'closed', closed_at = now() WHERE ref = 'sprint:12'")
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0023_sprint_e2e_budget", "0024_e2e_after_merge_kind"))
+        self.assertEqual(self.run_migrations(connection), ("0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         self.assertEqual(
             connection.exec_driver_sql("SELECT ref, e2e_budget, e2e_used FROM sprints ORDER BY ref").fetchall(),
@@ -1719,7 +1726,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0024_e2e_after_merge_kind",))
+        self.assertEqual(self.run_migrations(connection), ("0024_e2e_after_merge_kind", "0025_card_waits_for_person"))
 
         self.assertEqual(
             connection.exec_driver_sql("SELECT kind, class FROM owner_events").fetchall(),
@@ -1746,6 +1753,95 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "VALUES ('e2e_after_merge', 'needs_owner', NULL, 'x', now(), 'e-3')"
             )
         connection.rollback()
+
+
+    def test_0025_real_wait_backfill_constraints_and_the_previous_runtime(self) -> None:
+        import io
+        import os
+        import sys
+        import tarfile
+        import tempfile
+
+        import sqlalchemy as sa
+        from alembic import command
+
+        from secretary.board.owner_events import OwnerEventStore
+
+        connection = self.owner_connection()
+        config = migrate.alembic_config(connection=connection, passwords=self.passwords)
+        command.upgrade(config, "0024_e2e_after_merge_kind")
+        connection.exec_driver_sql(
+            "INSERT INTO sprints (ref, board_key, goal, definition_of_done, created_at, updated_at) "
+            "VALUES ('sprint:fixture', 800, 'wait', 'decision', now(), now())"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO tasks (task_ref, task_number, title, task_type, state, sprint_ref, created_at, updated_at) "
+            "VALUES ('secretary-800', 800, 'PO decision', 'decision', 'in_progress', 'sprint:fixture', now(), now())"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
+            "VALUES ('provider_red','notice',NULL,'prior notice',now(),'prior-notice')"
+        )
+        prior = connection.exec_driver_sql("SELECT * FROM owner_events").fetchall()
+        connection.commit()
+        self.assertEqual(self.run_migrations(connection), ("0025_card_waits_for_person",))
+        self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events WHERE dedup_key='prior-notice'").fetchall(), prior)
+        self.assertEqual(self.run_migrations(connection), ())
+        store = OwnerEventStore(self.credentials("app"))
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["unread"], 2)
+        self.assertEqual(snapshot["human_waits"][0]["sprint_ref"], "sprint:fixture")
+        self.assertTrue(next(event for event in snapshot["events"] if event["kind"] == "card_waits_for_person")["held"])
+        with self.assertRaises(sa.exc.IntegrityError):
+            connection.exec_driver_sql(
+                "INSERT INTO owner_events (kind, class, text, created_at, dedup_key) "
+                "VALUES ('card_waits_for_person','notice','invalid',now(),'invalid')"
+            )
+        connection.rollback()
+
+        # Run the actual previous src tree, not a mock of its schema assessment. CI
+        # fetches full history. During development the added revision is still uncommitted.
+        repository = Path(__file__).resolve().parents[1]
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "--is-shallow-repository"], cwd=repository, text=True
+            ).strip(),
+            "false",
+            "the prior-runtime proof requires full Git history (actions/checkout fetch-depth: 0)",
+        )
+        revision_path = "src/secretary/board/migrations/versions/0025_card_waits_for_person.py"
+        parents = subprocess.check_output(
+            ["git", "log", "--diff-filter=A", "--format=%P", "-1", "--", revision_path], cwd=repository, text=True
+        ).split()
+        previous = parents[0] if parents else "HEAD"
+        archive = subprocess.check_output(["git", "archive", previous, "src"], cwd=repository)
+        prior_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+            tree.extractall(prior_root, filter="data")
+        script = """import json, sys
+from types import SimpleNamespace
+from secretary.board import migrate
+from secretary.board.owner_events import OwnerEventStore
+from secretary.board.sql_cards import SqlCardClient
+from secretary.tasks import TaskReader
+credentials = SimpleNamespace(conninfo=lambda: sys.argv[1])
+store = OwnerEventStore(credentials)
+events = store.events()
+assert any(event.kind == 'card_waits_for_person' and event.event_class == 'needs_owner' for event in events)
+assert store.unread_count() == 2
+assert store.insert('provider_red', None, 'prior runtime still writes', 'old-runtime')
+client = SqlCardClient(credentials, sys.argv[2])
+assert TaskReader(client).show('secretary-800')['state'] == 'in_progress'
+client.call('createComment', task_id=client.call('getTaskByReference', project_id=1, reference='secretary-800')['id'], user_id=0, content='old runtime still writes cards')
+client.close()
+print(json.dumps({'head': migrate.EXPECTED_SCHEMA_REVISION, 'unread': store.unread_count()}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-P", "-c", script, self.credentials("app").conninfo(), str(prior_root)],
+            env={**os.environ, "PYTHONPATH": str(prior_root / "src")}, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"head": "0024_e2e_after_merge_kind", "unread": 3})
 
 
 if __name__ == "__main__":

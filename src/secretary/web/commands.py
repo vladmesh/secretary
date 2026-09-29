@@ -85,6 +85,7 @@ def health_layers(
         instance,
         data_dir=data_dir,
         offline=offline,
+        clock=now,
         health_reader=lambda: doctor.health_snapshot(),
     )
     doctor = DoctorLayer(reads.health_snapshot, now=now)
@@ -103,10 +104,11 @@ def run_web_serve(args: argparse.Namespace) -> int:
     reads, doctor = health_layers(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
     # One provider layer for the bar and the reset: a reset clears the cache the next render reads.
     usage = ProviderUsageLayer()
+    owner_events = OwnerEventLayer(args.instance)
     app = WebApp(
         reads,
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
-        SprintReadLayer(args.instance, data_dir=args.data_dir),
+        SprintReadLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
         SprintOperationLayer(args.instance, data_dir=args.data_dir),
         PauseReadLayer(args.instance, data_dir=args.data_dir),
         # The same construction `secretary pause`/`resume` make for the production dispatcher: a
@@ -118,7 +120,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
         doctor,
         po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
-        owner_events=OwnerEventLayer(args.instance),
+        owner_events=owner_events,
         provider_ops=ProviderOperationLayer(args.instance, usage=usage),
     )
     try:

@@ -6,11 +6,10 @@ it runs but somebody should look; green when health was read and reports no prob
 in :data:`secretary.webproto.reads.PROBLEM_SEVERITY` beside the codes it classifies, and this module
 only applies it and adds the one problem the summary cannot mint for itself: `health.unreadable`.
 
-Recorded state only. The whole reading is one call of the read layer's `health_snapshot`, which is
-`collect_status` over this host's own files -- systemd inventory, the production state, the
-checkpoint snapshot, the store findings, the memory index. No `secretary doctor` is run, no SSH is
-opened and no provider credential or endpoint is touched: this lamp is on every page, so a reading
-that reached out would turn a page view into a remote call.
+Recorded state only: status health and the latest result of the packaged doctor timer.
+The reader launches no doctor, SSH or provider probe. Doctor's run time remains separate
+from the time the web collected its cached reading. Missing or unusable results are explicit
+problems, and neither source can hide the other's findings.
 
 Cached for the same reason the provider layer is (:mod:`secretary.web.provider_usage`, whose shape
 this copies): the bar is rendered by every page, and the collection behind it is not cheap, so one
@@ -145,7 +144,13 @@ class DoctorLayer:
                 snapshot = self.read_health()
             except ReadError as exc:
                 snapshot = exc
-            self._cached = HealthReading(observed, snapshot, _classify(snapshot))
+            document = _classify(snapshot)
+            if isinstance(snapshot, dict):
+                snapshot["health"]["combined"] = {
+                    "colour": document["colour"], "findings": document["problems"],
+                    "problems": [problem["message"] for problem in document["problems"]],
+                }
+            self._cached = HealthReading(observed, snapshot, document)
             return self._cached
 
 
@@ -158,27 +163,40 @@ def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
     section = section if isinstance(section, dict) else {}
     status = section.get("status")
     source = section.get("source") if isinstance(section.get("source"), dict) else None
-    if not isinstance(status, dict) or not status:
-        reason = str((source or {}).get("reason") or "installation health was not read")
-        return unreadable(reason, source=source)
-    problems = [
-        {
-            "code": str(finding.get("code") or ""),
-            "message": str(finding.get("message") or ""),
-            "severity": problem_severity(str(finding.get("code") or "")),
-        }
-        for finding in status.get("findings") or []
-        if isinstance(finding, dict)
-    ]
-    return {
-        "kind": "doctor",
-        "observed_at": str(snapshot.get("observed_at") or "") or None,
-        "readable": True,
-        "reason": None,
-        "colour": lamp_colour(problems),
-        "problems": problems,
-        "source": source,
+    problems: list[dict[str, Any]] = []
+    readable = isinstance(status, dict) and bool(status)
+    reason = None if readable else str((source or {}).get("reason") or "installation health was not read")
+    if readable:
+        problems.extend(
+            {**finding, "severity": problem_severity(str(finding.get("code") or "")), "source": "status"}
+            for finding in status.get("findings") or [] if isinstance(finding, dict)
+        )
+    else:
+        problems.extend(unreadable(reason)["problems"])
+    recorded = section.get("doctor") if isinstance(section.get("doctor"), dict) else {
+        "state": "missing", "reason": "no recorded doctor attempt", "run_at": None,
     }
+    problems.extend(
+        {**finding, "message": str(finding.get("message") or _finding_identity(finding)),
+         "severity": problem_severity(str(finding.get("code") or "")), "source": "doctor"}
+        for finding in recorded.get("findings") or [] if isinstance(finding, dict)
+    )
+    if recorded.get("state") != "available":
+        problems.append({
+            "code": "health.unreadable", "source": "doctor",
+            "message": f"recorded doctor is {recorded.get('state') or 'unknown'}: {recorded.get('reason') or 'no reason recorded'}",
+            "severity": problem_severity(UNREADABLE_CODE),
+        })
+    return {
+        "kind": "doctor", "observed_at": str(snapshot.get("observed_at") or "") or None,
+        "readable": readable, "reason": reason, "colour": lamp_colour(problems),
+        "problems": problems, "source": source, "doctor": recorded,
+        "doctor_run_at": recorded.get("run_at"),
+    }
+
+
+def _finding_identity(finding: dict[str, Any]) -> str:
+    return " ".join(str(finding[key]) for key in ("kind", "name", "capability", "resource") if finding.get(key)) or str(finding.get("code") or "doctor finding")
 
 
 def unreadable(reason: str, *, source: dict[str, Any] | None = None) -> dict[str, Any]:

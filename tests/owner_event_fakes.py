@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from secretary.board.owner_events import (
+    CARD_WAITS_FOR_PERSON,
     CLASSES,
     KIND_CLASS,
     KINDS,
@@ -29,6 +30,7 @@ from secretary.board.owner_events import (
     card_holds_mark,
     class_of,
     list_order_key,
+    person_wait,
 )
 
 
@@ -58,7 +60,8 @@ class FakeOwnerEvents:
             raise self.failing
 
     def _held(self, event: OwnerEvent) -> bool:
-        return bool(event.subject_ref) and card_holds_mark(self.cards(str(event.subject_ref)))
+        card = self.cards(str(event.subject_ref)) if event.subject_ref else None
+        return bool(card) and (card_holds_mark(card) or (event.kind == CARD_WAITS_FOR_PERSON and bool(person_wait(card))))
 
     @staticmethod
     def check(kind: str, event_class: str) -> None:
@@ -99,6 +102,30 @@ class FakeOwnerEvents:
         with self.lock:
             self._answer()
             return sum(1 for row in self.rows.values() if row.read_at is None)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            events = self.events()
+            waits = []
+            for event in events:
+                card = self.cards(str(event.subject_ref)) if event.subject_ref else None
+                if event.pinned and card and card.get("sprint") and not card.get("closed") and (
+                    event.kind != CARD_WAITS_FOR_PERSON or event.held
+                ):
+                    waits.append({"event_id": event.id, "subject_ref": event.subject_ref, "sprint_ref": card["sprint"]})
+            return {"events": [event.to_json() for event in events],
+                    "unread_events": [event.to_json() for event in self.events(unread_only=True)],
+                    "unread": self.unread_count(), "human_waits": waits}
+
+    def settle_kind(self, subject_ref: str, kind: str) -> int:
+        with self.lock:
+            self._answer()
+            settled = 0
+            for identifier, row in list(self.rows.items()):
+                if row.subject_ref == subject_ref and row.kind == kind and row.read_at is None:
+                    self.rows[identifier] = replace(row, read_at=self._now())
+                    settled += 1
+            return settled
 
     def mark_read(self, event_id: int) -> OwnerEvent:
         with self.lock:

@@ -345,6 +345,10 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         for suite in SUITES:
             self.assertIn(suite, workflow)
         candidate_sha = "${{ github.event.pull_request.head.sha || github.sha }}"
+        # The board migration proof archives the source before the new revision was added.
+        suite_job = workflow.split("  typecheck:", 1)[0]
+        self.assertIn(f"ref: {candidate_sha}\n", suite_job)
+        self.assertIn("fetch-depth: 0", suite_job)
         self.assertIn(f'--candidate-sha "{candidate_sha}"', workflow)
         self.assertNotIn('--candidate-sha "$GITHUB_SHA"', workflow)
         self.assertIn(
