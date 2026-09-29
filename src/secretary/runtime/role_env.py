@@ -8,6 +8,7 @@ role allowlist are stripped even if the parent process already had them.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -15,6 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from secretary.board.local_run import parse_local_run_policy
 from secretary.runtime import docker_guard
 from secretary.runtime.paths import PRODUCT_ENV, default_instance_path
 
@@ -284,6 +286,7 @@ def runtime_env(
     base_env: dict[str, str] | None = None,
     env_file: Path | str | None = None,
     workspace: Path | str | None = None,
+    local_run_policy: str | None = None,
 ) -> dict[str, str]:
     """Return a sanitized env for `role`, with role-allowed values overlaid from the source file."""
     allowed = set(allowlist(role))
@@ -313,6 +316,15 @@ def runtime_env(
         env.pop(key, None)
     if role in RUFF_ROLES:
         env.update(_docker_bindings(env))
+        # This comes only from the explicit trusted command argument, never the ambient env.
+        if local_run_policy is not None:
+            try:
+                policy = json.loads(local_run_policy)
+                parse_local_run_policy(policy)
+            except (ValueError, TypeError):
+                pass  # malformed authority grants nothing, including an otherwise valid prefix
+            else:
+                env[docker_guard.POLICY_ENV] = json.dumps(policy, ensure_ascii=True)
         if workspace is not None:
             environment = Path(workspace).expanduser() / WORKSPACE_ENV_DIR
             venv_bin = environment / "bin"
@@ -457,6 +469,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     parser.add_argument("--role", required=True)
     parser.add_argument("--env-file")
     parser.add_argument("--workspace")
+    parser.add_argument("--local-run-policy")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
     command = list(ns.command)
@@ -469,7 +482,9 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
             raise RoleEnvError(f"role {ns.role!r} requires a workspace-owned Python environment")
         if ns.role in PRODUCT_VENV_ROLES:
             require_managed_interpreter()
-        env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
+        env = runtime_env(
+            ns.role, env_file=ns.env_file, workspace=ns.workspace, local_run_policy=ns.local_run_policy
+        )
         if ns.role in RUFF_ROLES:
             _require_docker_guard(env)
     except RoleEnvError as e:

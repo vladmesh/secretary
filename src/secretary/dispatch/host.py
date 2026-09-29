@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -657,6 +658,7 @@ class InstanceCatalog:
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
+        local_run_policy: str | None = None,
     ) -> HeadCommand:
         """The command this workspace's pane will run, with its workspace made fit to run it in."""
         profile = self._head_profile(head)
@@ -668,6 +670,7 @@ class InstanceCatalog:
                 workspace=workspace,
                 role=role,
                 identity=identity,
+                local_run_policy=local_run_policy,
             )
         except (HeadLaunchError, HeadCommandError) as exc:
             raise HostError(str(exc)) from None
@@ -3232,6 +3235,11 @@ class CommandHostRuntime:
             # deliberate for tests and manual overrides, with the inactivity ceiling as the fallback.
             self.catalog.prepare_head_workspace(head, workspace, role=role)
         else:
+            policy_binding: dict[str, str] = {}
+            if role in {"worker", "reviewer"}:
+                policy, _ = self._local_run_policy(task or {})
+                if policy is not None:
+                    policy_binding["local_run_policy"] = json.dumps(policy, ensure_ascii=True)
             launch = self.catalog.head_launch(
                 head,
                 prompt_file,
@@ -3239,6 +3247,7 @@ class CommandHostRuntime:
                 role=role,
                 launch_prompt=launch_prompt,
                 identity=launch_identity or None,
+                **policy_binding,
             )
             command = launch.command
             if pid_file:
@@ -3970,31 +3979,48 @@ class CommandHostRuntime:
         suffix = "".join(f" {shlex.quote(argument)}" for argument in arguments)
         return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary{suffix}"
 
+    def _local_run_policy(self, task: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """The same creation-only authority read for packets and ordinary head launches.
+
+        The launch snapshot is sufficient: sprint exceptions are immutable after creation.
+        Any malformed declaration invalidates the whole list before project filtering.
+        """
+        from secretary.board.local_run import parse_local_run_exceptions, parse_local_run_policy
+
+        reference, project = task.get("sprint"), task.get("project")
+        if not reference:
+            return None, False
+        try:
+            policy = {"card": task.get("ref"), "sprint": reference, "project": project, "exceptions": []}
+            parse_local_run_policy(policy)
+            if self.sprint_reader is None:
+                raise ValueError("no sprint reader")
+            sprint = self.sprint_reader.show(reference, include_cards=False)
+            if not isinstance(sprint, dict) or sprint.get("ref") != reference:
+                raise ValueError("sprint identity mismatch")
+            projects = sprint.get("reservations", [])
+            if not isinstance(projects, list) or any(
+                not isinstance(item, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", item) for item in projects
+            ):
+                raise ValueError("malformed sprint scope")
+            if project not in projects:
+                raise ValueError("card project is not reserved")
+            policy["exceptions"] = [
+                entry.to_document()
+                for entry in parse_local_run_exceptions(
+                    sprint.get("local_run_exceptions", []), projects=projects
+                )
+                if entry.project == project
+            ]
+            parse_local_run_policy(policy)
+            return policy, False
+        except Exception:  # noqa: BLE001 - any failed authority read grants no exceptions
+            return None, True
+
     def _local_run_section(self, task: dict[str, Any]) -> list[str]:
         """One rule for both heads, with authority read only from this card's sprint."""
-        from secretary.board.local_run import parse_local_run_exceptions
-
-        reference = str(task.get("sprint") or "")
-        project = str(task.get("project") or "")
-        entries = []
-        unavailable = False
-        if reference:
-            try:
-                if self.sprint_reader is None:
-                    raise ValueError("no sprint reader")
-                sprint = self.sprint_reader.show(reference, include_cards=False)
-                if not isinstance(sprint, dict) or sprint.get("ref") != reference:
-                    raise ValueError("sprint identity mismatch")
-                projects = sprint.get("reservations", [])
-                if not isinstance(projects, list) or any(not isinstance(item, str) for item in projects):
-                    raise ValueError("malformed sprint scope")
-                entries = [
-                    entry.to_document()
-                    for entry in parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=projects)
-                    if entry.project == project
-                ]
-            except Exception:  # noqa: BLE001 - any failed authority read grants no exceptions
-                unavailable = True
+        policy, unavailable = self._local_run_policy(task)
+        entries = policy["exceptions"] if policy else []
         sections = [
             "## Control-host local-run rule",
             "",
@@ -4016,7 +4042,10 @@ class CommandHostRuntime:
             "",
         ]
         if unavailable:
-            sections += ["Sprint exception authority is unreadable or malformed; no exception is authorized.", ""]
+            sections += [
+                "Sprint exception authority is unreadable or malformed; no exception is authorized.",
+                "",
+            ]
         return sections
 
     def _worker_task_doc(
@@ -4485,9 +4514,14 @@ class CommandHostRuntime:
             task.get("description") or "(empty task description)",
             "",
             *self._local_run_section(task),
-            "An observed local heavy run outside the applicable declared exceptions is a blocking",
-            "RED finding, even if its tests passed. Apply the same local-run bounds to every",
-            "verification you perform; obtain evidence through CI when those bounds require it.",
+            "An observed excessive local heavy run is a non-blocking observation, never grounds",
+            "for RED, even if its tests passed. Exclude its results from validation evidence; CI",
+            "or an allowed local check supplies that evidence. Judge the code and valid evidence.",
+            "The observer does not order rework or charge the budget for such a run alone.",
+            "Preserve historical verdicts in the audit; do not reopen them under this rule.",
+            "Apply the same local-run bounds to every verification you perform; obtain evidence",
+            "through CI when those bounds require it. Missing required valid evidence or a code",
+            "defect can still block release.",
             "",
             "## No subagents",
             "",

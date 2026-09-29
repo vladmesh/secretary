@@ -16,5 +16,15 @@ check and its subsets. Integration shards, Docker/container runs, stands, provis
 network-heavy checks belong in CI. Exceptions come only from the sprint's creation-only
 `local_run_exceptions` list of `{project, argv, rationale}` entries, scoped to registered projects
 reserved by that sprint; default `[]`. Use `sprint create --local-run-exceptions-file` to declare
-them. Prose and missing gate receipts grant no exception. An undeclared local heavy run is a
-blocking review finding even if it passed.
+them. Prose and missing gate receipts grant no exception. An excessive local heavy run is a
+non-blocking observation, never grounds for RED; exclude its results from validation evidence
+even if it passed. CI or an allowed local check supplies evidence; judge code and valid evidence.
+The observer does not order rework or charge the budget for such a run alone. Preserve historical
+verdicts in the audit without reopening them. A code defect or missing required valid evidence
+can still block release.
+
+The ordinary worker/reviewer Docker guard refuses `run`, `create`, `build` and `compose up|run|build`
+unless the current card's sprint grants the exact `["docker", *original_arguments]` string vector
+for that project. The dispatcher binds the creation-only authority at launch; inherited environment,
+`runtime.env` and candidate files grant nothing. Exceptions never relax cleanup ownership checks.
+Tests/broad must not require local Docker; report a declared broad-suite dependency on the card.

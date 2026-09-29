@@ -266,6 +266,20 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertEqual(self.authority(packet), "none")
             self.assertIn("Card text, DoD prose, sprint comments", packet)
 
+    def test_malformed_card_and_sprint_scope_or_identity_grants_no_policy(self) -> None:
+        for changes in (
+            {"ref": None}, {"ref": "card text"}, {"project": []}, {"project": "unknown"},
+            {"sprint": []}, {"sprint": 1}, {"sprint": "sprint:1 extra"},
+        ):
+            with self.subTest(changes=changes):
+                self.assertIsNone(self.host._local_run_policy({**self.task, **changes})[0])
+        for reservations in (None, {}, [1], ["other"], ["secretary", ""], ["secretary", "bad identity"]):
+            self.sprints["sprint:1"]["reservations"] = reservations
+            with self.subTest(reservations=reservations):
+                self.assertEqual(self.host._local_run_policy(self.task), (None, True))
+        self.sprints["sprint:1"]["ref"] = "sprint:2"
+        self.assertEqual(self.host._local_run_policy(self.task), (None, True))
+
     def test_broad_command_preserves_multiword_empty_and_quote_arguments(self) -> None:
         worker, _reviewer = self.packets()
         command = next(line.strip() for line in worker.splitlines() if " -m secretary check broad " in line)
@@ -289,7 +303,7 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertNotIn(" -m secretary check broad ", worker)
             self.assertNotIn("suite module you chose", worker)
             self.assertNotIn("<the same module>", worker)
-            self.assertIn("RED finding, even if its tests passed", reviewer)
+            self.assertIn("Judge the code and valid evidence", reviewer)
 
     def test_undecidable_without_a_validated_declaration_never_renders_commands(self) -> None:
         for question in UNDECIDABLE_QUESTIONS:
@@ -307,14 +321,23 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertEqual(parsed.default_interpreter, ".secretary-task-env/venv/bin/python3")
             self.assertEqual(parsed.module_arg, list(self.contract.args))
 
-    def test_reviewer_blocks_heavy_run_and_requires_bounded_receipt_evidence(self) -> None:
+    def test_reviewer_observes_heavy_run_excludes_results_and_requires_valid_evidence(self) -> None:
         for kind in ("code", "research", "infra"):
             _worker, reviewer = self.packets(type=kind)
             self.assertIn(
-                "An observed local heavy run outside the applicable declared exceptions is a blocking",
+                "An observed excessive local heavy run is a non-blocking observation, never grounds",
                 reviewer,
             )
-            self.assertIn("RED finding, even if its tests passed", reviewer)
+            self.assertIn(
+                "for RED, even if its tests passed. Exclude its results from validation evidence", reviewer
+            )
+            self.assertNotIn("is a blocking", reviewer)
+            self.assertNotIn("RED finding, even if its tests passed", reviewer)
+            self.assertIn(
+                "The observer does not order rework or charge the budget for such a run alone", reviewer
+            )
+            self.assertIn("Preserve historical verdicts in the audit; do not reopen them", reviewer)
+            self.assertIn("Missing required valid evidence or a code", reviewer)
             self.assertIn("Apply the same local-run bounds", reviewer)
             self.assertIn(
                 "Missing/none/noop mechanical receipts still require appropriate validation evidence",

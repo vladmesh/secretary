@@ -332,6 +332,21 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with self.assertRaisesRegex(HeadCommandError, "unknown role env binding"):
             wrap_role_command("worker", "true", binding="secretary.runtime.role_env")
 
+    def test_local_run_policy_is_an_explicit_argument_only_for_card_heads(self) -> None:
+        policy = json.dumps({"argv": ["docker", "run", "owner's two words", ""]})
+        for role in ("worker", "reviewer"):
+            with self.subTest(role=role), mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
+                vector = shlex.split(render_head_command(
+                    {"adapter": "claude"}, role=role, workspace="/worktree", local_run_policy=policy,
+                ).command)
+                self.assertEqual(vector[vector.index("--local-run-policy") + 1], policy)
+                with self.assertRaisesRegex(HeadCommandError, "renders no identity"):
+                    wrap_role_command(role, "true", binding=STANDING_BINDING, local_run_policy=policy)
+        with self.assertRaisesRegex(HeadCommandError, "carries no identity"):
+            render_head_command({"adapter": "claude"}, local_run_policy=policy)
+        with self.assertRaisesRegex(HeadCommandError, "carries no local-run policy"):
+            wrap_role_command("observer", "true", local_run_policy=policy)
+
 
 class PidHeartbeatTests(unittest.TestCase):
     def test_the_pid_written_is_the_head_s_own(self) -> None:

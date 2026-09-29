@@ -484,6 +484,7 @@ class ReviewCatalog(FakeCatalog):
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
+        local_run_policy: str | None = None,
     ):
         from secretary.runtime.head import HeadCommand
 
@@ -689,6 +690,7 @@ class PromptAfterStartCatalog(ReviewCatalog):
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
+        local_run_policy: str | None = None,
     ):
         from secretary.runtime.head import HeadCommand
 

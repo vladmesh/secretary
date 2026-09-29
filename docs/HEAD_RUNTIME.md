@@ -5,7 +5,7 @@ socket and journal (`LocalPtyHeadRuntime`). A head profile may say so with `runt
 or name no runtime. Heads used to run as Orca panes (`orca-legacy`); since A20 step 2 that name is
 only a marker on old durable records, which stay readable and are never launched.
 
-## Worker and reviewer Docker cleanup guard
+## Worker and reviewer Docker guard
 
 The shared role launcher puts a product-owned executable named `docker` before native Docker
 for workers and reviewers, in the role environment and again after the login shell reads its
@@ -15,6 +15,29 @@ modules, interpreters and inherited guard bindings do not choose its implementat
 resolves native Docker before adding this PATH prefix and calls that absolute executable directly.
 Missing or unexecutable guard, product interpreter or backend refuses the launch or command.
 PO and dispatcher Docker paths retain their existing behavior.
+
+The dispatcher reads the current card's sprint and validates its entire creation-only
+`local_run_exceptions` declaration before selecting entries for that card's project. Packets and
+launches use the same authority reader. An explicit `role_env exec --local-run-policy` argument
+carries a small card/sprint/project snapshot through the shared head renderer. The role environment
+discards inherited policy bindings and never reads policy from `runtime.env` or a candidate file.
+Missing sprint/field, unbound or standing launches, read failures and malformed authority grant
+no exceptions. The launch snapshot needs no refresh because the field is immutable after creation.
+
+Ordinary `docker run`, `create`, `build` and `compose up|run|build` refuse before any native call
+with status 125 and a use-CI message unless the snapshot grants that exact command. The same rule
+covers the native `container run|create` aliases and `image build`, `builder build` and `buildx build`
+in the existing parser hierarchy. Global flags, Compose options and `--` boundaries are parsed to
+identify the operation; unknown or unresolved options grant no execution. This does not inventory
+arbitrary Docker plugins or expand the restriction to unlisted heavy commands.
+
+The ordinary CLI matching vector is `["docker", *original_arguments]`, before flag parsing,
+endpoint translation or alias normalization. Only exact string-vector equality grants an exception:
+executable spelling, argument order, flag placement, values and empty arguments all matter. There
+is no shell evaluation, wildcard, prefix, basename/path equivalence or normalization. Authorized
+heavy commands retain their original argv, native output and status. The exception lifts only
+this heavy-operation restriction; all cleanup ownership checks below still apply. Tests and broad
+must not require local Docker; report a declared broad-suite dependency on Docker on the card.
 
 `docker rm`, `stop` and `kill`, including `docker container remove` and their other `docker container`
 aliases, require every explicit target to have `secretary.test-board=<positive decimal owner PID>` and no
@@ -47,7 +70,7 @@ There is no Compose selector engine or cleanup permission inferred from a filter
 This protects against accidental commands in trusted worker/reviewer roles. Absolute Docker paths,
 raw socket access, deliberate PATH/environment changes and malicious evasion remain outside the
 threat model; it provides no isolation from a malicious head. Forwarding a command grants no
-exception to the CI-only Docker/integration rule. Production label transitions, other fixture
+exception beyond the exact sprint vector to the CI-only Docker/integration rule. Production label transitions, other fixture
 ownership, reaping, volumes/cache cleanup and reader recovery remain separate work. No production
 Compose, upgrade behavior, credentials or data volume changes are made here. The later PO proof
 uses an owned production-labelled decoy through an actual head, with the real board untouched.
