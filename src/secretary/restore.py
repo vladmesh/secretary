@@ -30,16 +30,23 @@ from secretary.board.backend import CARD, SPRINT, board_client, entity_number
 from secretary.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+)
+from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     positive_int as _positive_int,
 )
+from secretary.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
 from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.task_routing import TaskMetadata
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
 from secretary.product_issues import (
     registered_projects,
 )
+from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     ObserverMetadataError,
@@ -50,15 +57,12 @@ from secretary.sprint_observer import (
     is_executable,
     parse_observer,
 )
-from secretary.board.sql_audit import SqlTaskAudit
 from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
     all_project_cards,
 )
-
-from secretary.runtime.head import CODEX_LAUNCH_MODES
 
 if TYPE_CHECKING:
     from secretary.board.sql_cards import SqlCardClient
@@ -516,6 +520,7 @@ SPRINT_PARITY_FIELDS = (
     "reviewer",
     "po_session",
     "allowed_productions",
+    "local_run_exceptions",
 )
 
 
@@ -621,6 +626,7 @@ _ABSENT = object()
 def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
     """The exported sprint contract, without what a rewrite cannot reproduce."""
     core: dict[str, Any] = {field: sprint.get(field, _ABSENT) for field in SPRINT_PARITY_FIELDS}
+    core["local_run_exceptions"] = sprint.get("local_run_exceptions", [])
     core["comments"] = [
         str(comment.get("text") or "") for comment in sprint.get("comments", []) if isinstance(comment, dict)
     ]
@@ -672,6 +678,10 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
         },
         # Only what the record carries: a sprint exported without them restores without them.
         **({"sprint_po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
+        **(
+            {LOCAL_RUN_EXCEPTIONS_FIELD: json.dumps(sprint["local_run_exceptions"], separators=(",", ":"))}
+            if sprint.get("local_run_exceptions") else {}
+        ),
         **(
             {
                 "sprint_allowed_productions": json.dumps(
@@ -900,6 +910,10 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             value = sprint.get(field, [])
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise RestoreError(f"normalized sprint export has invalid {field}")
+        try:
+            parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=sprint.get("reservations", []))
+        except ValueError as exc:
+            raise RestoreError(f"normalized sprint export has invalid local_run_exceptions: {exc}") from None
         budget = sprint.get("budget")
         if (
             not isinstance(budget, dict)

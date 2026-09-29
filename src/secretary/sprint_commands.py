@@ -78,6 +78,10 @@ def add_sprint_subcommands(subparsers) -> None:
     created.add_argument("--goal", required=True)
     created.add_argument("--definition-of-done", default="")
     created.add_argument("--dod-file")
+    created.add_argument(
+        "--local-run-exceptions-file",
+        help="JSON list of {project, argv, rationale} exceptions declared at creation; default []",
+    )
     created.add_argument("--repository", action="append", default=[])
     created.add_argument("--product", required=True, help="product id the sprint belongs to")
     created.add_argument(
@@ -445,6 +449,14 @@ def _thresholds(args: argparse.Namespace) -> dict | None:
 def run_create(args: argparse.Namespace) -> int:
     try:
         definition_of_done = _read_body(args.dod_file) if args.dod_file else args.definition_of_done
+        local_run_exceptions = (
+            json.loads(_read_body(args.local_run_exceptions_file)) if args.local_run_exceptions_file else []
+        )
+        if not isinstance(local_run_exceptions, list):
+            raise ValueError("local_run_exceptions must be a list")  # noqa: TRY004 - uniform JSON value validation
+    except ValueError as exc:
+        print(json.dumps({"error": {"code": "validation", "message": f"invalid local_run_exceptions JSON: {exc}"}}), file=os.sys.stderr)
+        return 2
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -467,6 +479,7 @@ def run_create(args: argparse.Namespace) -> int:
             po_session=args.po_session,
             allowed_productions=args.allow_production,
             e2e_budget=args.e2e_budget,
+            local_run_exceptions=local_run_exceptions,
         ),
     )
 

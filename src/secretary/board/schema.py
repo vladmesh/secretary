@@ -17,7 +17,7 @@ Everything §3 constrains is declared here, including the parts an ORM does not 
 * §3.3's two scoped sprint cursors are `DEFERRABLE INITIALLY DEFERRED` composite foreign keys,
   and every constraint §3.13 defers to step 2 carries ``use_alter=True`` so it is emitted as an
   ``ALTER TABLE`` after the tables exist, exactly as §3.13 orders it;
-* the seven `jsonb` columns are the seven §3.10 names and no others.
+* the eight `jsonb` columns are the eight §3.10 names and no others.
 
 Revision `0002_board_gaps` moved four things here, each named by the import run of
 `secretary-1583` on the live board (2026-09-07) that found it: `issue_comments` (479 comments on
@@ -197,6 +197,7 @@ class Sprint(Base):
     # Null and empty for every sprint opened before them; both are set at create and never inferred.
     po_session = sa.Column(sa.Text)
     allowed_productions = sa.Column(ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'::text[]"))
+    local_run_exceptions = sa.Column(JSONB, nullable=False, server_default=sa.text("'[]'::jsonb"))
     # The e2e run budget (0023): runs the sprint may dispatch and runs it dispatched, one
     # `sprint_e2e_charges` row each. Every sprint opened before it reads 3 and 0.
     e2e_budget = sa.Column(sa.Integer, nullable=False, server_default=sa.text("3"))
@@ -225,6 +226,7 @@ class Sprint(Base):
         sa.CheckConstraint("status IN ('open','closed','stopped')"),
         sa.CheckConstraint("(status = 'open') = (closed_at IS NULL)", name="sprint_closed_has_time"),
         sa.CheckConstraint("e2e_budget >= 0 AND e2e_used >= 0", name="sprint_e2e_counts_are_not_negative"),
+        sa.CheckConstraint("jsonb_typeof(local_run_exceptions) = 'array'", name="sprint_local_runs_are_array"),
         # §3.13 step 2: `tasks` and `sprint_resumes` do not exist yet, and both relations are
         # mutual, so these are emitted as ALTER TABLE after every table is created.
         sa.ForeignKeyConstraint(
@@ -1023,6 +1025,7 @@ PASSWORD_PARAMETERS = ("app_password", "read_password")
 
 #: The columns §3.10 declares `jsonb`, and the only ones in the schema.
 JSONB_COLUMNS = (
+    ("sprints", "local_run_exceptions"),
     ("products", "extensions"),
     ("sprints", "observer"),
     ("sprints", "source_audit"),

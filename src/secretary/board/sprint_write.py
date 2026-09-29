@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from secretary.board.e2e_budget import DEFAULT_E2E_BUDGET
+from secretary.board.local_run import LocalRunException, parse_local_run_exceptions
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission
@@ -114,6 +115,8 @@ class SprintCreateIntent:
     # The e2e run budget (secretary-1796). Left off the document at the default, so an intent staged
     # before it existed still replays as the same request.
     e2e_budget: int = DEFAULT_E2E_BUDGET
+    # Omitted at the empty default to preserve released create request identity.
+    local_run_exceptions: tuple[LocalRunException, ...] = ()
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> SprintCreateIntent:
@@ -134,6 +137,9 @@ class SprintCreateIntent:
             po_session=str(document.get("po_session")) if document.get("po_session") else None,
             allowed_productions=_strings(document.get("allowed_productions")),
             e2e_budget=int(document.get("e2e_budget", DEFAULT_E2E_BUDGET)),
+            local_run_exceptions=parse_local_run_exceptions(
+                document.get("local_run_exceptions", []), projects=_strings(document.get("reservations"))
+            ),
         )
 
     def to_document(self) -> dict[str, Any]:
@@ -158,6 +164,8 @@ class SprintCreateIntent:
             document["allowed_productions"] = list(self.allowed_productions)
         if self.e2e_budget != DEFAULT_E2E_BUDGET:
             document["e2e_budget"] = self.e2e_budget
+        if self.local_run_exceptions:
+            document["local_run_exceptions"] = [entry.to_document() for entry in self.local_run_exceptions]
         return document
 
     def admission(self, *, reference: str | None = None) -> SprintAdmission:

@@ -273,6 +273,7 @@ class FakeSprintOps:
         reviewer: str | None = None,
         role: str = "po",
         reference: str = "",
+        local_run_exceptions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         call = {
             "request_id": request_id,
@@ -286,6 +287,7 @@ class FakeSprintOps:
             "observer": observer,
             "worker": worker,
             "reviewer": reviewer,
+            "local_run_exceptions": local_run_exceptions or [],
         }
         self.calls.append(call)
         fingerprint = json.dumps(call, sort_keys=True)
@@ -458,6 +460,18 @@ class SprintRouteTests(SprintTransportFixture):
 
 
 class SprintFormTests(SprintTransportFixture):
+    def test_local_run_json_is_visible_passed_and_invalid_json_is_refused_before_create(self) -> None:
+        self.assertIn('name="local_run_exceptions"', self.form())
+        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
+        response = self.submit(self.valid(local_run_exceptions=json.dumps(entries)))
+        self.assertEqual(response.status, 303)
+        self.assertEqual(self.sprint_ops.calls[-1]["local_run_exceptions"], entries)
+        before = len(self.sprint_ops.calls)
+        for value in ("not JSON", "null", "{}"):
+            response = self.submit(self.valid(local_run_exceptions=value))
+            self.assertEqual(response.status, 400)
+        self.assertEqual(len(self.sprint_ops.calls), before)
+
     def test_the_form_offers_the_products_issues_projects_and_profiles_the_layer_answered(self) -> None:
         markup = self.form()
         for expected in (

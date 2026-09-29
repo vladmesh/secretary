@@ -1890,7 +1890,8 @@ python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID \
   [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE] \
-  [--po-session SESSION_ID] [--allow-production PROJECT_ID ...] [--e2e-budget N]
+  [--po-session SESSION_ID] [--allow-production PROJECT_ID ...] [--e2e-budget N] \
+  [--local-run-exceptions-file EXCEPTIONS.json]
 python3 -P -m secretary sprint list --status open
 python3 -P -m secretary sprint show --ref sprint:ID
 python3 -P -m secretary sprint status --ref sprint:ID
@@ -1905,6 +1906,39 @@ python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
 ```
+
+### Control-host local runs
+
+Worker and reviewer packets permit only the project's adapter-declared broad check and subsets
+locally. Integration shards, Docker/container runs, stands, provisioning and network-heavy checks
+run in CI only, except for exact vectors in the sprint's creation-only `local_run_exceptions` field.
+Development convenience, an acceptance criterion and missing/none/noop gate receipts grant no
+additional authority. Reviewers report an observed undeclared local heavy run as a blocking finding
+even if tests passed, and follow these bounds for their own verification. Receipt reuse and
+mandatory dispatcher-owned exact-SHA CI gates still apply.
+
+Create with `--local-run-exceptions-file EXCEPTIONS.json`, or pass `local_run_exceptions` to
+`SprintWriter.create` or `SprintOperationLayer.sprint_create`. The web creation form accepts the
+same JSON list. The default is `[]`, including released sprints and staged requests missing the
+field. An entry has exactly three keys:
+
+```json
+[{"project":"secretary","argv":["python3","-m","tests.integration","--case","two words"],"rationale":"Owner requires this exact local probe for this sprint"}]
+```
+
+`project` must be registered and reserved by the sprint. `argv` is a nonempty list of strings,
+starting with a nonempty executable; every argument boundary, including an empty argument, is
+preserved. `rationale` is nonempty text. Control characters are refused in all strings. Each
+entry grants only its exact vector, with no shell parsing, wildcard or inferred suite. Nonempty
+declarations are stored, audited and included in request identity: changing them under the same
+request id is refused. Empty defaults are omitted from request identity to preserve old retries.
+There is no post-creation mutation verb. Snapshots and restores preserve declarations.
+
+Both packet types render only entries for that card's sprint and project, and literal `none`
+otherwise. Malformed state or failed sprint reads authorize no exception. Card text, DoD prose,
+sprint comments and a head's judgement never grant one. A missing adapter module is a configuration
+gap: report the gap and evidence obtainable through CI or declared exceptions; workers cannot
+choose a replacement module, invent a command or run repository-wide discovery.
 
 The roles each sprint write admits:
 

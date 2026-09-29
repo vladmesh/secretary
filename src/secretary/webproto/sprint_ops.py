@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import SPRINT, board_client
+from secretary.board.local_run import parse_local_run_exceptions
 from secretary.config import InstanceReport, validate_instance
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import SprintWriter
@@ -235,6 +236,7 @@ class SprintOperationLayer(ProtocolBoundary):
         reviewer: str | None = None,
         role: str = "po",
         reference: str = "",
+        local_run_exceptions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Open one sprint, or hand back the sprint this request id already opened.
 
@@ -268,6 +270,14 @@ class SprintOperationLayer(ProtocolBoundary):
         issue_refs = list(issues or [])
         project_ids = list(projects or [])
         repository_roots = list(repositories or [])
+        try:
+            exceptions = [
+                entry.to_document() for entry in parse_local_run_exceptions(
+                    [] if local_run_exceptions is None else local_run_exceptions, projects=project_ids
+                )
+            ]
+        except ValueError as exc:
+            raise ValidationRefused(str(exc)) from None
         fingerprint = request_fingerprint(
             SPRINT_CREATE_OPERATION,
             {
@@ -288,6 +298,8 @@ class SprintOperationLayer(ProtocolBoundary):
                 # to keep them apart here as carefully as the entity does.
                 "worker": json.dumps(worker),
                 "reviewer": json.dumps(reviewer),
+                # Omit the empty default: old claimed web requests keep their fingerprint.
+                **({"local_run_exceptions": json.dumps(exceptions, sort_keys=True)} if exceptions else {}),
             },
         )
         existing = self._existing(store, request_id, fingerprint=fingerprint)
@@ -310,6 +322,7 @@ class SprintOperationLayer(ProtocolBoundary):
                 observer=observer_choice(observer),
                 worker=worker,
                 reviewer=reviewer,
+                local_run_exceptions=exceptions,
             )
         except TaskError as exc:
             raise self._refusal(exc, request_id=request_id) from None

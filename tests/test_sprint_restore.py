@@ -107,6 +107,29 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     def test_sprint_comments_have_only_the_shared_restore_representation(self) -> None:
         self.assertFalse(hasattr(SprintWriter, "restore_comment"))
 
+    def test_local_run_vectors_restore_export_and_replay_with_parity(self) -> None:
+        entries = [{"project": "secretary", "argv": ["python3", "-m", "tests.probe", "two words", ""], "rationale": "owner's exact probe"}]
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["local_run_exceptions"] = entries
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client, _count = self._restore()
+        live = SprintReader(client, data_dir=self.target_data).show(self.ref)
+        self.assertEqual(live["local_run_exceptions"], entries)
+        self.assertEqual(normalize_sprint_entity(live)["local_run_exceptions"], entries)
+        self._restore(client)
+        self.assertEqual(self.persisted_reference_count(client, self.ref), 1)
+        self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
+
+    def test_empty_local_run_default_restores_like_an_old_export(self) -> None:
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["local_run_exceptions"] = []
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client, _count = self._restore()
+        self.assertEqual(SprintReader(client).show(self.ref)["local_run_exceptions"], [])
+        self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
+
     def _seed_closed_sprint(self) -> str:
         writer = SprintWriter(  # type: ignore[arg-type]
             self.source,

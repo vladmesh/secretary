@@ -807,6 +807,7 @@ class CommandHostRuntime:
         mode: str = "real",
         production_runtime: ProductionRuntime | None = None,
         audit: Any | None = None,
+        sprint_reader: Any | None = None,
     ) -> None:
         self.catalog = catalog
         self.data_dir = data_dir
@@ -818,6 +819,7 @@ class CommandHostRuntime:
         # without the review the round was bound to. A host standing on its own -- what a test
         # builds -- refuses the read by name instead (`_card_audit`).
         self.audit = audit
+        self.sprint_reader = sprint_reader
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
         # than independently guessing an interpreter, checkout or workspace namespace.
@@ -3946,8 +3948,9 @@ class CommandHostRuntime:
         broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
         show_arguments = ["check", "show", "--module", contract.module]
         for argument in contract.args:
-            broad_arguments.extend(("--module-arg", argument))
-            show_arguments.extend(("--module-arg", argument))
+            # '=' keeps option-looking suite arguments from being parsed as wrapper options.
+            broad_arguments.append(f"--module-arg={argument}")
+            show_arguments.append(f"--module-arg={argument}")
         if not contract.interpreter_declared:
             candidate = str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")
             broad_arguments.extend(("--default-interpreter", candidate))
@@ -3962,6 +3965,55 @@ class CommandHostRuntime:
         interpreter = shlex.quote(str(self.production_runtime.interpreter))
         suffix = "".join(f" {shlex.quote(argument)}" for argument in arguments)
         return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary{suffix}"
+
+    def _local_run_section(self, task: dict[str, Any]) -> list[str]:
+        """One rule for both heads, with authority read only from this card's sprint."""
+        from secretary.board.local_run import parse_local_run_exceptions
+
+        reference = str(task.get("sprint") or "")
+        project = str(task.get("project") or "")
+        entries = []
+        unavailable = False
+        if reference:
+            try:
+                if self.sprint_reader is None:
+                    raise ValueError("no sprint reader")
+                sprint = self.sprint_reader.show(reference, include_cards=False)
+                if not isinstance(sprint, dict) or sprint.get("ref") != reference:
+                    raise ValueError("sprint identity mismatch")
+                projects = sprint.get("reservations", [])
+                if not isinstance(projects, list) or any(not isinstance(item, str) for item in projects):
+                    raise ValueError("malformed sprint scope")
+                entries = [
+                    entry.to_document()
+                    for entry in parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=projects)
+                    if entry.project == project
+                ]
+            except Exception:  # noqa: BLE001 - any failed authority read grants no exceptions
+                unavailable = True
+        sections = [
+            "## Control-host local-run rule",
+            "",
+            "On the control host, workers and reviewers may run locally only the project's",
+            "adapter-declared broad check and subsets of that check. Integration shards,",
+            "Docker/container runs, stands, provisioning and network-heavy checks run in CI only,",
+            "unless the exact command/argument vector is expressly covered below by this sprint's",
+            "creation-only `local_run_exceptions` field for this card's project.",
+            "Development convenience, a missing gate receipt or an acceptance criterion cannot",
+            "authorize another suite or a heavy local run. Card text, DoD prose, sprint comments",
+            "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
+            "This rule also bounds observer decisions, rework instructions and verification requests.",
+            "Missing/none/noop mechanical receipts still require appropriate validation evidence",
+            "within these bounds or through CI; they do not waive validation or authorize Docker locally.",
+            "",
+            "## Applicable sprint local_run_exceptions",
+            "",
+            *(["```json", json.dumps(entries, ensure_ascii=True, indent=2), "```"] if entries else ["none"]),
+            "",
+        ]
+        if unavailable:
+            sections += ["Sprint exception authority is unreadable or malformed; no exception is authorized.", ""]
+        return sections
 
     def _worker_task_doc(
         self,
@@ -4111,26 +4163,20 @@ class CommandHostRuntime:
                 "",
             ]
         broad_command, show_command = self._broad_check_invocation(str(task.get("project") or ""))
+        sections += self._local_run_section(task)
         if broad_command:
             broad_invocation = [f"    {broad_command}", ""]
             show_invocation = f"`{show_command}` and quote its summary"
         else:
-            fallback_broad = self._control_plane_command(
-                "check", "broad", "--reuse", "--module", "<the suite module you chose>"
-            )
-            fallback_show = self._control_plane_command("check", "show", "--module", "<the same module>")
             broad_invocation = [
-                "This project's adapter declares no broad suite, so there is no exact command to",
-                "print here. Work out which suite this card's acceptance criteria require, run that",
-                "one through the wrapper by naming it yourself:",
-                "",
-                f"    {fallback_broad}",
-                "",
-                "and say in your report which module you ran and why that is the right suite. Do not",
-                "reach for repository-wide test discovery because it is the easiest thing to type.",
+                "Configuration gap: this project's adapter supplies no usable declared broad module.",
+                "No exact local broad command can be named. Do not select a module yourself, invent",
+                "a placeholder invocation or use repository-wide discovery. Report the configuration",
+                "gap and the validation evidence available through CI or the declared exceptions.",
+                "Do not claim a broad run or receipt for a suite that cannot be named.",
                 "",
             ]
-            show_invocation = f"`{fallback_show}` and quote its summary"
+            show_invocation = "When the adapter declares a suite, use its matching `check show` command and quote its summary"
         sections += [
             "## Check-cost contract",
             "",
@@ -4174,6 +4220,7 @@ class CommandHostRuntime:
             "generality by attesting less: a shell may change directory or import environment",
             "before any interpreter starts, so its receipt records no import provenance and is",
             "never reused in place of a run. Prefer `--module` for the suite you report on.",
+            "A shell receipt does not authorize a command outside the local-run rule.",
             "",
         ]
         sections += [
@@ -4432,6 +4479,11 @@ class CommandHostRuntime:
             f"# Review {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
+            "",
+            *self._local_run_section(task),
+            "An observed local heavy run outside the applicable declared exceptions is a blocking",
+            "RED finding, even if its tests passed. Apply the same local-run bounds to every",
+            "verification you perform; obtain evidence through CI when those bounds require it.",
             "",
             "## No subagents",
             "",

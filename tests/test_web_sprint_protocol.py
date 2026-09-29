@@ -269,6 +269,25 @@ class ExecutorPinTests(SprintProtocolFixture):
 class IdempotencyTests(SprintProtocolFixture):
     """Criteria 3 and 4: a request id owns the sprint, and a half-done create is resumed."""
 
+    def test_local_run_exceptions_reach_entity_reads_and_request_fingerprint(self) -> None:
+        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's exact probe"}]
+        created = self.create(local_run_exceptions=entries)
+        self.assertEqual(validate(created, "web-sprint", created["kind"]), [])
+        self.assertEqual(created["sprint"]["sprint"]["value"]["local_run_exceptions"], entries)
+        repeated = self.create(local_run_exceptions=entries)
+        self.assertFalse(repeated["created"])
+        self.assertEqual(self.reference_of(repeated), self.reference_of(created))
+        for changed in ([], [{**entries[0], "argv": ["docker", "run", "changed"]}]):
+            with self.subTest(changed=changed), self.assertRaises(ValidationRefused):
+                self.create(local_run_exceptions=changed)
+
+    def test_old_web_create_fingerprint_keeps_the_empty_default(self) -> None:
+        created = self.create()
+        with mock.patch("secretary.sprints.SprintWriter.create") as never:
+            repeated = self.create(local_run_exceptions=[])
+        self.assertEqual(self.reference_of(repeated), self.reference_of(created))
+        never.assert_not_called()
+
     def test_a_repeat_returns_the_same_sprint_and_creates_no_second_one(self) -> None:
         first = self.create()
         second = self.create()

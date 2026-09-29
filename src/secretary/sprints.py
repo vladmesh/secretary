@@ -23,6 +23,11 @@ from secretary.board.backend import (
 )
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.e2e_budget import DEFAULT_E2E_BUDGET
+from secretary.board.local_run import (
+    LOCAL_RUN_EXCEPTIONS_FIELD,
+    parse_local_run_exceptions,
+    stored_local_run_exceptions,
+)
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
@@ -117,6 +122,7 @@ SPRINT_METADATA = {
     *EXECUTOR_FIELDS.values(),
     PO_SESSION_FIELD,
     ALLOWED_PRODUCTIONS_FIELD,
+    LOCAL_RUN_EXCEPTIONS_FIELD,
     sprint_e2e.SPRINT_E2E_BUDGET,
     sprint_e2e.SPRINT_E2E_USED,
     sprint_e2e.SPRINT_E2E_CHARGES,
@@ -663,6 +669,12 @@ class SprintReader:
         read = SprintReadMetadata.from_legacy(meta, thresholds=self.thresholds, now=_now)
         repositories = list(read.repositories)
         budget = read.budget.to_document()
+        try:
+            local_run_exceptions = stored_local_run_exceptions(
+                meta.get(LOCAL_RUN_EXCEPTIONS_FIELD), projects=_ownership(meta).get("reservations", [])
+            )
+        except ValueError as exc:
+            raise TaskError("backend_error", f"malformed sprint local_run_exceptions: {exc}", 1) from None
         result: dict[str, Any] = {
             "id": entity_id("sprint", task_id),
             "ref": _text(raw.get("reference")),
@@ -677,6 +689,7 @@ class SprintReader:
             # Null and empty for a sprint opened before either was recorded, never inferred.
             "po_session": meta.get(PO_SESSION_FIELD) or None,
             "allowed_productions": _json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)),
+            "local_run_exceptions": local_run_exceptions,
             # The e2e run budget (0023): `e2e: <used> of <budget>`, and the cards that spent the runs.
             "e2e": sprint_e2e.sprint_budget(meta),
             "status": read.state.value,
@@ -812,6 +825,7 @@ class SprintReader:
             # The PO session this sprint answers to and the productions it may touch.
             "po_session": sprint.get("po_session"),
             "allowed_productions": list(sprint.get("allowed_productions") or []),
+            "local_run_exceptions": sprint.get("local_run_exceptions", []),
             # The e2e run budget: runs used of the budget, and the cards that spent them.
             "e2e": sprint.get("e2e") or sprint_e2e.sprint_budget({}),
             # This sprint's own cards that owe a worker no dispatcher record can name
@@ -1026,6 +1040,7 @@ class SprintWriter:
         po_session: str | None = None,
         allowed_productions: list[str] | None = None,
         e2e_budget: int | None = None,
+        local_run_exceptions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -1045,6 +1060,7 @@ class SprintWriter:
             po_session=po_session,
             allowed_productions=allowed_productions or [],
             e2e_budget=e2e_budget,
+            local_run_exceptions=local_run_exceptions,
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -1151,6 +1167,7 @@ class SprintWriter:
         po_session: str | None = None,
         allowed_productions: list[str] | None = None,
         e2e_budget: int | None = None,
+        local_run_exceptions: list[dict[str, Any]] | None = None,
     ) -> SprintCreateIntent:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -1182,6 +1199,12 @@ class SprintWriter:
             e2e_budget = DEFAULT_E2E_BUDGET
         if isinstance(e2e_budget, bool) or not isinstance(e2e_budget, int) or e2e_budget < 0:
             raise TaskError("validation", f"--e2e-budget is a whole number of runs, 0 or more; not {e2e_budget!r}", 2)
+        try:
+            exceptions = parse_local_run_exceptions(
+                [] if local_run_exceptions is None else local_run_exceptions, projects=reservations
+            )
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
         return SprintCreateIntent(
             role=Role(role),
             actor=actor,
@@ -1203,6 +1226,7 @@ class SprintWriter:
             po_session=str(po_session or "").strip() or None,
             allowed_productions=self._productions_intent(allowed_productions or []),
             e2e_budget=e2e_budget,
+            local_run_exceptions=exceptions,
         )
 
     @staticmethod
@@ -1612,6 +1636,10 @@ class SprintWriter:
         # Only a budget other than the column's default: the read names it only then.
         if intent.e2e_budget != DEFAULT_E2E_BUDGET:
             values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
+        if intent.local_run_exceptions:
+            values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
+                [entry.to_document() for entry in intent.local_run_exceptions], separators=(",", ":")
+            )
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:

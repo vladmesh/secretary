@@ -332,8 +332,8 @@ class SchemaModelTests(unittest.TestCase):
         self.assertNotIn("schema_migrations", schema.metadata.tables)
         self.assertNotIn("alembic_version", schema.metadata.tables)
 
-    def test_jsonb_is_exactly_the_seven_columns_section_3_10_names(self) -> None:
-        """Seven since `0004` added lossless Product metadata as (J7)."""
+    def test_jsonb_is_exactly_the_eight_columns_section_3_10_names(self) -> None:
+        """Eight since `0026` added creation-only local-run authority as (J8)."""
         from sqlalchemy.dialects.postgresql import JSONB
 
         found = {
@@ -357,8 +357,8 @@ class SchemaModelTests(unittest.TestCase):
         ]
 
         # 56 since `0022` added `origin_returns` with three (secretary-1792); 57 since `0023` added the
-        # sprint's e2e counts (secretary-1796).
-        self.assertEqual(len(checks), 57, "§3.13 counts 57 CHECK constraints at the head revision")
+        # sprint's e2e counts (secretary-1796); 58 since `0026` added the local-run array shape.
+        self.assertEqual(len(checks), 58, "§3.13 counts 58 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -484,6 +484,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0026_sprint_local_runs",
                 "0025_card_waits_for_person",
                 "0024_e2e_after_merge_kind",
                 "0023_sprint_e2e_budget",

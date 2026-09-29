@@ -10,3 +10,11 @@ An execution card belongs to an open sprint. An open sprint reserves its project
 An optional observer follows sprint-level progress and decisions. It does not replace the worker or reviewer, and it does not claim cards. A stopped or closed sprint is not permission to continue changing its old card contract: start or reopen the appropriate planned work through the normal protocol.
 
 Use sprint comments for durable communication about the sprint. Keep goals, Definition of Done, decisions, and blockers specific enough that another role can act on them without reconstructing context from a conversation.
+
+Worker and reviewer local checks on the control host are limited to the project's adapter broad
+check and its subsets. Integration shards, Docker/container runs, stands, provisioning and
+network-heavy checks belong in CI. Exceptions come only from the sprint's creation-only
+`local_run_exceptions` list of `{project, argv, rationale}` entries, scoped to registered projects
+reserved by that sprint; default `[]`. Use `sprint create --local-run-exceptions-file` to declare
+them. Prose and missing gate receipts grant no exception. An undeclared local heavy run is a
+blocking review finding even if it passed.

@@ -35,6 +35,7 @@ from secretary._fsutil import (
     write_ndjson as _write_ndjson,
 )
 from secretary.board.backend import CARD, SPRINT, board_client
+from secretary.board.local_run import parse_local_run_exceptions
 from secretary.config import validate
 from secretary.memory_journal import export_memory_snapshot
 from secretary.tasks import TaskError, TaskReader, task_audit_for
@@ -281,6 +282,11 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
     )
     resume = sprint.get("resume")
     comments = sprint.get("comments")
+    local_run_exceptions = [
+        entry.to_document() for entry in parse_local_run_exceptions(
+            sprint.get("local_run_exceptions", []), projects=sprint.get("reservations", [])
+        )
+    ]
     return {
         "reference": str(sprint.get("ref") or ""),
         "goal": str(sprint.get("goal") or ""),
@@ -304,6 +310,7 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         # Carried only where the sprint has them (0016), so a record of a sprint opened before
         # them stays byte-identical to the record this export always wrote.
         **({"po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
+        **({"local_run_exceptions": local_run_exceptions} if local_run_exceptions else {}),
         **(
             {"allowed_productions": [str(project) for project in sprint["allowed_productions"]]}
             if sprint.get("allowed_productions")

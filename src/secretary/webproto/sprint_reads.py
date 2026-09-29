@@ -2034,6 +2034,7 @@ def _identity(row: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
         "executors": view.get("executors") or stored_executors({}),
         "po_session": view.get("po_session"),
         "allowed_productions": list(view.get("allowed_productions") or []),
+        "local_run_exceptions": view.get("local_run_exceptions", []),
         "budget": view.get("budget"),
     }
 
@@ -2675,6 +2676,7 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
         # a sprint opened before either was recorded.
         "po_session": sprint.get("po_session"),
         "allowed_productions": list(sprint.get("allowed_productions") or []),
+        "local_run_exceptions": sprint.get("local_run_exceptions", []),
         # The e2e run budget: `e2e: <used> of <budget>` and the cards that spent the runs (secretary-1796).
         "e2e": sprint.get("e2e"),
         "resume": sprint.get("resume"),

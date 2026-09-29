@@ -223,6 +223,7 @@ SPRINT_FIELDS = frozenset(
         "observer",
         "worker",
         "reviewer",
+        "local_run_exceptions",
     }
 )
 
@@ -758,6 +759,12 @@ class WebApp:
         _fields(body, SPRINT_FIELDS, "sprint create")
         submitted = _submission(body)
         errors = _incomplete(submitted)
+        try:
+            local_run_exceptions = json.loads(submitted["local_run_exceptions"] or "[]")
+            if not isinstance(local_run_exceptions, list):
+                raise ValueError("local_run_exceptions must be a list")  # noqa: TRY004 - uniform JSON value validation
+        except ValueError:
+            errors["local_run_exceptions"] = "Enter a JSON list of project, argv and rationale entries."
         if errors:
             # Nothing reached the layer, so this id was never claimed and is still the right one.
             return self._form_again(submitted, errors=errors, status=400)
@@ -774,6 +781,7 @@ class WebApp:
                 observer=submitted["observer"],
                 worker=_pin(submitted["worker"]),
                 reviewer=_pin(submitted["reviewer"]),
+                local_run_exceptions=local_run_exceptions,
             )
         except OperationPending as exc:
             return self._form_again(submitted, errors={}, status=status_for(exc.code), refusal=exc)
@@ -1172,6 +1180,7 @@ def _submission(form: dict[str, Any]) -> dict[str, Any]:
         "observer": _first(form, "observer"),
         "worker": _first(form, "worker"),
         "reviewer": _first(form, "reviewer"),
+        "local_run_exceptions": _first(form, "local_run_exceptions"),
     }
 
 
