@@ -17,6 +17,7 @@ from secretary.dispatch.git_workspace import orca_workspaces_root, workspace_roo
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.types import DispatcherError
+from secretary.sprints import SprintReader
 from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 
 
@@ -59,7 +60,7 @@ def runtime_from_args(
         audit,
         data,
         catalog,
-        CommandHostRuntime(catalog, data, mode=host_mode, audit=audit),
+        CommandHostRuntime(catalog, data, mode=host_mode, audit=audit, sprint_reader=SprintReader(client)),
         owner=owner,
         checkpoint=CheckpointWriter(data, catalog.instance_dir),
         checkpoint_push=CheckpointPusher(catalog.instance_dir),

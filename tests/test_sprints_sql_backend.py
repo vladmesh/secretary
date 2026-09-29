@@ -52,6 +52,42 @@ class SqlSprintAtomicityTests(SprintFixture):
             [(0,)],
         )
 
+    def test_sql_local_run_authority_survives_new_reader_and_rollback(self) -> None:
+        from secretary.sprints import SprintReader
+
+        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
+        options = {"role": "po", "actor": "operator", "goal": "declared", "product": "secretary",
+                   "issues": ["issue:open"], "projects": ["secretary"], "observer": {"kind": "none"},
+                   "reference": "sprint:atomic", "request_id": "local-sql", "local_run_exceptions": entries}
+        original = self.client.sprints._replace_relations
+        with mock.patch.object(self.client.sprints, "_replace_relations", side_effect=self._after(original)), self.assertRaises(TaskError):
+            self.writer.create(**options)
+        self._assert_no_request("local-sql")
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprints"), [(0,)])
+        first = self.writer.create(**options)
+        self.assertEqual(self.client._query("SELECT local_run_exceptions FROM sprints WHERE ref=%s", ("sprint:atomic",)), [(entries,)])
+        self.assertEqual(SprintReader(self.client).show("sprint:atomic")["local_run_exceptions"], entries)
+        self.assertEqual(self.writer.create(**options)["event_id"], first["event_id"])
+        with self.assertRaises(TaskError):
+            self.writer.create(**{**options, "local_run_exceptions": []})
+
+    def test_released_staged_create_without_field_replays_at_empty_default(self) -> None:
+        intent = self.writer._create_intent(
+            role="po", actor="operator", goal="old staged request", definition_of_done="",
+            repositories=[], product="secretary", issues=["issue:open"], reservations=["secretary"],
+            reference="sprint:atomic", observer={"kind": "none"},
+        ).to_document()
+        self.assertNotIn("local_run_exceptions", intent)
+        event = self.writer._event("created", "po", "operator", "sprint:atomic", "old-staged", {"intent": intent})
+        self.writer.audit.stage("old-staged", event)
+        options = {"role": "po", "actor": "operator", "goal": "old staged request", "product": "secretary",
+                   "issues": ["issue:open"], "projects": ["secretary"], "observer": {"kind": "none"},
+                   "reference": "sprint:atomic", "request_id": "old-staged", "local_run_exceptions": []}
+        result = self.writer.create(**options)
+        self.assertEqual(result["event_id"], event["event_id"])
+        self.assertEqual(result["sprint"]["local_run_exceptions"], [])
+        self.assertEqual(self.writer.create(**options)["event_id"], event["event_id"])
+
     @staticmethod
     def _after(original):
         def fail(*args, **kwargs):

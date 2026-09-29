@@ -3581,6 +3581,10 @@ def sprint_form(
             _observer_field(heads, submitted, errors),
             _executor_field("worker", "worker", heads, submitted),
             _executor_field("reviewer", "reviewer", heads, submitted),
+            _text_field(
+                "local_run_exceptions", "local run exceptions (JSON)", submitted, errors,
+                hint="optional list of {project, argv, rationale}; empty means none; each project must be reserved here",
+            ),
             '<button type="submit">start this sprint</button>',
             "</form>",
             f'<p class="hint empty">{escape(START_NOTICE)}</p>',

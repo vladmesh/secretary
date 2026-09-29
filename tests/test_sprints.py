@@ -72,6 +72,31 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(self._events(), [])
         self.assertEqual(self.sprint_record_count(), 0)
 
+    def test_local_run_declarations_persist_read_audit_and_own_request_identity(self) -> None:
+        entries = [{"project": "secretary", "argv": ["python3", "-m", "tests.probe", "two words", ""], "rationale": "owner's exact probe"}]
+        first = self._create(goal="declared", request_id="local-runs", local_run_exceptions=entries)
+        reference = first["sprint"]["ref"]
+        self.assertEqual(SprintReader(self.client).show(reference)["local_run_exceptions"], entries)
+        self.assertEqual(first["sprint"]["local_run_exceptions"], entries)
+        self.assertEqual(self._events()[0]["payload"]["intent"]["local_run_exceptions"], entries)
+        self.assertEqual(self._create(goal="declared", request_id="local-runs", local_run_exceptions=entries)["event_id"], first["event_id"])
+        for changed in ([], [{**entries[0], "argv": ["docker", "run"]}], [{**entries[0], "rationale": "changed"}]):
+            with self.subTest(changed=changed), self.assertRaises(TaskError):
+                self._create(goal="declared", request_id="local-runs", local_run_exceptions=changed)
+        self.assertEqual(len(self._events()), 1)
+
+    def test_default_local_runs_replay_old_identity_and_reject_unknown_project(self) -> None:
+        with self.assertRaises(TaskError):
+            self._create(goal="unknown", projects=["unregistered"], local_run_exceptions=[
+                {"project": "unregistered", "argv": ["docker", "run"], "rationale": "probe"}
+            ])
+        self._assert_nothing_was_written()
+        first = self._create(goal="old-default", request_id="old-default")
+        self.assertNotIn("local_run_exceptions", self._events()[0]["payload"]["intent"])
+        replay = self._create(goal="old-default", request_id="old-default", local_run_exceptions=[])
+        self.assertEqual(replay["event_id"], first["event_id"])
+        self.assertEqual(replay["sprint"]["local_run_exceptions"], [])
+
     def test_create_requires_product_issue_and_reservation_before_any_write(self) -> None:
         for kwargs, message in (
             ({"product": ""}, "owning product"),

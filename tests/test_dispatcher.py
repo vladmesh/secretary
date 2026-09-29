@@ -9845,8 +9845,8 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
         self.assertIn("    PYTHONPATH=", doc)
-        self.assertIn("python3 -P -m secretary check broad --reuse --module tests.broad --module-arg -v", doc)
-        self.assertIn("python3 -P -m secretary check show --module tests.broad --module-arg -v", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module tests.broad --module-arg=-v", doc)
+        self.assertIn("python3 -P -m secretary check show --module tests.broad --module-arg=-v", doc)
         self.assertNotIn("<this project's broad suite module>", doc)
         self.assertNotIn("<the same module>", doc)
 
@@ -9861,7 +9861,7 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
         self.assertIn(
-            "--module tests.broad --module-arg --only --module-arg 'fast lane'",
+            "--module tests.broad --module-arg=--only '--module-arg=fast lane'",
             doc,
         )
 
@@ -9872,8 +9872,8 @@ class HeadPromptTests(unittest.TestCase):
         issue:81a0a1e5c15225fa360e removed that, so silence is a refusal and never reaches a task
         packet at all. The branch is still live for a DECLARED contract written before `module`
         existed — `codegen-orchestrator` and `service-template` are exactly that today — and the
-        honest answer is still to tell the worker it has to choose and to name the habit it must
-        not fall into.
+        honest answer is a configuration gap. secretary-1842 removes worker-chosen suites:
+        only adapter checks and declared sprint exceptions may run locally.
         """
         self.host.catalog.broad_check_state = ContractVerdict.as_fit(
             ModuleContract(sys.executable, "secretary"), "secretary"
@@ -9881,9 +9881,10 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("This project's adapter declares no broad suite", doc)
-        self.assertIn("<the suite module you chose>", doc)
-        self.assertIn("say in your report which module you ran and why", doc)
+        self.assertIn("Configuration gap", doc)
+        self.assertNotIn("<the suite module you chose>", doc)
+        self.assertIn("Do not select a module yourself", doc)
+        self.assertNotIn(" -m secretary check broad ", doc)
         self.assertNotIn("<this project's broad suite module>", doc)
 
     def test_an_unreadable_registry_never_stops_the_packet_from_rendering(self) -> None:
@@ -9896,7 +9897,7 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("This project's adapter declares no broad suite", doc)
+        self.assertIn("Configuration gap", doc)
 
     def test_github_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
         self.host.catalog._adapter = {"validation": {"ci": "github"}}
@@ -10539,8 +10540,8 @@ class HeadPromptTests(unittest.TestCase):
                     self.assertNotIn("python3 -m secretary", command)
                 calls = [call.args for call in rendered.call_args_list]
                 self.assertGreaterEqual(sum(call[:1] == ("task",) for call in calls), 5)
-                self.assertTrue(any(call[:2] == ("check", "broad") for call in calls))
-                self.assertTrue(any(call[:2] == ("check", "show") for call in calls))
+                self.assertEqual(any(call[:2] == ("check", "broad") for call in calls), has_candidate_default)
+                self.assertEqual(any(call[:2] == ("check", "show") for call in calls), has_candidate_default)
                 self.assertEqual(
                     "--default-interpreter .secretary-task-env/venv/bin/python3" in worker,
                     has_candidate_default,

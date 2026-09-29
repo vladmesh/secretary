@@ -20,6 +20,7 @@ from secretary.board.e2e_budget import (
     SPRINT_E2E_CHARGES,
     SPRINT_E2E_USED,
 )
+from secretary.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD
 
 
 def _now() -> datetime:
@@ -162,7 +163,7 @@ class SqlSprintRecords:
         for values in self.client._query(
             "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
             "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions, "
-            "e2e_budget, e2e_used "
+            "e2e_budget, e2e_used, local_run_exceptions "
             "FROM sprints "
             "WHERE board_key = ANY(%s::bigint[])",
             (keys,),
@@ -224,7 +225,7 @@ class SqlSprintRecords:
         for key in keys:
             (
                 reference, goal, dod, product, status, observer, worker, reviewer, current, source,
-                po_session, productions, e2e_budget, e2e_used,
+                po_session, productions, e2e_budget, e2e_used, local_run_exceptions,
             ) = rows[key]
             reference = str(reference)
             values: dict[str, str] = {
@@ -260,6 +261,11 @@ class SqlSprintRecords:
                 values["sprint_allowed_productions"] = json.dumps(
                     [str(project) for project in productions], separators=(",", ":")
                 )
+            # JSONB orders object keys independently of the create intent. Use the same canonical
+            # representation as the writer's metadata proof, preserving every array's order.
+            values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
+                local_run_exceptions, sort_keys=True, separators=(",", ":")
+            )
             # The e2e run budget (0023), only where it is not the default a sprint reads without it (3,
             # nothing used, no charge), as the 0016 fields: a sprint that never spent a run reads as it did.
             if int(e2e_budget) != DEFAULT_E2E_BUDGET:
@@ -313,14 +319,15 @@ class SqlSprintRecords:
         self.client._execute(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, "
-            "allowed_productions, e2e_budget, e2e_used, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s,%s,%s)",
+            "allowed_productions, e2e_budget, e2e_used, local_run_exceptions, created_at, updated_at, closed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s::jsonb,%s,%s,%s)",
             (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
              meta.get("sprint_source_audit") or None, meta.get("sprint_po_session") or None,
              self._productions(meta.get("sprint_allowed_productions")),
              int(meta.get(SPRINT_E2E_BUDGET) or DEFAULT_E2E_BUDGET), int(meta.get(SPRINT_E2E_USED) or 0),
+             meta.get(LOCAL_RUN_EXCEPTIONS_FIELD, "[]"),
              now, now, None if status == "open" else now),
         )
         self._replace_relations(reference, meta)
@@ -450,6 +457,9 @@ class SqlSprintRecords:
         if "sprint_allowed_productions" in values:
             assignments.append("allowed_productions = %s::text[]")
             params.append(self._productions(values["sprint_allowed_productions"]))
+        if LOCAL_RUN_EXCEPTIONS_FIELD in values:
+            assignments.append("local_run_exceptions = %s::jsonb")
+            params.append(values[LOCAL_RUN_EXCEPTIONS_FIELD])
         # The budget as a sprint is created or restored with it, and a raise, which adds in place.
         if SPRINT_E2E_BUDGET in values:
             assignments.append("e2e_budget = %s")

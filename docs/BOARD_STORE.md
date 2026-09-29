@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0024` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0026` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/release_migrations.py` | the release's target bundle, its eligibility and bounded apply (§7.4) |
 | `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
@@ -80,7 +80,7 @@ keys cannot cross kinds.
 Conventions: `text` identifiers, `timestamptz` times, surrogate `bigint` keys only where a row has
 no natural key. Every reference between entities is a foreign key; a reference meaningful only
 within one sprint is a composite foreign key carrying the sprint (§3.3, §3.4, §3.8). Closed
-vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in seven columns (§3.10).
+vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in eight columns (§3.10).
 
 The DDL is grouped by entity. Forward and mutual references are added with `ALTER TABLE` after both
 tables exist (§3.13). `board/schema.py` is authoritative; the DDL below mirrors it.
@@ -183,6 +183,7 @@ CREATE TABLE sprints (
     reviewer_pin       text,
     po_session         text,                          -- the PO session it answers to (0016)
     allowed_productions text[] NOT NULL DEFAULT '{}', -- projects its operations may touch (0016)
+    local_run_exceptions jsonb NOT NULL DEFAULT '[]', -- exact command authority at create (0026, J8)
     e2e_budget         integer NOT NULL DEFAULT 3,    -- e2e runs it may dispatch (0023)
     e2e_used           integer NOT NULL DEFAULT 0,    -- e2e runs it dispatched (0023)
     current_task_ref   text,                          -- scoped cursor, below
@@ -195,6 +196,7 @@ CREATE TABLE sprints (
     closed_at          timestamptz,
     CONSTRAINT sprint_closed_has_time CHECK ((status = 'open') = (closed_at IS NULL)),
     CONSTRAINT sprint_e2e_counts_are_not_negative CHECK (e2e_budget >= 0 AND e2e_used >= 0),
+    CONSTRAINT sprint_local_runs_are_array CHECK (jsonb_typeof(local_run_exceptions) = 'array'),
     CONSTRAINT sprint_ref_is_a_sprint_reference CHECK (ref ~ '^sprint:'),
     CONSTRAINT sprint_number_agrees_with_ref CHECK (
         (ref ~ '^sprint:[0-9]+$') = (sprint_number IS NOT NULL) AND
@@ -641,7 +643,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 - One advisory lock (`secretary.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
 
-### 3.10 The seven `jsonb` columns
+### 3.10 The eight `jsonb` columns
 
 | Column | Content |
 |---|---|
@@ -652,6 +654,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | (J5) `requests.intent` | the frozen audit record compared on retry |
 | (J6) `issues.extensions` | (J3) for Issues |
 | (J7) `products.extensions` | (J3) for Products |
+| (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
 No extension bag may hold a field the schema names. Link sets, budget counters, resume fields and
 close decisions are relational.
@@ -737,7 +740,8 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0022_origin_returns` | `origin_returns`, the origin-return outbox (`board/origin_outbox.py`): `id` identity, `task_ref`, `event_id` unique as `origin_return_event_is_unique`, `request_id`, `target_state` (`origin_return_target_is_terminal`: done or blocked), `created_at`, and the delivery `delivered_at`, `status` (`origin_return_status_in_vocabulary`: delivered or skipped; `origin_return_status_with_its_delivery`: set exactly with `delivered_at`), `notice`, `session`, `po_request_id`; the partial index `origin_returns_undelivered` (`id` where `delivered_at IS NULL`) and `origin_returns_by_card`; one new table, every existing row loads unchanged; the downgrade drops it |
 | `0023_sprint_e2e_budget` | `sprints.e2e_budget` (integer, not null, default 3) and `sprints.e2e_used` (integer, not null, default 0) with `sprint_e2e_counts_are_not_negative`: every existing sprint, open ones included, loads with a budget of 3 and nothing used; `sprint_e2e_charges` (`dispatch_id` primary key, `sprint_ref` references `sprints` on delete cascade, `task_ref`, `charged_at`; index `sprint_e2e_charges_by_sprint`); `e2e_budget_spent` in `owner_event_kind_in_vocabulary` and, as a `needs_owner` kind, in `owner_event_class_follows_kind`, both restated; the downgrade restores `0021`'s two constraints and drops the table and the columns, and fails while an `e2e_budget_spent` event exists |
 | `0024_e2e_after_merge_kind` | `e2e_after_merge` in `owner_event_kind_in_vocabulary` and, as a `needs_owner` kind, in `owner_event_class_follows_kind`, both restated: an after-merge e2e run that needs the owner (secretary-1807); the after-merge records themselves are typed fields of a card's `e2e` bag field, no column; the downgrade restores `0023`'s two constraints and fails while an `e2e_after_merge` event exists |
-| `0025_card_waits_for_person` | additive widening of the owner-event vocabulary/class constraints for real sprint Blocked decisions and PO waits; backfills unresolved open sprint waits lacking an open needs_owner event, skips superseded/archived/wait cards, preserves prior rows; no column or new ledger; downgrade refuses while the added kind exists (head) |
+| `0025_card_waits_for_person` | additive widening of the owner-event vocabulary/class constraints for real sprint Blocked decisions and PO waits; backfills unresolved open sprint waits lacking an open needs_owner event, skips superseded/archived/wait cards, preserves prior rows; no column or new ledger; downgrade refuses while the added kind exists |
+| `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -749,7 +753,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 57 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 58 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1094,7 +1098,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0025_card_waits_for_person`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0026_sprint_local_runs`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

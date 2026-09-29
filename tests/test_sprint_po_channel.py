@@ -106,6 +106,26 @@ class CreateCommandTests(unittest.TestCase):
     def test_the_flag_is_recorded(self) -> None:
         self.assertEqual(self.create("--po-session", "s-flag")["po_session"], "s-flag")
 
+    def test_local_run_exceptions_json_file_and_default_reach_writer(self) -> None:
+        entries = [{"project": "secretary", "argv": ["docker", "run", "two words", ""], "rationale": "owner's probe"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "exceptions.json"
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            self.assertEqual(self.create("--local-run-exceptions-file", str(path))["local_run_exceptions"], entries)
+        self.assertEqual(self.create()["local_run_exceptions"], [])
+
+    def test_local_run_file_refuses_invalid_json_and_null_before_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "exceptions.json"
+            for value in ("not JSON", "null", "{}"):
+                path.write_text(value, encoding="utf-8")
+                with mock.patch.object(sprint_commands, "_write") as write, mock.patch("sys.stderr"):
+                    code = main(["sprint", "create", "--role", "po", "--goal", "g", "--product", "secretary",
+                                 "--issue", "issue:open", "--project", "secretary", "--observer", "none",
+                                 "--local-run-exceptions-file", str(path)])
+                self.assertEqual(code, 2)
+                write.assert_not_called()
+
     def test_inside_a_po_turn_the_environment_is_the_default_and_the_flag_wins(self) -> None:
         self.assertEqual(self.create(env={PO_SESSION_ENV: "s-turn"})["po_session"], "s-turn")
         self.assertEqual(
@@ -287,6 +307,7 @@ class SqlAdapterTests(unittest.TestCase):
                 # `e2e_budget` and `e2e_used`, as 0023 gave every sprint (secretary-1796).
                 3,
                 0,
+                [],  # creation-only local-run exceptions (0026)
             )
             self.executed: list[tuple[str, tuple]] = []
 
