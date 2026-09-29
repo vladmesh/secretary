@@ -113,7 +113,13 @@ class _RecordingHost(CommandHostRuntime):
     def _worker_task_doc(self, *args: Any, **kwargs: Any) -> str:
         return "task\n"
 
-    def _review_document(self, task: dict[str, Any], record: DispatcherRecord) -> tuple[Path, str]:
+    def _review_document(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
+    ) -> tuple[Path, str]:
         return Path(record.workspace).parent / "review.md", "review it"
 
     def _launch(self, workspace: str, title: str, head: str, prompt_file: str, **kwargs: Any) -> LaunchedHead:

@@ -833,6 +833,7 @@ class FakeHost:
         generation: int = 0,
         failover: bool = False,
         heartbeat_run_id: str = "",
+        local_run_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)

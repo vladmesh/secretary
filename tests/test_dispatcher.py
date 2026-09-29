@@ -12523,6 +12523,7 @@ class GitBranchHost(CommandHostRuntime):
         task: dict | None = None,
         failover: bool = False,
         heartbeat_run_id: str = "",
+        local_run_policy: tuple[dict | None, bool] | None = None,
     ) -> LaunchedHead:
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
