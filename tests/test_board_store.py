@@ -34,6 +34,7 @@ from secretary.board.store import (
 )
 from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 from tests import container_cleanup
+from tests import sql_backend_fixtures
 
 COMPLETE = {
     "SECRETARY_DB_HOST": "127.0.0.1",
@@ -377,6 +378,22 @@ class ProvisionDefinitionTests(unittest.TestCase):
 
 
 class TestContainerCleanupTests(unittest.TestCase):
+    def test_direct_fixture_registers_cleanup_before_port_inspection(self) -> None:
+        with (
+            mock.patch.object(sql_backend_fixtures.atexit, "register") as register,
+            mock.patch.object(
+                sql_backend_fixtures,
+                "docker",
+                side_effect=["exact-id", RuntimeError("port inspection failed")],
+            ),
+            mock.patch.object(sql_backend_fixtures, "remove_test_container") as remove,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "port inspection failed"):
+                sql_backend_fixtures.PostgresBoard()
+            register.assert_called_once()
+            register.call_args.args[0]()
+            remove.assert_called_once_with("exact-id")
+
     def test_direct_container_requires_exact_id_and_current_pid(self) -> None:
         for labels in ({}, {TEST_BOARD_LABEL: str(os.getpid() + 1)},
                        {TEST_BOARD_LABEL: str(os.getpid()), PRODUCTION_BOARD_LABEL: "true"}):
@@ -399,16 +416,19 @@ class TestContainerCleanupTests(unittest.TestCase):
             container_cleanup.remove_test_container("exact-id")
         self.assertEqual(calls[-1], ("rm", "-f", "exact-id"))
 
-    def test_missing_or_ambiguous_compose_target_does_not_sweep(self) -> None:
+    def test_missing_or_ambiguous_compose_target_does_not_sweep_preexisting_same_name_volume(self) -> None:
         with mock.patch.object(container_cleanup, "_docker", return_value="one\ntwo") as docker:
             with self.assertRaisesRegex(RuntimeError, "ambiguous"):
                 container_cleanup.cleanup_test_project("private")
             self.assertEqual(docker.call_count, 1)
 
         with mock.patch.object(container_cleanup, "_docker", return_value="") as docker:
-            with self.assertRaisesRegex(RuntimeError, "missing"):
-                container_cleanup.cleanup_test_project("private")
-            self.assertEqual(docker.call_count, 1)
+            # The existing `reused_board-db` is deliberately not inspected or removed: this
+            # setup attempt never positively observed an owned container.
+            container_cleanup.cleanup_test_project("reused", container_expected=False)
+            docker.assert_called_once_with(
+                "ps", "--all", "--quiet", "--no-trunc", "--filter", "label=com.docker.compose.project=reused"
+            )
 
         with mock.patch.object(container_cleanup, "_docker", side_effect=RuntimeError("No such container")):
             with self.assertRaisesRegex(RuntimeError, "No such container"):
@@ -428,6 +448,33 @@ class TestContainerCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
                 container_cleanup.cleanup_test_project("private")
         self.assertEqual([call[0] for call in calls], ["ps", "container"])
+
+    def test_setup_failure_after_owned_container_cleans_its_resources(self) -> None:
+        import json
+
+        calls = []
+        def docker(*args):
+            calls.append(args)
+            if args[0] == "ps":
+                return "exact-id"
+            if args[:2] == ("container", "inspect"):
+                return json.dumps([{"Id": "exact-id", "Config": {"Labels": {
+                    TEST_BOARD_LABEL: str(os.getpid()),
+                    "com.docker.compose.project": "fresh",
+                    "com.docker.compose.service": "postgres"}}}])
+            if args[1] == "inspect":
+                kind = args[0]
+                discriminator = f"com.docker.compose.{kind}"
+                value = "default" if kind == "network" else "board-db"
+                return json.dumps([{"Name": args[2], "Labels": {
+                    "com.docker.compose.project": "fresh", discriminator: value}}])
+            return ""
+
+        with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
+            container_cleanup.cleanup_test_project("fresh", container_expected=False)
+        self.assertIn(("rm", "-f", "exact-id"), calls)
+        self.assertIn(("network", "rm", "fresh_default"), calls)
+        self.assertIn(("volume", "rm", "fresh_board-db"), calls)
 
     def test_compose_cleanup_removes_only_verified_container_and_disposable_resources(self) -> None:
         calls = []

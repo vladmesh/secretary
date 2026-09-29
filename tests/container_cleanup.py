@@ -51,6 +51,10 @@ def cleanup_test_project(project: str, *, container_expected: bool = True) -> No
         raise RuntimeError(f"ambiguous test Compose containers for {project}: {ids}")
     if not ids and container_expected:
         raise RuntimeError(f"missing test Compose container for {project}")
+    # A setup attempt that never left an owned container has no authority over a same-named
+    # volume or network left by an earlier attempt.
+    if not ids:
+        return
     if ids:
         remove_test_container(ids[0], project=project)
     for kind, name, discriminator in (

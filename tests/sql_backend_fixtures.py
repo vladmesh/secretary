@@ -66,7 +66,6 @@ class PostgresBoard:
             for module in ("psycopg", "sqlalchemy", "alembic"):
                 __import__(module)
             board = cls.__new__(cls)
-            atexit.register(board.stop)
             board.__init__()
             cls._shared = board
         return cls._shared
@@ -100,6 +99,9 @@ class PostgresBoard:
             "-c",
             "full_page_writes=off",
         )
+        # Register before inspecting the port or waiting for PostgreSQL: direct callers may
+        # construct this fixture before they have a chance to register their own cleanup.
+        atexit.register(self.stop)
         published = json.loads(docker("inspect", "-f", "{{json .NetworkSettings.Ports}}", self.container))
         self.host = "127.0.0.1"
         self.port = int(published["5432/tcp"][0]["HostPort"])

@@ -8,6 +8,7 @@ import socket
 import tarfile
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -120,7 +121,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         path.chmod(0o600)
         compose = instance / "postgres-compose.yml"
-        project = f"secretary-recovery-{name}-{os.getpid()}"
+        project = f"secretary-recovery-{name}-{uuid.uuid4().hex}"
         self.projects.append((instance, project, False))
         provision.provision(instance, compose_path=compose, project=project,
                             test_owner_pid=os.getpid())
