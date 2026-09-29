@@ -235,7 +235,10 @@ def cleanup_docker() -> dict[str, Any]:
     try:
         output = _docker("builder", "prune", "--force", "--all", "--filter",
                          f"until={BUILD_CACHE_MAX_AGE_HOURS}h")
-        match = re.search(r"Total reclaimed space:\s*([0-9.]+\s*[kMGTPE]?B)", output)
+        match = re.search(
+            r"(?m)^Total(?: reclaimed space)?:[ \t]*([0-9]+(?:\.[0-9]+)?[ \t]*[kMGTPE]?B)[ \t]*$",
+            output,
+        )
         if match is None:
             raise CleanupError("build cache prune result malformed")
         inventory.cache_reclaimed = match.group(1)
