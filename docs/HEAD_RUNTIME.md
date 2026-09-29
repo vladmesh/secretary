@@ -17,8 +17,9 @@ Missing or unexecutable guard, product interpreter or backend refuses the launch
 PO and dispatcher Docker paths retain their existing behavior.
 
 The dispatcher reads the current card's sprint and validates its entire creation-only
-`local_run_exceptions` declaration before selecting entries for that card's project. Packets and
-launches use the same authority reader. An explicit `role_env exec --local-run-policy` argument
+`local_run_exceptions` declaration before selecting entries for that card's project. The durable
+launch intent retains one validated snapshot for each head round; its packet and launch use that
+same value, including an empty or unavailable result. An explicit `role_env exec --local-run-policy` argument
 carries a small card/sprint/project snapshot through the shared head renderer. The role environment
 discards inherited policy bindings and never reads policy from `runtime.env` or a candidate file.
 Missing sprint/field, unbound or standing launches, read failures and malformed authority grant
@@ -26,7 +27,8 @@ no exceptions. The launch snapshot needs no refresh because the field is immutab
 
 Ordinary `docker run`, `create`, `build` and `compose up|run|build` refuse before any native call
 with status 125 and a use-CI message unless the snapshot grants that exact command. The same rule
-covers the native `container run|create` aliases and `image build`, `builder build` and `buildx build`
+covers the native `container run|create` aliases and `image build`, `builder build`, `buildx build`
+and `buildx b`
 in the existing parser hierarchy. Global flags, Compose options and `--` boundaries are parsed to
 identify the operation; unknown or unresolved options grant no execution. This does not inventory
 arbitrary Docker plugins or expand the restriction to unlisted heavy commands.

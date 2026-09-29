@@ -24,6 +24,7 @@ BINDINGS = (BACKEND_ENV, PYTHON_ENV, SOURCE_ENV, POLICY_ENV)
 DESTRUCTIVE = {"rm", "stop", "kill"}
 HEAVY = {"run", "create", "build"}
 CONTAINER_ALIASES = {"remove": "rm"}
+BUILD_ALIASES = {"image": {"build"}, "builder": {"build"}, "buildx": {"build", "b"}}
 PRUNE_GROUPS = {"container", "system", "volume", "image", "builder", "buildx", "network"}
 GLOBAL_VALUES = {
     "--host",
@@ -252,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
                     operation = CONTAINER_ALIASES.get(nested[0], nested[0])
                     if operation in DESTRUCTIVE | {"run", "create"}:
                         verb, rest = operation, nested[1:]
-                elif verb in {"image", "builder", "buildx"} and nested and nested[0] == "build":
+                elif nested and nested[0] in BUILD_ALIASES.get(verb, ()):
                     verb = "build"
             if verb == "prune":
                 raise GuardError(f"prune scope is unsupported; {ALTERNATIVE}")

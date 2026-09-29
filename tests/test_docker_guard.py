@@ -220,6 +220,7 @@ class DockerGuardTests(unittest.TestCase):
             ["image", "build", "."],
             ["builder", "build", "."],
             ["buildx", "build", "."],
+            ["buildx", "b", "."],
             ["compose", "up"],
             ["compose", "run", "service"],
             ["compose", "build"],
@@ -270,6 +271,44 @@ class DockerGuardTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "native stdout\n")
                     self.assertEqual(result.stderr, "native stderr\n")
                     self.assertEqual([call["args"] for call in self.calls()], [args])
+
+    def test_documented_build_spellings_need_their_own_exact_exception(self) -> None:
+        # Docker documents these five spellings as one build operation. Classification may share
+        # an action; the original CLI vector is still the only authority for an exception.
+        commands = [
+            ["build", "."],
+            ["builder", "build", "."],
+            ["image", "build", "."],
+            ["buildx", "build", "."],
+            ["buildx", "b", "."],
+        ]
+        self.case["read_status"] = 27
+        for role in ("worker", "reviewer"):
+            for index, args in enumerate(commands):
+                with self.subTest(role=role, args=args):
+                    command = shlex.join(["docker", *args])
+                    self.transcript.write_text("")
+                    refused = self.run_shell(command, role)
+                    self.assert_refused(refused)
+                    self.assertIn("use CI", refused.stderr)
+                    self.assertEqual(self.calls(), [])
+
+                    exact = self.policy(["docker", *args])
+                    forwarded = self.run_shell(command, role, policy=exact)
+                    self.assertEqual(forwarded.returncode, 27, forwarded.stderr)
+                    self.assertEqual(forwarded.stdout, "native stdout\n")
+                    self.assertEqual(forwarded.stderr, "native stderr\n")
+                    self.assertEqual([call["args"] for call in self.calls()], [args])
+
+                    for other in (
+                        ["docker", *args[:-1], "./"],
+                        ["docker", *commands[(index + 1) % len(commands)]],
+                    ):
+                        self.transcript.write_text("")
+                        refused = self.run_shell(command, role, policy=self.policy(other))
+                        self.assert_refused(refused)
+                        self.assertIn("use CI", refused.stderr)
+                        self.assertEqual(self.calls(), [])
 
     def test_vector_near_misses_never_normalize_or_evaluate_an_exception(self) -> None:
         allowed = ["docker", "--context=remote", "run", "--env", "NOTE=two words", "image", ""]
