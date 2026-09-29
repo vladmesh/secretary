@@ -1468,7 +1468,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs"))
 
-        # Every column a sprint had loads unchanged; 0023 appends its e2e budget columns (3 and 0).
+        # Every old column loads unchanged; 0023 adds the e2e budget (3 and 0), 0026 no exceptions.
         sprints = connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall()
         self.assertEqual(
             (
@@ -1477,7 +1477,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             ),
             before,
         )
-        self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0)])
+        self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0, [])])
         self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "h-1", to=store))
         self.assertFalse(record("card_handed_to_owner", "secretary-1", "again", "h-1", to=store))
         self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))

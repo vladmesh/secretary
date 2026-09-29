@@ -1638,7 +1638,8 @@ class SprintWriter:
             values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
         if intent.local_run_exceptions:
             values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
-                [entry.to_document() for entry in intent.local_run_exceptions], separators=(",", ":")
+                [entry.to_document() for entry in intent.local_run_exceptions],
+                sort_keys=True, separators=(",", ":"),
             )
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.

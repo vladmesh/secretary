@@ -261,7 +261,11 @@ class SqlSprintRecords:
                 values["sprint_allowed_productions"] = json.dumps(
                     [str(project) for project in productions], separators=(",", ":")
                 )
-            values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(local_run_exceptions, separators=(",", ":"))
+            # JSONB orders object keys independently of the create intent. Use the same canonical
+            # representation as the writer's metadata proof, preserving every array's order.
+            values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
+                local_run_exceptions, sort_keys=True, separators=(",", ":")
+            )
             # The e2e run budget (0023), only where it is not the default a sprint reads without it (3,
             # nothing used, no charge), as the 0016 fields: a sprint that never spent a run reads as it did.
             if int(e2e_budget) != DEFAULT_E2E_BUDGET:

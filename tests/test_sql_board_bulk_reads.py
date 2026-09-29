@@ -104,14 +104,17 @@ def _seed(client: SqlCardClient, n: int) -> None:
             status = ("open", "closed", "stopped")[number % 3]
             q(
                 "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, "
-                "status, observer, worker_pin, reviewer_pin, source_audit, created_at, updated_at, closed_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s)",
+                "status, observer, worker_pin, reviewer_pin, source_audit, local_run_exceptions, "
+                "created_at, updated_at, closed_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
                 (
                     ref, sprint_key(ref), number, f"Goal {number}", f"DoD {number}",
                     "secretary" if number % 2 else None, status,
                     json.dumps({"profile": "claude-observer", "b": 1}) if number % 2 else None,
                     "codex-high" if number % 2 else None, "claude-opus" if number % 4 == 1 else None,
                     json.dumps({"z": 1, "a": [number]}) if number % 3 == 0 else None,
+                    json.dumps([{"project": f"held-{number}", "argv": ["probe", "two words", ""],
+                                 "rationale": "owner's exact probe"}] if number % 2 else []),
                     _at(number), _at(number + 1), None if status == "open" else _at(number + 2),
                 ),
             )
@@ -349,9 +352,9 @@ class _PerRecordOracle:
         from secretary.board.sql_sprints import _rfc3339
 
         reference = self.q("SELECT ref FROM sprints WHERE board_key = %s", (key,))[0][0]
-        goal, dod, product, status, observer, worker, reviewer, current, source = self.q(
+        goal, dod, product, status, observer, worker, reviewer, current, source, exceptions = self.q(
             "SELECT goal, definition_of_done, product_id, status, observer, worker_pin, reviewer_pin, "
-            "current_task_ref, source_audit FROM sprints WHERE ref = %s", (reference,)
+            "current_task_ref, source_audit, local_run_exceptions FROM sprints WHERE ref = %s", (reference,)
         )[0]
         values: dict[str, str] = {
             "sprint_goal": str(goal), "sprint_definition_of_done": str(dod),
@@ -384,6 +387,7 @@ class _PerRecordOracle:
             values["sprint_reviewer"] = str(reviewer)
         if source is not None:
             values["sprint_source_audit"] = json.dumps(source, sort_keys=True, separators=(",", ":"))
+        values["sprint_local_run_exceptions"] = json.dumps(exceptions, sort_keys=True, separators=(",", ":"))
         resume = self.q(
             "SELECT selected_step, selected_why, rejected_alternatives, current_task, dod_state, "
             "next_safe_step, recorded_at, recorded_at_source FROM sprint_resumes WHERE resume_id = "

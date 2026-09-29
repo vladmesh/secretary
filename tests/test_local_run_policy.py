@@ -14,6 +14,7 @@ from unittest import mock
 
 from secretary.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
 from secretary.board.sprint_write import SprintCreateIntent
+from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.cli import build_parser
 from secretary.data import normalize_sprint_entity
 from secretary.dispatch.host import CommandHostRuntime
@@ -93,6 +94,32 @@ class LocalRunCreationTests(unittest.TestCase):
         for value in malformed:
             with self.subTest(stored=value), self.assertRaises(ValueError):
                 parse_local_run_exceptions(value, projects=["secretary"])
+
+    def test_create_metadata_proof_accepts_sql_json_object_order_and_preserves_argv(self) -> None:
+        entry = exception()
+        # JSONB returns object keys in its own order. Arrays, including argv, keep their order.
+        stored_entry = {key: entry[key] for key in ("argv", "project", "rationale")}
+        row = (7, "sprint:7", "g", "", "secretary", "open", {"kind": "none"},
+               None, None, None, None, None, [], 3, 0, [stored_entry])
+        sql_client = mock.MagicMock()
+        sql_client._staged.return_value = {}
+        sql_client._query.side_effect = lambda query, params: (
+            [row] if query.startswith("SELECT board_key, ref, goal") else []
+        )
+        self.client.call.return_value = SqlSprintRecords(sql_client).metadata(7)
+        values = {LOCAL_RUN_EXCEPTIONS_FIELD: self.writer._create_values(
+            self.intent(local_run_exceptions=[entry])
+        )[LOCAL_RUN_EXCEPTIONS_FIELD]}
+        self.assertTrue(self.writer._metadata_matches(7, values))
+        self.client.call.reset_mock()
+        document = {"progress": {}}
+        with mock.patch.object(self.writer.transactions, "save"):
+            self.writer._ensure_metadata(document, 7, values, step="fields")
+        self.assertTrue(document["progress"]["fields_done"])
+        self.client.call.assert_called_once_with("getTaskMetadata", task_id=7)
+        stored_entry["argv"] = list(reversed(entry["argv"]))
+        self.client.call.return_value = SqlSprintRecords(sql_client).metadata(7)
+        self.assertFalse(self.writer._metadata_matches(7, values))
 
     def test_reader_exposes_default_and_refuses_malformed_state(self) -> None:
         reader = SprintReader(self.client)
