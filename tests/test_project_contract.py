@@ -17,11 +17,18 @@ asked for it.
 from __future__ import annotations
 
 import hashlib
+import json
+import shlex
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from secretary.cli import build_parser
+from secretary.dispatch.host import CommandHostRuntime
 
 from secretary.projects.contract import (
     ADAPTER_INVALID,
@@ -671,6 +678,143 @@ class CatalogContractTests(unittest.TestCase):
 
         self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)
         self.assertEqual(verdict.question, UNDECIDABLE_RELATIVE_INTERPRETER)
+
+    def packet_host(self, catalog) -> CommandHostRuntime:
+        return CommandHostRuntime(
+            catalog,
+            self.root / "data",
+            mode="noop",
+            audit=mock.Mock(events=mock.Mock(return_value=[])),
+            production_runtime=SimpleNamespace(interpreter=self.root / "production env" / "bin" / "python"),
+        )
+
+    def assert_relative_packet(self, args: tuple[str, ...]) -> None:
+        catalog = self.catalog(
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
+            + f"  args: {json.dumps(args)}\n"
+        )
+        verdict = catalog.broad_check_verdict("example")
+        self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)
+        self.assertEqual(verdict.question, UNDECIDABLE_RELATIVE_INTERPRETER)
+        self.assertIsNone(verdict.contract, "a declaration is not a runnable contract")
+        with self.assertRaises(ContractStateError):
+            contract_of(verdict)
+
+        host = self.packet_host(catalog)
+        task = {"ref": "example-1", "project": "example", "type": "code", "description": ""}
+        packet = host._worker_task_doc(task, "main", "attempt")
+        self.assertNotIn("Configuration gap", packet)
+        broad, show = host._broad_check_invocation("example")
+        self.assertIn(f"    {broad}\n", packet)
+        self.assertIn(f"`{show}`", packet)
+        for command, verb in ((broad, "broad"), (show, "show")):
+            vector = shlex.split(command)
+            self.assertEqual(
+                vector[1:5], [str(host.production_runtime.interpreter), "-P", "-m", "secretary"]
+            )
+            self.assertTrue(vector[0].startswith("PYTHONPATH="))
+            expected = ["check", verb]
+            if verb == "broad":
+                expected.append("--reuse")
+            expected += ["--module", "suite", *(f"--module-arg={arg}" for arg in args)]
+            self.assertEqual(vector[5:], expected)
+            parsed = build_parser().parse_args(vector[5:])
+            self.assertEqual(parsed.module, "suite")
+            self.assertEqual(parsed.module_arg or [], list(args))
+            self.assertNotIn("--default-interpreter", command)
+            self.assertNotIn(".venv/bin/python", command)
+
+        declaration = verdict.declared_contract
+        self.assertEqual(declaration.interpreter, ".venv/bin/python")
+        self.assertTrue(declaration.interpreter_declared)
+        self.assertEqual(declaration.module, "suite")
+        self.assertEqual(declaration.args, args)
+
+        # The registered checkout's venv cannot answer for a missing candidate interpreter.
+        registered = self.repo / ".venv" / "bin" / "python"
+        registered.parent.mkdir(parents=True)
+        registered.symlink_to(sys.executable)
+        self.assertEqual(catalog.broad_check_verdict("example"), verdict)
+        workspace = self.root / "candidate"
+        workspace.mkdir()
+        with self.assertRaises(ContractUnusable) as caught:
+            module_contract(catalog.binding("example"), instance=catalog.instance_dir, project_root=workspace)
+        self.assertEqual(caught.exception.shape, INTERPRETER_UNAVAILABLE)
+        self.assertIn(str(workspace / ".venv" / "bin" / "python"), caught.exception.message)
+
+        candidate_interpreter = workspace / ".venv" / "bin" / "python"
+        candidate_interpreter.parent.mkdir(parents=True)
+        candidate_interpreter.symlink_to(sys.executable)
+        resolved = module_contract(
+            catalog.binding("example"), instance=catalog.instance_dir, project_root=workspace
+        )
+        self.assertEqual(resolved.interpreter, str(candidate_interpreter))
+        self.assertTrue(candidate_interpreter.is_symlink())
+        self.assertEqual(resolved.module, "suite")
+        self.assertEqual(resolved.args, args)
+
+    def test_relative_interpreter_packet_renders_declared_suite_without_args(self) -> None:
+        self.assert_relative_packet(())
+
+    def test_relative_interpreter_packet_preserves_exact_declared_args(self) -> None:
+        self.assert_relative_packet(("--only", "fast lane", "", "owner's test", "-v"))
+
+    def test_unusable_declarations_do_not_render_a_broad_or_show_command(self) -> None:
+        catalog = self.catalog()
+        host = self.packet_host(catalog)
+        adapter = catalog.instance_dir / "adapters" / "example.yaml"
+        cases = (
+            (
+                "relative interpreter without module",
+                ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n",
+                CONTRACT_UNDECIDABLE,
+                UNDECIDABLE_RELATIVE_INTERPRETER,
+            ),
+            (
+                "invalid args",
+                ADAPTER_BODY
+                + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+                + "  module: suite\n  args: [7]\n",
+                CONTRACT_REFUSED,
+                ADAPTER_INVALID,
+            ),
+            (
+                "blank interpreter",
+                ADAPTER_BODY + "broad_check:\n  interpreter: ' '\n  import_package: thing\n  module: suite\n",
+                CONTRACT_REFUSED,
+                BROAD_CHECK_INCOMPLETE,
+            ),
+            (
+                "unavailable absolute interpreter",
+                ADAPTER_BODY
+                + f"broad_check:\n  interpreter: {self.root / 'missing-python'}\n"
+                + "  import_package: thing\n  module: suite\n",
+                CONTRACT_REFUSED,
+                INTERPRETER_UNAVAILABLE,
+            ),
+            ("no broad declaration", ADAPTER_BODY, CONTRACT_REFUSED, BROAD_CHECK_NOT_DECLARED),
+            ("invalid adapter", "setup: {}\n", CONTRACT_REFUSED, ADAPTER_INVALID),
+            ("unavailable adapter", None, CONTRACT_REFUSED, ADAPTER_UNAVAILABLE),
+        )
+        task = {"ref": "example-1", "project": "example", "type": "code", "description": ""}
+        for name, body, state, reason in cases:
+            with self.subTest(case=name):
+                if body is None:
+                    adapter.unlink()
+                else:
+                    adapter.write_text(body, encoding="utf-8")
+                verdict = catalog.broad_check_verdict("example")
+                self.assertEqual(verdict.state, state)
+                self.assertEqual(verdict.question if verdict.undecidable else verdict.refusal.shape, reason)
+                self.assertEqual(host._broad_check_invocation("example"), ("", ""))
+                packet = host._worker_task_doc(task, "main", "attempt")
+                self.assertIn("Configuration gap", packet)
+                self.assertIn("Do not select a module yourself", packet)
+                self.assertNotIn(" -m secretary check broad ", packet)
+                self.assertNotIn(" -m secretary check show ", packet)
+        self.assertEqual(host._broad_check_invocation("unregistered"), ("", ""))
+        self.assertEqual(host._broad_check_invocation(""), ("", ""))
 
 
 if __name__ == "__main__":
