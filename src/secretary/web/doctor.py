@@ -1,15 +1,16 @@
 """The doctor lamp's reading: recorded installation health, classified by code, and cached.
 
-Three colours and nothing else. Red when the installation cannot be trusted to run work -- or when
+Red when the installation cannot be trusted to run work or when
 its health could not be read at all, which is the case a lamp must never draw as green; yellow when
 it runs but somebody should look; green when health was read and reports no problem. The rule lives
 in :data:`secretary.webproto.reads.PROBLEM_SEVERITY` beside the codes it classifies, and this module
-only applies it and adds the one problem the summary cannot mint for itself: `health.unreadable`.
+only applies it and adds recorded-read and stuck-collection problems. An expected first result
+is unknown until collected; independent status problems retain their severity.
 
 Recorded state only: status health and the latest result of the packaged doctor timer.
 The reader launches no doctor, SSH or provider probe. Doctor's run time remains separate
-from the time the web collected its cached reading. Missing or unusable results are explicit
-problems, and neither source can hide the other's findings.
+from the time the web collected its cached reading. Unusable results are explicit problems;
+an expected missing first result is unknown. Neither source can hide the other's findings.
 
 Cached for the same reason the provider layer is (:mod:`secretary.web.provider_usage`, whose shape
 this copies): the bar is rendered by every page, and the collection behind it is not cheap, so one
@@ -30,6 +31,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.infra.doctor_record import STUCK_SECONDS
 from secretary.webproto.errors import ReadError
 from secretary.webproto.reads import lamp_colour, problem_severity
 
@@ -174,22 +176,33 @@ def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
     else:
         problems.extend(unreadable(reason)["problems"])
     recorded = section.get("doctor") if isinstance(section.get("doctor"), dict) else {
-        "state": "missing", "reason": "no recorded doctor attempt", "run_at": None,
+        "state": "unknown", "reason": "not yet collected", "run_at": None,
     }
     problems.extend(
         {**finding, "message": str(finding.get("message") or _finding_identity(finding)),
          "severity": problem_severity(str(finding.get("code") or "")), "source": "doctor"}
         for finding in recorded.get("findings") or [] if isinstance(finding, dict)
     )
-    if recorded.get("state") != "available":
+    if recorded.get("state") not in ("available", "unknown"):
         problems.append({
             "code": "health.unreadable", "source": "doctor",
             "message": f"recorded doctor is {recorded.get('state') or 'unknown'}: {recorded.get('reason') or 'no reason recorded'}",
             "severity": problem_severity(UNREADABLE_CODE),
         })
+    collecting = recorded.get("collecting") or {}
+    if collecting.get("stuck"):
+        elapsed = collecting["elapsed_seconds"]
+        problems.append({
+            "code": "doctor.collection_stuck", "source": "doctor",
+            "message": f"doctor collection has run for {elapsed:.2f} seconds (threshold {STUCK_SECONDS} seconds); "
+                       "the producer may have been interrupted; inspect secretary-doctor.service and its journal",
+            "elapsed_seconds": elapsed, "threshold_seconds": STUCK_SECONDS,
+            "severity": problem_severity("doctor.collection_stuck"),
+        })
+    colour = lamp_colour(problems) if problems or recorded.get("state") != "unknown" else "unknown"
     return {
         "kind": "doctor", "observed_at": str(snapshot.get("observed_at") or "") or None,
-        "readable": readable, "reason": reason, "colour": lamp_colour(problems),
+        "readable": readable, "reason": reason, "colour": colour,
         "problems": problems, "source": source, "doctor": recorded,
         "doctor_run_at": recorded.get("run_at"),
     }

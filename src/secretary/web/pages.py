@@ -459,6 +459,7 @@ body { padding-bottom: var(--bar-height); }
 .lamp-green { color: var(--ok); background: var(--ok-soft); }
 .lamp-yellow { color: var(--warn); background: var(--warn-soft); }
 .lamp-red { color: var(--bad); background: var(--bad-soft); }
+.lamp-unknown { color: var(--muted); background: var(--surface); }
 /* One provider is one group: a heading set apart from its windows the way a panel's heading is
    (uppercase and tracked, like h2), a rule between one provider and the next, and each window a
    chip of its own so the eye never has to guess where a window ends and the next one begins. */
@@ -703,13 +704,12 @@ def _limits_bar_of(section: dict[str, Any] | None, *, doctor: dict[str, Any] | N
     )
 
 
-#: The lamp's three colours, and what each one says when a person hovers it. There is no fourth:
-#: health that could not be read is red, because a lamp cannot say "unknown" in a colour without
-#: somebody reading that colour as "fine". See :data:`secretary.webproto.reads.PROBLEM_SEVERITY`.
+#: Unknown is reserved for the expected initial doctor state, before any result exists.
 LAMP_WORDS: dict[str, str] = {
     "green": "no problem is recorded for this installation",
     "yellow": "this installation runs, but something wants a person's eye",
     "red": "this installation cannot be trusted to run work, or its health is unknown",
+    "unknown": "recorded doctor is unknown / not yet collected",
 }
 
 
@@ -1356,11 +1356,14 @@ def _health_panel(installation: dict[str, Any]) -> str:
     recorded = health.get("doctor") or {}
     if recorded:
         parts.append(f'<p class="muted">Recorded doctor: {escape(str(recorded.get("state")))}; run at {escape(str(recorded.get("run_at") or "unknown"))}.</p>')
+        parts.append(_doctor_progress(recorded))
     problems = [str(item) for item in (health.get("combined") or status).get("problems") or []]
     if problems:
         combined = health.get("combined") or {}
         parts.append(_doctor_list(combined["findings"]) if combined.get("findings") else
                      '<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>")
+    elif recorded.get("state") == "unknown":
+        parts.append('<p class="muted">recorded doctor is unknown / not yet collected.</p>')
     else:
         parts.append('<p class="muted">nothing needs attention.</p>')
     checkpoint = status.get("checkpoint") or {}
@@ -1755,6 +1758,9 @@ def doctor(section: dict[str, Any] | None) -> str:
         f'completed at {escape(str(recorded.get("completed_at") or "unknown"))}; '
         f'exit {escape(str(recorded.get("exit_code")))}</p>'
     )
+    parts.append(_doctor_progress(recorded))
+    if recorded.get("state") == "unknown":
+        parts.append('<p class="muted">recorded doctor is unknown / not yet collected.</p>')
     if isinstance(document.get("source"), dict):
         parts.append(_source_block(document["source"], what="status health"))
     if problems:
@@ -1776,7 +1782,7 @@ def doctor(section: dict[str, Any] | None) -> str:
                     count=len(other),
                 )
             )
-    elif document.get("readable"):
+    elif document.get("readable") and recorded.get("state") != "unknown":
         parts.append(
             '<p class="empty">no problem is recorded for this installation: '
             "every check this installation records answered, and none of them is a finding.</p>"
@@ -1789,7 +1795,14 @@ def doctor(section: dict[str, Any] | None) -> str:
 
 
 #: The lamp's colour, said in the stylesheet's own words for the light on the page.
-_LIGHT_OF = {"green": "ok", "yellow": "attention", "red": "bad"}
+_LIGHT_OF = {"green": "ok", "yellow": "attention", "red": "bad", "unknown": "unknown"}
+
+
+def _doctor_progress(recorded: dict[str, Any]) -> str:
+    collecting = recorded.get("collecting")
+    if not isinstance(collecting, dict):
+        return ""
+    return f'<p class="muted">run in progress since {escape(str(collecting.get("run_at") or "unknown"))}</p>'
 
 
 def _doctor_list(problems: list[dict[str, Any]]) -> str:
