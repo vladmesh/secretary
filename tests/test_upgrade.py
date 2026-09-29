@@ -16,6 +16,7 @@ from typing import ClassVar
 from unittest import mock
 
 from secretary import state_repo, status, upgrade
+from secretary.board import provision as board_provision
 from secretary.config import DataDirError
 from secretary.head_health import HeadReadiness, resolve_head_chain
 from secretary.head_registry import (
@@ -774,6 +775,112 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(calls, ["ok", "bad"])
         self.assertFalse(result.ok)
         self.assertIn("failed", result.render())
+
+    def test_compose_replacement_keeps_owner_mode_and_atomic_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "installation"
+            directory.mkdir(mode=0o755)
+            compose = directory / "postgres-compose.yml"
+            compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            before = compose.stat()
+            self.assertTrue(board_provision._write_compose(
+                compose, dry_run=False, privileged_argv=lambda argv: argv
+            ))
+            after = compose.stat()
+            self.assertNotEqual(before.st_ino, after.st_ino)
+            self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+            self.assertEqual(stat.S_IMODE(after.st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+            self.assertEqual(compose.read_text(encoding="utf-8"), board_provision.COMPOSE_TEXT)
+            self.assertEqual(list(directory.iterdir()), [compose])
+
+    def test_compose_export_permission_failure_preserves_old_definition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            compose = Path(temporary) / "postgres-compose.yml"
+            compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            with mock.patch(
+                "secretary._fsutil._proc.run",
+                side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)],
+            ) as run:
+                with self.assertRaises(board_provision.BoardStoreError) as raised:
+                    board_provision._write_compose(
+                        compose, dry_run=False, privileged_argv=lambda argv: argv
+                    )
+            self.assertIn("stage private file", str(raised.exception))
+            self.assertEqual(run.call_count, 2)  # failed install, then cleanup
+            self.assertEqual(compose.read_text(encoding="utf-8"), board_provision.LEGACY_COMPOSE_TEXT)
+            self.assertEqual(list(compose.parent.iterdir()), [compose])
+
+    def test_compose_failed_rename_removes_staged_file_and_preserves_old_definition(self):
+        from secretary import _proc
+
+        with tempfile.TemporaryDirectory() as temporary:
+            compose = Path(temporary) / "postgres-compose.yml"
+            compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            real_run = _proc.run
+
+            def fail_rename(argv, **kwargs):
+                if argv[0] == "mv":
+                    return subprocess.CompletedProcess(argv, 1)
+                return real_run(argv, **kwargs)
+
+            with mock.patch("secretary._fsutil._proc.run", side_effect=fail_rename):
+                with self.assertRaises(board_provision.BoardStoreError) as raised:
+                    board_provision._write_compose(
+                        compose, dry_run=False, privileged_argv=lambda argv: argv
+                    )
+            self.assertIn("replace private file", str(raised.exception))
+            self.assertEqual(compose.read_text(encoding="utf-8"), board_provision.LEGACY_COMPOSE_TEXT)
+            self.assertEqual(list(compose.parent.iterdir()), [compose])
+
+    def test_provision_exception_renders_failed_step_json_and_stops_before_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary)
+            report = SimpleNamespace(ok=True, instance_path=instance / "instance.yaml", data_dir=instance)
+            args = SimpleNamespace(
+                instance=str(instance), product_root=str(upgrade.running_product_root()),
+                base_branch="main", dry_run=False, no_pull=True, runtime_user=None,
+                host_fixture=None, json=True,
+            )
+            calls: list[str] = []
+
+            def completed(_context):
+                calls.append("completed")
+                return upgrade.StepResult("dependencies", "changed", "installed")
+
+            def restart(_context):
+                calls.append("restart")
+                return upgrade.StepResult("web", "changed", "restarted")
+
+            original_run_steps = upgrade.run_steps
+            import contextlib
+            import io
+
+            output = io.StringIO()
+            with (
+                mock.patch("secretary.upgrade.validate_instance", return_value=report),
+                mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", instance)),
+                mock.patch("secretary.upgrade.provision_board_store", side_effect=RuntimeError(
+                    "could not write export file: Permission denied"
+                )),
+                mock.patch("secretary.upgrade.run_steps", side_effect=lambda context: original_run_steps(
+                    context, steps=(completed, upgrade.step_board_store_provision, restart)
+                )),
+                contextlib.redirect_stdout(output),
+            ):
+                code = upgrade.run_upgrade(args)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual([(step["name"], step["status"]) for step in payload["steps"]], [
+                ("dependencies", "changed"), ("board-store-provision", "failed")
+            ])
+            self.assertIn("Permission denied", payload["steps"][1]["detail"])
+            self.assertNotIn("Traceback", output.getvalue())
+            self.assertEqual(calls, ["completed"])
 
     def test_pulled_code_handoff_preserves_the_upgrade_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

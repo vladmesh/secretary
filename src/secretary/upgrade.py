@@ -2327,8 +2327,12 @@ def step_board_store(context: UpgradeContext) -> StepResult:
 def step_board_store_provision(context: UpgradeContext) -> StepResult:
     """Reconcile the container only for an installation carrying the lifecycle marker."""
     try:
-        outcome = provision_board_store(context.instance_path, dry_run=context.dry_run)
-    except BoardStoreError as exc:
+        outcome = provision_board_store(
+            context.instance_path,
+            dry_run=context.dry_run,
+            privileged_argv=context.units.argv if isinstance(context.units, SystemdUnitInstaller) else None,
+        )
+    except (BoardStoreError, OSError, RuntimeError) as exc:
         return StepResult("board-store-provision", "failed", str(exc))
     if outcome is None:
         return StepResult(

@@ -5,12 +5,16 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat as stat_module
+import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from secretary import _proc
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -60,6 +64,51 @@ def write_text_atomic(path: Path, payload: str) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def write_private_text_atomic_privileged(
+    path: Path,
+    payload: str,
+    *,
+    owner: tuple[int, int],
+    privileged_argv: Callable[[list[str]], list[str]],
+) -> None:
+    """Stage a mode-0600, correctly owned file beside a privileged target, then rename it.
+
+    The caller supplies the existing host's non-interactive sudo argv boundary. No privileged
+    interpreter loads code from a user-owned checkout, and the old target survives a failed stage
+    or rename. The random staging name lives in the target directory, never in a shared temp dir.
+    """
+    staged = path.with_name(f".{path.name}.{secrets.token_hex(12)}.tmp")
+
+    def run(command: list[str], label: str, *, input_text: str | None = None) -> None:
+        try:
+            result = _proc.run(privileged_argv(command), input=input_text, timeout=60)
+        except FileNotFoundError:
+            raise RuntimeError(f"could not {label} {path}: {command[0]} not found") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"could not {label} {path}: {command[0]} timed out") from None
+        except OSError as exc:
+            raise RuntimeError(f"could not {label} {path}: {exc}") from None
+        if result.returncode:
+            raise RuntimeError(f"could not {label} {path}: {command[0]} exited {result.returncode}")
+
+    try:
+        run(
+            [
+                "install", "-T", "-m", "0600", "-o", str(owner[0]), "-g", str(owner[1]),
+                "/dev/stdin", str(staged),
+            ],
+            "stage private file",
+            input_text=payload,
+        )
+        run(["mv", "-fT", "--", str(staged), str(path)], "replace private file")
+    except RuntimeError as exc:
+        try:
+            run(["rm", "-f", "--", str(staged)], "remove staged private file")
+        except RuntimeError as cleanup_exc:
+            raise RuntimeError(f"{exc}; {cleanup_exc}") from None
+        raise
 
 
 def stage_text(path: Path, payload: str) -> Path:
