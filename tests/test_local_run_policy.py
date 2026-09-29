@@ -18,7 +18,11 @@ from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.cli import build_parser
 from secretary.data import normalize_sprint_entity
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.projects.contract import ContractVerdict, ModuleContract
+from secretary.projects.contract import (
+    UNDECIDABLE_QUESTIONS,
+    ContractVerdict,
+    ModuleContract,
+)
 from secretary.restore import RestoreError, _normalized_sprints, _restore_sprint_metadata
 from secretary.sprints import SprintReader, SprintWriter
 from secretary.tasks import TaskError
@@ -286,6 +290,22 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertNotIn("suite module you chose", worker)
             self.assertNotIn("<the same module>", worker)
             self.assertIn("RED finding, even if its tests passed", reviewer)
+
+    def test_undecidable_without_a_validated_declaration_never_renders_commands(self) -> None:
+        for question in UNDECIDABLE_QUESTIONS:
+            with self.subTest(question=question):
+                self.catalog.broad_check_verdict = mock.Mock(
+                    return_value=ContractVerdict.as_undecidable(question, "secretary", "question remains open")
+                )
+                self.assertEqual(self.host._broad_check_invocation("secretary"), ("", ""))
+
+    def test_default_interpreter_is_preserved_for_an_ordinary_fit_declaration(self) -> None:
+        self.contract = replace(self.contract, interpreter_declared=False)
+        for command in self.host._broad_check_invocation("secretary"):
+            vector = shlex.split(command)
+            parsed = build_parser().parse_args(vector[vector.index("secretary") + 1 :])
+            self.assertEqual(parsed.default_interpreter, ".secretary-task-env/venv/bin/python3")
+            self.assertEqual(parsed.module_arg, list(self.contract.args))
 
     def test_reviewer_blocks_heavy_run_and_requires_bounded_receipt_evidence(self) -> None:
         for kind in ("code", "research", "infra"):

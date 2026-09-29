@@ -205,6 +205,10 @@ class ContractVerdict:
 
     Built only through the three constructors below, so a state can never arrive without the thing
     that makes it readable — a refusal without its shape, or an open question without its name.
+
+    `declared_contract` preserves validated command metadata for the relative-interpreter question.
+    Its interpreter is still the adapter's relative spelling, not a runnable resolution. Only a
+    fit verdict carries `contract`; the worker must still ask again with its candidate workspace.
     """
 
     state: str
@@ -213,6 +217,7 @@ class ContractVerdict:
     refusal: ContractUnusable | None = None
     question: str = ""
     detail: str = ""
+    declared_contract: ModuleContract | None = None
 
     @classmethod
     def as_fit(cls, contract: ModuleContract, adapter: str) -> ContractVerdict:
@@ -230,10 +235,23 @@ class ContractVerdict:
         )
 
     @classmethod
-    def as_undecidable(cls, question: str, adapter: str, detail: str) -> ContractVerdict:
+    def as_undecidable(
+        cls,
+        question: str,
+        adapter: str,
+        detail: str,
+        *,
+        declared_contract: ModuleContract | None = None,
+    ) -> ContractVerdict:
         if question not in UNDECIDABLE_QUESTIONS:
             raise ContractStateError(f"unknown open question {question!r}")
-        return cls(state=CONTRACT_UNDECIDABLE, adapter=adapter, question=question, detail=detail)
+        return cls(
+            state=CONTRACT_UNDECIDABLE,
+            adapter=adapter,
+            question=question,
+            detail=detail,
+            declared_contract=declared_contract,
+        )
 
     @property
     def fit(self) -> bool:
@@ -399,6 +417,7 @@ def _declared_contract(
                 f"adapter {adapter_name!r} names interpreter {interpreter!r}, which the adapter "
                 "schema resolves from the candidate workspace; no candidate workspace exists yet, "
                 "so the tree that will run the check is the only side that can answer this",
+                declared_contract=ModuleContract(interpreter, import_package, module=module, args=args),
             )
         # Preserve a venv symlink: resolving it loses its site paths.
         interpreter = str(Path(workspace).resolve() / interpreter_path)

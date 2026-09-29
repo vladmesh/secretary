@@ -224,6 +224,7 @@ from secretary.memory import access as memory_access
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
+    UNDECIDABLE_RELATIVE_INTERPRETER,
     ContractVerdict,
 )
 from secretary.projects.contract import decide as _decide_broad_check_contract
@@ -3929,9 +3930,10 @@ class CommandHostRuntime:
         cannot run without inventing part of it is a packet that teaches the expensive habit.
 
         The contract is read through the same `projects.contract` rules the preflight and the
-        worker's own resolution use, so the command printed here is the command that workspace will
-        actually accept. Two empty strings mean the project declares no suite: the caller then says
-        so in words rather than printing a command that does not exist.
+        worker's own resolution use. A declared relative interpreter remains an open question until
+        the worker holds its workspace; its validated suite can still be named here. Rendering is
+        no evidence that the interpreter or imports will be usable there. Two empty strings mean
+        no usable suite declaration is available, which the caller reports in words.
         """
         if not project:
             return "", ""
@@ -3943,6 +3945,8 @@ class CommandHostRuntime:
             # and the refusal itself is the preflight's to report, not this packet's.
             return "", ""
         contract = verdict.contract if verdict.fit else None
+        if verdict.undecidable and verdict.question == UNDECIDABLE_RELATIVE_INTERPRETER:
+            contract = verdict.declared_contract
         if contract is None or not contract.module:
             return "", ""
         broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
