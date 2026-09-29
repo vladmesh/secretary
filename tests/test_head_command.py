@@ -261,7 +261,10 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 "python3 -P -m secretary.runtime.role_env exec --role worker --workspace /worktree -- "
                 "/bin/sh -lc "
                 + shlex.quote(
-                    "PATH=/worktree/.secretary-task-env/venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
+                    "test -x /opt/checkout/src/secretary/runtime/docker-bin/docker || "
+                    "{ printf '%s\\n' 'docker-guard: executable unavailable; repair the role launch' >&2; exit 125; }; "
+                    "PATH=/opt/checkout/src/secretary/runtime/docker-bin:/worktree/.secretary-task-env/venv/bin"
+                    "${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
                 ),
             )
 

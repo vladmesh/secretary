@@ -208,7 +208,7 @@ include = ["secretary*"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.
 "secretary.board.migrations" = ["script.py.mako", "versions/*.py"]
-"secretary.runtime" = ["heads.toml"]
+"secretary.runtime" = ["heads.toml", "docker-bin/docker"]
 "secretary.automations.agents.curator" = ["*.toml"]
 "secretary.automations.agents.pipeline" = ["*.toml"]
 "secretary.automations.agents.retro" = ["*.toml"]

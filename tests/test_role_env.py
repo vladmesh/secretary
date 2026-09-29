@@ -66,6 +66,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             ruff.chmod(0o755)
             python = root / role_env.WORKSPACE_ENV_DIR / "bin" / "python3"
             python.symlink_to("/usr/bin/python3")
+            (root / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
             base_env = {
                 "PATH": os.environ["PATH"],
                 "SECRETARY_INSTANCE": str(root),
@@ -334,7 +335,15 @@ class ManagedInterpreterTests(unittest.TestCase):
                     result.stdout.split(), [str(workspace / role_env.WORKSPACE_ENV_DIR / "bin" / "python3")]
                 )
                 self.assertEqual(env["VIRTUAL_ENV"], str(workspace / role_env.WORKSPACE_ENV_DIR))
-                self.assertNotIn(str(self.product), env["PATH"])
+                # The product Docker guard is now first; Python still comes from the workspace.
+                self.assertEqual(
+                    env["PATH"].split(os.pathsep)[:2],
+                    [
+                        str(self.product / "src/secretary/runtime/docker-bin"),
+                        str(workspace / role_env.WORKSPACE_ENV_DIR / "bin"),
+                    ],
+                )
+                self.assertNotIn(str(self.product / ".venv/bin"), env["PATH"])
 
     def test_the_role_env_puts_the_product_venv_first(self) -> None:
         for role in self.ROLES:

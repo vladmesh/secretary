@@ -190,6 +190,7 @@ from tests.fakes.dispatcher import (
 from tests.integration_setup import require_disposable_board_fixture
 from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, legacy_runtime_lines
 from tests.sql_backend_fixtures import PostgresBoard, card_store
+from tests.support.managed_venv import guarded_product_env
 
 
 def setUpModule() -> None:
@@ -11176,11 +11177,10 @@ class DispatcherLauncherTests(unittest.TestCase):
             runtime = root / "runtime.env"
             runtime.write_text(legacy_runtime_lines() + "ANTHROPIC_MODEL=opus\n", encoding="utf-8")
             env = {
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                **guarded_product_env(root),
                 "HOME": str(home),
                 "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
                 "SECRETARY_INSTANCE": str(root),
-                "TA_SECRETARY_REPO": str(repo),
                 "ANTHROPIC_MODEL": "opus",
                 "CLAUDE_MANAGED_SETTINGS": str(root / "no-managed.json"),
                 **dict(zip(LEGACY_ENV, LEGACY_VALUES)),
@@ -11216,6 +11216,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 cwd=tmp,
                 check=False,
             )
+            self.assertFalse((root / "docker-calls").exists(), "the model probe must not call native Docker")
 
         self.assertEqual(delivered.returncode, 0, delivered.stderr)
         self.assertEqual(naive, ("opus", "env:ANTHROPIC_MODEL"))
@@ -12410,7 +12411,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         for name in LEGACY_ENV:
             self.assertNotIn(name, env)
         self.assertNotIn("TA_CODEX_MODE", env)
-        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["PATH"], str(role_env.docker_guard_dir()) + os.pathsep + "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 
