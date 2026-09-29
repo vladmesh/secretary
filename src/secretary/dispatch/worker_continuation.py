@@ -224,7 +224,15 @@ def complete_red_transition(
     # The rework's generation is the one this transition reserved before the move: assigned,
     # never advanced. A legacy transition without a reservation falls back to the advance it
     # was written with.
+    previous_generation = record.report_generation
     record.report_generation = continuation.reserved_generation or record.report_generation + 1
+    if continuation.retained:
+        successor = getattr(runtime.host, "retained_local_run_snapshot_successor", None)
+        if callable(successor):
+            record.worker_local_run_snapshot = successor(
+                moved, previous_generation, record.report_generation,
+                record.worker_local_run_snapshot,
+            )
     # And the instruction that round is opened on, from the same transition. Always assigned,
     # never merged: a red gate has no decision, and inheriting the prior round's would hand a
     # worker an adjudication of review findings its code has already answered.
@@ -798,7 +806,8 @@ def _restart_red_worker(
     held_transition = replace(record.worker_continuation)
     record.worker_continuation.clear()
     failure = _write_worker_relaunch_intent(
-        runtime, payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round
+        runtime, payload, records, ref, record, action=f"{phase}-red-rework", round_number=rework_round,
+        task=task,
     )
     if failure is not None:
         record.worker_continuation = held_transition

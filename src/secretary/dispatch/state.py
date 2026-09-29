@@ -801,6 +801,9 @@ class DispatcherRecord:
     preferred_head: str = ""
     preferred_review_head: str = ""
     report_generation: int = 0
+    # One validated policy per role round, persisted before packet rendering and launch.
+    worker_local_run_snapshot: dict[str, Any] = field(default_factory=dict)
+    review_local_run_snapshot: dict[str, Any] = field(default_factory=dict)
     # Frozen when the dispatcher accepts a worker report, before any source
     # handoff is consulted.  Every later terminal effect reads this one typed
     # classification, so losing a report handoff cannot redefine the path.
@@ -1075,6 +1078,8 @@ class DispatcherRecord:
             "paused_reviewer_at": self.paused_reviewer_at,
             "paused_worker_at": self.paused_worker_at,
             "report_generation": self.report_generation,
+            "worker_local_run_snapshot": dict(self.worker_local_run_snapshot),
+            "review_local_run_snapshot": dict(self.review_local_run_snapshot),
             "report_decision": self.report_decision,
             "report_protocol_prerequisites": list(self.report_protocol_prerequisites),
             "outcome_terminal_path": self.outcome_terminal_path.value,
@@ -1182,6 +1187,16 @@ class DispatcherRecord:
             # it over is what keeps the first generation this dispatcher opens above every id the
             # previous one issued for the round still running.
             report_generation=int(payload.get("report_generation") or payload.get("review_baseline") or 0),
+            worker_local_run_snapshot=(
+                dict(payload["worker_local_run_snapshot"])
+                if isinstance(payload.get("worker_local_run_snapshot"), dict)
+                else {}
+            ),
+            review_local_run_snapshot=(
+                dict(payload["review_local_run_snapshot"])
+                if isinstance(payload.get("review_local_run_snapshot"), dict)
+                else {}
+            ),
             report_decision=str(payload.get("report_decision") or ""),
             report_protocol_prerequisites=tuple(
                 item

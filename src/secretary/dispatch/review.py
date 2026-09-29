@@ -907,6 +907,7 @@ def start_review(
         action=action,
         head=record.review_head,
         workspace=record.workspace,
+        task=task,
         **intent_kwargs,
     )
     if failure is not None:

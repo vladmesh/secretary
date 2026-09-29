@@ -18,6 +18,8 @@ from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.cli import build_parser
 from secretary.data import normalize_sprint_entity
 from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.launch import write_launch_intent
+from secretary.dispatch.state import DispatcherRecord
 from secretary.projects.contract import (
     UNDECIDABLE_QUESTIONS,
     ContractVerdict,
@@ -210,6 +212,85 @@ class LocalRunPacketTests(unittest.TestCase):
 
     def authority(self, packet: str) -> str:
         return packet.split("## Applicable sprint local_run_exceptions\n\n", 1)[1].split("\n\n", 1)[0]
+
+    def test_intent_snapshot_survives_reader_change_and_document_redelivery(self) -> None:
+        declared = exception()
+        for role in ("worker", "review"):
+            for first_fails in (True, False):
+                with self.subTest(role=role, first_fails=first_fails):
+                    workspace = self.root / f"{role}-{first_fails}"
+                    workspace.mkdir()
+                    record = DispatcherRecord(
+                        worker="worker", workspace=str(workspace), handle="", head="head",
+                        review_head="head", attempt_id="attempt", comment_baseline=0,
+                        review_baseline=1, state="claimed", claimed_at=1.0,
+                        report_generation=1,
+                    )
+                    sprint = {
+                        "ref": "sprint:1", "reservations": ["secretary"],
+                        "local_run_exceptions": [declared],
+                    }
+                    self.reader.show.reset_mock()
+                    self.reader.show.side_effect = (
+                        [OSError("transient"), sprint]
+                        if first_fails else [sprint, OSError("transient")]
+                    )
+                    runtime = SimpleNamespace(
+                        host=SimpleNamespace(local_run_snapshot_for_round=self.host.local_run_snapshot_for_round),
+                        save_records=mock.Mock(),
+                    )
+                    self.assertIsNone(write_launch_intent(
+                        runtime, {}, {self.task["ref"]: record}, self.task["ref"], record,
+                        role=role, action="test", head="head", workspace=str(workspace), task=self.task,
+                    ))
+                    restored = DispatcherRecord.from_json(record.to_json())
+                    self.assertIsNone(write_launch_intent(
+                        runtime, {}, {self.task["ref"]: restored}, self.task["ref"], restored,
+                        role=role, action="retry", head="head", workspace=str(workspace), task=self.task,
+                    ))
+                    self.assertEqual(self.reader.show.call_count, 1)
+                    snapshot = (
+                        restored.worker_local_run_snapshot if role == "worker"
+                        else restored.review_local_run_snapshot
+                    )
+                    frozen = self.host._frozen_local_run_policy(self.task, role, 1, snapshot)
+                    self.assertEqual(frozen[0] is None, first_fails)
+                    if role == "worker":
+                        self.catalog.integration_base = lambda *_args: "main"
+                        with (
+                            mock.patch.object(self.host, "_refuse_legacy_record"),
+                            mock.patch.object(self.host, "_nudge_worker"),
+                        ):
+                            self.host.deliver_worker_comments(self.task, restored)
+                        packet = (workspace / "TASK.md").read_text()
+                    else:
+                        with mock.patch.object(self.host, "head_commit", return_value="abc"):
+                            document, _ = self.host._review_document(
+                                self.task, restored, local_run_policy=frozen
+                            )
+                        packet = document.read_text()
+                    self.assertEqual("unreadable or malformed" in packet, first_fails)
+                    self.assertEqual('"argv": [' in packet, not first_fails)
+                    self.assertEqual(self.reader.show.call_count, 1)
+                    if role == "worker":
+                        restored.worker_local_run_snapshot = (
+                            self.host.retained_local_run_snapshot_successor(
+                                self.task, 1, 2, restored.worker_local_run_snapshot
+                            )
+                        )
+                        restored.report_generation = 2
+                        resumed = DispatcherRecord.from_json(restored.to_json())
+                        with (
+                            mock.patch.object(self.host, "_refuse_legacy_record"),
+                            mock.patch.object(self.host, "_nudge_worker"),
+                        ):
+                            self.host.deliver_worker_comments(self.task, resumed)
+                        successor_packet = (workspace / "TASK.md").read_text()
+                        self.assertEqual("unreadable or malformed" in successor_packet, first_fails)
+                        self.assertEqual('"argv": [' in successor_packet, not first_fails)
+                        self.assertEqual(self.reader.show.call_count, 1)
+                    self.reader.show.side_effect = None
+
 
     def test_secretary_and_codegen_receive_same_rule_and_only_own_entries(self) -> None:
         for project in ("secretary", "codegen-orchestrator"):

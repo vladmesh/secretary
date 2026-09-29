@@ -454,6 +454,9 @@ class DockerGuardTests(unittest.TestCase):
         ):
             for role in ("worker", "reviewer"):
                 with self.subTest(role=role):
+                    frozen = host._frozen_local_run_policy(
+                        task, role, 1, host.local_run_snapshot_for_round(task, role, 1, {})
+                    )
                     with self.assertRaises(ProbeFinished):
                         host._launch(
                             str(self.workspace),
@@ -463,6 +466,7 @@ class DockerGuardTests(unittest.TestCase):
                             role=role,
                             env_name="FAKE_HEAD_OVERRIDE",
                             task=task,
+                            local_run_policy=frozen,
                         )
                     self.assertEqual(results[-1].returncode, 0, results[-1].stderr)
                     vector = shlex.split(commands[-1])
@@ -476,9 +480,34 @@ class DockerGuardTests(unittest.TestCase):
                             "exceptions": [declared],
                         },
                     )
-                    section = "\n".join(host._local_run_section(task))
+                    section = "\n".join(host._local_run_section(task, local_run_policy=frozen))
                     self.assertIn(json.dumps([declared], ensure_ascii=True, indent=2), section)
                     self.assertNotIn('"project": "other"', section)
+            for role in ("worker", "reviewer"):
+                for first_fails in (True, False):
+                    with self.subTest(role=role, first_fails=first_fails):
+                        reader.show.reset_mock()
+                        reader.show.side_effect = (
+                            [OSError("transient sprint read"), sprint]
+                            if first_fails else [sprint, OSError("transient sprint read")]
+                        )
+                        captured = host.local_run_snapshot_for_round(task, role, 2, {})
+                        frozen = host._frozen_local_run_policy(task, role, 2, captured)
+                        section = "\n".join(host._local_run_section(task, local_run_policy=frozen))
+                        self.assertEqual("unreadable or malformed" in section, first_fails)
+                        self.assertEqual('"argv": [' in section, not first_fails)
+                        self.transcript.write_text("")
+                        with self.assertRaises(ProbeFinished):
+                            host._launch(
+                                str(self.workspace), "fake", "fake-head", "TASK.md",
+                                role=role, env_name="FAKE_HEAD_OVERRIDE", task=task,
+                                local_run_policy=frozen,
+                            )
+                        self.assertEqual(results[-1].returncode == 0, not first_fails)
+                        self.assertEqual(reader.show.call_count, 1)
+                        if first_fails:
+                            self.assertEqual(self.calls(), [])
+            reader.show.side_effect = None
             # Another project, another sprint, absent/malformed/read-failed authority and unbound
             # task launches all run through the same real launch renderer and deny before native.
             self.transcript.write_text("")
