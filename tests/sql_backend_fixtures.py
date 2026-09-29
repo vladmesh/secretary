@@ -30,6 +30,7 @@ from secretary.board.backend import record_key, sprint_reference_number
 from secretary.board.sql_cards import SqlCardClient, _task_number_of
 from secretary.board.store import BoardStoreConfig
 from secretary.runtime.container_labels import TEST_BOARD_LABEL
+from tests.container_cleanup import remove_test_container
 
 IMAGE = "postgres:16"
 OWNER = "secretary_owner"
@@ -64,12 +65,14 @@ class PostgresBoard:
         if cls._shared is None:
             for module in ("psycopg", "sqlalchemy", "alembic"):
                 __import__(module)
-            board = cls()
-            atexit.register(board.stop)
+            board = cls.__new__(cls)
+            board.__init__()
             cls._shared = board
         return cls._shared
 
     def __init__(self) -> None:
+        self.container = ""
+        self._stopped = False
         self.container = docker(
             "run",
             "--rm",
@@ -96,12 +99,14 @@ class PostgresBoard:
             "-c",
             "full_page_writes=off",
         )
+        # Register before inspecting the port or waiting for PostgreSQL: direct callers may
+        # construct this fixture before they have a chance to register their own cleanup.
+        atexit.register(self.stop)
         published = json.loads(docker("inspect", "-f", "{{json .NetworkSettings.Ports}}", self.container))
         self.host = "127.0.0.1"
         self.port = int(published["5432/tcp"][0]["HostPort"])
         self._serial = 0
         self._template_ready = False
-        self._stopped = False
         #: Released databases, emptied and ready to be handed out again (`release_database`).
         self._pool: list[str] = []
         self._await_server()
@@ -110,8 +115,9 @@ class PostgresBoard:
     def stop(self) -> None:
         if self._stopped:
             return
+        if self.container:
+            remove_test_container(self.container)
         self._stopped = True
-        docker("rm", "-f", self.container)
 
     def _await_server(self) -> None:
         import psycopg

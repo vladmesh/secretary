@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import socket
-import subprocess
 import tarfile
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +26,7 @@ from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
 from secretary.sprints import SprintWriter, sprint_client
 from secretary.tasks import TaskWriter
+from tests.container_cleanup import cleanup_test_project
 
 
 class PostgresRecoveryFailureTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class PostgresRecoveryFailureTests(unittest.TestCase):
 
 
 class PostgresRecoveryIntegrationTests(unittest.TestCase):
-    projects: list[tuple[Path, str]]
+    projects: list[tuple[Path, str, bool]]
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -120,37 +121,24 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         path.chmod(0o600)
         compose = instance / "postgres-compose.yml"
-        project = f"secretary-recovery-{name}-{os.getpid()}"
-        self.projects.append((instance, project))
-        provision.provision(instance, compose_path=compose, project=project)
+        project = f"secretary-recovery-{name}-{uuid.uuid4().hex}"
+        self.projects.append((instance, project, False))
+        provision.provision(instance, compose_path=compose, project=project,
+                            test_owner_pid=os.getpid())
+        self.projects[-1] = (instance, project, True)
         migrate.migrate_instance(instance)
         provision.verify_roles(instance)
         return instance, config
 
     def _cleanup_projects(self) -> None:
-        for instance, project in reversed(self.projects):
-            config = instance / "board-store.env"
-            compose = instance / "postgres-compose.yml"
-            if config.exists() and compose.exists():
-                subprocess.run(
-                    [
-                        "docker",
-                        "compose",
-                        "--project-name",
-                        project,
-                        "--env-file",
-                        str(config),
-                        "--file",
-                        str(compose),
-                        "down",
-                        "--volumes",
-                        "--remove-orphans",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=180,
-                )
+        errors = []
+        for _instance, project, completed in reversed(self.projects):
+            try:
+                cleanup_test_project(project, container_expected=completed)
+            except RuntimeError as exc:
+                errors.append(f"{project}: {exc}")
+        if errors:
+            raise RuntimeError("test Compose cleanup refused: " + "; ".join(errors))
 
     def _seed(self) -> None:
         data_dir = self.root / "source-data"
@@ -505,8 +493,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                         self.assertNotIn(secret, chunk)
         self.assertNotIn("secretary-backup/instance/board-store.env", names)
 
-        source_project = self.projects.pop(0)
+        source_project = self.projects[0]
         self._down(*source_project)
+        self.projects.pop(0)
         first = restore_postgres_backup(result.archive, self.target_instance)
         second = restore_postgres_backup(result.archive, self.target_instance)
         self.assertEqual(first, second)
@@ -723,26 +712,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertTrue((self.root / "target-data" / "postgres-restore.json").is_file())
 
     @staticmethod
-    def _down(instance: Path, project: str) -> None:
-        subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                project,
-                "--env-file",
-                str(instance / "board-store.env"),
-                "--file",
-                str(instance / "postgres-compose.yml"),
-                "down",
-                "--volumes",
-                "--remove-orphans",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+    def _down(instance: Path, project: str, completed: bool) -> None:
+        cleanup_test_project(project, container_expected=completed)
 
 
 if __name__ == "__main__":
