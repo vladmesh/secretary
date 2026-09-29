@@ -445,8 +445,8 @@ class DockerGuardTests(unittest.TestCase):
             }
         )
         probe = (
-            'printf "%s\\n" "$TA_SECRETARY_REPO" "$SECRETARY_INSTANCE" "$BOARD_ROLE"; '
-            'command -v python3; test -z "${ANTHROPIC_MODEL:-}"'
+            "id -u >/dev/null && printenv TA_SECRETARY_REPO SECRETARY_INSTANCE BOARD_ROLE"
+            ' && command -v python3 && test -z "${ANTHROPIC_MODEL:-}"'
         )
         snapshot = (
             "import json; from secretary.dispatch.launcher import claude_launch_model; "
@@ -470,6 +470,16 @@ class DockerGuardTests(unittest.TestCase):
                         '["sonnet", "user_settings"]',
                     ],
                 )
+                self.assertFalse((parent / "docker-calls").exists())
+                self.assertEqual(self.calls(), [])
+
+        # Exposing the two launch utilities must not reopen host Docker resolution on failure.
+        (parent / "native-bin/docker").chmod(0o644)
+        for role in ("worker", "reviewer"):
+            with self.subTest(missing_backend=role):
+                result = self.run_shell("docker rm safe", role)
+                self.assertEqual(result.returncode, 125, result.stderr)
+                self.assertIn("native Docker backend is unavailable", result.stderr)
                 self.assertFalse((parent / "docker-calls").exists())
                 self.assertEqual(self.calls(), [])
 

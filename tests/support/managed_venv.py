@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -30,12 +31,18 @@ def managed_product_root(parent: Path) -> Path:
 def guarded_product_env(parent: Path) -> dict[str, str]:
     """A managed test product and a native Docker stub for probes that never call Docker.
 
-    The PATH has no host Docker fallback. Any unexpected native call leaves `docker-calls` in
-    `parent` and fails; callers assert that the file is absent after their launch probe.
+    Login profiles need `id` and the launch probes use `printenv`; expose only those host tools,
+    not a host PATH directory. The PATH has no host Docker fallback. Any unexpected native call
+    leaves `docker-calls` in `parent` and fails; callers assert that the file is absent afterwards.
     """
     product = managed_product_root(parent)
     native_bin = parent / "native-bin"
     native_bin.mkdir()
+    for name in ("id", "printenv"):
+        executable = shutil.which(name, path=os.defpath)
+        if executable is None:
+            raise RuntimeError(f"the guarded launch fixture requires {name}")
+        (native_bin / name).symlink_to(executable)
     docker = native_bin / "docker"
     docker.write_text(
         f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(parent / 'docker-calls'))}\nexit 97\n",
