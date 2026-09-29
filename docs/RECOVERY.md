@@ -187,6 +187,16 @@ maintenance, bounded at 60 seconds. `secretary status` lists the timer under `ho
 `last_trigger`, and the service under `host.units` reads `failed` after a failed run; the run's
 before/after object counts are in its journal.
 
+The same maintenance command also inventories only containers carrying `secretary.test-board`
+with a valid owner PID. It removes one by full ID only after two label checks and two definitive
+dead-owner checks; a production marker protects the container. Docker's anonymous-only
+`volume prune` requires API 1.42 or newer and leaves named or in-use volumes alone. The native
+`builder prune` keeps cache used within the last seven days and cache still in use; no image-prune
+command runs. Docker calls pin the local `/var/run/docker.sock` endpoint and ignore inherited API
+overrides. Its JSON journal result contains bounded counts, retained reasons, reclaimed cache
+space and failure findings, without raw Docker output. A Docker failure makes the service fail and
+does not widen any subsequent deletion scope.
+
 ## Validation gate
 
 Before each tick commit the snapshot passes a fail-closed check. If any item fails, the tick skips the

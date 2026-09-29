@@ -14,8 +14,32 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import cli, status
 from secretary.cli import main
 from secretary.infra import doctor_record as records
+from secretary.infra.host_space_policy import ROOT_FREE_MIN_BYTES
+
+
+class RootDiskFindingTests(unittest.TestCase):
+    def test_threshold_boundary_and_unavailable_probe(self):
+        root = Path("/configured/data")
+        for free, code in ((ROOT_FREE_MIN_BYTES - 1, "root_disk_low"),
+                           (ROOT_FREE_MIN_BYTES, None), (None, "root_disk_unavailable")):
+            with self.subTest(free=free), mock.patch.object(cli, "disk_free_bytes", return_value=free):
+                finding = cli.root_disk_finding(root)
+                self.assertEqual(finding["code"] if finding else None, code)
+                if finding is not None:
+                    self.assertEqual(finding["threshold_bytes"], ROOT_FREE_MIN_BYTES)
+                if code == "root_disk_low":
+                    self.assertEqual(finding["free_bytes"], free)
+
+    def test_shared_status_probe_rejects_malformed_measurement(self):
+        for value in (-1, "100", True, None):
+            with self.subTest(value=value), mock.patch.object(status.shutil, "disk_usage") as usage:
+                usage.return_value.free = value
+                self.assertIsNone(status.disk_free_bytes(Path("/configured/data")))
+        with mock.patch.object(status.shutil, "disk_usage", return_value=None):
+            self.assertIsNone(status.disk_free_bytes(Path("/configured/data")))
 
 
 class DoctorRecordTests(unittest.TestCase):

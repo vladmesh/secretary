@@ -30,6 +30,7 @@ from secretary.host import (
 )
 from secretary.host_apply import resolve_packaged
 from secretary.infra import instance_maintenance
+from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNITS = REPO_ROOT / "packaging" / "systemd"
@@ -225,13 +226,31 @@ class MaintenanceRunTests(_WithoutSuiteGitConfig):
         with tempfile.TemporaryDirectory() as tmp:
             instance = _instance_repo(Path(tmp))
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            # The Git CLI contract is local; Docker cleanup is exercised with a fake below.
+            with contextlib.redirect_stdout(output), mock.patch.object(
+                instance_maintenance, "cleanup_docker", return_value={"findings": []}
+            ):
                 code = main(["instance-maintenance", "--instance", str(instance)])
 
         self.assertEqual(code, 0, output.getvalue())
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["status"], "ok")
         self.assertIn("loose_objects", payload)
+        self.assertEqual(payload["cleanup"], {"findings": []})
+
+    def test_the_cli_exposes_cleanup_failure_without_raw_docker_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = _instance_repo(Path(tmp))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch.object(
+                instance_maintenance, "cleanup_docker",
+                return_value={"findings": ["Docker command failed or exceeded output bound"]},
+            ):
+                code = main(["instance-maintenance", "--instance", str(instance)])
+        self.assertEqual(code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["cleanup"]["findings"], ["Docker command failed or exceeded output bound"])
 
     def test_the_cli_fails_on_a_directory_that_is_no_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +260,167 @@ class MaintenanceRunTests(_WithoutSuiteGitConfig):
 
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output.getvalue())["status"], "failed")
+
+
+class DockerCleanupTests(unittest.TestCase):
+    """A fake native boundary proves selection without touching a Docker daemon."""
+
+    def test_native_command_pins_local_socket_and_current_api(self):
+        with mock.patch.dict(os.environ, {"DOCKER_HOST": "tcp://remote:2375",
+                                              "DOCKER_CONTEXT": "remote", "DOCKER_API_VERSION": "1.41"}), \
+             mock.patch.object(instance_maintenance.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(instance_maintenance._docker("version"), "")
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["DOCKER_HOST"], "unix:///var/run/docker.sock")
+        self.assertNotIn("DOCKER_CONTEXT", environment)
+        self.assertNotIn("DOCKER_API_VERSION", environment)
+
+    def test_pid_absence_is_definitive_and_permission_failure_is_not(self):
+        with mock.patch.object(instance_maintenance.os, "kill", side_effect=ProcessLookupError):
+            self.assertTrue(instance_maintenance._owner_dead(101))
+        with mock.patch.object(instance_maintenance.os, "kill", side_effect=PermissionError):
+            self.assertFalse(instance_maintenance._owner_dead(101))
+        self.assertFalse(instance_maintenance._owner_dead(os.getpid()))
+
+    def test_dead_owner_only_and_native_prunes_are_bounded_and_idempotent(self):
+        ids = [format(index, "064x") for index in range(1, 7)]
+        labels = {
+            ids[0]: {TEST_BOARD_LABEL: "101"},
+            ids[1]: {TEST_BOARD_LABEL: "202"},
+            ids[2]: {TEST_BOARD_LABEL: "101", PRODUCTION_BOARD_LABEL: "true"},
+            ids[3]: {"other": "101"},  # A name/image decoy cannot establish ownership.
+            ids[4]: {TEST_BOARD_LABEL: "01"},
+            ids[5]: {TEST_BOARD_LABEL: "9" * 5000},
+        }
+        present = set(ids)
+        calls = []
+        volume_runs = 0
+
+        def docker(*args):
+            nonlocal volume_runs
+            calls.append(args)
+            if args[:2] == ("container", "ls"):
+                self.assertEqual(args[-1], f"label={TEST_BOARD_LABEL}")
+                return "\n".join(identifier for identifier in ids if identifier in present)
+            if args[:2] == ("container", "inspect"):
+                identifier = args[2]
+                return json.dumps([{"Id": identifier, "Config": {"Labels": labels[identifier]}}])
+            if args[:2] == ("container", "rm"):
+                self.assertEqual(args[2], "--force")
+                present.remove(args[3])
+                return args[3]
+            if args[0] == "version":
+                return "1.45\n"
+            if args[:2] == ("volume", "prune"):
+                self.assertEqual(args, ("volume", "prune", "--force"))
+                volume_runs += 1
+                return ("Deleted Volumes:\n" + "a" * 64 + "\nTotal reclaimed space: 1B\n"
+                        if volume_runs == 1 else "Total reclaimed space: 0B")
+            if args[:2] == ("builder", "prune"):
+                self.assertEqual(args[-1], "until=168h")
+                self.assertNotIn("--all", args)
+                return "Total reclaimed space: 4MB\n" if volume_runs == 1 else "Total reclaimed space: 0B\n"
+            self.fail(args)
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker), \
+             mock.patch.object(instance_maintenance, "_owner_dead", side_effect=lambda pid: pid == 101):
+            first = instance_maintenance.cleanup_docker()
+            second = instance_maintenance.cleanup_docker()
+        self.assertEqual(first["containers"]["removed"], 1)
+        self.assertEqual(first["containers"]["retained"],
+                         {"owner_live_or_unknown": 1, "protected_label": 3, "invalid_owner": 1})
+        self.assertEqual(first["anonymous_volumes"]["removed"], 1)
+        self.assertEqual(first["build_cache"]["reclaimed"], "4MB")
+        self.assertEqual(first["findings"], [])
+        self.assertEqual(second["containers"]["removed"], 0)
+        self.assertEqual(second["anonymous_volumes"]["removed"], 0)
+        self.assertEqual([call for call in calls if call[:2] == ("container", "rm")],
+                         [("container", "rm", "--force", ids[0])])
+
+    def test_changed_owner_concurrent_removal_and_command_failure_fail_closed(self):
+        identifier = "a" * 64
+        inspections = 0
+
+        def docker(*args):
+            nonlocal inspections
+            if args[:2] == ("container", "ls"):
+                return identifier
+            if args[:2] == ("container", "inspect"):
+                inspections += 1
+                owner = "101" if inspections == 1 else "202"
+                return json.dumps([{"Id": identifier, "Config": {"Labels": {TEST_BOARD_LABEL: owner}}}])
+            if args[0] == "version":
+                raise instance_maintenance.CleanupError("version unavailable")
+            if args[:2] == ("builder", "prune"):
+                raise instance_maintenance.CleanupError("builder unavailable")
+            self.fail(f"destructive call: {args}")
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker), \
+             mock.patch.object(instance_maintenance, "_owner_dead", return_value=True):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["containers"], {"removed": 0, "retained": {"changed_or_live": 1}})
+        self.assertEqual(result["findings"], ["version unavailable", "builder unavailable"])
+
+    def test_empty_and_oversized_inventory(self):
+        calls = []
+
+        def docker(*args):
+            calls.append(args)
+            if args[:2] == ("container", "ls"):
+                return ""
+            if args[0] == "version":
+                return "1.41"
+            if args[:2] == ("builder", "prune"):
+                return "Total reclaimed space: 0B"
+            self.fail(args)
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["containers"]["removed"], 0)
+        self.assertTrue(result["findings"])
+        self.assertIsNone(result["anonymous_volumes"]["removed"])
+        self.assertFalse(any(call[:2] == ("volume", "prune") for call in calls))
+
+        def oversized(*args):
+            if args[:2] == ("container", "ls"):
+                return "\n".join(format(index, "064x") for index in range(instance_maintenance.MAX_CONTAINERS + 1))
+            if args[0] == "version":
+                return "1.42"
+            if args[:2] == ("volume", "prune"):
+                return "Total reclaimed space: 0B"
+            if args[:2] == ("builder", "prune"):
+                return "Total reclaimed space: 0B"
+            self.fail(f"container inspection/removal after oversized inventory: {args}")
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=oversized):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["containers"]["removed"], 0)
+        self.assertIn("test container inventory exceeds bound or contains duplicates", result["findings"])
+
+    def test_failed_removal_does_not_claim_success_or_expose_native_output(self):
+        identifier = "f" * 64
+
+        def docker(*args):
+            if args[:2] == ("container", "ls"):
+                return identifier
+            if args[:2] == ("container", "inspect"):
+                return json.dumps([{"Id": identifier, "Config": {"Labels": {TEST_BOARD_LABEL: "101"}}}])
+            if args[:2] == ("container", "rm"):
+                raise instance_maintenance.CleanupError("test container removal failed")
+            if args[0] == "version":
+                return "1.42"
+            if args[:2] == ("volume", "prune"):
+                return "Total reclaimed space: 0B"
+            if args[:2] == ("builder", "prune"):
+                return "Total reclaimed space: 0B"
+            self.fail(args)
+
+        with mock.patch.object(instance_maintenance, "_docker", side_effect=docker), \
+             mock.patch.object(instance_maintenance, "_owner_dead", return_value=True):
+            result = instance_maintenance.cleanup_docker()
+        self.assertEqual(result["containers"], {"removed": 0, "retained": {"removal_failed": 1}})
+        self.assertEqual(result["findings"], ["test container removal failed"])
 
 
 class MaintenanceUnitTests(unittest.TestCase):
