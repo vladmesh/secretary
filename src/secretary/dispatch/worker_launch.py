@@ -236,6 +236,7 @@ def launch_worker_after_claim(
         action="claim",
         head=record.head,
         workspace=runtime.host.restore_workspace(claimed, record.worker),
+        task=claimed,
     )
     if intent_failure is not None:
         if intent_failure.startswith("codex-fanout-policy:"):
@@ -278,6 +279,11 @@ def launch_worker_after_claim(
         reference=ref,
     )
     try:
+        snapshot_kwargs = (
+            {"local_run_snapshot": record.worker_local_run_snapshot}
+            if callable(getattr(runtime.host, "local_run_snapshot_for_round", None))
+            else {}
+        )
         prepared = runtime.host.prepare_worker(
             claimed,
             record.worker,
@@ -287,6 +293,7 @@ def launch_worker_after_claim(
             generation=record.report_generation,
             failover=bool(record.preferred_head),
             heartbeat_run_id=str(dict(record.launch_intent).get("run_id") or ""),
+            **snapshot_kwargs,
         )
     except (HeadLaunchAborted, HostError) as exc:
         aborted = _worker_launch_failure(runtime,
@@ -534,6 +541,7 @@ def write_worker_relaunch_intent(
     *,
     action: str,
     round_number: int | None = None,
+    task: dict[str, Any] | None = None,
 ) -> str | None:
     """Fix a rework or respawn bring-up on disk before `restart_worker` is called."""
     return _write_launch_intent(
@@ -547,6 +555,7 @@ def write_worker_relaunch_intent(
         head=record.head,
         workspace=record.workspace,
         round_number=round_number,
+        task=task,
     )
 
 
@@ -676,7 +685,7 @@ def _relaunch_headless_worker(
     # different worktree than the candidate it was decided on.
     record.workspace = str(state.get("workspace") or record.workspace)
     failure = write_worker_relaunch_intent(runtime,
-        payload, records, ref, record, action="headless-worker-recovery"
+        payload, records, ref, record, action="headless-worker-recovery", task=task
     )
     if failure is not None:
         return _launch_intent_unwritable(

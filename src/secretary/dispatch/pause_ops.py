@@ -538,6 +538,7 @@ def _resume_heads(
             action="worker-resume",
             head=record.head,
             workspace=record.workspace,
+            task=task,
         )
         if failure is not None:
             skipped.append(f"{ref}:worker")

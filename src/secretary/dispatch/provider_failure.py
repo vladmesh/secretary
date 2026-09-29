@@ -396,7 +396,7 @@ def _relaunch_worker(
     record.head = choice.head
     record.preferred_head = choice.preferred if choice.substituted else ""
     failure = write_worker_relaunch_intent(
-        runtime, payload, records, ref, record, action="worker-provider-fallback"
+        runtime, payload, records, ref, record, action="worker-provider-fallback", task=task
     )
     if failure is not None:
         return _launch_intent_unwritable(

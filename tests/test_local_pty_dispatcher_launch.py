@@ -91,6 +91,7 @@ class _StandInCatalog(FakeCatalog):
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
+        local_run_policy: str | None = None,
     ) -> HeadCommand:
         return HeadCommand(self.command, adapter="claude")
 

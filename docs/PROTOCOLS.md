@@ -1913,9 +1913,20 @@ Worker and reviewer packets permit only the project's adapter-declared broad che
 locally. Integration shards, Docker/container runs, stands, provisioning and network-heavy checks
 run in CI only, except for exact vectors in the sprint's creation-only `local_run_exceptions` field.
 Development convenience, an acceptance criterion and missing/none/noop gate receipts grant no
-additional authority. Reviewers report an observed undeclared local heavy run as a blocking finding
-even if tests passed, and follow these bounds for their own verification. Receipt reuse and
-mandatory dispatcher-owned exact-SHA CI gates still apply.
+additional authority. An excessive local heavy run is a non-blocking observation, never grounds
+for RED. Exclude its results from validation evidence, even if tests passed; CI or an allowed
+local check supplies that evidence. Review verdicts depend on code and valid evidence, and
+reviewers follow these bounds for their own verification. The observer does not order rework or
+charge the budget for such a run alone. Historical verdicts remain in the audit and are not
+reopened. Missing required valid evidence or a code defect can still block release. Receipt reuse
+and mandatory dispatcher-owned exact-SHA CI gates still apply.
+
+The shared worker/reviewer [Docker guard](HEAD_RUNTIME.md#worker-and-reviewer-docker-guard)
+refuses `run`, `create`, `build` and `compose up|run|build` unless the current card's project-scoped
+sprint snapshot grants `["docker", *original_arguments]` by exact string-vector equality before
+any parsing or translation. Inherited policy and `runtime.env` grant nothing. Cleanup ownership
+checks remain mandatory even with an exact exception. Tests/broad must not require local Docker;
+report a declared broad-suite dependency on Docker on the card instead of weakening the guard.
 
 Create with `--local-run-exceptions-file EXCEPTIONS.json`, or pass `local_run_exceptions` to
 `SprintWriter.create` or `SprintOperationLayer.sprint_create`. The web creation form accepts the

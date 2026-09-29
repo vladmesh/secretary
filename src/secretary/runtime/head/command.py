@@ -149,6 +149,7 @@ def render_head_command(
     workspace: str = "",
     role: str = "",
     identity: Mapping[str, str] | None = None,
+    local_run_policy: str | None = None,
     binding: str = HEAD_BINDING,
 ) -> HeadCommand:
     """The shell command that brings one head up, and how its prompt reaches it.
@@ -165,8 +166,15 @@ def render_head_command(
         raise HeadCommandError(f"head has unknown adapter {adapter!r} (known: {known})")
     command = render(profile, prompt=prompt, workspace=workspace)
     if role:
-        command = wrap_role_command(role, command, identity=identity, binding=binding, workspace=workspace)
-    elif identity:
+        command = wrap_role_command(
+            role,
+            command,
+            identity=identity,
+            local_run_policy=local_run_policy,
+            binding=binding,
+            workspace=workspace,
+        )
+    elif identity or local_run_policy is not None:
         raise HeadCommandError("an unwrapped head command carries no identity")
     return HeadCommand(
         command,
@@ -180,6 +188,7 @@ def wrap_role_command(
     command: str,
     *,
     identity: Mapping[str, str] | None = None,
+    local_run_policy: str | None = None,
     binding: str = HEAD_BINDING,
     workspace: str = "",
 ) -> str:
@@ -192,14 +201,18 @@ def wrap_role_command(
 
     `identity` is rendered beside that binding rather than left to `runtime.env`. Only names the
     role's allowlist knows are rendered; anything else is refused here instead of silently ignored.
+    `local_run_policy` is a dispatcher snapshot rendered as an explicit role-env argument so no
+    inherited binding or runtime.env declaration can accidentally grant a heavy-command exception.
     """
     if binding not in ROLE_ENV_BINDINGS:
         known = ", ".join(ROLE_ENV_BINDINGS)
         raise HeadCommandError(f"unknown role env binding {binding!r} (known: {known})")
     if binding == STANDING_BINDING:
-        if identity:
+        if identity or local_run_policy is not None:
             raise HeadCommandError(f"the {STANDING_BINDING} binding renders no identity for role {role!r}")
         return role_env.wrap_shell_command(role, command, workspace=workspace or None)
+    if local_run_policy is not None and role not in role_env.RUFF_ROLES:
+        raise HeadCommandError(f"role {role!r} carries no local-run policy")
     unknown = sorted(set(identity or {}) - set(role_env.ROLE_ALLOWLIST.get(role, ())))
     if unknown:
         raise HeadCommandError(f"role {role!r} carries no binding named {', '.join(unknown)}")
@@ -207,9 +220,12 @@ def wrap_role_command(
     prefix = " ".join([*role_env.launch_binding(), *rendered])
     command = role_env.role_shell_command(role, command, workspace=workspace or None)
     workspace_arg = f" --workspace {shlex.quote(workspace)}" if workspace else ""
+    policy_arg = (
+        f" --local-run-policy {shlex.quote(local_run_policy)}" if local_run_policy is not None else ""
+    )
     return (
         f"{prefix} {pythonpath_prefix(cast(dict[str, str], os.environ))} python3 {PYTHON_SAFE_PATH_FLAG} "
-        f"-m {role_env.ENTRY_POINT} exec --role {shlex.quote(role)}{workspace_arg} -- /bin/sh -lc "
+        f"-m {role_env.ENTRY_POINT} exec --role {shlex.quote(role)}{workspace_arg}{policy_arg} -- /bin/sh -lc "
         f"{shlex.quote(command)}"
     )
 

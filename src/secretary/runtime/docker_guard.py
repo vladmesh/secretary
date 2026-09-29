@@ -1,4 +1,4 @@
-"""Conservative protection against accidental Docker cleanup in worker/reviewer heads.
+"""Conservative protection against accidental Docker execution in worker/reviewer heads.
 
 Native Docker resolves endpoints and container metadata. All targets are checked before the
 single destructive call, which uses full IDs. This is not a malicious-head sandbox.
@@ -13,14 +13,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from secretary.board.local_run import parse_local_run_policy
 from secretary.runtime.container_labels import is_test_container
 
 BACKEND_ENV = "SECRETARY_DOCKER_BACKEND"
 PYTHON_ENV = "SECRETARY_DOCKER_PYTHON"
 SOURCE_ENV = "SECRETARY_DOCKER_SOURCE"
-BINDINGS = (BACKEND_ENV, PYTHON_ENV, SOURCE_ENV)
+POLICY_ENV = "SECRETARY_DOCKER_LOCAL_RUN_POLICY"
+BINDINGS = (BACKEND_ENV, PYTHON_ENV, SOURCE_ENV, POLICY_ENV)
 DESTRUCTIVE = {"rm", "stop", "kill"}
+HEAVY = {"run", "create", "build"}
 CONTAINER_ALIASES = {"remove": "rm"}
+BUILD_ALIASES = {"image": {"build"}, "builder": {"build"}, "buildx": {"build", "b"}}
 PRUNE_GROUPS = {"container", "system", "volume", "image", "builder", "buildx", "network"}
 GLOBAL_VALUES = {
     "--host",
@@ -49,6 +53,7 @@ COMPOSE_VALUES = {
 }
 COMPOSE_BOOLS = {"--compatibility", "--dry-run", "--all-resources", "--help"}
 ALTERNATIVE = "use docker container rm|stop|kill with explicit test container IDs instead"
+USE_CI = "use CI; heavy local Docker requires an exact sprint local_run_exceptions argv"
 
 
 class GuardError(RuntimeError):
@@ -74,7 +79,7 @@ def _option(args: list[str], index: int, values: set[str], booleans: set[str]) -
         if index + 1 >= len(args) or not args[index + 1] or args[index + 1].startswith("--"):
             raise GuardError(f"missing value for {name}")
         return args[index : index + 2], index + 2
-    raise GuardError(f"unknown option {name}; command scope is unresolved")
+    raise GuardError(f"unknown option {name}; command scope is unresolved; {USE_CI}")
 
 
 def _leading(args: list[str], values: set[str], booleans: set[str]) -> tuple[list[str], list[str]]:
@@ -203,9 +208,24 @@ def _checked_ids(backend: str, prefix: list[str], targets: list[str], env: dict[
     return ids
 
 
+def _heavy_allowed(args: list[str], env: dict[str, str]) -> bool:
+    """Match ['docker', *original_arguments], before parsing or endpoint/alias translation.
+
+    No basename, path, flag, shell, wildcard or prefix equivalence is applied. The role launcher
+    strips inherited policy and supplies only its explicit dispatcher snapshot. This is an
+    accidental-command guard, not protection against a head forging its own environment.
+    """
+    try:
+        entries = parse_local_run_policy(json.loads(env.get(POLICY_ENV, "")))
+    except (ValueError, TypeError):
+        return False
+    return any(entry.argv == ("docker", *args) for entry in entries)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     env = dict(os.environ)
+    heavy_allowed = _heavy_allowed(args, env)
     backend = env.get(BACKEND_ENV, "")
     try:
         path = Path(backend)
@@ -221,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
                 _, compose = _leading(rest, COMPOSE_VALUES | GLOBAL_VALUES, COMPOSE_BOOLS | GLOBAL_BOOLS)
                 if compose and compose[0] in DESTRUCTIVE | {"down", "prune"}:
                     raise GuardError(f"Compose destructive scope is unsupported; {ALTERNATIVE}")
+                if compose and compose[0] in {"up", "run", "build"} and not heavy_allowed:
+                    raise GuardError(f"Compose {compose[0]} refused; {USE_CI}")
             elif verb in PRUNE_GROUPS:
                 values = GLOBAL_VALUES | ({"--builder"} if verb == "buildx" else set())
                 nested_globals, nested = _leading(rest, values, GLOBAL_BOOLS)
@@ -229,10 +251,14 @@ def main(argv: list[str] | None = None) -> int:
                     raise GuardError(f"prune scope is unsupported; {ALTERNATIVE}")
                 if verb == "container" and nested:
                     operation = CONTAINER_ALIASES.get(nested[0], nested[0])
-                    if operation in DESTRUCTIVE:
+                    if operation in DESTRUCTIVE | {"run", "create"}:
                         verb, rest = operation, nested[1:]
+                elif nested and nested[0] in BUILD_ALIASES.get(verb, ()):
+                    verb = "build"
             if verb == "prune":
                 raise GuardError(f"prune scope is unsupported; {ALTERNATIVE}")
+            if verb in HEAVY and not heavy_allowed:
+                raise GuardError(f"Docker {verb} refused; {USE_CI}")
             if verb in DESTRUCTIVE:
                 options, targets = _targets(rest, verb, globals_)
                 prefix = _endpoint(backend, globals_, env)

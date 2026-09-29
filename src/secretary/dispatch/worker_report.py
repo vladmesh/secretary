@@ -534,7 +534,7 @@ def _reject_stale_done(
     _reset_wait(record, "review")
     moved = runtime.reader.show(ref)
     failure = _write_worker_relaunch_intent(
-        runtime, payload, records, ref, record, action="stale-done-rework"
+        runtime, payload, records, ref, record, action="stale-done-rework", task=moved
     )
     if failure is not None:
         return _launch_intent_unwritable(

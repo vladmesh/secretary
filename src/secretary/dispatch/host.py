@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -657,6 +658,7 @@ class InstanceCatalog:
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
+        local_run_policy: str | None = None,
     ) -> HeadCommand:
         """The command this workspace's pane will run, with its workspace made fit to run it in."""
         profile = self._head_profile(head)
@@ -668,6 +670,7 @@ class InstanceCatalog:
                 workspace=workspace,
                 role=role,
                 identity=identity,
+                local_run_policy=local_run_policy,
             )
         except (HeadLaunchError, HeadCommandError) as exc:
             raise HostError(str(exc)) from None
@@ -1017,6 +1020,7 @@ class CommandHostRuntime:
         generation: int = 0,
         failover: bool = False,
         heartbeat_run_id: str = "",
+        local_run_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_production_runtime("worker-prepare")
         project = task["project"]
@@ -1045,8 +1049,15 @@ class CommandHostRuntime:
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
         self._clear_report_bodies(task["ref"])
+        snapshot = local_run_snapshot or self.local_run_snapshot_for_round(
+            task, WORKER_ROLE, generation, {}
+        )
+        local_run_policy = self._frozen_local_run_policy(task, WORKER_ROLE, generation, snapshot)
         self._write_prompt(
-            Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
+            Path(workspace) / "TASK.md",
+            self._worker_task_doc(
+                task, base, attempt_id, generation, local_run_policy=local_run_policy
+            ),
         )
         launched = self._launch(
             workspace,
@@ -1060,6 +1071,7 @@ class CommandHostRuntime:
             task=task,
             failover=failover,
             heartbeat_run_id=heartbeat_run_id,
+            local_run_policy=local_run_policy,
         )
         return {
             "workspace": workspace,
@@ -1089,6 +1101,9 @@ class CommandHostRuntime:
         self._require_workspace_environment(str(workspace))
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
+        local_run_policy = self._frozen_local_run_policy(
+            task, WORKER_ROLE, record.report_generation, record.worker_local_run_snapshot
+        )
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(
@@ -1099,6 +1114,7 @@ class CommandHostRuntime:
                 record.report_decision,
                 record.report_protocol_prerequisites,
                 record=record,
+                local_run_policy=local_run_policy,
             ),
         )
         return self._launch(
@@ -1113,6 +1129,7 @@ class CommandHostRuntime:
             task=task,
             failover=bool(record.preferred_head),
             heartbeat_run_id=heartbeat_run_id,
+            local_run_policy=local_run_policy,
         )
 
     def observer_workspace(self, reference: str) -> str:
@@ -1842,7 +1859,10 @@ class CommandHostRuntime:
         self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
         self._require_workspace_environment(record.workspace)
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
-        document, nudge = self._review_document(task, record)
+        local_run_policy = self._frozen_local_run_policy(
+            task, REVIEW_ROLE, record.review_baseline, record.review_local_run_snapshot
+        )
+        document, nudge = self._review_document(task, record, local_run_policy=local_run_policy)
         launched = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
@@ -1855,6 +1875,7 @@ class CommandHostRuntime:
             task=task,
             failover=bool(record.preferred_review_head),
             heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
+            local_run_policy=local_run_policy,
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
@@ -1919,7 +1940,10 @@ class CommandHostRuntime:
             # unbound source belongs to a prior busy pre-send and is bound by the same boundary.
             if ingress.source.get("state") == "bound":
                 ingress.poll()
-        document, nudge = self._review_document(task, record)
+        local_run_policy = self._frozen_local_run_policy(
+            task, REVIEW_ROLE, record.review_baseline, record.review_local_run_snapshot
+        )
+        document, nudge = self._review_document(task, record, local_run_policy=local_run_policy)
         try:
             receipt = self.head_runtime_for(run).deliver(
                 run,
@@ -3147,6 +3171,7 @@ class CommandHostRuntime:
         task: dict[str, Any] | None = None,
         failover: bool = False,
         heartbeat_run_id: str = "",
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with."""
         if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
@@ -3232,6 +3257,11 @@ class CommandHostRuntime:
             # deliberate for tests and manual overrides, with the inactivity ceiling as the fallback.
             self.catalog.prepare_head_workspace(head, workspace, role=role)
         else:
+            policy_binding: dict[str, str] = {}
+            if role in {"worker", "reviewer"}:
+                policy, _ = local_run_policy if local_run_policy is not None else (None, bool((task or {}).get("sprint")))
+                if policy is not None:
+                    policy_binding["local_run_policy"] = json.dumps(policy, ensure_ascii=True)
             launch = self.catalog.head_launch(
                 head,
                 prompt_file,
@@ -3239,6 +3269,7 @@ class CommandHostRuntime:
                 role=role,
                 launch_prompt=launch_prompt,
                 identity=launch_identity or None,
+                **policy_binding,
             )
             command = launch.command
             if pid_file:
@@ -3695,6 +3726,9 @@ class CommandHostRuntime:
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
+        local_run_policy = self._frozen_local_run_policy(
+            task, WORKER_ROLE, record.report_generation, record.worker_local_run_snapshot
+        )
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(
@@ -3705,6 +3739,7 @@ class CommandHostRuntime:
                 record.report_decision,
                 record.report_protocol_prerequisites,
                 record=record,
+                local_run_policy=local_run_policy,
             ),
         )
         try:
@@ -3750,6 +3785,9 @@ class CommandHostRuntime:
         generation = record.report_generation
         decision = record.report_decision
         protocol_prerequisites = record.report_protocol_prerequisites
+        local_run_policy = self._frozen_local_run_policy(
+            task, WORKER_ROLE, generation, record.worker_local_run_snapshot
+        )
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
@@ -3761,6 +3799,7 @@ class CommandHostRuntime:
                 decision,
                 protocol_prerequisites,
                 record=record,
+                local_run_policy=local_run_policy,
             ),
         )
         # The continuation travels as a pointer at the document just written, not as the round typed
@@ -3849,7 +3888,13 @@ class CommandHostRuntime:
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
-    def _review_document(self, task: dict[str, Any], record: DispatcherRecord) -> tuple[Path, str]:
+    def _review_document(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
+    ) -> tuple[Path, str]:
         """This round's review task, on disk, and the one line that points a reviewer at it.
 
         The text never travels through the pane; only a bounded pointer does. A retry re-renders the
@@ -3857,7 +3902,10 @@ class CommandHostRuntime:
         a pane is opened. Nothing here writes to or removes anything from the candidate checkout.
         """
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
-        prompt = self._review_prompt(task, record.attempt_id, record.review_baseline, record=record)
+        prompt = self._review_prompt(
+            task, record.attempt_id, record.review_baseline, record=record,
+            local_run_policy=local_run_policy,
+        )
         try:
             _write_prompt_document(document, prompt, outside=Path(record.workspace))
             nudge = _nudge_for(document)
@@ -3970,31 +4018,128 @@ class CommandHostRuntime:
         suffix = "".join(f" {shlex.quote(argument)}" for argument in arguments)
         return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary{suffix}"
 
-    def _local_run_section(self, task: dict[str, Any]) -> list[str]:
-        """One rule for both heads, with authority read only from this card's sprint."""
-        from secretary.board.local_run import parse_local_run_exceptions
+    def _local_run_policy(self, task: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """The same creation-only authority read for packets and ordinary head launches.
 
-        reference = str(task.get("sprint") or "")
-        project = str(task.get("project") or "")
-        entries = []
-        unavailable = False
-        if reference:
-            try:
-                if self.sprint_reader is None:
-                    raise ValueError("no sprint reader")
-                sprint = self.sprint_reader.show(reference, include_cards=False)
-                if not isinstance(sprint, dict) or sprint.get("ref") != reference:
-                    raise ValueError("sprint identity mismatch")
-                projects = sprint.get("reservations", [])
-                if not isinstance(projects, list) or any(not isinstance(item, str) for item in projects):
-                    raise ValueError("malformed sprint scope")
-                entries = [
-                    entry.to_document()
-                    for entry in parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=projects)
-                    if entry.project == project
-                ]
-            except Exception:  # noqa: BLE001 - any failed authority read grants no exceptions
-                unavailable = True
+        The launch snapshot is sufficient: sprint exceptions are immutable after creation.
+        Any malformed declaration invalidates the whole list before project filtering.
+        """
+        from secretary.board.local_run import parse_local_run_exceptions, parse_local_run_policy
+
+        reference, project = task.get("sprint"), task.get("project")
+        if not reference:
+            return None, False
+        try:
+            policy = {"card": task.get("ref"), "sprint": reference, "project": project, "exceptions": []}
+            parse_local_run_policy(policy)
+            if self.sprint_reader is None:
+                raise ValueError("no sprint reader")
+            sprint = self.sprint_reader.show(reference, include_cards=False)
+            if not isinstance(sprint, dict) or sprint.get("ref") != reference:
+                raise ValueError("sprint identity mismatch")
+            projects = sprint.get("reservations", [])
+            if not isinstance(projects, list) or any(
+                not isinstance(item, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", item) for item in projects
+            ):
+                raise ValueError("malformed sprint scope")
+            if project not in projects:
+                raise ValueError("card project is not reserved")
+            policy["exceptions"] = [
+                entry.to_document()
+                for entry in parse_local_run_exceptions(
+                    sprint.get("local_run_exceptions", []), projects=projects
+                )
+                if entry.project == project
+            ]
+            parse_local_run_policy(policy)
+            return policy, False
+        except Exception:  # noqa: BLE001 - any failed authority read grants no exceptions
+            return None, True
+
+    def local_run_snapshot_for_round(
+        self,
+        task: dict[str, Any],
+        role: str,
+        round_number: int,
+        retained: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Capture once for a fresh round; keep the same result on retries and recovery."""
+        identity = {
+            "card": task.get("ref"),
+            "sprint": task.get("sprint") or "",
+            "project": task.get("project"),
+            "role": role,
+            "round": round_number,
+        }
+        if retained.get("role") == role and retained.get("round") == round_number:
+            # A corrupt or changed identity in the current round must not trigger a new read that
+            # could grant authority to a guard already bound with a different result.
+            return dict(retained)
+        policy, unavailable = self._local_run_policy(task)
+        return {**identity, "policy": policy, "unavailable": unavailable}
+
+    def _frozen_local_run_policy(
+        self,
+        task: dict[str, Any],
+        role: str,
+        round_number: int,
+        snapshot: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        from secretary.board.local_run import parse_local_run_policy
+
+        identity = {
+            "card": task.get("ref"),
+            "sprint": task.get("sprint") or "",
+            "project": task.get("project"),
+            "role": role,
+            "round": round_number,
+        }
+        if not isinstance(snapshot, dict) or set(snapshot) != {*identity, "policy", "unavailable"}:
+            return None, bool(task.get("sprint"))
+        if any(snapshot.get(key) != value for key, value in identity.items()):
+            return None, bool(task.get("sprint"))
+        unavailable = snapshot["unavailable"]
+        if not isinstance(unavailable, bool):
+            return None, bool(task.get("sprint"))
+        policy = snapshot["policy"]
+        if policy is None:
+            return None, unavailable
+        if unavailable or not isinstance(policy, dict):
+            return None, True
+        try:
+            parse_local_run_policy(policy)
+        except ValueError:
+            return None, True
+        if any(policy.get(key) != task.get(key if key != "card" else "ref") for key in ("card", "sprint", "project")):
+            return None, True
+        return policy, False
+
+    def retained_local_run_snapshot_successor(
+        self,
+        task: dict[str, Any],
+        previous_round: int,
+        new_round: int,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Carry the existing head's guard policy into a new report round on that same head."""
+        policy, unavailable = self._frozen_local_run_policy(
+            task, WORKER_ROLE, previous_round, snapshot
+        )
+        return {
+            "card": task.get("ref"), "sprint": task.get("sprint") or "",
+            "project": task.get("project"), "role": WORKER_ROLE, "round": new_round,
+            "policy": policy, "unavailable": unavailable,
+        }
+
+    def _local_run_section(
+        self,
+        task: dict[str, Any],
+        *,
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
+    ) -> list[str]:
+        """One rule for both heads, with authority read only from this card's sprint."""
+        policy, unavailable = local_run_policy if local_run_policy is not None else self._local_run_policy(task)
+        entries = policy["exceptions"] if policy else []
         sections = [
             "## Control-host local-run rule",
             "",
@@ -4016,7 +4161,10 @@ class CommandHostRuntime:
             "",
         ]
         if unavailable:
-            sections += ["Sprint exception authority is unreadable or malformed; no exception is authorized.", ""]
+            sections += [
+                "Sprint exception authority is unreadable or malformed; no exception is authorized.",
+                "",
+            ]
         return sections
 
     def _worker_task_doc(
@@ -4029,6 +4177,7 @@ class CommandHostRuntime:
         protocol_prerequisites: tuple[str, ...] = (),
         *,
         record: DispatcherRecord | None = None,
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> str:
         branch = _legacy_worker_branch(task["ref"])
         # The generation keeps the report request-id distinct per round: a rework reuses the same
@@ -4167,7 +4316,7 @@ class CommandHostRuntime:
                 "",
             ]
         broad_command, show_command = self._broad_check_invocation(str(task.get("project") or ""))
-        sections += self._local_run_section(task)
+        sections += self._local_run_section(task, local_run_policy=local_run_policy)
         if broad_command:
             broad_invocation = [f"    {broad_command}", ""]
             show_invocation = f"`{show_command}` and quote its summary"
@@ -4454,6 +4603,7 @@ class CommandHostRuntime:
         review_round: int,
         *,
         record: DispatcherRecord | None = None,
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> str:
         # The round belongs in the key like it does in the worker report id: a card that goes red
         # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
@@ -4484,10 +4634,15 @@ class CommandHostRuntime:
             "",
             task.get("description") or "(empty task description)",
             "",
-            *self._local_run_section(task),
-            "An observed local heavy run outside the applicable declared exceptions is a blocking",
-            "RED finding, even if its tests passed. Apply the same local-run bounds to every",
-            "verification you perform; obtain evidence through CI when those bounds require it.",
+            *self._local_run_section(task, local_run_policy=local_run_policy),
+            "An observed excessive local heavy run is a non-blocking observation, never grounds",
+            "for RED, even if its tests passed. Exclude its results from validation evidence; CI",
+            "or an allowed local check supplies that evidence. Judge the code and valid evidence.",
+            "The observer does not order rework or charge the budget for such a run alone.",
+            "Preserve historical verdicts in the audit; do not reopen them under this rule.",
+            "Apply the same local-run bounds to every verification you perform; obtain evidence",
+            "through CI when those bounds require it. Missing required valid evidence or a code",
+            "defect can still block release.",
             "",
             "## No subagents",
             "",

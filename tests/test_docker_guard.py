@@ -13,12 +13,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.runtime import docker_guard, role_env
 from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import command as head_command
 from secretary.runtime.head.command import wrap_role_command
-from tests.support.managed_venv import guarded_product_env, managed_product_root
+from tests.support.managed_venv import guarded_product_env
 
 SAFE_ID = "a" * 64
 OTHER_ID = "b" * 64
@@ -106,7 +110,8 @@ class DockerGuardTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        self.product = managed_product_root(self.root)
+        product_env = guarded_product_env(self.root)
+        self.product = Path(product_env["TA_SECRETARY_REPO"])
         self.workspace = self.root / "candidate"
         self.workspace.mkdir()
         venv_bin = self.workspace / role_env.WORKSPACE_ENV_DIR / "bin"
@@ -114,8 +119,7 @@ class DockerGuardTests(unittest.TestCase):
         (venv_bin / "python3").symlink_to(sys.executable)
         (venv_bin / "ruff").write_text("#!/bin/sh\nprintf '%s\\n' 'workspace ruff'\n")
         (venv_bin / "ruff").chmod(0o755)
-        native_bin = self.root / "native"
-        native_bin.mkdir()
+        native_bin = self.root / "native-bin"
         self.native = native_bin / "docker"
         self.native.write_text(f"#!{sys.executable}\n" + NATIVE)
         self.native.chmod(0o755)
@@ -131,8 +135,7 @@ class DockerGuardTests(unittest.TestCase):
             }
         }
         self.base = {
-            "PATH": str(native_bin) + os.pathsep + str(self.product / ".venv/bin"),
-            "TA_SECRETARY_REPO": str(self.product),
+            **product_env,
             "SECRETARY_RUNTIME_ENV_FILE": str(self.root / "absent.env"),
             "GUARD_CASE": str(self.case_file),
             "GUARD_TRANSCRIPT": str(self.transcript),
@@ -141,9 +144,23 @@ class DockerGuardTests(unittest.TestCase):
     def save_case(self) -> None:
         self.case_file.write_text(json.dumps(self.case))
 
-    def environment(self, role: str = "worker") -> dict[str, str]:
+    def environment(self, role: str = "worker", *, policy: str | None = None) -> dict[str, str]:
         with mock.patch.dict(os.environ, self.base, clear=True):
-            return role_env.runtime_env(role, base_env=self.base, workspace=self.workspace)
+            return role_env.runtime_env(
+                role, base_env=self.base, workspace=self.workspace, local_run_policy=policy
+            )
+
+    def policy(self, *vectors: list[str], project: str = "secretary") -> str:
+        return json.dumps(
+            {
+                "card": "secretary-1",
+                "sprint": "sprint:1",
+                "project": project,
+                "exceptions": [
+                    {"project": project, "argv": argv, "rationale": "exact fake probe"} for argv in vectors
+                ],
+            }
+        )
 
     def calls(self) -> list[dict[str, object]]:
         if not self.transcript.exists():
@@ -171,11 +188,13 @@ class DockerGuardTests(unittest.TestCase):
         )
 
     def run_shell(
-        self, command: str, role: str = "worker", *, binding: str = "head"
+        self, command: str, role: str = "worker", *, binding: str = "head", policy: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         self.save_case()
         with mock.patch.dict(os.environ, self.base, clear=True):
-            wrapped = wrap_role_command(role, command, workspace=str(self.workspace), binding=binding)
+            wrapped = wrap_role_command(
+                role, command, workspace=str(self.workspace), binding=binding, local_run_policy=policy
+            )
         return subprocess.run(
             ["/bin/sh", "-c", wrapped],
             env=self.base,
@@ -190,6 +209,458 @@ class DockerGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 125, result.stderr)
         self.assertIn("docker-guard:", result.stderr)
         self.assertEqual(self.destructive_calls(), [], self.calls())
+
+    def test_heavy_operations_and_native_aliases_refuse_before_any_native_call(self) -> None:
+        commands = [
+            ["run", "image"],
+            ["create", "image"],
+            ["build", "."],
+            ["container", "run", "image"],
+            ["container", "create", "image"],
+            ["image", "build", "."],
+            ["builder", "build", "."],
+            ["buildx", "build", "."],
+            ["buildx", "b", "."],
+            ["compose", "up"],
+            ["compose", "run", "service"],
+            ["compose", "build"],
+            ["--context=remote", "--", "run", "image"],
+            ["-Hunix:///fake/sock", "container", "--debug=false", "--", "create", "image"],
+            ["container", "--log-level", "debug", "run", "image"],
+            ["buildx", "--builder=remote", "--", "build", "."],
+            ["compose", "-fup", "--profile", "build", "--project-name=p", "--", "up"],
+            ["compose", "--context", "remote", "--file", "run", "run", "service"],
+        ]
+        for role in ("worker", "reviewer"):
+            for args in commands:
+                with self.subTest(role=role, args=args):
+                    result = self.run_guard(*args, env=self.environment(role))
+                    self.assert_refused(result)
+                    self.assertIn("use CI", result.stderr)
+                    self.assertEqual(self.calls(), [])
+            for binding in ("head", "standing"):
+                for verb in ("run", "create", "build", "compose up", "compose run", "compose build"):
+                    with self.subTest(role=role, binding=binding, verb=verb):
+                        result = self.run_shell(f"docker {verb}", role, binding=binding)
+                        self.assert_refused(result)
+                        self.assertIn("use CI", result.stderr)
+                        self.assertEqual(self.calls(), [])
+
+    def test_exact_heavy_exception_preserves_original_argv_output_and_status(self) -> None:
+        self.case["read_status"] = 27
+        commands = [
+            ["run", "--env", "NOTE=owner's two words", "image", ""],
+            ["--context=remote", "create", "image"],
+            ["container", "--debug=false", "--", "run", "image"],
+            ["container", "create", "image"],
+            ["build", "--tag=owner/image", "."],
+            ["image", "build", "."],
+            ["builder", "build", "."],
+            ["buildx", "--builder", "remote", "build", "."],
+            ["compose", "-f", "two words.yaml", "--", "up", "service"],
+            ["compose", "run", "service", ""],
+            ["compose", "build", "service"],
+        ]
+        policy = self.policy(*[["docker", *args] for args in commands])
+        for role in ("worker", "reviewer"):
+            for args in commands:
+                with self.subTest(role=role, args=args):
+                    self.transcript.write_text("")
+                    result = self.run_shell(shlex.join(["docker", *args]), role, policy=policy)
+                    self.assertEqual(result.returncode, 27, result.stderr)
+                    self.assertEqual(result.stdout, "native stdout\n")
+                    self.assertEqual(result.stderr, "native stderr\n")
+                    self.assertEqual([call["args"] for call in self.calls()], [args])
+
+    def test_documented_build_spellings_need_their_own_exact_exception(self) -> None:
+        # Docker documents these five spellings as one build operation. Classification may share
+        # an action; the original CLI vector is still the only authority for an exception.
+        commands = [
+            ["build", "."],
+            ["builder", "build", "."],
+            ["image", "build", "."],
+            ["buildx", "build", "."],
+            ["buildx", "b", "."],
+        ]
+        self.case["read_status"] = 27
+        for role in ("worker", "reviewer"):
+            for index, args in enumerate(commands):
+                with self.subTest(role=role, args=args):
+                    command = shlex.join(["docker", *args])
+                    self.transcript.write_text("")
+                    refused = self.run_shell(command, role)
+                    self.assert_refused(refused)
+                    self.assertIn("use CI", refused.stderr)
+                    self.assertEqual(self.calls(), [])
+
+                    exact = self.policy(["docker", *args])
+                    forwarded = self.run_shell(command, role, policy=exact)
+                    self.assertEqual(forwarded.returncode, 27, forwarded.stderr)
+                    self.assertEqual(forwarded.stdout, "native stdout\n")
+                    self.assertEqual(forwarded.stderr, "native stderr\n")
+                    self.assertEqual([call["args"] for call in self.calls()], [args])
+
+                    for other in (
+                        ["docker", *args[:-1], "./"],
+                        ["docker", *commands[(index + 1) % len(commands)]],
+                    ):
+                        self.transcript.write_text("")
+                        refused = self.run_shell(command, role, policy=self.policy(other))
+                        self.assert_refused(refused)
+                        self.assertIn("use CI", refused.stderr)
+                        self.assertEqual(self.calls(), [])
+
+    def test_vector_near_misses_never_normalize_or_evaluate_an_exception(self) -> None:
+        allowed = ["docker", "--context=remote", "run", "--env", "NOTE=two words", "image", ""]
+        near_misses = [
+            ["--context", "remote", *allowed[2:]],  # equal-value global spelling
+            ["run", "--context=remote", *allowed[3:]],  # global flag placement
+            ["--context=remote", "container", *allowed[2:]],  # native alias
+            [*allowed[1:-1]],  # empty argument removed
+            [*allowed[1:-1], "changed"],
+            ["--context=other", *allowed[2:]],
+            [*allowed[1:3], "--env=NOTE=two words", *allowed[5:]],
+            [*allowed[1:3], "image", *allowed[3:5], ""],  # argument order
+        ]
+        policy = self.policy(allowed)
+        for args in near_misses:
+            with self.subTest(args=args):
+                self.assert_refused(self.run_guard(*args, env=self.environment(policy=policy)))
+                self.assertEqual(self.calls(), [])
+        for executable in ("/usr/bin/docker", "./docker", "DOCKER"):
+            with self.subTest(executable=executable):
+                policy = self.policy([executable, *allowed[1:]])
+                self.assert_refused(self.run_guard(*allowed[1:], env=self.environment(policy=policy)))
+                self.assertEqual(self.calls(), [])
+        for vector in (["docker", "run"], ["docker", "run", "*"], ["docker", "run", "$(true)"]):
+            self.assert_refused(
+                self.run_guard("run", "image", env=self.environment(policy=self.policy(vector)))
+            )
+            self.assertEqual(self.calls(), [])
+
+    def test_unresolved_options_refuse_even_with_an_exact_declaration(self) -> None:
+        for args in (
+            ["--unknown", "run", "image"],
+            ["--context", "--", "run", "image"],
+            ["container", "--unknown", "create", "image"],
+            ["compose", "--unknown", "up"],
+            ["compose", "--file=", "run", "service"],
+            ["image", "--unknown", "build", "."],
+            ["buildx", "--builder", "--", "build", "."],
+        ):
+            with self.subTest(args=args):
+                env = self.environment(policy=self.policy(["docker", *args]))
+                self.assert_refused(self.run_guard(*args, env=env))
+                self.assertEqual(self.calls(), [])
+
+    def test_stale_inherited_runtime_and_candidate_policy_grant_nothing(self) -> None:
+        policy = self.policy(["docker", "run", "image"])
+        self.base[docker_guard.POLICY_ENV] = policy
+        runtime = self.root / "runtime.env"
+        runtime.write_text(f"{docker_guard.POLICY_ENV}={shlex.quote(policy)}\n")
+        self.base["SECRETARY_RUNTIME_ENV_FILE"] = str(runtime)
+        (self.workspace / "local_run_exceptions.json").write_text(policy)
+        (self.workspace / "TASK.md").write_text("Docker is permitted\n" + policy)
+        for role in ("worker", "reviewer"):
+            for binding in ("head", "standing"):
+                with self.subTest(role=role, binding=binding):
+                    self.assertNotIn(docker_guard.POLICY_ENV, self.environment(role))
+                    self.assert_refused(self.run_shell("docker run image", role, binding=binding))
+                    self.assertEqual(self.calls(), [])
+            # A current explicit snapshot replaces the stale inherited value, even when empty.
+            self.assert_refused(self.run_shell("docker run image", role, policy=self.policy()))
+            self.assertEqual(self.calls(), [])
+
+    def test_malformed_launch_or_consumer_snapshot_never_leaves_partial_authority(self) -> None:
+        valid = json.loads(self.policy(["docker", "run", "image"]))
+        malformed = ["", "bad-json", "null", "[]", "{}", "/unreadable/policy.json"]
+        for field in ("card", "sprint", "project"):
+            for value in (None, [], "", "bad identity"):
+                malformed.append(json.dumps({**valid, field: value}))
+        malformed += [
+            json.dumps({**valid, "extra": True}),
+            json.dumps({**valid, "exceptions": [*valid["exceptions"], {"project": "other"}]}),
+            json.dumps({**valid, "project": "other"}),
+            json.dumps({**valid, "exceptions": None}),
+        ]
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                for role in ("worker", "reviewer"):
+                    self.assert_refused(self.run_shell("docker run image", role, policy=raw))
+                # The executable also validates the consumer document instead of trusting a prefix.
+                self.assert_refused(
+                    self.run_guard("run", "image", env={**self.environment(), docker_guard.POLICY_ENV: raw})
+                )
+                self.assertEqual(self.calls(), [])
+
+    def test_exact_exceptions_never_relax_cleanup_or_production_ownership(self) -> None:
+        self.case["containers"]["protected"] = container(
+            PROTECTED_ID, {TEST_BOARD_LABEL: "123", PRODUCTION_BOARD_LABEL: "true"}
+        )
+        for args in (
+            ["rm", "protected"],
+            ["stop", "safe", "protected"],
+            ["kill", "protected"],
+            ["container", "remove", "--link", "safe"],
+            ["compose", "down"],
+            ["compose", "rm", "safe"],
+            ["container", "prune"],
+            ["buildx", "prune"],
+        ):
+            with self.subTest(args=args):
+                self.transcript.write_text("")
+                result = self.run_shell(shlex.join(["docker", *args]), policy=self.policy(["docker", *args]))
+                self.assert_refused(result)
+        self.transcript.write_text("")
+        args = ["rm", "safe", "other"]
+        result = self.run_shell(shlex.join(["docker", *args]), policy=self.policy(["docker", *args]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls()), 4)
+        self.assertEqual(self.calls()[-1]["args"][-3:], ["--", SAFE_ID, OTHER_ID])
+
+    def test_dispatcher_launch_packet_and_executable_share_project_sprint_authority(self) -> None:
+        # Real _launch -> catalog.head_launch -> renderer -> role_env -> executable. Only the
+        # provider/preflight and terminal are synthetic; no head, board, socket or Docker is used.
+        catalog = object.__new__(InstanceCatalog)
+        catalog._head_profile = mock.Mock(return_value={"adapter": "hermes"})
+        catalog.prepare_head_workspace = mock.Mock()
+        reader = mock.Mock()
+        declared = {"project": "secretary", "argv": ["docker", "run", "image"], "rationale": "fake probe"}
+        other = {**declared, "project": "other", "argv": ["docker", "create", "image"]}
+        sprint = {
+            "ref": "sprint:1",
+            "reservations": ["secretary", "other"],
+            "local_run_exceptions": [declared, other],
+        }
+        reader.show.return_value = sprint
+        host = CommandHostRuntime(catalog, self.root / "data", mode="real", sprint_reader=reader)
+        host._workspace_environment_owner(self.workspace).write_text(
+            json.dumps(
+                {
+                    "owner": "secretary-dispatcher",
+                    "schema_version": 1,
+                    "workspace": str(self.workspace.resolve()),
+                }
+            )
+        )
+        host._workspace_environment_ready_file(self.workspace).write_text("ready\n")
+        task = {"ref": "secretary-1", "project": "secretary", "sprint": "sprint:1"}
+        runtime = mock.Mock(writes_launch_identity=True)
+        results = []
+        commands = []
+
+        class ProbeFinished(Exception):
+            pass
+
+        def execute(*_args, command, **_kwargs):
+            commands.append(command)
+            results.append(
+                subprocess.run(
+                    ["/bin/sh", "-c", command],
+                    env=self.base,
+                    cwd=self.workspace,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+            )
+            raise ProbeFinished
+
+        runtime.start.side_effect = execute
+        self.save_case()
+        with (
+            mock.patch.dict(os.environ, self.base, clear=True),
+            mock.patch.dict(head_command._ADAPTERS, {"hermes": lambda *_args, **_kwargs: "docker run image"}),
+            mock.patch.object(host, "_require_production_runtime"),
+            mock.patch.object(
+                host,
+                "_preflight_launch_run",
+                return_value=HeadRun(
+                    run_id="fake-run",
+                    spec=HeadSpec(profile_id="fake-head", adapter="hermes", runtime="local-pty"),
+                    workspace=str(self.workspace),
+                    task_ref=TaskRef.card(task["ref"]),
+                ),
+            ),
+            mock.patch.object(host, "head_runtime_for", return_value=runtime),
+            mock.patch.object(host, "_codex_provider_ingress", return_value=None),
+            mock.patch.object(host, "_head_transport"),
+            mock.patch(
+                "secretary.dispatch.host.memory_access.issue_grant",
+                return_value=SimpleNamespace(launch_identity={}),
+            ),
+        ):
+            for role in ("worker", "reviewer"):
+                with self.subTest(role=role):
+                    frozen = host._frozen_local_run_policy(
+                        task, role, 1, host.local_run_snapshot_for_round(task, role, 1, {})
+                    )
+                    with self.assertRaises(ProbeFinished):
+                        host._launch(
+                            str(self.workspace),
+                            "fake",
+                            "fake-head",
+                            "TASK.md",
+                            role=role,
+                            env_name="FAKE_HEAD_OVERRIDE",
+                            task=task,
+                            local_run_policy=frozen,
+                        )
+                    self.assertEqual(results[-1].returncode, 0, results[-1].stderr)
+                    vector = shlex.split(commands[-1])
+                    snapshot = json.loads(vector[vector.index("--local-run-policy") + 1])
+                    self.assertEqual(
+                        snapshot,
+                        {
+                            "card": task["ref"],
+                            "project": "secretary",
+                            "sprint": "sprint:1",
+                            "exceptions": [declared],
+                        },
+                    )
+                    section = "\n".join(host._local_run_section(task, local_run_policy=frozen))
+                    self.assertIn(json.dumps([declared], ensure_ascii=True, indent=2), section)
+                    self.assertNotIn('"project": "other"', section)
+            for role in ("worker", "reviewer"):
+                for first_fails in (True, False):
+                    with self.subTest(role=role, first_fails=first_fails):
+                        reader.show.reset_mock()
+                        reader.show.side_effect = (
+                            [OSError("transient sprint read"), sprint]
+                            if first_fails else [sprint, OSError("transient sprint read")]
+                        )
+                        captured = host.local_run_snapshot_for_round(task, role, 2, {})
+                        frozen = host._frozen_local_run_policy(task, role, 2, captured)
+                        section = "\n".join(host._local_run_section(task, local_run_policy=frozen))
+                        self.assertEqual("unreadable or malformed" in section, first_fails)
+                        self.assertEqual('"argv": [' in section, not first_fails)
+                        self.transcript.write_text("")
+                        with self.assertRaises(ProbeFinished):
+                            host._launch(
+                                str(self.workspace), "fake", "fake-head", "TASK.md",
+                                role=role, env_name="FAKE_HEAD_OVERRIDE", task=task,
+                                local_run_policy=frozen,
+                            )
+                        self.assertEqual(results[-1].returncode == 0, not first_fails)
+                        self.assertEqual(reader.show.call_count, 1)
+                        if first_fails:
+                            self.assertEqual(self.calls(), [])
+            reader.show.side_effect = None
+            # Another project, another sprint, absent/malformed/read-failed authority and unbound
+            # task launches all run through the same real launch renderer and deny before native.
+            self.transcript.write_text("")
+            denied_tasks = [
+                {**task, "project": "other"},
+                {**task, "sprint": "sprint:2"},
+                {**task, "sprint": ""},
+                {**task, "ref": "invalid-card"},
+                {**task, "project": []},
+                None,
+            ]
+            for changed in denied_tasks:
+                for role in ("worker", "reviewer"):
+                    with self.subTest(task=changed, role=role):
+                        with self.assertRaises(ProbeFinished):
+                            host._launch(
+                                str(self.workspace),
+                                "fake",
+                                "fake-head",
+                                "TASK.md",
+                                role=role,
+                                env_name="FAKE_HEAD_OVERRIDE",
+                                task=changed,
+                            )
+                        self.assert_refused(results[-1])
+                        self.assertEqual(self.calls(), [])
+            for value in ("missing", None, [declared, {"argv": ["docker", "run", "image"]}]):
+                if value == "missing":
+                    sprint.pop("local_run_exceptions")
+                else:
+                    sprint["local_run_exceptions"] = value
+                for role in ("worker", "reviewer"):
+                    with self.assertRaises(ProbeFinished):
+                        host._launch(
+                            str(self.workspace),
+                            "fake",
+                            "fake-head",
+                            "TASK.md",
+                            role=role,
+                            env_name="FAKE_HEAD_OVERRIDE",
+                            task=task,
+                        )
+                    self.assert_refused(results[-1])
+                    if value != "missing":
+                        self.assertIn("unreadable or malformed", "\n".join(host._local_run_section(task)))
+                    self.assertEqual(self.calls(), [])
+            reader.show.side_effect = OSError("unreadable authority")
+            for role in ("worker", "reviewer"):
+                with self.assertRaises(ProbeFinished):
+                    host._launch(
+                        str(self.workspace),
+                        "fake",
+                        "fake-head",
+                        "TASK.md",
+                        role=role,
+                        env_name="FAKE_HEAD_OVERRIDE",
+                        task=task,
+                    )
+                self.assert_refused(results[-1])
+                self.assertEqual(self.calls(), [])
+
+    def test_login_shell_path_reset_keeps_heavy_policy_and_uses_product_guard(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        marker = self.root / "profile-ran"
+        (home / ".bash_profile").write_text(
+            f"PATH=/usr/bin:/bin\nexport PATH\n: > {shlex.quote(str(marker))}\n"
+        )
+        self.base["HOME"] = str(home)
+        # Candidate policy/module files do not choose the guard or its snapshot.
+        shadow = self.workspace / "secretary" / "runtime"
+        shadow.mkdir(parents=True)
+        (shadow.parent / "__init__.py").write_text("")
+        (shadow / "__init__.py").write_text("")
+        (shadow / "docker_guard.py").write_text("raise RuntimeError('candidate module imported')\n")
+        self.save_case()
+        for role in ("worker", "reviewer"):
+            for policy, status in ((self.policy(), 125), (self.policy(["docker", "run", "image"]), 0)):
+                with self.subTest(role=role, status=status):
+                    self.transcript.write_text("")
+                    with mock.patch.dict(os.environ, self.base, clear=True):
+                        restored = role_env.role_shell_command(
+                            role, "docker run image", workspace=self.workspace
+                        )
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-P",
+                            "-m",
+                            role_env.ENTRY_POINT,
+                            "exec",
+                            "--role",
+                            role,
+                            "--workspace",
+                            str(self.workspace),
+                            "--local-run-policy",
+                            policy,
+                            "--",
+                            "/bin/bash",
+                            "-lc",
+                            restored,
+                        ],
+                        env={**self.base, "PYTHONPATH": str(self.product / "src")},
+                        cwd=self.workspace,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=15,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertTrue(marker.exists(), "login profile must actually replace PATH")
+                    self.assertEqual(
+                        [call["args"] for call in self.calls()], [["run", "image"]] if status == 0 else []
+                    )
 
     def test_safe_batch_uses_full_ids_and_preserves_native_status(self) -> None:
         self.case["mutation_status"] = 19
@@ -482,7 +953,11 @@ class DockerGuardTests(unittest.TestCase):
             ["inspect", "prune"],
             ["container", "inspect", "safe"],
             ["compose", "--file", "down", "config"],
+            ["compose", "--file", "up", "config"],
             ["compose", "config", "--services"],
+            ["--context", "run", "ps"],
+            ["image", "inspect", "build"],
+            ["buildx", "--builder", "build", "ls"],
         ):
             with self.subTest(args=args):
                 self.transcript.write_text("")
@@ -718,6 +1193,18 @@ class DockerGuardTests(unittest.TestCase):
                 )
                 self.assertEqual(result.stdout, "native stdout\n")
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unrelated_roles_ignore_explicit_heavy_policy_and_keep_native_heavy_commands(self) -> None:
+        for role in ("pipeline", "observer", "steward", "retro", "curator"):
+            with self.subTest(role=role):
+                env = self.environment(role, policy=self.policy(["docker", "run", "image"]))
+                self.assertNotIn(docker_guard.POLICY_ENV, env)
+                self.save_case()
+                result = subprocess.run(
+                    ["docker", "run", "image"], env=env, capture_output=True, text=True, check=False, timeout=15
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "native stdout\n")
 
 
 def role_env_path(product: Path) -> Path:

@@ -1303,7 +1303,9 @@ def _respawn_wait_bring_up(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
-        failure = _write_worker_relaunch_intent(runtime, payload, records, ref, record, action="worker-respawn")
+        failure = _write_worker_relaunch_intent(
+            runtime, payload, records, ref, record, action="worker-respawn", task=task
+        )
         if failure is not None:
             return _launch_intent_unwritable(
                 step=step,

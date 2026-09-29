@@ -237,6 +237,7 @@ def write_launch_intent(
     workspace: str,
     document: str = "",
     round_number: int | None = None,
+    task: dict[str, Any] | None = None,
 ) -> str | None:
     """Fix one bring-up on disk before the host is called. Returns the failure, or None.
 
@@ -247,6 +248,8 @@ def write_launch_intent(
     """
     previous = dict(getattr(record, "launch_intent", None) or {})
     previous_workspace_settled = record.workspace_settled
+    snapshot_field = "review_local_run_snapshot" if role == REVIEW_ROLE else "worker_local_run_snapshot"
+    previous_snapshot = dict(getattr(record, snapshot_field, {}) or {})
     reserved = record.attempt_round if round_number is None else round_number
     run_id = uuid.uuid4().hex
     preflight_run: head_ops.HeadRun | None = None
@@ -266,6 +269,10 @@ def write_launch_intent(
         except Exception as exc:  # noqa: BLE001 — report any host preflight refusal
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
         preflight_run = candidate
+    snapshot_for_round = getattr(getattr(runtime, "host", None), "local_run_snapshot_for_round", None)
+    if task is not None and callable(snapshot_for_round):
+        policy_round = record.review_baseline if role == REVIEW_ROLE else record.report_generation
+        setattr(record, snapshot_field, snapshot_for_round(task, role, policy_round, previous_snapshot))
     record.workspace_settled = False
     record.launch_intent = LaunchIntent(
         role=role,
@@ -291,6 +298,7 @@ def write_launch_intent(
     except STORAGE_ERRORS as exc:
         record.launch_intent = previous
         record.workspace_settled = previous_workspace_settled
+        setattr(record, snapshot_field, previous_snapshot)
         return f"{type(exc).__name__}: {exc}"
     return None
 
