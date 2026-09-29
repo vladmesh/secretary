@@ -94,7 +94,7 @@ from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
 from tests.production_runtime_fixtures import registered_production_runtime
 from tests.retired_board import legacy_runtime_lines
-from tests.support.managed_venv import managed_product_root
+from tests.support.managed_venv import guarded_product_env, managed_product_root
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -858,7 +858,8 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         ``secretary.runtime.role_env`` out of it; the layout points at it the way an alternate upgrade
         would, and the launching shell is given a home where no checkout exists at all.
         """
-        product = Path(__file__).resolve().parents[1]
+        product_env = guarded_product_env(self.root)
+        product = Path(product_env["TA_SECRETARY_REPO"])
         layout = SystemdLayout(
             product_root=product,
             instance_path=self.instance,
@@ -876,7 +877,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             if line.startswith("Environment=")
         )
         with mock.patch.dict(
-            os.environ, {**unit_env, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, clear=True
+            os.environ, {**unit_env, "PATH": product_env["PATH"]}, clear=True
         ):
             workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
@@ -890,13 +891,14 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             text=True,
             timeout=120,
             env={
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PATH": product_env["PATH"],
                 "HOME": str(self.root / "home"),
             },
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(product), result.stderr)
+        self.assertFalse((self.root / "docker-calls").exists(), "the checkout probe must not call native Docker")
 
     def test_a_dispatcher_launched_head_resolves_the_selected_instance(self) -> None:
         """End to end through the rendered command, the way a head actually starts.
@@ -908,7 +910,8 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """
         self.decoy_runtime_env()
         bound = self.unit_env("secretary-dispatcher-production.service")
-        bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
+        product_env = guarded_product_env(self.root)
+        bound.update(product_env)
         with mock.patch.dict(os.environ, bound, clear=True):
             workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
@@ -929,14 +932,15 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             timeout=120,
             cwd=self.root,
             env={
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PATH": product_env["PATH"],
                 "HOME": str(self.root),
-                "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+                "TA_SECRETARY_REPO": product_env["TA_SECRETARY_REPO"],
             },
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(self.instance), result.stderr)
+        self.assertFalse((self.root / "docker-calls").exists(), "the instance probe must not call native Docker")
 
     def decoy_runtime_env(self) -> None:
         """The selected instance's runtime.env, carrying the default installation's own name.

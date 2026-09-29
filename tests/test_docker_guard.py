@@ -18,7 +18,7 @@ from unittest import mock
 from secretary.runtime import docker_guard, role_env
 from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 from secretary.runtime.head.command import wrap_role_command
-from tests.support.managed_venv import managed_product_root
+from tests.support.managed_venv import guarded_product_env, managed_product_root
 
 SAFE_ID = "a" * 64
 OTHER_ID = "b" * 64
@@ -422,6 +422,56 @@ class DockerGuardTests(unittest.TestCase):
                     self.assertEqual(len(self.calls()), 2)
                     env = self.environment(role)
                     self.assertEqual(env["PATH"].split(os.pathsep)[0], str(role_env_path(self.product)))
+
+    def test_ci_checkout_without_a_managed_venv_uses_the_named_product_fixture(self) -> None:
+        # CI installs into its selected interpreter, not <checkout>/.venv. These probes use the
+        # same fixture as the dispatcher integration tests and exercise the actual launch boundary.
+        parent = self.root / "ci-fixture"
+        parent.mkdir()
+        product_env = guarded_product_env(parent)
+        runtime = parent / "runtime.env"
+        runtime.write_text("ANTHROPIC_MODEL=opus\nSECRETARY_INSTANCE=/decoy\n")
+        home = parent / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude/settings.json").write_text(json.dumps({"model": "sonnet"}))
+        self.base.update(
+            {
+                **product_env,
+                "HOME": str(home),
+                "CLAUDE_MANAGED_SETTINGS": str(parent / "no-managed.json"),
+                "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
+                "SECRETARY_INSTANCE": str(parent / "selected-instance"),
+                "ANTHROPIC_MODEL": "opus",
+            }
+        )
+        probe = (
+            'printf "%s\\n" "$TA_SECRETARY_REPO" "$SECRETARY_INSTANCE" "$BOARD_ROLE"; '
+            'command -v python3; test -z "${ANTHROPIC_MODEL:-}"'
+        )
+        snapshot = (
+            "import json; from secretary.dispatch.launcher import claude_launch_model; "
+            "print(json.dumps(claude_launch_model({'adapter': 'claude'})))"
+        )
+        probe += (
+            f" && PYTHONPATH={shlex.quote(str(Path(product_env['TA_SECRETARY_REPO']) / 'src'))} "
+            f"python3 -P -c {shlex.quote(snapshot)}"
+        )
+        for role in ("worker", "reviewer"):
+            with self.subTest(role=role):
+                result = self.run_shell(probe, role)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [
+                        product_env["TA_SECRETARY_REPO"],
+                        str(parent / "selected-instance"),
+                        role,
+                        str(self.workspace / role_env.WORKSPACE_ENV_DIR / "bin/python3"),
+                        '["sonnet", "user_settings"]',
+                    ],
+                )
+                self.assertFalse((parent / "docker-calls").exists())
+                self.assertEqual(self.calls(), [])
 
     def test_login_profile_reset_preserves_guard_workspace_tools_and_product_binding(self) -> None:
         # bash reads this profile during -lc. It actively removes every launcher PATH prefix.
