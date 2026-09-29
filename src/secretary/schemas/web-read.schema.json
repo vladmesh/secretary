@@ -111,7 +111,16 @@
               "required": ["source", "status"],
               "properties": {
                 "source": {"$ref": "#/$defs/source"},
-                "status": {"type": ["object", "null"]}
+                "status": {"type": ["object", "null"]},
+                "doctor": {"$ref": "#/$defs/recorded_doctor"},
+                "combined": {
+                  "type": "object",
+                  "properties": {
+                    "colour": {"enum": ["red", "yellow", "green", "unknown"]},
+                    "findings": {"type": "array", "items": {"type": "object"}},
+                    "problems": {"type": "array", "items": {"type": "string"}}
+                  }
+                }
               }
             }
           }
@@ -145,6 +154,30 @@
           "properties": {
             "source": {"$ref": "#/$defs/source"},
             "items": {"type": "array", "items": {"$ref": "#/$defs/agent"}}
+          }
+        }
+      }
+    },
+    "recorded_doctor": {
+      "type": "object",
+      "description": "Last completed attempt and current collection metadata. Unknown means not yet collected; invalid or failed readings remain explicit errors. Only collection begun after the completed attempt is current.",
+      "required": ["state", "reason", "run_at", "completed_at", "exit_code", "findings", "collecting"],
+      "properties": {
+        "state": {"enum": ["available", "unknown", "failed", "unavailable", "stale", "malformed", "wrong_installation", "wrong_mode"]},
+        "reason": {"type": ["string", "null"]},
+        "run_at": {"type": ["string", "null"]},
+        "completed_at": {"type": ["string", "null"]},
+        "exit_code": {"type": ["integer", "null"]},
+        "findings": {"type": "array", "items": {"type": "object"}},
+        "collecting": {
+          "type": ["object", "null"],
+          "required": ["run_at", "mode", "elapsed_seconds", "threshold_seconds", "stuck"],
+          "properties": {
+            "run_at": {"type": "string"},
+            "mode": {"enum": ["live", "offline", "host_fixture"]},
+            "elapsed_seconds": {"type": "number", "minimum": 0},
+            "threshold_seconds": {"const": 60},
+            "stuck": {"type": "boolean"}
           }
         }
       }

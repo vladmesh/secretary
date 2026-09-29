@@ -820,6 +820,7 @@ PROBLEM_SEVERITY: dict[str, str] = {
     # Minted by the reader of this summary rather than here: health that could not be read at all
     # is not an absence of problems, so it carries a code of its own and the gravest severity.
     "health.unreadable": "red",
+    "doctor.collection_stuck": "red",
     # Yellow: the installation is running, but a person should look.
     "pipeline.paused": "yellow",
     "dispatcher.divergences_open": "yellow",

@@ -137,6 +137,7 @@ class TheColourRuleTests(unittest.TestCase):
             "checkpoint.rpo_exceeded",
             "secret_store.key_unusable",
             "health.unreadable",
+            "doctor.collection_stuck",
         }
         yellow = {
             "pipeline.paused",
@@ -538,10 +539,10 @@ class OneReadingTests(SprintProtocolFixture):
         path = self.data_dir / RESULT_PATH
         original = path.read_bytes()
         cases = (
-            ("missing", None), ("malformed", b"{broken"),
+            ("unknown", None), ("malformed", b"{broken"),
             ("stale", {"run_at": utc(NOW - 181), "completed_at": utc(NOW - 180)}),
             ("failed", {"outcome": "failed", "reason": "deadline exceeded", "result": None, "exit_code": None}),
-            ("collecting", {"outcome": "collecting", "reason": "unfinished attempt", "completed_at": None, "result": None, "exit_code": None}),
+            ("unknown", {"outcome": "collecting", "reason": "unfinished attempt", "completed_at": None, "result": None, "exit_code": None}),
             ("wrong_installation", {"installation": {"instance": "another", "data_dir": "another"}}),
             ("unavailable", {"outcome": "unavailable", "reason": "bus unavailable", "exit_code": 2}),
         )
@@ -559,7 +560,78 @@ class OneReadingTests(SprintProtocolFixture):
                 self.assertEqual(document["doctor"]["state"], expected)
                 self.assertEqual(document["colour"], "red")
                 self.assertIn("unit.failed", [item["code"] for item in document["problems"]])
-                self.assertIn("recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode())
+                if expected == "unknown":
+                    self.assertNotIn("health.unreadable", [item["code"] for item in document["problems"]])
+                    self.assertIn("unknown / not yet collected", self.app().handle("GET", "/doctor").body.decode())
+                else:
+                    self.assertIn("recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode())
+
+    def test_periodic_producer_preserves_baseline_and_cached_pages_through_completion(self):
+        from secretary.infra import doctor_record as records
+
+        finding = {"code": "recovery_bypass", "message": "ambient credential configuration",
+                   "capability": "checkpoint-git-authentication"}
+        self.stored(findings=[finding])
+        app = self.app()
+        before = self.doctor.doctor_snapshot()
+        self.clock += CACHE_SECONDS + 1
+
+        def collect(command, **kwargs):
+            during = self.doctor.doctor_snapshot()
+            self.assertEqual(during["colour"], "yellow")
+            self.assertEqual(during["problems"], before["problems"])
+            self.assertEqual(during["doctor_run_at"], before["doctor_run_at"])
+            self.assertEqual(self.panel()["combined"]["findings"], before["problems"])
+            for route in ("/", "/doctor"):
+                page = app.handle("GET", route).body.decode()
+                self.assertIn("lamp lamp-yellow", page)
+                self.assertIn("checkpoint-git-authentication", page)
+                self.assertIn("run in progress since " + records.utc(self.clock), page)
+                self.assertNotIn("health.unreadable", page)
+            self.clock += 2
+            return 1, {"schema_version": 1, "ok": False,
+                       "findings": [{"code": "unit.failed", "message": "a.service is failed"}]}
+
+        with mock.patch.object(records.time, "time", side_effect=lambda: self.clock), mock.patch.object(records, "collect", collect):
+            self.assertEqual(records.record(self.instance, data_dir=self.data_dir), 0)
+        self.assertEqual(self.doctor.doctor_snapshot()["problems"], before["problems"])
+        self.clock += CACHE_SECONDS + 1
+        for route in ("/", "/doctor"):
+            page = app.handle("GET", route).body.decode()
+            self.assertIn("lamp lamp-red", page)
+            self.assertIn("unit.failed", page)
+            self.assertNotIn("run in progress since", page)
+        self.assertEqual(self.panel()["combined"]["findings"], self.doctor.doctor_snapshot()["problems"])
+        self.assertEqual(self.collected, 3)
+
+    def test_initial_and_stuck_collecting_states_are_shared_by_dashboard_lamp_and_doctor(self):
+        from secretary.infra import doctor_record as records
+
+        path = self.data_dir / records.RESULT_PATH
+        path.unlink()
+        app = self.app()
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "unknown")
+        start = self.clock
+        records.publish(path, {
+            "schema_version": 2, "installation": records.identity(self.instance, self.data_dir),
+            "completed": None, "collecting": {"run_at": records.utc(start), "mode": "live"},
+        })
+        for elapsed in (0, records.STUCK_SECONDS, records.STUCK_SECONDS + .01):
+            self.clock = start + elapsed
+            self.doctor._cached = None
+            stuck = elapsed > records.STUCK_SECONDS
+            colour = "red" if stuck else "unknown"
+            document = self.doctor.doctor_snapshot()
+            self.assertEqual(document["colour"], colour)
+            self.assertEqual([item["code"] for item in document["problems"]], ["doctor.collection_stuck"] if stuck else [])
+            self.assertEqual(self.panel()["combined"]["colour"], colour)
+            for route in ("/", "/doctor"):
+                page = app.handle("GET", route).body.decode()
+                self.assertIn("lamp lamp-" + colour, page)
+                self.assertIn("unknown / not yet collected", page)
+                self.assertIn("run in progress since " + records.utc(start), page)
+                self.assertNotIn("health.unreadable", page)
+                self.assertNotIn("nothing needs attention", page)
 
     def panel(self) -> dict[str, Any]:
         return self.reads.system_snapshot()["installation"]["health"]

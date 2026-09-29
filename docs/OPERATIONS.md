@@ -2214,17 +2214,18 @@ where the numbers would be.
 
 #### The doctor lamp, and the page behind it
 
-The bar also carries a doctor lamp, at its left, on every page. It has exactly three colours and no
-fourth, and each one is decided by a rule rather than by a reading of the sentences:
+The bar also carries a doctor lamp, at its left, on every page. Its state follows recorded findings:
 
 - **red** — the installation cannot be trusted to run work, or its health is unknown. Any of
   `unit.failed`, `unit.missing`, `checkpoint.blocked`, `checkpoint.last_failed`,
   `secret_store.key_unusable`, or
-  `health.unreadable`.
+  `health.unreadable` or `doctor.collection_stuck`.
 - **yellow** — it runs, but somebody should look. Any of `pipeline.paused`,
   `dispatcher.divergences_open`, `host.inventory_unreadable`,
   `memory.index_missing`. A problem whose code nobody has classified is yellow too — never green.
 - **green** — health was read, and it reports no problem at all.
+- **unknown**: recorded doctor is not yet collected and status reports no problems. This initial
+  state uses a neutral grey lamp. A real status finding still makes it yellow or red.
 
 Each problem carries that stable code beside the sentence a person reads, and the **code**, not the
 wording, is what the colour is decided from (`secretary.webproto.reads.PROBLEM_SEVERITY`). Red wins
@@ -2245,8 +2246,9 @@ read of `DATA_DIR/doctor/latest.json`. Page reads never launch doctor, provider 
 severity remains unchanged; any doctor finding, including an unknown future code, makes the lamp
 non-green. Both sources retain their problems. `/doctor` shows finding code/message and identity/details,
 doctor run/completion/exit and the web reading time separately; lamp hover text includes doctor run time.
-Missing, malformed, unreadable, stale, wrong-installation and failed records are explicit red unknown
-doctor problems. A process built without the layer still shows unknown health.
+Malformed, unreadable, stale, wrong-installation, wrong-mode and failed records remain explicit red
+doctor problems. Missing first results and an ordinary first collection say `unknown / not yet
+collected`, with no `health.unreadable` finding. A process built without the layer remains red.
 
 #### Periodic doctor recording
 
@@ -2262,33 +2264,59 @@ It calls this installed product's `python -P -m secretary doctor --instance INST
 runs can pass `--host-fixture DIR`/`--offline`; records retain their mode, and a live web reader refuses
 to treat those modes as a live diagnostic success. No scheduler runs in dispatcher ticks or page requests.
 
-`DATA_DIR/doctor/latest.json` is a latest-attempt document, schema version 1:
+`DATA_DIR/doctor/latest.json` is a bounded document, schema version 2. Both parts share the installation
+identity. `completed` holds the last completed attempt (including failures), or null before the first
+completion. `collecting` holds only the current run's start and mode, or null after completion:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "installation": {"instance": "/srv/instance/instance.yaml", "data_dir": "/srv/data"},
-  "run_at": "2026-09-29T00:00:00Z",
-  "completed_at": "2026-09-29T00:00:02Z",
-  "mode": "live",
-  "outcome": "result",
-  "exit_code": 1,
-  "reason": null,
-  "result": {"schema_version": 1, "ok": false, "findings": [{"code": "recovery_bypass", "message": "ambient credential configuration", "capability": "checkpoint-git-authentication"}]}
+  "completed": {
+    "run_at": "2026-09-29T00:00:00Z",
+    "completed_at": "2026-09-29T00:00:02Z",
+    "mode": "live",
+    "outcome": "result",
+    "exit_code": 1,
+    "reason": null,
+    "result": {"schema_version": 1, "ok": false, "findings": [{"code": "recovery_bypass", "message": "ambient credential configuration", "capability": "checkpoint-git-authentication"}]}
+  },
+  "collecting": {"run_at": "2026-09-29T00:01:02Z", "mode": "live"}
 }
 ```
 
-The recording command takes a nonblocking `doctor/record.lock`, first atomically publishes an unfinished
-`collecting` attempt with no prior result, then evaluates in a child process group with a 40-second
+The recording command takes a nonblocking `doctor/record.lock`, atomically retains the validated
+completed attempt alongside a new collection marker, then evaluates in a child process group with a 40-second
 deadline and a 2 MiB output bound. The unit's outer deadline is 50 seconds and kills its control group.
 Timeout kills the collector group, including its probes. Exit 1 with findings is a recorded diagnostic
 result: the recording command succeeds. Exit 2 is `unavailable` and preserves diagnostic findings;
 process/parse failures publish `failed`, without raw stdout/stderr or exception text. No secrets or
 environments are stored. Publication uses a private sibling, file fsync, atomic replace and directory
-fsync. A killed attempt leaves `collecting`, never a freshly dated old success. A write refusal fails
-the unit/journal and never refreshes the prior timestamp; the prior record expires normally.
+fsync. Completion atomically replaces `completed` and clears `collecting`. A killed attempt leaves
+the previous completed attempt readable with its original timestamps, or an honest initial unknown.
+A write refusal fails the unit/journal and never refreshes the prior timestamp; the prior result
+expires normally. No result history is stored.
 
-Freshness is 180 seconds from UTC run start, not from web collection time or file mtime. Future/invalid
+Precedence is shared by all consumers: completed findings and freshness come from `completed` alone.
+Collection metadata is current only when its start is strictly later than that completion; an older
+or equal marker cannot make the completed run look stuck or override its mode. Producer UTC timestamps
+retain microsecond precision so sequential invocations within the same second remain distinguishable;
+released whole-second timestamps remain readable. Both parts are
+validated under the same installation identity. An ordinary current marker adds no problem and
+the dashboard and `/doctor` show `run in progress since <run_at>` beside the completed reading.
+After more than 60 seconds it adds the separate red `doctor.collection_stuck` finding, with elapsed
+time, threshold and a service/journal inspection hint. Exactly 60 seconds does not trigger it.
+This allows 20 seconds beyond the normal 40-second child deadline (and 10 beyond the unit's outer
+deadline) for termination and publication. An interruption can leave a marker behind; a subsequent
+successful collection clears it. Genuine completed-result staleness remains red during collection.
+
+Released schema-version-1 completed records remain readable and are retained by the next producer
+run. A version-1 `collecting` record already erased its predecessor: it reads unknown/not yet
+collected until completion, and its start still supplies the same stuck-run threshold. No historical
+result is fabricated.
+
+Freshness is 180 seconds from the completed attempt's UTC run start, not from current collection,
+web collection time or file mtime. Future/invalid
 times are malformed. An expired result retains its findings and says stale. Cache reuse can delay a
 new result or expiry by at most another 60 seconds; each response uses one pinned reading throughout.
 
