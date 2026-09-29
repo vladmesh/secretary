@@ -60,11 +60,13 @@ PROVIDER_RED = "provider_red"
 DELEGATED_CARD_SETTLED = "delegated_card_settled"
 E2E_BUDGET_SPENT = "e2e_budget_spent"
 E2E_AFTER_MERGE = "e2e_after_merge"
+CARD_WAITS_FOR_PERSON = "card_waits_for_person"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
 #: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023 and 0024) are these two lists. A
 #: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
+    CARD_WAITS_FOR_PERSON: NEEDS_OWNER,
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
     # A card outside every sprint, with no PO session to hand the decision to, spent its per-card
@@ -218,12 +220,29 @@ def card_holds_mark(card: Mapping[str, Any] | None) -> bool:
     return isinstance(bag, Mapping) and any(str(bag.get(key) or "") for key in MARK_KEYS)
 
 
+def person_wait(card: Mapping[str, Any]) -> str | None:
+    """The board's actual human waits. Machine wait cards never mean a human decision."""
+    if card.get("closed") or card.get("state") == "done":
+        return None
+    if card_holds_mark(card) or card.get("waiting_owner"):
+        return "card is handed to the owner"
+    if card.get("state") == "in_progress" and card.get("type") in {"decision", "operation"}:
+        return "card is with the PO"
+    if card.get("state") == "blocked" and card.get("type") != "wait":
+        return "Blocked card awaits a decision"
+    return None
+
+
 # --- the PostgreSQL store ------------------------------------------------------------------
 
 #: A card carrying the mark, spelled once for the SQL reads and the refusal.
 _HELD = (
     "EXISTS (SELECT 1 FROM tasks t WHERE t.task_ref = e.subject_ref "
-    f"AND (t.extensions -> '{EXTENSION_BAG}') ?| ARRAY[{', '.join(repr(key) for key in MARK_KEYS)}])"
+    f"AND ((t.extensions -> '{EXTENSION_BAG}') ?| ARRAY[{', '.join(repr(key) for key in MARK_KEYS)}] "
+    "OR (e.kind = 'card_waits_for_person' AND NOT t.archived AND "
+    "((t.state = 'blocked' AND t.task_type <> 'wait') OR "
+    "(t.state = 'in_progress' AND t.task_type IN ('decision','operation'))) "
+    "AND NOT EXISTS (SELECT 1 FROM task_supersessions u WHERE u.supersedes = t.task_ref))))"
 )
 
 
@@ -296,6 +315,46 @@ class OwnerEventStore:
         with self._connection() as connection:
             return int(connection.execute("SELECT count(*) FROM owner_events WHERE read_at IS NULL").fetchone()[0])
 
+    def snapshot(self) -> dict[str, Any]:
+        """List, count and scoped open human waits at one SQL statement snapshot.
+
+        The attention facts are genuine unread rows, never manufactured by a page read.
+        A card subject is scoped through its real sprint foreign key; superseded/archived
+        subjects cannot make that sprint wait. New card-wait events must still be held.
+        """
+        with self._connection() as connection:
+            document = connection.execute(
+                "SELECT jsonb_build_object('unread', (SELECT count(*) FROM owner_events WHERE read_at IS NULL), "
+                "'events', COALESCE((SELECT jsonb_agg(row_to_json(listed)) FROM ("
+                f"SELECT e.*, {_HELD} AS held FROM owner_events e "
+                "ORDER BY (e.\"class\" = 'needs_owner' AND e.read_at IS NULL) DESC, e.created_at DESC, e.id DESC "
+                "LIMIT %s) listed), '[]'::jsonb), "
+                "'unread_events', COALESCE((SELECT jsonb_agg(row_to_json(listed)) FROM ("
+                f"SELECT e.*, {_HELD} AS held FROM owner_events e WHERE e.read_at IS NULL "
+                "ORDER BY (e.\"class\" = 'needs_owner') DESC, e.created_at DESC, e.id DESC "
+                "LIMIT %s) listed), '[]'::jsonb), "
+                "'human_waits', COALESCE((SELECT jsonb_agg(jsonb_build_object('event_id', e.id, "
+                "'subject_ref', e.subject_ref, 'sprint_ref', COALESCE(t.sprint_ref, s.ref))) "
+                "FROM owner_events e LEFT JOIN tasks t ON t.task_ref = e.subject_ref "
+                "LEFT JOIN sprints s ON s.ref = e.subject_ref "
+                "WHERE e.read_at IS NULL AND e.\"class\" = 'needs_owner' "
+                "AND (t.sprint_ref IS NOT NULL OR s.ref IS NOT NULL) AND COALESCE(t.archived, false) = false "
+                "AND NOT EXISTS (SELECT 1 FROM task_supersessions u WHERE u.supersedes = t.task_ref) "
+                f"AND (e.kind <> 'card_waits_for_person' OR {_HELD})), '[]'::jsonb))",
+                (LIST_LIMIT, LIST_LIMIT),
+            ).fetchone()[0]
+        for event in [*document["events"], *document["unread_events"]]:
+            event["unread"] = event["read_at"] is None
+            event["pinned"] = event["unread"] and event["class"] == NEEDS_OWNER
+        return document
+
+    def settle_kind(self, subject_ref: str, kind: str) -> int:
+        with self._connection() as connection:
+            return connection.execute(
+                "UPDATE owner_events SET read_at = now() WHERE subject_ref = %s AND kind = %s AND read_at IS NULL",
+                (subject_ref, kind),
+            ).rowcount
+
     def mark_read(self, event_id: int) -> OwnerEvent:
         """Mark one event read; an already read one answers as it is. Refuses a held `needs_owner` event."""
         with self._connection() as connection:
@@ -337,6 +396,8 @@ class OwnerEventStore:
 
 
 def _held_refusal(event: OwnerEvent) -> str:
+    if event.kind == CARD_WAITS_FOR_PERSON:
+        return f"owner event {event.id} stays unread until {event.subject_ref} leaves its Blocked decision or PO wait"
     return (
         f"owner event {event.id} needs the owner and stays unread until {event.subject_ref} leaves "
         "waiting_owner: the PO completes the card or the mark is cleared"
@@ -444,6 +505,26 @@ def settle(subject_ref: str, *, to: Any) -> int:
         return 0
 
 
+def record_person_wait(card: Mapping[str, Any], occurrence: str, *, to: Any) -> None:
+    """Called by card mutations, never a GET. One event per real wait episode."""
+    reference = str(card.get("ref") or "")
+    reason = person_wait(card)
+    sink = _sink(to)
+    if reason is None:
+        if sink is not None:
+            try:
+                sink.settle_kind(reference, CARD_WAITS_FOR_PERSON)
+            except Exception as exc:  # noqa: BLE001 - the producer retains the existing bell failure policy
+                logger.warning("card wait event of %s not settled: %s", reference, type(exc).__name__)
+        return
+    # This producer supplies sprint attention. Handover and outside-sprint producers
+    # retain their own event kinds and settlement rules.
+    if not card.get("sprint") or card_holds_mark(card) or card.get("waiting_owner"):
+        return
+    record(CARD_WAITS_FOR_PERSON, reference, f"{reference}: {reason}",
+           f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
+
+
 def _bounded(text: str) -> str:
     text = str(text or "").strip() or "(no text)"
     return text if len(text) <= TEXT_LIMIT else text[: TEXT_LIMIT - 1] + "…"
@@ -453,6 +534,7 @@ __all__ = [
     "ALREADY_PRESENT",
     "BUDGET_SIGNAL",
     "CARD_HANDED_TO_OWNER",
+    "CARD_WAITS_FOR_PERSON",
     "CLASSES",
     "DELEGATED_CARD_SETTLED",
     "E2E_AFTER_MERGE",
@@ -483,8 +565,10 @@ __all__ = [
     "class_of",
     "list_order_key",
     "needs_human_section",
+    "person_wait",
     "po_session_subject",
     "record",
+    "record_person_wait",
     "record_strict",
     "settle",
 ]

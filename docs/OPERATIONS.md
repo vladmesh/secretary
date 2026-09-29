@@ -723,6 +723,7 @@ What each kind means:
 | kind | class | means | what to do |
 | --- | --- | --- | --- |
 | `card_handed_to_owner` | needs the owner | the PO handed a `decision`/`operation` card to you with a reason | answer on the card page (the comment form posts as the owner) or in the sprint's PO session; it clears when the PO completes the card |
+| `card_waits_for_person` | needs the owner | an unresolved sprint card is Blocked awaiting a decision, or a decision/operation card is with the PO | decide or complete the card; the event stays unread while that wait holds and settles when the card leaves it |
 | `steward_needs_human` | needs the owner | the steward's report card went Blocked with a "Needs a human" section | read the report card; mark the event read once handled |
 | `e2e_budget_spent` | needs the owner | a code card outside every sprint, cut by nobody's PO session, spent its 3 e2e runs and was Blocked (or, for an after-merge project, was left out of the after-merge run) | re-cut the work in a sprint with an e2e budget, or through the PO; mark the event read once handled |
 | `e2e_after_merge` | needs the owner | an after-merge e2e run on `main` ended with no verdict (cancelled, timed out, deadline passed, unreadable, refused, not identified, ran on another SHA), and its cards are pending again; or a red one's hotfix card had no open sprint and no PO session to go to and is Blocked | read the run and the comment on the cards; for a Blocked hotfix, decide who fixes it (unblock it into a sprint, or hand it to the PO); mark the event read once handled |
@@ -738,6 +739,26 @@ A notice is marked read by its button or by "Mark all notices read"; an event th
 read by a click only when its card does not wait for the owner, and otherwise stays unread until the
 card leaves `waiting_owner`. A producer's write never fails what it reports: a board without `0018` logs
 `owner event <kind> (<key>) not recorded: ...` and goes on.
+
+The dashboard's sprint attention chip takes scoped open `needs_owner` event IDs from the same
+SQL statement snapshot as the bell count and list. A card subject is joined through its sprint
+foreign key; a superseded or archived card cannot fabricate a human wait. Page responses pin this
+reading, so a settlement during rendering cannot split the chip from the bell. GETs write no events.
+Routine observer, CI and wait-card waits are neutral. An unavailable event/card source and an
+unknown sprint state do not mean attention.
+
+`TaskWriter._transition_card` publishes `card_waits_for_person` in the card transition transaction,
+with a dedup key containing the transition request ID. The same path settles this kind on leaving
+the wait. PO handover settles the PO wait and retains the established `card_handed_to_owner` producer;
+completion clears the handover mark and settles its events in the transition transaction. Other
+open needs_owner events retain their existing click/settlement behavior. Bell count includes genuine
+unread notices as before, but notices cannot cause a sprint chip.
+
+Revision `0025_card_waits_for_person` adds only this constrained kind and backfills existing unresolved
+open sprint waits without an open needs_owner event. It preserves old events and skips archived,
+superseded and machine-wait cards. It declares `release_safety = "additive"`; the previous 0024 runtime
+can still read the newer schema, load the added kind as an OwnerEvent, and write its existing kinds
+and card records. Applying/releasing it and restarting production services are PO/dispatcher work.
 
 ## How long things take
 
@@ -2214,15 +2235,59 @@ The lamp is a link to `/doctor` from every page. That page lists the current pro
 code and its message, grouped by the severity that decides the colour, with the red group first; when
 there are none it says so plainly; when health could not be read it says that, with the reason.
 
-**Refreshing the lamp reads recorded state only.** It is one cached read of the same collector the
-dashboard's attention banner and `Installation` panel use (`secretary.web.doctor`, a one-minute in-process cache over
-`reads.health_snapshot` → `collect_status` with no sprints and no panel probes): this host's own
-systemd inventory, production state, checkpoint snapshot, store findings and memory index. It runs no
-live `secretary doctor`, opens no SSH to any host, and touches no provider credential or provider
-endpoint. As with the provider half of the bar, rendering a page adds no collection: a walk over every
-page inside one cache window collects once, and JSON routes, which render no page, collect nothing. A
-process built without the doctor layer still serves every page, and its lamp is red, because health
-that nothing read is unknown health.
+Refreshing the lamp combines status health with the latest recorded real doctor findings. The
+dashboard's attention banner, Installation panel, lamp and `/doctor` share `DoctorLayer`'s one-minute
+cache over `ReadLayer.health_snapshot`: `collect_status` with no sprints or panel probes, plus a local
+read of `DATA_DIR/doctor/latest.json`. Page reads never launch doctor, provider or SSH probes. Status
+severity remains unchanged; any doctor finding, including an unknown future code, makes the lamp
+non-green. Both sources retain their problems. `/doctor` shows finding code/message and identity/details,
+doctor run/completion/exit and the web reading time separately; lamp hover text includes doctor run time.
+Missing, malformed, unreadable, stale, wrong-installation and failed records are explicit red unknown
+doctor problems. A process built without the layer still shows unknown health.
+
+#### Periodic doctor recording
+
+The catalog materializer owns `secretary-doctor.service` and `secretary-doctor.timer`. The timer starts
+30 seconds after boot and 60 seconds after the previous oneshot becomes inactive, with one-second
+accuracy. It uses the installation runtime user, home, runtime.env and installed product venv. The
+timer must be enabled/active; its triggered oneshot need not remain active. Component disabled/foreign
+declarations retain their existing ownership boundary. Daily instance Git maintenance is independent.
+
+The rendered command is `PRODUCT_ROOT/.venv/bin/secretary doctor-record --instance INSTANCE --data-dir DATA_DIR`.
+It calls this installed product's `python -P -m secretary doctor --instance INSTANCE --json`, whose
+`run_doctor_json`/`collect_doctor_inspection` remain the sole diagnostic evaluator. Manual fixture/offline
+runs can pass `--host-fixture DIR`/`--offline`; records retain their mode, and a live web reader refuses
+to treat those modes as a live diagnostic success. No scheduler runs in dispatcher ticks or page requests.
+
+`DATA_DIR/doctor/latest.json` is a latest-attempt document, schema version 1:
+
+```json
+{
+  "schema_version": 1,
+  "installation": {"instance": "/srv/instance/instance.yaml", "data_dir": "/srv/data"},
+  "run_at": "2026-09-29T00:00:00Z",
+  "completed_at": "2026-09-29T00:00:02Z",
+  "mode": "live",
+  "outcome": "result",
+  "exit_code": 1,
+  "reason": null,
+  "result": {"schema_version": 1, "ok": false, "findings": [{"code": "recovery_bypass", "message": "ambient credential configuration", "capability": "checkpoint-git-authentication"}]}
+}
+```
+
+The recording command takes a nonblocking `doctor/record.lock`, first atomically publishes an unfinished
+`collecting` attempt with no prior result, then evaluates in a child process group with a 40-second
+deadline and a 2 MiB output bound. The unit's outer deadline is 50 seconds and kills its control group.
+Timeout kills the collector group, including its probes. Exit 1 with findings is a recorded diagnostic
+result: the recording command succeeds. Exit 2 is `unavailable` and preserves diagnostic findings;
+process/parse failures publish `failed`, without raw stdout/stderr or exception text. No secrets or
+environments are stored. Publication uses a private sibling, file fsync, atomic replace and directory
+fsync. A killed attempt leaves `collecting`, never a freshly dated old success. A write refusal fails
+the unit/journal and never refreshes the prior timestamp; the prior record expires normally.
+
+Freshness is 180 seconds from UTC run start, not from web collection time or file mtime. Future/invalid
+times are malformed. An expired result retains its findings and says stale. Cache reuse can delay a
+new result or expiry by at most another 60 seconds; each response uses one pinned reading throughout.
 
 The dashboard's banner and `Installation` panel read that same cached reading, not a collection of their
 own: one cache, one window, so they and the lamp cannot disagree, and they are up to one minute stale

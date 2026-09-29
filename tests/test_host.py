@@ -1493,6 +1493,7 @@ class DoctorHostCliTests(unittest.TestCase):
             "  components:\n"
             "    curator: {enabled: false}\n"
             "    instance-maintenance: {enabled: false}\n"
+            "    doctor: {enabled: false}\n"
             "    memory: {enabled: false}\n"
             "    retro: {enabled: false}\n"
             "    steward: {enabled: false}\n"

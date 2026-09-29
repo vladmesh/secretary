@@ -56,7 +56,7 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 #: returned result, the outbox of the returns a delegated card owes, and a sprint's e2e run budget
 #: with the bell kind of a spent per-card e2e cap, and the bell kind of an after-merge e2e run that
 #: needs the owner.
-EXPECTED_SCHEMA_REVISION = "0024_e2e_after_merge_kind"
+EXPECTED_SCHEMA_REVISION = "0025_card_waits_for_person"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("secretary.board.migrations"), recorded here

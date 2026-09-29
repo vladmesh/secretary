@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from secretary.board import e2e_budget, e2e_record, owner_events, wait_card
+from secretary.board import po_origin as origin_field
 from secretary.board.audit_contract import card_transition_of, is_protocol_event
 from secretary.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
@@ -34,16 +36,39 @@ from secretary.board.extension_bag import EXTENSION_BAG
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
+)
+from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+)
+from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
-    null_if_empty as _null_if_empty,
+)
+from secretary.board.legacy_codec import (
+    null_if_empty as _null_if_empty,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     positive_int as _positive_int,
-    split_heads as _split_heads,
+)
+from secretary.board.legacy_codec import (
+    split_heads as _split_heads,  # noqa: F401 - released private compatibility alias
+)
+from secretary.board.legacy_codec import (
     text as _text,
 )
-from secretary.board import owner_events
+from secretary.board.models import (
+    Actor,
+    CardState,
+    EntityKind,
+    Event,
+    EventKind,
+    RelatedRefs,
+)
 from secretary.board.outcome_round_context import OutcomeRoundContext
 from secretary.board.owner_handover import (
     CLEAR_MARK,
@@ -55,13 +80,20 @@ from secretary.board.owner_handover import (
     render_handover_comment,
     waiting_owner,
 )
-from secretary.board.models import (
-    Actor,
-    CardState,
-    EntityKind,
-    Event,
-    EventKind,
-    RelatedRefs,
+from secretary.board.production_rights import (
+    ACTIVATION_OPERATION_REQUEST_PREFIX,
+    NO_PRODUCTION,
+    TOUCHES_PRODUCTION,
+)
+from secretary.board.production_rights import (
+    create_refusal as production_create_refusal,
+)
+from secretary.board.production_rights import (
+    touches_production as card_production,
+)
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    validate_rework_prerequisites,
 )
 from secretary.board.roles import (
     BOARD_ROLES,
@@ -95,30 +127,11 @@ from secretary.board.task_routing import (
     default_review,
     impact_bounds_refusal,
 )
-from secretary.board.production_rights import (
-    ACTIVATION_OPERATION_REQUEST_PREFIX,
-    NO_PRODUCTION,
-    TOUCHES_PRODUCTION,
-)
-from secretary.board.production_rights import (
-    create_refusal as production_create_refusal,
-)
-from secretary.board.production_rights import (
-    touches_production as card_production,
-)
-from secretary.board.protocol_artifacts import (
-    ArtifactOwnershipViolation,
-    validate_rework_prerequisites,
-)
 from secretary.board.transitions import BoardProtocolError
-from secretary.board import po_origin as origin_field
-from secretary.board import e2e_budget, e2e_record
-from secretary.board import wait_card
 from secretary.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
 )
-from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from secretary.runtime.head import CODEX_LAUNCH_MODES
 from secretary.runtime.redact import redact
 from secretary.runtime.references import (
@@ -127,6 +140,7 @@ from secretary.runtime.references import (
     next_reference,
     reference_allocation_lock,
 )
+from secretary.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 
 if TYPE_CHECKING:
     from secretary.board.sql_cards import SqlCardClient
@@ -2201,6 +2215,7 @@ class TaskWriter:
         def mutation(task: dict[str, Any]) -> None:
             number = _task_number(task)
             self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
+            owner_events.record_person_wait({**task, "state": "done"}, "", to=self.client)
             self.client.call(
                 "createComment",
                 task_id=number,
@@ -3462,6 +3477,11 @@ class TaskWriter:
         """
         try:
             with self._mutation():
+                def finish_with_wait(entity: Any) -> None:
+                    if finish is not None:
+                        finish(entity)
+                    owner_events.record_person_wait(self.reader.show(reference), request_id, to=self.client)
+
                 return self.board_host.transition(
                     TransitionRequest(
                         EntityKind.CARD,
@@ -3489,7 +3509,7 @@ class TaskWriter:
                             **({PO_SESSION_KEY: po_session} if po_session else {}),
                         },
                     ),
-                    finish=finish,
+                    finish=finish_with_wait,
                 )
         except BoardEventPending:
             raise self._post_effect_refusal("the card transition") from None

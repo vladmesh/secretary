@@ -65,7 +65,7 @@ class EntityTests(unittest.TestCase):
             {kind for kind in KINDS if class_of(kind) == NEEDS_OWNER},
             # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise;
             # `e2e_after_merge` since 0024 (secretary-1807): an after-merge e2e run that needs the owner.
-            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent", "e2e_after_merge"},
+            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent", "e2e_after_merge", "card_waits_for_person"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
                      "po_turn_failed", "provider_red", "delegated_card_settled"):
@@ -95,7 +95,7 @@ class EntityTests(unittest.TestCase):
         # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796); 0024 restates
         # both again with `e2e_after_merge`, a `needs_owner` kind (secretary-1807). The class vocabulary is
         # still the one 0018 created.
-        restated = importlib.import_module("secretary.board.migrations.versions.0024_e2e_after_merge_kind")
+        restated = importlib.import_module("secretary.board.migrations.versions.0025_card_waits_for_person")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
         restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
@@ -106,7 +106,7 @@ class EntityTests(unittest.TestCase):
                 name,
             )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
-        self.assertEqual(restated.down_revision, "0023_sprint_e2e_budget")
+        self.assertEqual(restated.down_revision, "0024_e2e_after_merge_kind")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()
@@ -199,7 +199,7 @@ class EntityTests(unittest.TestCase):
 
         store = owner_events.OwnerEventStore(SimpleNamespace(conninfo=lambda: "dbname=x"))
         with mock.patch("psycopg.connect", return_value=Connection()):
-            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 7 migration.*0018_owner_events") as raised:
+            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 8 migration.*0018_owner_events") as raised:
                 store.unread_count()
             self.assertEqual(raised.exception.code, "schema_owed")
             self.assertEqual(raised.exception.pending[0], "0018_owner_events")

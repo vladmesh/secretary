@@ -149,10 +149,15 @@ from secretary.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import recorded_card_transition, task_audit_for
+from secretary.tasks import TaskError, recorded_card_transition, task_audit_for
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
+from secretary.webproto.errors import (
+    InstallationUnavailable,
+    RuntimeUnavailable,
+    TaskNotFound,
+    ValidationRefused,
+)
 from secretary.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, render, rule
 
 SCHEMA_VERSION = 1
@@ -1224,11 +1229,13 @@ class SprintReadLayer(ProtocolBoundary):
         *,
         data_dir: str | Path | None = None,
         board_client: Any | None = None,
+        owner_events: Any | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._board_client = board_client
+        self.owner_events = owner_events
         self._clock = clock
 
     # -- shared plumbing -------------------------------------------------------------------
@@ -1513,8 +1520,22 @@ class SprintReadLayer(ProtocolBoundary):
             "checks": SECTIONS.checks(sprint),
             "waiting": SECTIONS.waiting(sprint),
             "waiting_on": _waiting_on(sprint),
+            "attention": self._attention(sprint),
             "head_profiles": SECTIONS.head_profiles(sprint),
         }
+
+    def _attention(self, sprint: SourceSet) -> dict[str, Any]:
+        """Only this sprint's open human-wait events, from the bell's same board reading."""
+        if self.owner_events is None or not sprint.answered(SOURCE_SPRINTS) or not sprint.answered(SOURCE_CARDS):
+            return {"state": "unknown", "event_ids": [], "reason": "human wait source is unavailable"}
+        row, _view = sprint.value(SOURCE_SPRINTS)
+        if not row or row.get("status") != "open":
+            return {"state": "none", "event_ids": [], "reason": None}
+        snapshot = self.owner_events.snapshot()
+        if snapshot["state"] != "available":
+            return {"state": "unknown", "event_ids": [], "reason": snapshot["reason"]}
+        identifiers = [wait["event_id"] for wait in snapshot["human_waits"] if wait["sprint_ref"] == row["ref"]]
+        return {"state": "waiting" if identifiers else "none", "event_ids": identifiers, "reason": None}
 
     def _observer(self, sprint: SourceSet) -> dict[str, Any]:
         """What this sprint declared, and whether that observer is actually up.
@@ -1890,9 +1911,12 @@ class SprintReadLayer(ProtocolBoundary):
 
     def _client(self) -> Any:
         """One client for both boards this layer reads: sprints and Product/Issue."""
-        return self._board_client or board_client(
-            self._instance_dir(), serves=(SPRINT, PRODUCT_ISSUE)
-        )
+        try:
+            return self._board_client or board_client(
+                self._instance_dir(), serves=(SPRINT, PRODUCT_ISSUE)
+            )
+        except TaskError as exc:
+            raise RuntimeUnavailable(f"the sprint board is not usable: {exc.message}") from exc
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance
