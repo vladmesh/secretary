@@ -62,6 +62,7 @@ from secretary.host import (
 )
 from secretary.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from secretary.host_commands import add_reconcile_subcommands
+from secretary.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.installation import add_install_commands
 from secretary.knowledge_write import (
@@ -102,7 +103,7 @@ from secretary.secret_store import store_findings as _secret_store_findings
 from secretary.session import run_shell
 from secretary.sprint_commands import add_sprint_subcommands
 from secretary.state_repo import StateRepoError
-from secretary.status import collect_status
+from secretary.status import collect_status, disk_free_bytes
 from secretary.task_commands import add_task_subcommands
 from secretary.upgrade import add_upgrade_command
 from secretary.web.commands import add_web_serve_subcommands
@@ -567,6 +568,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_secret_store_status(report, findings=inspection.secret_store)
     print_board_schema_status(inspection.board_schema)
 
+    for finding in inspection.findings:
+        if finding["code"] in {"root_disk_low", "root_disk_unavailable"}:
+            print(f"root filesystem: {finding['message']}")
+
     print("host changes: none")
     if inspection.unavailable:
         # A kind could not be inspected, so this is not a clean "all matched".
@@ -765,18 +770,24 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
 def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
     """Collect invariant failures once for the text and JSON doctor renderers."""
     findings: list[dict[str, object]] = []
+    disk_unavailable = False
+    if not args.offline and (not args.dry_run or args.host or args.host_fixture):
+        disk_finding = root_disk_finding(report.data_dir)
+        if disk_finding is not None:
+            findings.append(disk_finding)
+            disk_unavailable = disk_finding["code"] == "root_disk_unavailable"
     restore = _restore_findings(report)
     findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     collected: CollectResult | None = None
     expected = None
     diffs = None
-    unavailable = False
+    unavailable = disk_unavailable
     if inspect_host:
         expected, collected, diffs = collect_host_inventory(report, args)
         for kind, reason in collected.errors.items():
             findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
-        unavailable = bool(collected.errors)
+        unavailable = unavailable or bool(collected.errors)
         for kind, diff in diffs.items():
             if kind in collected.errors:
                 continue
@@ -855,6 +866,19 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         diffs,
         board_schema,
     )
+
+
+def root_disk_finding(data_dir: Path) -> dict[str, object] | None:
+    """The configured data root's filesystem, with unknown distinct from sufficient space."""
+    free = disk_free_bytes(data_dir)
+    if free is None:
+        return {"code": "root_disk_unavailable", "threshold_bytes": ROOT_FREE_MIN_BYTES,
+                "message": "free space probe unavailable"}
+    if free < ROOT_FREE_MIN_BYTES:
+        return {"code": "root_disk_low", "free_bytes": free,
+                "threshold_bytes": ROOT_FREE_MIN_BYTES,
+                "message": f"{free} bytes free, below {ROOT_FREE_MIN_BYTES} byte threshold"}
+    return None
 
 
 def board_schema_inspection(report, args: argparse.Namespace) -> dict[str, object]:
@@ -1890,8 +1914,10 @@ def run_instance_maintenance(args: argparse.Namespace) -> int:
     except state_repo.StateRepoError as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, sort_keys=True))
         return 1
-    print(json.dumps({"status": "ok", **result}, sort_keys=True))
-    return 0
+    cleanup = instance_maintenance.cleanup_docker()
+    failed = bool(cleanup["findings"])
+    print(json.dumps({"status": "failed" if failed else "ok", **result, "cleanup": cleanup}, sort_keys=True))
+    return 1 if failed else 0
 
 
 def run_backup_verify(args: argparse.Namespace) -> int:

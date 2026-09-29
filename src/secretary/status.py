@@ -470,19 +470,23 @@ def _memory_status(data_dir: Path) -> dict[str, Any]:
 
 
 def _host_resources(data_dir: Path) -> dict[str, Any]:
+    return {
+        "disk_free_bytes": disk_free_bytes(data_dir),
+        "memory_available_bytes": _memory_available(),
+        "load_average": _load_average(),
+    }
+
+
+def disk_free_bytes(data_dir: Path) -> int | None:
+    """Free bytes on the configured data root's filesystem, or unknown on probe failure."""
     try:
         probe = data_dir
         while not probe.exists() and probe != probe.parent:
             probe = probe.parent
-        usage = shutil.disk_usage(probe)
-        disk_free = usage.free
-    except OSError:
-        disk_free = None
-    return {
-        "disk_free_bytes": disk_free,
-        "memory_available_bytes": _memory_available(),
-        "load_average": _load_average(),
-    }
+        free = shutil.disk_usage(probe).free
+        return free if type(free) is int and free >= 0 else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def _memory_available() -> int | None:

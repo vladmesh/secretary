@@ -670,6 +670,12 @@ cursor) into the watchdog's `panel` field; `--offline` reports it as `not-probed
 non-zero for a broken or unavailable host. Use `status` for what is running and `doctor` for what
 needs repair.
 
+Doctor measures free bytes on the filesystem containing the configured `data_dir` (or its nearest
+existing ancestor). Below 10 GiB it reports `root_disk_low` with `free_bytes` and
+`threshold_bytes`; a failed or malformed probe reports `root_disk_unavailable` and exits as
+unavailable. The threshold and the seven-day build-cache age are defined once in
+`secretary.infra.host_space_policy`. Offline doctor skips the host probe; dry-run remains read-only.
+
 The `recovery` object is shared with doctor:
 
 - `resources` lists every resource in the installed head registry. `source` separates a fresh
