@@ -335,6 +335,16 @@ class ProvisionDefinitionTests(unittest.TestCase):
         with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
             provision._inspect_container("id", volume_name="secretary-board-store_board-db")
 
+    def test_container_inspection_rejects_malformed_labels_fail_closed(self) -> None:
+        payload = {"Config": {"Image": provision.IMAGE, "Labels": ["not-a-map"]},
+                   "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}, "PortBindings": {
+                       "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
+                   "Mounts": [{"Type": "volume", "Name": "secretary-board-store_board-db",
+                               "Destination": "/var/lib/postgresql/data"}]}
+        with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
+            with self.assertRaisesRegex(BoardStoreError, "ownership label"):
+                provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+
     def test_reconcile_passes_only_the_private_file_path_not_credentials_on_argv(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
