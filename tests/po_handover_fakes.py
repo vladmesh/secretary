@@ -13,6 +13,7 @@ from typing import Any
 
 from secretary.board.audit_contract import require_claim
 from secretary.board.owner_handover import HANDED_TO_OWNER, mark_values, render_handover_comment
+from tests.owner_event_fakes import FakeOwnerEvents
 from tests.po_card_fakes import REF, DispatcherFixture, card
 
 REASON = "Pay the relay provider: a card is needed and the owner holds it."
@@ -56,6 +57,7 @@ class OneCardClient:
     def __init__(self, document: dict[str, Any], instance_dir: str) -> None:
         self.document = document
         self.instance_dir = instance_dir
+        self.owner_events = FakeOwnerEvents(lambda ref: document if document.get("ref") == ref else None)
         self.writes: list[tuple[str, dict[str, Any]]] = []
 
     def call(self, method: str, **params: Any) -> Any:

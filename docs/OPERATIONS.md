@@ -737,8 +737,10 @@ What each kind means:
 
 A notice is marked read by its button or by "Mark all notices read"; an event that needs the owner is
 read by a click only when its card does not wait for the owner, and otherwise stays unread until the
-card leaves `waiting_owner`. A producer's write never fails what it reports: a board without `0018` logs
-`owner event <kind> (<key>) not recorded: ...` and goes on.
+card leaves `waiting_owner`. Advisory notice producers log a failed event write and go on.
+Authoritative card waits require the event store: creation, replacement or settlement failure
+refuses the enclosing mutation with a typed backend cause. PostgreSQL rolls back the card,
+metadata, comments and occurrence together; restore the store and retry the same request ID.
 
 The dashboard's sprint attention chip takes scoped open `needs_owner` event IDs from the same
 SQL statement snapshot as the bell count and list. A card subject is joined through its sprint
@@ -749,7 +751,8 @@ unknown sprint state do not mean attention.
 
 `TaskWriter._transition_card` publishes `card_waits_for_person` in the card transition transaction,
 with a dedup key containing the transition request ID. The same path settles this kind on leaving
-the wait. PO handover settles the PO wait and retains the established `card_handed_to_owner` producer;
+the wait. PO handover inserts the established `card_handed_to_owner` event, settles the PO wait,
+and writes the mark/comment in one transaction with its handover occurrence;
 completion clears the handover mark and settles its events in the transition transaction. Other
 open needs_owner events retain their existing click/settlement behavior. Bell count includes genuine
 unread notices as before, but notices cannot cause a sprint chip.

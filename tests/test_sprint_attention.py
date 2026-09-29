@@ -5,8 +5,12 @@ from __future__ import annotations
 import re
 from unittest import mock
 
+import psycopg
+
 from secretary.board.owner_events import OwnerEventStore, OwnerEventsUnavailable, ReadRefused, record
-from secretary.tasks import TaskWriter
+from secretary.board.owner_handover import waiting_owner
+from secretary.board.sql_cards import SqlCardClient
+from secretary.tasks import TaskError, TaskReader, TaskWriter
 from secretary.web.app import WebApp
 from secretary.webproto.owner_events import OwnerEventLayer
 from tests.web_fakes import Recording, system_snapshot
@@ -55,6 +59,190 @@ class SprintAttentionTests(SprintProtocolFixture):
     def move(self, target, request="move-12"):
         return self.writer.move(role="dispatcher", actor="dispatcher", reference="secretary-12",
                                 target=target, reason="fixture decision", request_id=request)
+
+    def handover(self, request="handover-12"):
+        return self.writer.handover(role="po", actor="po", reference="secretary-12", to="owner",
+                                    reason="Choose the fixture option", request_id=request)
+
+    def complete(self, request="complete-12"):
+        return self.writer.complete(role="po", actor="po", reference="secretary-12", kind="decision",
+                                    body="## Decision\nChoose option A.\n\n## How to verify\nRead the fixture.\n",
+                                    request_id=request)
+
+    def committed_state(self):
+        return (self.writer.reader.show("secretary-12"), self.store.events(),
+                self.writer.audit.events("secretary-12"))
+
+    def assert_event_timeout_rolls_back(self, action, request, *, row_lock=False):
+        before = self.committed_state()
+        with psycopg.connect(self.board.credentials.conninfo()) as blocker:
+            if row_lock:
+                blocker.execute("SELECT id FROM owner_events WHERE read_at IS NULL FOR UPDATE").fetchall()
+            else:
+                blocker.execute("LOCK TABLE owner_events IN SHARE MODE")
+            with self.assertRaises(TaskError) as refusal, self.board.transaction():
+                self.board.connection.execute("SET LOCAL statement_timeout = '200ms'")
+                action()
+            self.assertEqual(refusal.exception.code, "backend_error")
+            self.assertIn("required owner wait", str(refusal.exception))
+            self.assertIn("statement timeout", str(refusal.exception))
+            self.assertIn("rolled back", str(refusal.exception))
+            self.assertIn("retry the same request ID", str(refusal.exception))
+            self.assertIsInstance(refusal.exception.__cause__, OwnerEventsUnavailable)
+        self.assertEqual(self.committed_state(), before)
+        self.assertIsNone(self.writer.audit.pending_event(request))
+        self.assertIsNone(self.writer.audit.committed_event(request))
+        self.assertIsNone(self.writer._typed_event(request))
+        self.assertEqual(self.writer.reconcile(), (0, 0))
+
+    def assert_committed_replay(self, action):
+        before = self.committed_state()
+        self.assertTrue(action()["replayed"])
+        self.assertEqual(self.committed_state(), before)
+
+    def test_handover_abort_and_post_commit_interruption_keep_a_durable_wait(self):
+        self.claim("decision")
+        before = self.committed_state()
+        [po] = self.store.events(unread_only=True)
+        # A separate client and event connection see committed data while the writer's
+        # transaction has already inserted the replacement, settled PO and set the mark.
+        observer = SqlCardClient(self.board.credentials, self.instance)
+        self.addCleanup(observer.close)
+        events = OwnerEventLayer(self.instance, store=OwnerEventStore(self.board.credentials))
+        sprints = self.reads(board_client=observer, owner_events=events)
+        app = WebApp(Recording(system_snapshot=system_snapshot()), Recording(), sprints,
+                     Recording(), Recording(pause_state={}), Recording(), Recording(), Recording(),
+                     owner_events=events)
+        call = self.board.call
+        observed = []
+        abort_before_commit = True
+
+        def at_uncommitted_mark(method, **params):
+            if method == "createComment":
+                self.assertIsNotNone(waiting_owner(self.writer.reader.show("secretary-12")))
+                self.assertIsNone(waiting_owner(TaskReader(observer).show("secretary-12")))
+                [event] = events.owner_event_list(unread_only=True)["events"]
+                self.assertEqual((event["id"], event["kind"]), (po.id, "card_waits_for_person"))
+                page = app.handle("GET", "/").body.decode()
+                self.assertIn("attention required", page)
+                self.assertIn('<span class="bell-count">1</span>', page)
+                observed.append(event["id"])
+                if abort_before_commit:
+                    raise KeyboardInterrupt("stop before the real transaction commits")
+            return call(method, **params)
+
+        with (mock.patch.object(self.board, "call", side_effect=at_uncommitted_mark),
+              self.assertRaises(KeyboardInterrupt)):
+            self.handover("interrupted-handover")
+        self.assertEqual(observed, [po.id])
+        self.assertEqual(self.committed_state(), before)
+        self.assertIsNone(self.writer.audit.pending_event("interrupted-handover"))
+        self.assert_wait(True)
+
+        write = self.writer._write
+        abort_before_commit = False
+
+        def interrupt_after_commit(*args, **kwargs):
+            result = write(*args, **kwargs)
+            # This independent read verifies that _write really committed before interruption.
+            self.assertIsNotNone(waiting_owner(TaskReader(observer).show("secretary-12")))
+            [event] = events.owner_event_list(unread_only=True)["events"]
+            self.assertEqual(event["kind"], "card_handed_to_owner")
+            self.assertEqual(event["dedup_key"], f"card_handed_to_owner:secretary-12:{result['event_id']}")
+            page = app.handle("GET", "/").body.decode()
+            self.assertIn("attention required", page)
+            self.assertIn('<span class="bell-count">1</span>', page)
+            raise KeyboardInterrupt("stop after the real transaction commits")
+
+        with (mock.patch.object(self.board, "call", side_effect=at_uncommitted_mark),
+              mock.patch.object(self.writer, "_write", side_effect=interrupt_after_commit),
+              self.assertRaises(KeyboardInterrupt)):
+            self.handover("interrupted-handover")
+        self.assertEqual(observed, [po.id, po.id])
+        self.assertEqual(self.writer.reconcile(), (0, 0))
+        self.assert_committed_replay(lambda: self.handover("interrupted-handover"))
+        self.assert_wait(True)
+        [owner] = self.store.events(unread_only=True)
+        self.assertEqual(owner.kind, "card_handed_to_owner")
+        self.assertIsNotNone(next(event for event in self.store.events() if event.id == po.id).read_at)
+        with self.assertRaises(ReadRefused):
+            self.store.mark_read(owner.id)
+        self.assertEqual(self.store.mark_all_read(), 0)
+        self.complete()
+        self.assert_committed_replay(self.complete)
+        self.assert_wait(False)
+        self.assertEqual(self.events.unread_count()["count"], 0)
+
+    def test_native_po_wait_insert_timeout_rolls_back_claim_and_retries_once(self):
+        self.board.save_metadata(12, task_type="decision")
+
+        def claim():
+            return self.writer.claim(role="dispatcher", actor="dispatcher", reference="secretary-12",
+                                     worker="fixture", request_id="timeout-claim")
+
+        self.assert_event_timeout_rolls_back(claim, "timeout-claim")
+        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "ready")
+        self.assert_wait(False)
+        self.assertFalse(claim()["replayed"])
+        self.assert_committed_replay(claim)
+        [event] = self.store.events()
+        self.assertEqual(event.dedup_key, "card_waits_for_person:secretary-12:timeout-claim")
+        self.assertEqual(self.sprints.sprint_state("sprint:1")["work"]["waiting_on"][0]["kind"], "po")
+        self.assert_wait(True)
+        self.assertEqual(self.events.unread_count()["count"], 1)
+
+    def test_native_blocked_entry_and_exit_timeouts_roll_back_and_retry_once(self):
+        self.claim()
+        block = lambda: self.move("blocked", "timeout-block")
+        self.assert_event_timeout_rolls_back(block, "timeout-block")
+        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "in_progress")
+        self.assert_wait(False)
+        self.assertFalse(block()["replayed"])
+        self.assert_committed_replay(block)
+        [event] = self.store.events()
+        self.assertEqual(event.dedup_key, "card_waits_for_person:secretary-12:timeout-block")
+        self.assert_wait(True)
+
+        def unblock():
+            return self.writer.move(role="po", actor="po", reference="secretary-12", target="ready",
+                                    reason="decision taken", sprint_override=True,
+                                    sprint_override_reason="fixture decision", request_id="timeout-unblock")
+
+        self.assert_event_timeout_rolls_back(unblock, "timeout-unblock")
+        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "blocked")
+        self.assert_wait(True)
+        self.assertFalse(unblock()["replayed"])
+        self.assert_committed_replay(unblock)
+        self.assert_wait(False)
+        [settled] = self.store.events()
+        self.assertEqual(settled.id, event.id)
+        self.assertIsNotNone(settled.read_at)
+        self.assertEqual(self.events.unread_count()["count"], 0)
+
+    def test_native_handover_replacement_and_completion_settlement_failures_roll_back(self):
+        self.claim("decision")
+        self.assert_event_timeout_rolls_back(self.handover, "handover-12")
+        self.assert_wait(True)
+        # A row lock permits the replacement INSERT, then cancels predecessor settlement.
+        # Both savepoints and the mark/audit still roll back together.
+        self.assert_event_timeout_rolls_back(self.handover, "handover-12", row_lock=True)
+        self.assertIsNone(waiting_owner(self.writer.reader.show("secretary-12")))
+        [po] = self.store.events()
+        self.assertEqual(po.kind, "card_waits_for_person")
+        self.handover()
+        self.assert_committed_replay(self.handover)
+        self.assert_wait(True)
+        self.assert_event_timeout_rolls_back(self.complete, "complete-12")
+        self.assertIsNotNone(waiting_owner(self.writer.reader.show("secretary-12")))
+        [owner] = self.store.events(unread_only=True)
+        self.assertEqual(owner.kind, "card_handed_to_owner")
+        with self.assertRaises(ReadRefused):
+            self.store.mark_read(owner.id)
+        self.assert_wait(True)
+        self.complete()
+        self.assert_committed_replay(self.complete)
+        self.assert_wait(False)
+        self.assertEqual(self.events.unread_count()["count"], 0)
 
     def test_between_cards_empty_waiting_on_and_an_unrelated_notice_are_neutral(self):
         self.board.move(12, "done")

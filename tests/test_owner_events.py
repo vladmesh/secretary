@@ -284,11 +284,12 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.writer._typed_event = lambda request_id: typed.get(request_id)  # type: ignore[method-assign]
 
         def transition(**fields: Any) -> Any:
-            fields["finish"](None)
-            self.card["state"] = fields["target"].value
-            typed[fields["request_id"]] = SimpleNamespace(
-                ref=fields["reference"], reason=fields["reason"], source_state="in_progress"
-            )
+            with self.writer._mutation():
+                fields["finish"](None)
+                self.card["state"] = fields["target"].value
+                typed[fields["request_id"]] = SimpleNamespace(
+                    ref=fields["reference"], reason=fields["reason"], source_state="in_progress"
+                )
             return SimpleNamespace(event=SimpleNamespace(event_id="evt-done"))
 
         self.writer._transition_card = transition  # type: ignore[method-assign]
@@ -329,13 +330,21 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.writer._reset_transition_metadata(copy.deepcopy(self.card), source="in_progress", target="blocked")
         self.assertIsNone(self.events.of_kind("card_handed_to_owner")[0].read_at)
 
-    def test_a_bell_that_cannot_write_does_not_fail_the_handover_or_the_completion(self) -> None:
+    def test_required_handover_and_completion_refuse_an_unavailable_wait_store(self) -> None:
+        from secretary.tasks import TaskError
+
         self.events.missing_table = True
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
-            self.assertEqual(self.hand_over()["action"], "handed_to_owner")
+        with self.assertRaisesRegex(TaskError, "required owner wait.*retry the same request ID"):
+            self.hand_over()
+        self.assertIsNone(waiting_owner(self.card))
+        self.events.missing_table = False
+        self.hand_over()
+        self.events.missing_table = True
+        with self.assertRaisesRegex(TaskError, "required owner wait.*retry the same request ID"):
             self.writer.complete(role="po", actor="po", reference=REF, kind="decision", body=DECISION_BODY,
                                  request_id="complete-1")
-        self.assertEqual(self.card["state"], "done")
+        self.assertEqual(self.card["state"], "in_progress")
+        self.assertIsNotNone(waiting_owner(self.card))
 
 
 # --- the producers ----------------------------------------------------------------------------

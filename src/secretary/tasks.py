@@ -2162,8 +2162,9 @@ class TaskWriter:
         payload as `po_session`, as `complete` records it (secretary-1792); it permits nothing.
 
         One write: the `waiting_owner` mark on the card (`board.owner_handover`) and a PO comment
-        `[handover:owner]` with the reason, in the transaction of one `handed_to_owner` audit record,
-        so the three land together or not at all. The card stays In progress. The request id makes it
+        `[handover:owner]` with the reason, the required unread owner event and predecessor PO-wait
+        settlement, in the transaction of one `handed_to_owner` audit record. They land together
+        or not at all. The card stays In progress. The request id makes it
         idempotent: a repeat answers the recorded handover and writes nothing, and the same id with
         another card or reason is refused. Every refusal (role, recipient, reason, kind, column, a
         mark already there) is decided before anything is written; the card ones are decided on the
@@ -2175,6 +2176,7 @@ class TaskWriter:
         reason = self._redact_for_board(reason).strip()
         if not reason:
             raise TaskError("validation", "a handover needs a reason: what the owner has to decide or do", 2)
+        request_id = request_id or str(uuid.uuid4())
         since = _now()
         identity = {"to": OWNER, "reason_sha256": _digest(reason)}
 
@@ -2214,8 +2216,18 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> None:
             number = _task_number(task)
-            self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
+            occurrence = self.audit.pending_event(request_id)
+            if occurrence is None:
+                raise TaskError("backend_error", "handover has no staged occurrence", 1)
+            owner_events.record_required_wait(
+                owner_events.CARD_HANDED_TO_OWNER,
+                reference,
+                f"{reference} is handed to the owner: {reason}",
+                f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{occurrence['event_id']}",
+                to=self.client,
+            )
             owner_events.record_person_wait({**task, "state": "done"}, "", to=self.client)
+            self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
             self.client.call(
                 "createComment",
                 task_id=number,
@@ -2223,19 +2235,9 @@ class TaskWriter:
                 content=f"[{role.value}]\n{render_handover_comment(reason)}",
             )
 
-        result = self._write(
+        return self._write(
             HANDED_TO_OWNER, role, actor, reference, request_id, payload, mutation, identity=identity
         )
-        # The bell's half of the handover: one `needs_owner` event per handover record, written after
-        # the handover committed, so a store without it (or without 0018) costs the bell, not the card.
-        owner_events.record(
-            owner_events.CARD_HANDED_TO_OWNER,
-            reference,
-            f"{reference} is handed to the owner: {reason}",
-            f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{result.get('event_id') or request_id}",
-            to=self.client,
-        )
-        return result
 
     def cancel(
         self,
@@ -3431,16 +3433,14 @@ class TaskWriter:
         # A card handed to the owner waits for the owner only while it is In progress: whatever
         # moves it on (`task complete` above all) takes the mark off in the same transaction.
         clear_mark = CLEAR_MARK if source == "in_progress" and carries_mark_fields(task) else {}
+        if clear_mark:
+            owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
         if target in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
             )
         elif clear_mark:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=clear_mark)
-        if clear_mark:
-            # The stay-unread rule's one end: the card no longer waits for the owner, so its
-            # `needs_owner` events are read now, in this transaction (a savepoint on PostgreSQL).
-            owner_events.settle(str(task.get("ref") or ""), to=self.client)
         if source == "validate" and target not in {"ready", "done"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
@@ -4575,11 +4575,19 @@ class TaskWriter:
         `recover_*` entry points have nothing to do there (§7.3).
         """
         scope = getattr(self.client, "transaction", None)
-        if scope is None:
-            yield
-            return
-        with scope():
-            yield
+        try:
+            with scope() if scope is not None else contextlib.nullcontext():
+                yield
+        except (owner_events.OwnerEventError, BoardEventPending) as exc:
+            cause = exc.__cause__ if isinstance(exc, BoardEventPending) else exc
+            if not isinstance(cause, owner_events.OwnerEventError):
+                raise
+            outcome = "mutation rolled back" if scope is not None else "mutation refused"
+            raise TaskError(
+                "backend_error",
+                f"{cause}; {outcome}; restore owner-event availability and retry the same request ID",
+                1,
+            ) from cause
 
     def _post_effect_refusal(self, subject: str) -> TaskError:
         """The refusal a mutation inside `_mutation()` owes when it fails after its board effect.

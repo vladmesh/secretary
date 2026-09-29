@@ -12,17 +12,19 @@ the owner should know: a sprint closed or stopped, the budget signal, a dead hea
 failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
 CHECK constraints (`board/schema.py`), from the same lists.
 
-**The writer never fails its caller.** :func:`record` is idempotent under its dedup key (a unique
+**Advisory notices never fail their caller.** :func:`record` is idempotent under its dedup key (a unique
 column: a repeat inserts nothing) and swallows every failure after logging it: a store that does not
 answer, a board that owes migrations (merged code runs before the upgrade applies them; the schema
 gate refuses it as `OwnerEventsSchemaOwed`), a store that is not configured at all. A producer's own
-work never depends on the bell. The one exception is :func:`record_strict`, for a caller whose work
+notice never depends on the bell. :func:`record_strict`, for a caller whose work
 is complete only with its event (a delegated card's returned result, secretary-1792): the same write,
 answered as written, already present or failed instead of swallowed, so that caller repeats it.
+Required card waits use :func:`record_required_wait` and :func:`settle_required_wait` instead:
+failures escape the owner-event savepoint and roll back the enclosing card mutation and occurrence.
 
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark
 (`board.owner_handover`) is never marked read by a click or by "mark all read": :meth:`mark_read`
-refuses it and :meth:`mark_all_read` takes notices only. Its `read_at` is set by :func:`settle` when
+refuses it and :meth:`mark_all_read` takes notices only. Its `read_at` is set by :func:`settle_required_wait` when
 the card's mark clears, which `TaskWriter._reset_transition_metadata` calls in the transition's own
 transaction.
 """
@@ -440,7 +442,7 @@ def _sink(to: Any) -> Any:
 def record(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to: Any) -> bool:
     """Write one owner event, at most once per `dedup_key`; True when this call wrote it.
 
-    The one writer every producer calls. It never raises: an unknown kind is logged as the defect it
+    The advisory writer. It never raises: an unknown kind is logged as the defect it
     is, and a store that refuses or does not answer is logged and skipped. `to` is where to write
     (see :func:`_sink`); None, or an installation with no board store, writes nowhere.
     """
@@ -506,23 +508,49 @@ def settle(subject_ref: str, *, to: Any) -> int:
 
 
 def record_person_wait(card: Mapping[str, Any], occurrence: str, *, to: Any) -> None:
-    """Called by card mutations, never a GET. One event per real wait episode."""
+    """Required within the card mutation, never a GET. One event per real wait episode."""
     reference = str(card.get("ref") or "")
     reason = person_wait(card)
     sink = _sink(to)
     if reason is None:
         if sink is not None:
-            try:
-                sink.settle_kind(reference, CARD_WAITS_FOR_PERSON)
-            except Exception as exc:  # noqa: BLE001 - the producer retains the existing bell failure policy
-                logger.warning("card wait event of %s not settled: %s", reference, type(exc).__name__)
+            settle_required_wait(reference, kind=CARD_WAITS_FOR_PERSON, to=to)
         return
     # This producer supplies sprint attention. Handover and outside-sprint producers
     # retain their own event kinds and settlement rules.
     if not card.get("sprint") or card_holds_mark(card) or card.get("waiting_owner"):
         return
-    record(CARD_WAITS_FOR_PERSON, reference, f"{reference}: {reason}",
-           f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
+    record_required_wait(CARD_WAITS_FOR_PERSON, reference, f"{reference}: {reason}",
+                         f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
+
+
+@contextlib.contextmanager
+def _required_wait_store(subject_ref: str, *, to: Any) -> Iterator[Any]:
+    """Let savepoint failures reach the card transaction with their backend cause intact."""
+    try:
+        sink = _sink(to)
+        if sink is None:
+            raise OwnerEventsUnavailable("no board store configured")
+        yield sink
+    except Exception as exc:
+        raise OwnerEventsUnavailable(f"required owner wait for {subject_ref}: {exc}") from exc
+
+
+def record_required_wait(kind: str, subject_ref: str, text: str, dedup_key: str, *, to: Any) -> None:
+    """Create the card's authoritative unread fact inside its mutation transaction."""
+    with _required_wait_store(subject_ref, to=to) as sink:
+        if kind not in {CARD_HANDED_TO_OWNER, CARD_WAITS_FOR_PERSON} or not dedup_key.strip():
+            raise ValueError("a required card wait needs its established kind and occurrence key")
+        sink.insert(kind, subject_ref, _bounded(text), dedup_key)
+
+
+def settle_required_wait(subject_ref: str, *, to: Any, kind: str | None = None) -> None:
+    """End or replace a human wait atomically with the card effect; never best effort."""
+    with _required_wait_store(subject_ref, to=to) as sink:
+        if kind is None:
+            sink.settle_subject(subject_ref)
+        else:
+            sink.settle_kind(subject_ref, kind)
 
 
 def _bounded(text: str) -> str:
@@ -569,6 +597,8 @@ __all__ = [
     "po_session_subject",
     "record",
     "record_person_wait",
+    "record_required_wait",
     "record_strict",
     "settle",
+    "settle_required_wait",
 ]
