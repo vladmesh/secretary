@@ -334,6 +334,9 @@ class DoctorRecordTests(unittest.TestCase):
                 self.assertIn(code, page)
             if "health.unreadable" not in codes:
                 self.assertNotIn("health.unreadable", page)
+            if document["doctor"]["state"] == "unknown":
+                self.assertIn("unknown / not yet collected", page)
+                self.assertNotIn("nothing needs attention", page)
         return document
 
     def test_actual_producer_transitions_share_cached_dashboard_lamp_and_doctor(self):
@@ -369,18 +372,21 @@ class DoctorRecordTests(unittest.TestCase):
     def test_stuck_collection_is_a_separate_finding_at_the_injected_clock_boundary(self):
         app, doctor = self.web_fixture()
         start = self.web_clock
-        records.publish(self.path, self.envelope(self.baseline(), {"run_at": records.utc(start), "mode": "live"}))
-        for elapsed in (0, records.STUCK_SECONDS, records.STUCK_SECONDS + .01):
-            self.web_clock = start + elapsed
-            doctor._cached = None
-            stuck = elapsed > records.STUCK_SECONDS
-            codes = ["recovery_bypass"] + (["doctor.collection_stuck"] if stuck else [])
-            document = self.assert_web_state(app, doctor, "red" if stuck else "yellow", codes=codes)
-            if stuck:
-                problem = document["problems"][-1]
-                self.assertAlmostEqual(problem["elapsed_seconds"], elapsed)
-                self.assertEqual(problem["threshold_seconds"], records.STUCK_SECONDS)
-                self.assertIn("secretary-doctor.service", problem["message"])
+        for completed in (self.baseline(), None):
+            records.publish(self.path, self.envelope(completed, {"run_at": records.utc(start), "mode": "live"}))
+            for elapsed in (0, records.STUCK_SECONDS, records.STUCK_SECONDS + .01):
+                with self.subTest(completed=completed is not None, elapsed=elapsed):
+                    self.web_clock = start + elapsed
+                    doctor._cached = None
+                    stuck = elapsed > records.STUCK_SECONDS
+                    codes = (["recovery_bypass"] if completed else []) + (["doctor.collection_stuck"] if stuck else [])
+                    colour = "red" if stuck else "yellow" if completed else "unknown"
+                    document = self.assert_web_state(app, doctor, colour, codes=codes)
+                    if stuck:
+                        problem = document["problems"][-1]
+                        self.assertAlmostEqual(problem["elapsed_seconds"], elapsed)
+                        self.assertEqual(problem["threshold_seconds"], records.STUCK_SECONDS)
+                        self.assertIn("secretary-doctor.service", problem["message"])
 
     def test_missing_and_actual_first_collection_are_unknown_without_hiding_status_problems(self):
         app, doctor = self.web_fixture()

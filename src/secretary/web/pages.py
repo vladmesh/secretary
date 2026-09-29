@@ -1357,14 +1357,14 @@ def _health_panel(installation: dict[str, Any]) -> str:
     if recorded:
         parts.append(f'<p class="muted">Recorded doctor: {escape(str(recorded.get("state")))}; run at {escape(str(recorded.get("run_at") or "unknown"))}.</p>')
         parts.append(_doctor_progress(recorded))
+    if recorded.get("state") == "unknown":
+        parts.append('<p class="muted">recorded doctor is unknown / not yet collected.</p>')
     problems = [str(item) for item in (health.get("combined") or status).get("problems") or []]
     if problems:
         combined = health.get("combined") or {}
         parts.append(_doctor_list(combined["findings"]) if combined.get("findings") else
                      '<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>")
-    elif recorded.get("state") == "unknown":
-        parts.append('<p class="muted">recorded doctor is unknown / not yet collected.</p>')
-    else:
+    elif recorded.get("state") != "unknown":
         parts.append('<p class="muted">nothing needs attention.</p>')
     checkpoint = status.get("checkpoint") or {}
     resources = status.get("resources") or {}

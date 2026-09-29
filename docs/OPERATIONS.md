@@ -2224,7 +2224,7 @@ The bar also carries a doctor lamp, at its left, on every page. Its state follow
   `dispatcher.divergences_open`, `host.inventory_unreadable`,
   `memory.index_missing`. A problem whose code nobody has classified is yellow too — never green.
 - **green** — health was read, and it reports no problem at all.
-- **unknown** — recorded doctor is not yet collected and status reports no problems. This initial
+- **unknown**: recorded doctor is not yet collected and status reports no problems. This initial
   state uses a neutral grey lamp. A real status finding still makes it yellow or red.
 
 Each problem carries that stable code beside the sentence a person reads, and the **code**, not the

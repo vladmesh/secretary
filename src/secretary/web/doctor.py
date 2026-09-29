@@ -31,7 +31,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from secretary.infra.doctor_record import STUCK_SECONDS
 from secretary.webproto.errors import ReadError
 from secretary.webproto.reads import lamp_colour, problem_severity
 
@@ -192,11 +191,12 @@ def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
     collecting = recorded.get("collecting") or {}
     if collecting.get("stuck"):
         elapsed = collecting["elapsed_seconds"]
+        threshold = collecting["threshold_seconds"]
         problems.append({
             "code": "doctor.collection_stuck", "source": "doctor",
-            "message": f"doctor collection has run for {elapsed:.2f} seconds (threshold {STUCK_SECONDS} seconds); "
+            "message": f"doctor collection has run for {elapsed:.2f} seconds (threshold {threshold} seconds); "
                        "the producer may have been interrupted; inspect secretary-doctor.service and its journal",
-            "elapsed_seconds": elapsed, "threshold_seconds": STUCK_SECONDS,
+            "elapsed_seconds": elapsed, "threshold_seconds": threshold,
             "severity": problem_severity("doctor.collection_stuck"),
         })
     colour = lamp_colour(problems) if problems or recorded.get("state") != "unknown" else "unknown"
