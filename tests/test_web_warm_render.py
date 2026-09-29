@@ -30,7 +30,9 @@ from unittest import mock
 import yaml
 
 from secretary.board import store
+from secretary.board.sql_cards import SqlCardClient
 from secretary.board.sql_sprints import sprint_key
+from secretary.tasks import TaskReader
 from secretary.web.app import WebApp
 from secretary.web.commands import health_layers
 from secretary.web.provider_usage import ProviderUsageLayer
@@ -38,7 +40,7 @@ from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import hold_store_exclusion
 from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.fakes.tasks import reader_seed
-from tests.sql_backend_fixtures import PostgresBoard, seed_client
+from tests.sql_backend_fixtures import PostgresBoard, seed_client, terminate_session
 from tests.web_fakes import Recording
 
 #: The Definition of Done's ceiling for one warm render.
@@ -95,6 +97,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         )
         self.instance = self._instance()
         config = BOARD.fresh_database()
+        self.config = config
         path = store.store_path(self.instance)
         path.write_text(
             "".join(f"{key}={value}\n" for key, value in config.as_environ().items()), encoding="utf-8"
@@ -210,6 +213,48 @@ class WarmDashboardRenderTests(unittest.TestCase):
             self.assertIn("cards on the board", page)
         # Neither request touched the exclusion `web-serve` established before serving.
         self.assertEqual((self.instance / ".gitignore").read_text(encoding="utf-8"), gitignore)
+
+    def test_the_same_web_app_reads_cards_after_its_board_session_is_terminated(self) -> None:
+        app = self.app()
+        other_reader = SqlCardClient(self.config.for_role("read"), self.instance)
+        self.addCleanup(other_reader.close)
+        self.assertEqual(
+            TaskReader(other_reader).show("secretary-468")["title"], "Readonly task protocol"
+        )
+        other_pid = other_reader.connection.info.backend_pid
+
+        def current_cards() -> list[dict[str, Any]]:
+            response = app.handle("GET", "/api/system")
+            self.assertEqual(response.status, 200)
+            document = json.loads(response.body)
+            self.assertEqual(document["tasks"]["source"]["state"], "available")
+            return document["tasks"]["items"]
+
+        before = current_cards()
+        self.assertIn(
+            ("secretary-468", "Readonly task protocol"),
+            [(card["ref"], card["title"]) for card in before],
+        )
+        client = app.reads._client()
+        self.addCleanup(client.close)
+        first_pid = client.connection.info.backend_pid
+        terminate_session(client)
+
+        after = current_cards()
+        self.assertEqual(after, before)
+        self.assertNotEqual(client.connection.info.backend_pid, first_pid)
+        response = app.handle("GET", "/api/tasks/secretary-468")
+        self.assertEqual(response.status, 200)
+        card = json.loads(response.body)["card"]
+        self.assertEqual(card["source"]["state"], "available")
+        self.assertEqual(
+            (card["value"]["ref"], card["value"]["title"]),
+            ("secretary-468", "Readonly task protocol"),
+        )
+        self.assertEqual(
+            TaskReader(other_reader).show("secretary-468")["title"], "Readonly task protocol"
+        )
+        self.assertEqual(other_reader.connection.info.backend_pid, other_pid)
 
 
 if __name__ == "__main__":
