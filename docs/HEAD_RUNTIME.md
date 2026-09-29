@@ -16,8 +16,8 @@ resolves native Docker before adding this PATH prefix and calls that absolute ex
 Missing or unexecutable guard, product interpreter or backend refuses the launch or command.
 PO and dispatcher Docker paths retain their existing behavior.
 
-`docker rm`, `stop` and `kill`, including their `docker container` aliases, require every explicit
-target to have `secretary.test-board=<positive decimal owner PID>` and no
+`docker rm`, `stop` and `kill`, including `docker container remove` and their other `docker container`
+aliases, require every explicit target to have `secretary.test-board=<positive decimal owner PID>` and no
 `secretary.production-board` marker. PID values use ASCII digits without a sign, whitespace or
 leading zero. The production value reserved for the later lifecycle is
 `secretary.production-board=true`; the presence of that key protects a container even if its value
@@ -31,7 +31,9 @@ context. The guard pins that host for native container inspection and execution,
 whole allowed batch before making any destructive call, and replaces target names and ID prefixes
 with inspected full container IDs. Reusing a name cannot redirect cleanup. Any unsafe or unresolved
 target refuses the whole invocation. Force/volumes, stop timeouts and stop/kill signals are supported;
-unknown flags, combined short flags and ambiguous syntax are refused. Named contexts with stored
+unknown flags, combined short flags and ambiguous syntax are refused. Link removal (`--link`, `-l`
+and attached/equals forms) is refused. A global short log level must precede the removal command;
+the unambiguous `--log-level` option is also supported. Named contexts with stored
 TLS material or TLS verification overrides are conservatively refused for destructive operations;
 use explicit `--host` and TLS CLI settings for that scope. Read-only calls retain native arguments,
 output and status. Allowed destructive calls retain native output, status and signal handling.

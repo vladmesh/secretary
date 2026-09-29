@@ -20,6 +20,7 @@ PYTHON_ENV = "SECRETARY_DOCKER_PYTHON"
 SOURCE_ENV = "SECRETARY_DOCKER_SOURCE"
 BINDINGS = (BACKEND_ENV, PYTHON_ENV, SOURCE_ENV)
 DESTRUCTIVE = {"rm", "stop", "kill"}
+CONTAINER_ALIASES = {"remove": "rm"}
 PRUNE_GROUPS = {"container", "system", "volume", "image", "builder", "buildx", "network"}
 GLOBAL_VALUES = {
     "--host",
@@ -102,6 +103,12 @@ def _targets(args: list[str], operation: str, globals_: list[str]) -> tuple[list
             break
         if token.startswith("-"):
             name = token.split("=", 1)[0]
+            # rm's -l means link removal, including attached/equals spellings. Never reinterpret
+            # an unsupported local flag as the global log level and remove the whole container.
+            if operation == "rm" and (
+                name == "--link" or (token.startswith("-l") and not token.startswith("--"))
+            ):
+                raise GuardError(f"link removal is unsupported; {ALTERNATIVE}")
             # Local flags win over globals (rm -v means volumes, not version).
             if name in values | booleans or (token[:2] in values and not token.startswith("--")):
                 option, index = _option(args, index, values, booleans)
@@ -220,8 +227,10 @@ def main(argv: list[str] | None = None) -> int:
                 globals_.extend(nested_globals)
                 if nested and nested[0] == "prune":
                     raise GuardError(f"prune scope is unsupported; {ALTERNATIVE}")
-                if verb == "container" and nested and nested[0] in DESTRUCTIVE:
-                    verb, rest = nested[0], nested[1:]
+                if verb == "container" and nested:
+                    operation = CONTAINER_ALIASES.get(nested[0], nested[0])
+                    if operation in DESTRUCTIVE:
+                        verb, rest = operation, nested[1:]
             if verb == "prune":
                 raise GuardError(f"prune scope is unsupported; {ALTERNATIVE}")
             if verb in DESTRUCTIVE:

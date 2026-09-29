@@ -85,7 +85,7 @@ elif rest[:2] == ["container", "inspect"]:
             case["containers"][target] = case["containers"]["protected"]
             case["current"] = "replaced"
             case_path.write_text(json.dumps(case))
-elif rest[:2] in (["container", "rm"], ["container", "stop"], ["container", "kill"]):
+elif rest[:2] in (["container", "rm"], ["container", "remove"], ["container", "stop"], ["container", "kill"]):
     print("native mutation")
     sys.exit(case.get("mutation_status", 0))
 elif rest and rest[0] == "ps" and "ancestor=postgres:16" in rest:
@@ -154,7 +154,7 @@ class DockerGuardTests(unittest.TestCase):
         return [
             call
             for call in self.calls()
-            if any(arg in {"rm", "stop", "kill", "down", "prune"} for arg in call["args"])
+            if any(arg in {"rm", "remove", "stop", "kill", "down", "prune"} for arg in call["args"])
             and "inspect" not in call["args"]
         ]
 
@@ -237,6 +237,90 @@ class DockerGuardTests(unittest.TestCase):
                     self.assert_refused(self.run_guard(operation, "safe", "protected"))
                     self.assertEqual(len(self.calls()), 3)
 
+    def test_container_remove_alias_refuses_protected_batches_through_both_roles(self) -> None:
+        for role in ("worker", "reviewer"):
+            for labels in (
+                {},
+                {TEST_BOARD_LABEL: "0"},
+                {PRODUCTION_BOARD_LABEL: "true"},
+                {TEST_BOARD_LABEL: "123", PRODUCTION_BOARD_LABEL: "true"},
+            ):
+                for targets in ("protected", "safe protected"):
+                    with self.subTest(role=role, labels=labels, targets=targets):
+                        self.transcript.write_text("")
+                        self.case["containers"]["protected"] = container(PROTECTED_ID, labels)
+                        result = self.run_shell(
+                            "docker --context=remote container remove -f " + targets, role
+                        )
+                        self.assert_refused(result)
+                        calls = self.calls()
+                        self.assertEqual(len(calls), 1 + len(targets.split()))
+                        self.assertEqual(calls[0]["args"], ["--context", "remote", "context", "inspect"])
+                        self.assertEqual([call["args"][-1] for call in calls[1:]], targets.split())
+                        self.assertEqual(
+                            [call["host"] for call in calls], ["unix:///fake/remote.sock"] * len(calls)
+                        )
+
+    def test_container_remove_alias_pins_endpoint_and_substitutes_full_ids(self) -> None:
+        self.case.update({"reuse": True, "mutation_status": 19})
+        for role in ("worker", "reviewer"):
+            with self.subTest(role=role):
+                self.transcript.write_text("")
+                result = self.run_shell(
+                    "docker --context=initial container --log-level=debug remove -f --volumes -- safe other",
+                    role,
+                )
+                self.assertEqual(result.returncode, 19, result.stderr)
+                self.assertEqual(result.stdout, "native mutation\n")
+                calls = self.calls()
+                self.assertEqual(len(calls), 4)
+                self.assertEqual([call["host"] for call in calls], ["unix:///fake/initial.sock"] * 4)
+                self.assertEqual([call["args"][-1] for call in calls[1:3]], ["safe", "other"])
+                self.assertEqual(len(self.destructive_calls()), 1)
+                self.assertEqual(
+                    calls[-1]["args"],
+                    [
+                        "--log-level",
+                        "debug",
+                        "--host",
+                        "unix:///fake/initial.sock",
+                        "container",
+                        "rm",
+                        "-f",
+                        "--volumes",
+                        "--",
+                        SAFE_ID,
+                        OTHER_ID,
+                    ],
+                )
+                # The fake reuses both names after inspection; execution still names their old IDs.
+                changed = json.loads(self.case_file.read_text())
+                self.assertEqual(changed["containers"]["safe"], changed["containers"]["protected"])
+                self.assertEqual(changed["containers"]["other"], changed["containers"]["protected"])
+
+    def test_rm_local_link_spellings_never_become_global_log_levels(self) -> None:
+        for role in ("worker", "reviewer"):
+            for command in ("rm", "container rm", "container remove"):
+                for arguments in (
+                    "-l debug safe",
+                    "-l=debug safe",
+                    "-ldebug safe",
+                    "-l safe",
+                    "-l=true safe",
+                    "-lfalse safe",
+                    "--link safe",
+                    "--link=false safe",
+                    "safe -ldebug",
+                ):
+                    with self.subTest(role=role, command=command, arguments=arguments):
+                        self.transcript.write_text("")
+                        result = self.run_shell("docker " + command + " " + arguments, role)
+                        self.assert_refused(result)
+                        self.assertIn("link removal is unsupported", result.stderr)
+                        self.assertEqual(
+                            self.calls(), [], "reject local link syntax before native inspection"
+                        )
+
     def test_unknown_failed_ambiguous_and_malformed_inspections(self) -> None:
         cases = {
             "unknown": None,
@@ -267,6 +351,11 @@ class DockerGuardTests(unittest.TestCase):
     def test_aliases_options_boundaries_and_global_placements(self) -> None:
         vectors = (
             (["container", "rm", "-f", "--", "safe"], ["-f"]),
+            (["-l", "debug", "rm", "-f", "-v", "--", "safe"], ["-f", "-v"]),
+            (["-ldebug", "container", "remove", "--force=false", "safe"], ["--force=false"]),
+            (["container", "-l=debug", "remove", "--", "safe"], []),
+            (["rm", "safe", "--log-level=debug"], []),
+            (["container", "remove", "--log-level", "debug", "safe"], []),
             (["--debug", "container", "--context=remote", "stop", "-t", "-1", "safe"], ["-t", "-1"]),
             (["kill", "safe", "--signal=HUP", "-Htcp://example:2375"], ["--signal", "HUP"]),
             (["container", "kill", "-sTERM", "safe", "--context", "remote"], ["-s", "TERM"]),
