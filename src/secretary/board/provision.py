@@ -7,11 +7,12 @@ import os
 import stat
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from secretary import _proc
-from secretary._fsutil import write_text_atomic
+from secretary._fsutil import write_private_text_atomic_privileged, write_text_atomic
 from secretary.board import store
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
@@ -173,7 +174,10 @@ def _exists(kind: str, name: str) -> bool:
     )
 
 
-def _write_compose(path: Path, *, dry_run: bool, expected_text: str = COMPOSE_TEXT) -> bool:
+def _write_compose(
+    path: Path, *, dry_run: bool, expected_text: str = COMPOSE_TEXT,
+    privileged_argv: Callable[[list[str]], list[str]] | None = None,
+) -> bool:
     installed = inspect_compose(path, expected_text=expected_text)
     if installed.status == "not-regular":
         raise BoardStoreError("board store compose definition must be a regular file")
@@ -187,9 +191,20 @@ def _write_compose(path: Path, *, dry_run: bool, expected_text: str = COMPOSE_TE
         return False
     try:
         if not dry_run:
-            write_text_atomic(path, expected_text)
-            path.chmod(0o600)
-    except OSError as exc:
+            if privileged_argv is None:
+                write_text_atomic(path, expected_text)
+                path.chmod(0o600)
+            else:
+                # Replacing a user-owned file still requires write access to its root-owned
+                # parent. Preserve its owner; the invoking installation account owns a new file
+                # so it can inspect the definition on the next upgrade.
+                owner = (os.getuid(), os.getgid()) if installed.status == "missing" else (
+                    path.stat().st_uid, path.stat().st_gid
+                )
+                write_private_text_atomic_privileged(
+                    path, expected_text, owner=owner, privileged_argv=privileged_argv
+                )
+    except (OSError, RuntimeError) as exc:
         raise BoardStoreError(f"could not reconcile board store compose definition: {exc}") from None
     return True
 
@@ -260,6 +275,7 @@ def provision(
     compose_path: Path = DEFAULT_COMPOSE_PATH,
     project: str = PROJECT,
     test_owner_pid: int | None = None,
+    privileged_argv: Callable[[list[str]], list[str]] | None = None,
 ) -> ProvisionOutcome | None:
     """Create a fresh store or reconcile a configured one without rotating credentials.
 
@@ -295,7 +311,10 @@ def provision(
                 raise BoardStoreError("ambiguous legacy board store containers")
             _inspect_container(old_container, volume_name=volume_name, host_port=config.port,
                                project=project, legacy=True)
-    if _write_compose(compose_path, dry_run=dry_run, expected_text=expected_text):
+    if _write_compose(
+        compose_path, dry_run=dry_run, expected_text=expected_text,
+        privileged_argv=privileged_argv,
+    ):
         actions.append("upgrade legacy PostgreSQL compose definition" if installed.status == "legacy"
                        else "materialize PostgreSQL compose definition")
         if installed.status == "legacy":

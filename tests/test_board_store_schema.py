@@ -27,6 +27,7 @@ import importlib
 import json
 import os
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -34,12 +35,15 @@ import unittest
 import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest import mock
 
 from secretary import upgrade
 from secretary.board import migrate, provision, schema, schema_gate
 from secretary.board.backend import record_key
 from secretary.board.store import BoardStoreConfig
 from secretary.runtime.container_labels import TEST_BOARD_LABEL
+from secretary.host_apply import SystemdUnitInstaller
 from tests.container_cleanup import cleanup_test_project, remove_test_container
 
 IMAGE = "postgres:16"
@@ -119,6 +123,62 @@ def docker(*arguments: str) -> str:
     if completed.returncode != 0:
         raise RuntimeError(f"docker {' '.join(arguments)} failed: {completed.stderr.strip()}")
     return completed.stdout.strip()
+
+
+class ProductionLayoutUpgradeTests(unittest.TestCase):
+    def test_upgrade_replaces_dev_owned_compose_in_root_owned_installation(self) -> None:
+        """The real upgrade step uses sudo for its atomic write under a root-owned 0755 dir."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installation = root / "installation"
+            installation.mkdir(mode=0o755)
+            compose = installation / "postgres-compose.yml"
+            compose.write_text(provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            original = compose.stat()
+            config = root / "board-store.env"
+            config.write_text("\n".join((
+                "SECRETARY_DB_HOST=127.0.0.1", "SECRETARY_DB_PORT=5432",
+                f"SECRETARY_DB_NAME={DATABASE}", f"SECRETARY_DB_OWNER_USER={OWNER}",
+                f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                f"SECRETARY_DB_APP_USER={schema.APP_ROLE}",
+                f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
+                f"SECRETARY_DB_READ_USER={schema.READ_ROLE}",
+                f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}", "",
+            )), encoding="utf-8")
+            config.chmod(0o600)
+            elevated = [] if os.geteuid() == 0 else ["sudo", "-n"]
+            subprocess.run([*elevated, "chown", "0:0", str(installation)], check=True)
+            try:
+                defaults = dict(provision.provision.__kwdefaults__ or {})
+                defaults["compose_path"] = compose
+                context = upgrade.UpgradeContext(
+                    instance_path=root, product_root=upgrade.running_product_root(),
+                    base_branch="main", dry_run=False, units=SystemdUnitInstaller(),
+                    report=SimpleNamespace(data_dir=root),
+                )
+                with (
+                    mock.patch.object(provision.provision, "__kwdefaults__", defaults),
+                    mock.patch("secretary.board.provision._run", return_value="container-id"),
+                    mock.patch("secretary.board.provision._inspect_container"),
+                    mock.patch("secretary.board.provision._wait_ready"),
+                ):
+                    result = upgrade.step_board_store_provision(context)
+                self.assertEqual(result.status, "changed", result.detail)
+                self.assertIn("production ownership marker", result.detail)
+                updated = compose.stat()
+                self.assertNotEqual(updated.st_ino, original.st_ino)
+                self.assertEqual((updated.st_uid, updated.st_gid), (original.st_uid, original.st_gid))
+                self.assertEqual(stat.S_IMODE(updated.st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(installation.stat().st_mode), 0o755)
+                self.assertEqual((installation.stat().st_uid, installation.stat().st_gid), (0, 0))
+                self.assertEqual(compose.read_text(encoding="utf-8"), provision.COMPOSE_TEXT)
+                self.assertEqual(list(installation.iterdir()), [compose])
+            finally:
+                subprocess.run(
+                    [*elevated, "chown", f"{os.getuid()}:{os.getgid()}", str(installation)],
+                    check=True,
+                )
 
 
 class BoardStoreSchemaTests(unittest.TestCase):
