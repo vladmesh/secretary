@@ -13,6 +13,7 @@ from secretary.host import (
     KINDS,
     FixtureHostSource,
     LiveHostSource,
+    build_doctor_expectations,
     build_expectations,
     build_plan,
     foreign_units,
@@ -210,8 +211,13 @@ def run_reconcile_apply(args) -> int:
         instance_path=report.instance_path.parent,
         data_dir=report.data_dir,
     )
-    expected = build_expectations(report.bindings, report.host)
-    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
+    try:
+        runtime_user, _ = resolve_runtime_owner(report.instance_path.parent)
+    except ValueError as exc:
+        print("secretary reconcile apply: " + str(exc))
+        return 2
+    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource(runtime_user)
     collected = source.collect(expected)
     if collected.errors:
         # Reconciling against a half-read host would read a missing unit as
@@ -226,11 +232,6 @@ def run_reconcile_apply(args) -> int:
     if error:
         print("secretary reconcile apply: " + error)
         return 2
-    try:
-        runtime_user, _ = resolve_runtime_owner(report.instance_path.parent)
-    except ValueError as exc:
-        print("secretary reconcile apply: " + str(exc))
-        return 2
     result = apply_host(
         ApplyInputs(
             instance=report.instance,
@@ -241,7 +242,7 @@ def run_reconcile_apply(args) -> int:
             packaged=packaged,
             runtime_user=runtime_user,
         ),
-        units=SystemdUnitInstaller(),
+        units=SystemdUnitInstaller(runtime_user=runtime_user),
         dry_run=args.dry_run,
     )
     for line in result.render():

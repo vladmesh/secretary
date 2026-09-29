@@ -17,14 +17,21 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from secretary import _proc
+from secretary.infra.systemd import (
+    ACTIVE_STATES,
+    ENABLED_STATES,
+    SystemdObservation,
+    observation_error,
+)
+from secretary.infra.systemd import (
+    CommandResult as _CmdResult,
+)
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime.paths import component_enabled, configured_product_root
 
@@ -450,9 +457,7 @@ def plan_changes(
         renamed = desired_resource and (
             resource.kind != desired_resource.kind or resource.name != desired_resource.name
         )
-        if (desired_resource is None or renamed) and resource.name in actual_names.get(
-            resource.kind, set()
-        ):
+        if (desired_resource is None or renamed) and resource.name in actual_names.get(resource.kind, set()):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
     known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")
@@ -559,6 +564,23 @@ def _normalized_repo_path(repo: str) -> str:
     return str(Path(repo).expanduser().resolve(strict=False))
 
 
+def unit_runtime_expectations(
+    desired: Iterable[PlannedResource], packaged: Iterable[PackagedUnit]
+) -> dict[str, tuple[bool, bool]]:
+    """Required persistent state of the canonical desired units, from their shipped metadata."""
+    packaged_by_name = {unit.name: unit for unit in packaged}
+    runtime = {}
+    for resource in desired:
+        if resource.kind != "unit":
+            continue
+        unit = packaged_by_name.get(resource.name)
+        if unit is not None and unit.oneshot and not unit.installable:
+            runtime[resource.name] = (False, False)
+        else:
+            runtime[resource.name] = (True, True)
+    return runtime
+
+
 def build_doctor_expectations(
     instance: dict[str, Any],
     bindings: Iterable[dict[str, Any]],
@@ -586,31 +608,50 @@ def build_doctor_expectations(
     )
     desired = build_plan(instance, bindings, packaged=packaged)
     units = {resource.name for resource in desired if resource.kind == "unit"}
-    packaged_by_name = {unit.name: unit for unit in packaged}
-    runtime: dict[str, tuple[bool, bool]] = {}
-    for name in units:
-        unit = packaged_by_name.get(name)
-        if name.endswith(".timer"):
-            runtime[name] = (True, True)
-        elif unit is not None and unit.oneshot:
-            # A oneshot unit fired by its timer has no [Install] section (`is-enabled` reports
-            # "static", not "enabled") and is only briefly active around the run, so neither is
-            # required here. It still needs an entry: the live collector only probes
-            # `systemctl is-enabled`/`is-active` for names present in this dict, and without one
-            # a completed run reads to status/doctor as an unprobed unit (`active: null`) instead
-            # of the truthful, if transient, state it actually has.
-            runtime[name] = (False, False)
-        else:
-            runtime[name] = (True, True)
     return Expectations(
         projects=projects,
         units=units,
         unit_prefix=prefix,
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
         foreign_units=foreign_units(host),
-        unit_runtime=runtime,
+        unit_runtime=unit_runtime_expectations(desired, packaged),
         project_error=project_error,
     )
+
+
+@dataclass(frozen=True)
+class UnitRuntimeFinding:
+    name: str
+    field: str
+    actual: str
+
+    def render(self) -> str:
+        if self.field == "runtime":
+            return f"{self.name}: runtime status unavailable"
+        return f"{self.name}: expected {self.field}, got {self.actual}"
+
+
+def assess_unit_runtime(
+    runtime: dict[str, tuple[bool, bool]], collected: CollectResult
+) -> list[UnitRuntimeFinding]:
+    """Assess observable, present units. File absence and kind unavailability belong to inventory."""
+    if "units" in collected.errors:
+        return []
+    findings = []
+    for name, (need_enabled, need_active) in sorted(runtime.items()):
+        if name not in collected.inventory.units:
+            continue
+        state = collected.inventory.unit_states.get(name)
+        if state is None:
+            if need_enabled or need_active:
+                findings.append(UnitRuntimeFinding(name, "runtime", "unavailable"))
+            continue
+        enabled, active = state
+        if need_enabled and enabled != "enabled":
+            findings.append(UnitRuntimeFinding(name, "enabled", enabled))
+        if need_active and active != "active":
+            findings.append(UnitRuntimeFinding(name, "active", active))
+    return findings
 
 
 def _diff(expected: set[str], actual: set[str]) -> KindDiff:
@@ -753,22 +794,6 @@ class FixtureHostSource(HostSource):
             return {}, "fixture unit states are unreadable"
 
 
-@dataclass(frozen=True)
-class _CmdResult:
-    """Outcome of one host probe.
-
-    ``ran`` is False only when the process could not execute at all; ``reason`` is set then. When
-    ``ran`` is True the caller interprets ``returncode``/``stderr`` itself, because a non-zero exit is
-    not always a failure (``systemctl list-unit-files`` exits 1 on no match).
-    """
-
-    ran: bool
-    returncode: int
-    stdout: str
-    stderr: str
-    reason: str = ""
-
-
 class LiveHostSource(HostSource):
     """The real host: the projects directory and systemd, both read-only.
 
@@ -778,6 +803,9 @@ class LiveHostSource(HostSource):
 
     # Cap each host probe so a hung systemctl cannot wedge doctor.
     timeout_seconds = 10
+
+    def __init__(self, runtime_user: str | None = None):
+        self.runtime_user = runtime_user
 
     def collect(self, expected: Expectations) -> CollectResult:
         inventory = HostInventory()
@@ -837,7 +865,7 @@ class LiveHostSource(HostSource):
                 return set(), {}, {}, "host.unit_prefix is required to compute unmanaged-on-host"
             return set(), {}, {}, ""
         result = self._run(["systemctl", "list-unit-files", "--no-legend", f"{prefix}*"])
-        reason = self._systemctl_error(result)
+        reason = observation_error(result, allow_empty_match=True)
         if reason:
             return set(), {}, {}, reason
         names: set[str] = set()
@@ -853,11 +881,12 @@ class LiveHostSource(HostSource):
                 continue
             enabled = self._run(["systemctl", "is-enabled", name])
             active = self._run(["systemctl", "is-active", name])
-            if not enabled.ran or not active.ran:
-                return set(), {}, {}, enabled.reason or active.reason
-            if enabled.stderr.strip() or active.stderr.strip():
-                return set(), {}, {}, "systemctl runtime status unavailable"
-            states[name] = (enabled.stdout.strip() or "disabled", active.stdout.strip() or "inactive")
+            reason = observation_error(enabled, states=ENABLED_STATES) or observation_error(
+                active, states=ACTIVE_STATES
+            )
+            if reason:
+                return set(), {}, {}, reason
+            states[name] = (enabled.stdout.strip(), active.stdout.strip())
             if name.endswith(".timer"):
                 # Best effort: a missing trigger reads as unknown, never as an inventory failure.
                 shown = self._run(["systemctl", "show", "--property=LastTriggerUSec", "--value", name])
@@ -865,27 +894,5 @@ class LiveHostSource(HostSource):
                     triggers[name] = value
         return names, states, triggers, ""
 
-    @staticmethod
-    def _systemctl_error(result: _CmdResult) -> str:
-        """Real failure vs. an empty match.
-
-        ``list-unit-files`` exits 1 with no stderr when a pattern matches no units, which is a
-        legitimately empty result, so only a failed exec or a non-empty stderr counts as an error.
-        """
-        if not result.ran:
-            return result.reason
-        if result.returncode != 0 and result.stderr.strip():
-            return f"systemctl exited {result.returncode}"
-        return ""
-
     def _run(self, cmd: list[str]) -> _CmdResult:
-        tool = cmd[0]
-        try:
-            result = _proc.run(cmd, timeout=self.timeout_seconds)
-        except FileNotFoundError:
-            return _CmdResult(False, -1, "", "", f"{tool} not found")
-        except subprocess.TimeoutExpired:
-            return _CmdResult(False, -1, "", "", f"{tool} timed out after {self.timeout_seconds}s")
-        except OSError:
-            return _CmdResult(False, -1, "", "", f"{tool} could not run")
-        return _CmdResult(True, result.returncode, result.stdout or "", result.stderr or "")
+        return SystemdObservation(self.runtime_user, self.timeout_seconds).run(cmd)

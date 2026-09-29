@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -36,7 +37,12 @@ from secretary.host import (
 from secretary.host import (
     _CmdResult as CmdResult,
 )
-from secretary.host_apply import resolve_packaged, resolve_systemd_layout
+from secretary.host_apply import (
+    HostCommandError,
+    SystemdUnitInstaller,
+    resolve_packaged,
+    resolve_systemd_layout,
+)
 from tests.runtime_account_fixtures import fixture_runtime_account
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -394,6 +400,10 @@ class ReconcilePlanTests(unittest.TestCase):
                 fixture.mkdir()
                 (fixture / "units.txt").write_text(
                     "\n".join(resource.name for resource in desired if resource.kind == "unit") + "\n",
+                    encoding="utf-8",
+                )
+                (fixture / "unit-states.txt").write_text(
+                    "".join(f"{unit.name} enabled active\n" for unit in packaged if unit.installable),
                     encoding="utf-8",
                 )
                 manifest = root / "managed.json"
@@ -1205,7 +1215,9 @@ class NoOrcaUnitInDoctorTests(unittest.TestCase):
                 calls.append(cmd)
                 verb, name = cmd[1], cmd[-1]
                 if verb == "list-unit-files":
-                    return _cmd(stdout="".join(f"{unit} enabled enabled\n" for unit in sorted(expected.units)))
+                    return _cmd(
+                        stdout="".join(f"{unit} enabled enabled\n" for unit in sorted(expected.units))
+                    )
                 if name in NoOrcaUnitInDoctorTests.FOREIGN:
                     stopped = {"is-enabled": ("disabled\n", 1), "is-active": ("inactive\n", 3)}
                     stdout, code = stopped.get(verb, ("", 0))
@@ -1422,6 +1434,41 @@ class LiveSourceErrorTests(unittest.TestCase):
         self.assertTrue(result.ran)
         self.assertEqual(result.returncode, 1)
 
+    def test_execution_failures_and_unrecognized_status_are_unavailable_for_collector_and_installer(self):
+        expected = Expectations(
+            units={"secretary-steward.timer"},
+            unit_prefix="secretary-",
+            unit_runtime={"secretary-steward.timer": (True, True)},
+        )
+        failures = (
+            FileNotFoundError(),
+            PermissionError(),
+            subprocess.TimeoutExpired("systemctl", 10),
+            subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 5, stdout="inactive\n", stderr=""),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure):
+                if isinstance(failure, BaseException):
+                    patch = unittest.mock.patch("secretary.infra.systemd._proc.run", side_effect=failure)
+                else:
+                    listed = subprocess.CompletedProcess(
+                        [], 0, stdout="secretary-steward.timer enabled enabled\n", stderr=""
+                    )
+                    enabled = subprocess.CompletedProcess([], 0, stdout="enabled\n", stderr="")
+                    patch = unittest.mock.patch(
+                        "secretary.infra.systemd._proc.run", side_effect=[listed, enabled, failure, failure]
+                    )
+                with patch:
+                    collected = LiveHostSource("operator").collect(expected)
+                    self.assertIn("system manager/bus unavailable", collected.errors["units"])
+                    self.assertEqual(collected.inventory.units, set())
+                    self.assertEqual(cli._unit_runtime_findings(expected, collected), [])
+                    with self.assertRaisesRegex(HostCommandError, "system manager/bus unavailable"):
+                        SystemdUnitInstaller(sudo=False, runtime_user="operator").is_active(
+                            "secretary-steward.timer"
+                        )
+
 
 class DoctorHostCliTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1558,6 +1605,11 @@ class DoctorHostCliTests(unittest.TestCase):
             fixture.mkdir()
             (fixture / "units.txt").write_text(
                 "secretary-dispatcher-production.service\nsecretary-dispatcher-production.timer\n",
+                encoding="utf-8",
+            )
+            (fixture / "unit-states.txt").write_text(
+                "secretary-dispatcher-production.service static inactive\n"
+                "secretary-dispatcher-production.timer enabled active\n",
                 encoding="utf-8",
             )
 

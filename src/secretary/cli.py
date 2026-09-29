@@ -12,6 +12,7 @@ from pathlib import Path
 
 from secretary import state_repo
 from secretary.backup import create_backups, verify_backup
+from secretary.board.owner_event_commands import add_owner_event_subcommands
 from secretary.check_commands import add_check_subcommands
 from secretary.checkpoint import (
     checkpoint_snapshot,
@@ -33,8 +34,8 @@ from secretary.dispatch.commands import (
     add_head_status_command,
     add_pause_commands,
 )
-from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatch.pause import ProductionPause
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.gate import run_gate
 from secretary.head_health import (
     PROBE_BROKEN,
@@ -46,18 +47,20 @@ from secretary.head_health import (
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads, read_source
 from secretary.host import (
-    CollectResult,
     KINDS,
+    CollectResult,
     FixtureHostSource,
     KindDiff,
     LiveHostSource,
+    assess_unit_runtime,
     build_doctor_expectations,
     build_plan,
+    foreign_units,
     inventory,
     load_managed_manifest,
     plan_changes,
 )
-from secretary.host_apply import resolve_installed_packaged
+from secretary.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from secretary.host_commands import add_reconcile_subcommands
 from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.installation import add_install_commands
@@ -79,7 +82,6 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
-from secretary.board.owner_event_commands import add_owner_event_subcommands
 from secretary.po.commands import add_po_subcommands
 from secretary.po.service import add_po_serve_subcommands
 from secretary.product_issue_commands import add_product_issue_subcommands
@@ -1517,7 +1519,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
     managed, error = load_managed_manifest(data_dir / "host-managed.json")
     if error:
         return ["production dispatcher managed manifest unavailable: " + error]
-    changes = plan_changes(desired, collected_host.inventory, managed, prefix)
+    changes = plan_changes(desired, collected_host.inventory, managed, prefix, foreign_units(report.host))
     findings = []
     for change in changes:
         if not change.logical_id.startswith("systemd:dispatcher:production"):
@@ -1950,8 +1952,9 @@ def print_host_inventory(
 
 
 def collect_host_inventory(report, args: argparse.Namespace):
-    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     assert report.data_dir is not None
+    runtime_user, _ = resolve_runtime_owner(report.instance_path.parent)
+    source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource(runtime_user)
     packaged = resolve_installed_packaged(
         report.instance,
         instance_path=report.instance_path.parent,
@@ -1986,19 +1989,7 @@ def _print_unit_runtime(expected, collected: CollectResult) -> bool:
 
 
 def _unit_runtime_findings(expected, collected: CollectResult) -> list[str]:
-    if "units" in collected.errors:
-        return []
-    findings: list[str] = []
-    for name, (need_enabled, need_active) in sorted(expected.unit_runtime.items()):
-        state = collected.inventory.unit_states.get(name)
-        if state is None:
-            continue
-        enabled, active = state
-        if need_enabled and enabled != "enabled":
-            findings.append(f"{name}: expected enabled, got {enabled}")
-        if need_active and active != "active":
-            findings.append(f"{name}: expected active, got {active}")
-    return findings
+    return [finding.render() for finding in assess_unit_runtime(expected.unit_runtime, collected)]
 
 
 def _join(names: list[str]) -> str:
