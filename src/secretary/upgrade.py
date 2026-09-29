@@ -2330,7 +2330,11 @@ def step_board_store_provision(context: UpgradeContext) -> StepResult:
         outcome = provision_board_store(
             context.instance_path,
             dry_run=context.dry_run,
-            privileged_argv=context.units.argv if isinstance(context.units, SystemdUnitInstaller) else None,
+            privileged_argv=(
+                context.units.argv
+                if callable(getattr(context.units, "argv", None))
+                else None
+            ),
         )
     except (BoardStoreError, OSError, RuntimeError) as exc:
         return StepResult("board-store-provision", "failed", str(exc))
