@@ -32,6 +32,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .head_run_binding import head_run_binding
+
 if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
     from .head.run import HeadRun
 
@@ -764,31 +766,11 @@ def codex_provider_source_descriptor(run: HeadRun) -> dict[str, Any]:
     """
     return {
         "run_id": run.run_id,
-        "head_run_fingerprint": _head_run_fingerprint(run),
+        "head_run_fingerprint": head_run_binding(run.to_json())[1],
         "workspace": str(Path(run.workspace).resolve(strict=False)),
         "role": run.role,
         "task_ref": run.task_ref.to_json(),
     }
-
-
-def _head_run_fingerprint(run: HeadRun) -> str:
-    stable = {
-        "run_id": run.run_id,
-        "workspace": run.workspace,
-        "task_ref": run.task_ref.to_json(),
-        "role": run.role,
-        "spec": {
-            "profile_id": run.spec.profile_id,
-            "adapter": run.spec.adapter,
-            "model": run.spec.model or "",
-            "effort": run.spec.effort,
-            "resource": run.spec.resource or "",
-            "codex_mode": run.spec.codex_mode or "",
-            "fallback": list(run.spec.fallback),
-        },
-    }
-    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(encoded.encode("ascii")).hexdigest()[:32]
 
 
 def _unknown_run(run: HeadRun, reason: str) -> HeadRun:
