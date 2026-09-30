@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import signal
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,7 @@ from secretary.runtime.head.local_pty.client import spawn_head
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
+from secretary.runtime.head.command import with_pid_heartbeat
 from secretary.runtime.head.memory import (
     DEFAULT_MEMORY_LIMIT_MIB,
     ScopeEvidence,
@@ -30,6 +33,17 @@ from secretary.webproto.run_state import _exit_status
 
 
 class HeadMemoryTests(unittest.TestCase):
+    def test_scoped_heartbeat_writes_identity_in_head_process_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            pid_file = Path(temp) / "head.pid"
+            wrapped = with_pid_heartbeat(
+                "/bin/true", str(pid_file), identity={"run_id": "scoped"}, in_process=True,
+            )
+            self.assertTrue(wrapped.startswith("exec python3 -P -c "))
+            process = subprocess.Popen(["/bin/sh", "-c", wrapped])
+            self.assertEqual(process.wait(timeout=5), 0)
+            self.assertEqual(json.loads(pid_file.read_text())["pid"], process.pid)
+
     def test_default_and_profile_limits_materialize_as_own_scope_property(self) -> None:
         for role in ("observer", "worker", "review", "po"):
             with self.subTest(role=role):

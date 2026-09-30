@@ -333,7 +333,10 @@ class Supervisor:
 
     def _head_argv(self) -> list[str]:
         identity = {"run_id": self.run_id, "role": self.role, "task": self.task}
-        wrapped = with_pid_heartbeat(self.command, str(self.pid_file), identity=identity)
+        wrapped = with_pid_heartbeat(
+            self.command, str(self.pid_file), identity=identity,
+            in_process=self._memory_lifecycle is not None,
+        )
         return ["/bin/sh", "-c", wrapped]
 
     def start_head(self) -> int:
