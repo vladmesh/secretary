@@ -301,9 +301,7 @@ if record.get('leaf') != before:
     publish(record)""".replace("__WRITER_ARGS__", writer_args)
     encoded_identity = json.dumps(dict(identity or {}), sort_keys=True, separators=(",", ":"))
     if in_process:
-        # The scoped head is the only unprotected task in its cgroup. A separate
-        # heartbeat writer would briefly make pids.peak indistinguishable from a
-        # surviving child, so this process publishes the record and then execs.
+        # Publish identity in the head process so the recorded PID survives exec.
         writer += "\nos.execvpe('/bin/sh', ['/bin/sh', '-c', 'exec env ' + command], os.environ)"
         return (
             f'exec python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} "$$" '

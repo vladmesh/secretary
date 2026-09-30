@@ -27,7 +27,12 @@ The launcher registers the scope through the system manager and drops back to th
 before starting the supervisor. The supervisor still owns the pty, socket, stop sequence and
 `run.exited` journal record. The scope enables group OOM kills while the supervisor alone is
 protected, then the supervisor requires a local `oom_group_kill` event and the head's `SIGKILL`
-before recording `memory_limit`. A child OOM event on its own cannot name the head as the victim.
+at head reap before recording `memory_limit`. This uses the group-kill event captured at the
+head's exit, so later child OOM activity cannot change the head's reason. A child OOM event on
+its own cannot name the head as the victim, and children or threads do not disqualify a group
+kill. The launch writes the scope name to its run directory before starting systemd-run; failed
+starts stop the scope and prove `cgroup.events` reports no members. PO turns keep the same owner
+name beside their turn files, including across service recovery.
 The scope supplies a resource boundary; it does not
 replace the supervisor's process ownership or exit record.
 

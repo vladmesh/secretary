@@ -14,7 +14,7 @@ from unittest import mock
 from secretary.dispatch import review, wait_vitality
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
-from secretary.runtime.head.local_pty.client import spawn_head
+from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
@@ -95,7 +95,7 @@ class HeadMemoryTests(unittest.TestCase):
             with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup),
                   mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.supervisor_oom_protected", return_value=True)):
                 supervisor._prepare_memory_scope()
-                self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0, "oom_group_kill": 0}, 1))
+                self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0, "oom_group_kill": 0}))
                 (cgroup / "memory.max").write_text("2097152\n", encoding="ascii")
                 with self.assertRaisesRegex(SupervisorStartupError, "MemoryMax=1048576"):
                     supervisor._prepare_memory_scope()
@@ -104,7 +104,7 @@ class HeadMemoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(SupervisorStartupError, "MemorySwapMax=0"):
                     supervisor._prepare_memory_scope()
 
-    def test_synthetic_tiny_limit_kill_persists_typed_reason_for_every_role(self) -> None:
+    def test_synthetic_tiny_limit_kill_with_children_or_threads_persists_reason_for_every_role(self) -> None:
         # A 1 MiB scope's synthetic memory.events.local transition and SIGKILL are the
         # supervisor's two independent witnesses. No production cgroup is touched here.
         for role in ("observer", "worker", "review", "po"):
@@ -120,9 +120,11 @@ class HeadMemoryTests(unittest.TestCase):
                 )
                 supervisor._head_pid = 12345
                 supervisor._head_status = signal.SIGKILL
-                supervisor._memory_evidence = ScopeEvidence(Path(temp), {"max": 0, "oom_kill": 0, "oom_group_kill": 0}, 1)
+                supervisor._memory_evidence = ScopeEvidence(Path(temp), {"max": 0, "oom_kill": 0, "oom_group_kill": 0})
                 (Path(temp) / "memory.events.local").write_text("max 1\noom_kill 1\noom_group_kill 1\n", encoding="ascii")
-                (Path(temp) / "pids.peak").write_text("2\n", encoding="ascii")
+                # The peak includes the head's children or threads and has no role in attribution.
+                (Path(temp) / "pids.peak").write_text("8\n", encoding="ascii")
+                supervisor._events_at_head_exit = memory_events(Path(temp))
                 supervisor._journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
                 try:
                     with (
@@ -206,7 +208,8 @@ class HeadMemoryTests(unittest.TestCase):
             )
             supervisor._head_pid = 12345
             supervisor._head_status = signal.SIGKILL
-            supervisor._memory_evidence = ScopeEvidence(cgroup, before, 1)
+            supervisor._memory_evidence = ScopeEvidence(cgroup, before)
+            supervisor._events_at_head_exit = before
             supervisor._journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
             try:
                 with (mock.patch.object(supervisor, "_finish_delivery"),
@@ -217,6 +220,89 @@ class HeadMemoryTests(unittest.TestCase):
             exited = read_events(run_dir / "journal.jsonl").of_kind(RUN_EXITED)[0]
             self.assertEqual(exited["signal"], signal.SIGKILL)
             self.assertNotIn("head_loss_reason", exited)
+
+    def test_child_oom_then_unrelated_head_kill_is_not_attributed(self) -> None:
+        before = {"max": 0, "oom_kill": 0, "oom_group_kill": 0}
+        child_only = {"max": 1, "oom_kill": 1, "oom_group_kill": 0}
+        self.assertIsNone(head_loss_reason(
+            signal_number=signal.SIGKILL, before=before, after=child_only,
+            group_kill_at_head_exit=True,
+        ))
+
+    def test_prestart_timeout_stops_scope_and_proves_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_id = "prestart-timeout"
+            cgroup = root / "system.slice" / scope_unit(run_id)
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+
+            def stop(*_args, **_kwargs):
+                (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            with (
+                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen",
+                           return_value=SimpleNamespace(wait=lambda: 0)),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop) as systemctl,
+            ):
+                with self.assertRaises(LocalPtySpawnError) as failure:
+                    spawn_head(root=root / "runs", run_id=run_id, role="worker", task="card:1",
+                               command="true", memory_limit_mib=1, timeout=0)
+            self.assertEqual(failure.exception.reason, "timeout")
+            self.assertTrue(failure.exception.cleanup_complete)
+            self.assertEqual(systemctl.call_count, 1)
+            self.assertEqual(ScopedHeadLifecycle.from_run_dir(protocol.run_dir_for(root / "runs", run_id)).run_id, run_id)
+
+    def test_systemd_stop_failure_keeps_durable_scope_for_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_id = "stop-failed"
+            cgroup = root / "system.slice" / scope_unit(run_id)
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+            run_dir = protocol.run_dir_for(root / "runs", run_id)
+            with (
+                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen",
+                           return_value=SimpleNamespace(wait=lambda: 0)),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                           return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
+            ):
+                with self.assertRaises(LocalPtySpawnError) as failure:
+                    spawn_head(root=root / "runs", run_id=run_id, role="po", task="turn:1",
+                               command="true", memory_limit_mib=1, timeout=0)
+            self.assertEqual(failure.exception.reason, "cleanup_failed")
+            self.assertFalse(failure.exception.cleanup_complete)
+            owner = ScopedHeadLifecycle.from_run_dir(run_dir)
+            self.assertIsNotNone(owner)
+            with (
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                           side_effect=lambda *_args, **_kwargs: (
+                               (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+                               and SimpleNamespace(returncode=0, stderr=b"")
+                           )),
+            ):
+                owner.stop_and_prove_empty()
+
+    def test_successful_stop_without_empty_membership_is_not_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            owner = ScopedHeadLifecycle("still-populated", 96)
+            cgroup = root / "system.slice" / scope_unit(owner.run_id)
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+            with (
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                           return_value=SimpleNamespace(returncode=0, stderr=b"")),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.time.monotonic",
+                           side_effect=[0, 11]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "still has members"):
+                    owner.stop_and_prove_empty()
 
     def test_scoped_startup_cancellation_waits_for_supervisor_reap(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -290,6 +376,17 @@ class HeadMemoryTests(unittest.TestCase):
             with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope):
                 result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", "systemd-run"])
             self.assertEqual(result, 7)
+
+    def test_scope_launcher_reaps_prestart_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / protocol.STARTUP_ERROR_NAME).write_text("{}", encoding="utf-8")
+            scope = SimpleNamespace(wait=mock.Mock(return_value=0))
+            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen",
+                            return_value=scope):
+                result = scope_launcher.main([temp, str(run_dir / "scope.log"), "1", "systemd-run"])
+            self.assertEqual(result, 0)
+            scope.wait.assert_called_once_with(timeout=5)
 
     def test_immediate_scoped_exit_returns_durable_head_handle(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

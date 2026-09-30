@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -12,12 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from ..memory import (
+    CGROUP_ROOT,
     MemoryScopeError,
     ScopeEvidence,
     head_loss_reason,
     memory_events,
     own_cgroup,
-    peak_tasks,
     scope_argv,
     scope_unit,
     supervisor_oom_protected,
@@ -31,6 +32,37 @@ class ScopedHeadLifecycle:
     run_id: str
     limit_mib: int
     owner_unit: str = ""
+
+    def persist(self, run_dir: Path) -> None:
+        """Leave the scope name on disk before any process can create the unit."""
+        path = run_dir / "scope-owner.json"
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump({"run_id": self.run_id, "unit": scope_unit(self.run_id)}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        descriptor = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def from_run_dir(run_dir: Path) -> ScopedHeadLifecycle | None:
+        try:
+            record = json.loads((run_dir / "scope-owner.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise MemoryScopeError(f"could not read scope owner in {run_dir}: {exc}") from exc
+        try:
+            run_id = record["run_id"]
+            if not isinstance(run_id, str) or record["unit"] != scope_unit(run_id):
+                raise ValueError("invalid scope identity")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MemoryScopeError(f"invalid scope owner in {run_dir}: {exc}") from exc
+        return ScopedHeadLifecycle(run_id, 1)
 
     def launcher_argv(
         self, supervisor: list[str], *, run_dir: Path, log_path: Path, timeout: float,
@@ -62,12 +94,27 @@ class ScopedHeadLifecycle:
             if any(event.get("kind") == RUN_STARTED for event in read_events(run_dir / protocol.JOURNAL_NAME).events):
                 return 0
             if (run_dir / protocol.STARTUP_ERROR_NAME).exists():
+                try:
+                    scope.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    scope.terminate()
+                    try:
+                        scope.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        scope.kill()
+                        scope.wait()
                 return 0
             status = scope.poll()
             if status is not None:
                 return status
             time.sleep(0.05)
-        return 0  # The caller retains its own bounded startup check and log diagnostic.
+        scope.terminate()
+        try:
+            scope.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            scope.kill()
+            scope.wait()
+        return 1
 
     @staticmethod
     def started_or_exited(events: Sequence[dict[str, Any]], since: int) -> tuple[dict[str, Any], bool] | None:
@@ -86,11 +133,11 @@ class ScopedHeadLifecycle:
         return record, exited
 
     def cancel_started(self, *, socket_path: Path, journal_path: Path, started_seq: int) -> None:
-        """Stop a launched head and wait for its supervisor to reap it before launch fails.
+        """Stop a launched head and prove its whole scope empty before launch fails.
 
         The heartbeat can lag run.started. In that interval the caller has no handle, but
-        the supervisor already owns a live head. Its socket is the normal cancellation
-        path; stopping the scope is the fallback if the supervisor cannot answer.
+        the supervisor already owns a live head. Its socket requests a clean stop;
+        systemd stops the whole scope even if the head was reaped or the socket failed.
         """
         from .client import SupervisorClient
         from .journal import RUN_EXITED, read_events
@@ -101,8 +148,6 @@ class ScopedHeadLifecycle:
                 for event in read_events(journal_path).events
             )
 
-        if reaped():
-            return
         requested = False
         try:
             with SupervisorClient.connect(socket_path, timeout=1.0) as client:
@@ -113,9 +158,14 @@ class ScopedHeadLifecycle:
         deadline = time.monotonic() + (10.0 if requested else 0.0)
         while time.monotonic() < deadline:
             if reaped():
-                return
+                break
             time.sleep(0.05)
-        if reaped():
+        self.stop_and_prove_empty()
+
+    def stop_and_prove_empty(self) -> None:
+        """Stop the entire cgroup and keep ownership if empty membership cannot be proved."""
+        cgroup = CGROUP_ROOT / "system.slice" / scope_unit(self.run_id)
+        if not cgroup.exists():
             return
         try:
             stopped = subprocess.run(
@@ -128,6 +178,19 @@ class ScopedHeadLifecycle:
         if stopped.returncode != 0:
             detail = stopped.stderr.decode("utf-8", errors="replace").strip()
             raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                fields = (cgroup / "cgroup.events").read_text(encoding="ascii").splitlines()
+            except FileNotFoundError:
+                return  # systemd removed the cgroup after its final member left.
+            except OSError as exc:
+                raise MemoryScopeError(f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}") from exc
+            if "populated 0" in fields:
+                return  # cgroup.events counts descendants, including separate process groups.
+            if time.monotonic() >= deadline:
+                raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} still has members")
+            time.sleep(0.05)
 
     def verify_self(self) -> ScopeEvidence:
         """Run before `run.started`; a supervisor outside its configured scope refuses launch."""
@@ -151,10 +214,13 @@ class ScopedHeadLifecycle:
                 f"head scope {scope_unit(self.run_id)} did not materialize "
                 f"MemoryMax={expected}, MemorySwapMax=0, memory.oom.group=1 and a protected supervisor"
             )
-        return ScopeEvidence(cgroup, before, peak_tasks(cgroup))
+        return ScopeEvidence(cgroup, before)
 
     @staticmethod
-    def exit_fields(status: int, evidence: ScopeEvidence, *, stopping: bool = False) -> dict[str, Any]:
+    def exit_fields(
+        status: int, evidence: ScopeEvidence, *, stopping: bool = False,
+        events_at_head_exit: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """A group OOM event kills the unprotected head; a stop never claims that event."""
         signal_number = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
         fields: dict[str, Any] = {
@@ -162,8 +228,8 @@ class ScopedHeadLifecycle:
             "exit_code": os.WEXITSTATUS(status) if os.WIFEXITED(status) else None,
         }
         reason = None if stopping else head_loss_reason(
-            signal_number=signal_number, before=evidence.before, after=memory_events(evidence.cgroup),
-            sole_victim=evidence.tasks_before == 1 and peak_tasks(evidence.cgroup) == 2,
+            signal_number=signal_number, before=evidence.before, after=events_at_head_exit,
+            group_kill_at_head_exit=events_at_head_exit is not None,
         )
         if reason is not None:
             fields["head_loss_reason"] = reason

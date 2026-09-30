@@ -153,7 +153,9 @@ class LocalPtySubstrateTests(unittest.TestCase):
         # Touch each page: a zero-filled bytearray may stay lazily backed and never count
         # against the scope's MemoryMax.
         pressure = (
-            "import sys, time; sys.stdin.readline(); "
+            "import subprocess, sys, threading, time; sys.stdin.readline(); "
+            "threading.Thread(target=time.sleep, args=(5,), daemon=True).start(); "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
             "data = bytearray(192 * 1024 * 1024); "
             "data[::4096] = b'x' * (len(data) // 4096); time.sleep(5)"
         )

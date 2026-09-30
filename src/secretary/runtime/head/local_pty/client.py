@@ -173,27 +173,32 @@ def spawn_head(
     launch_env = _supervisor_environment(env)
     lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit) if memory_limit_mib is not None else None
     if lifecycle is not None:
+        lifecycle.persist(run_dir)
         argv = lifecycle.launcher_argv(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],
         )
-    with open(log_path, "ab", buffering=0) as log:
-        intermediate = subprocess.Popen(
-            argv,
-            cwd=str(cwd) if cwd else None,
-            env=launch_env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            start_new_session=True,
-            close_fds=True,
-        )
-    # An unscoped intermediate forks the supervisor; a scoped launcher detaches systemd-run
-    # while its non-daemonizing supervisor stays in the live scope. Reap either intermediary.
-    status = intermediate.wait()
+    try:
+        with open(log_path, "ab", buffering=0) as log:
+            intermediate = subprocess.Popen(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                env=launch_env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+                close_fds=True,
+            )
+        # Reap the launcher before cleanup, so it cannot register a late scope afterwards.
+        status = intermediate.wait()
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = LocalPtySpawnError("scope_failed", f"head scope launcher failed: {exc}")
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already) from exc
     if memory_limit_mib is not None and status != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
-        raise LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
+        error = LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
 
     deadline = time.monotonic() + timeout
     while True:
@@ -248,13 +253,14 @@ def _after_failed_launch(
     if lifecycle is None:
         return error
     observed = lifecycle.started_or_exited(read_events(journal_path).events, since)
-    if observed is None or observed[1]:
-        return error
     try:
-        lifecycle.cancel_started(
-            socket_path=socket_path, journal_path=journal_path,
-            started_seq=int(observed[0].get("seq") or 0),
-        )
+        if observed is not None and not observed[1]:
+            lifecycle.cancel_started(
+                socket_path=socket_path, journal_path=journal_path,
+                started_seq=int(observed[0].get("seq") or 0),
+            )
+        else:
+            lifecycle.stop_and_prove_empty()
     except MemoryScopeError as exc:
         return LocalPtySpawnError(
             "cleanup_failed", f"{error.detail}; {exc}", cleanup_complete=False,

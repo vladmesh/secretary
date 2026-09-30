@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import tempfile
+import os
+import signal
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +16,7 @@ from secretary.po.runner import PoRunner
 from secretary.runtime.head.local_pty.client import HeadHandle, LocalPtySpawnError
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.memory import scope_unit
 from secretary.runtime.head.spec import HeadSpec
 from secretary.runtime.heads import Registry
 
@@ -94,18 +99,33 @@ class PoScopedLaunchTests(unittest.TestCase):
                 run_dir = next((root / "po-heads").iterdir())
                 with JournalWriter(run_dir / "journal.jsonl", run_dir.name) as writer:
                     writer.append(RUN_STARTED, head_pid=123, supervisor_pid=456)
+                cgroup = root / "system.slice" / scope_unit(run_dir.name)
+                cgroup.mkdir(parents=True)
+                (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
                 return SimpleNamespace(wait=lambda: 0)
 
-            def cancel(_self, *, socket_path, journal_path, started_seq):
-                self.assertEqual(socket_path.parent, journal_path.parent)
-                self.assertGreater(started_seq, 0)
+            def stop_scope(*args, **kwargs):
+                run_dir = next((root / "po-heads").iterdir())
+                cgroup = root / "system.slice" / scope_unit(run_dir.name)
+                (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
                 cancelled.append(True)
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            def stop_head(**_kwargs):
+                run_dir = next((root / "po-heads").iterdir())
+                with JournalWriter(run_dir / "journal.jsonl", run_dir.name) as writer:
+                    writer.append(RUN_EXITED, head_pid=123, signal=signal.SIGKILL)
+
+            client = mock.MagicMock()
+            client.__enter__.return_value.stop.side_effect = stop_head
 
             with (
                 mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=start),
                 mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=False),
                 mock.patch("secretary.runtime.head.local_pty.client.SPAWN_TIMEOUT_SECONDS", 0.02),
-                mock.patch.object(ScopedHeadLifecycle, "cancel_started", cancel),
+                mock.patch("secretary.runtime.head.local_pty.client.SupervisorClient.connect", return_value=client),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop_scope),
             ):
                 with self.assertRaisesRegex(RuntimeError, "did not answer"):
                     runner._launch(session, 1, ["/bin/true"], files)
@@ -131,6 +151,113 @@ class PoScopedLaunchTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "scope is still alive"):
                     runner._launch(session, 1, ["/bin/true"], files)
             store.finish_turn.assert_not_called()
+
+    def test_po_failure_stops_detached_descendants_before_settling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = SimpleNamespace(finish_turn=mock.Mock(return_value=True))
+            runner = PoRunner(store, root)
+            files = runner.files("session", 1)
+            files.directory.mkdir(parents=True)
+            owner = ScopedHeadLifecycle("detached-turn", 96)
+            scope_dir = runner._scope_dir("session", 1)
+            scope_dir.mkdir()
+            owner.persist(scope_dir)
+            cgroup = root / "system.slice" / scope_unit(owner.run_id)
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+            children = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                         start_new_session=True) for _ in range(2)]
+            self.addCleanup(lambda: [child.kill() if child.poll() is None else None for child in children])
+            self.addCleanup(lambda: [child.wait(timeout=5) for child in children])
+            self.assertNotEqual(os.getpgid(children[0].pid), os.getpgid(children[1].pid))
+
+            def stop(*_args, **_kwargs):
+                for child in children:
+                    if child.poll() is None:
+                        os.kill(child.pid, signal.SIGKILL)
+                for child in children:
+                    child.wait(timeout=5)
+                (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            def finish(*_args, **_kwargs):
+                self.assertTrue(all(child.poll() is not None for child in children))
+                self.assertEqual((cgroup / "cgroup.events").read_text(), "populated 0\n")
+                return True
+
+            store.finish_turn.side_effect = finish
+            with (
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
+            ):
+                runner._abandon("session", 1, None, "launch failed")
+            store.finish_turn.assert_called_once()
+
+    def test_po_cleanup_failure_leaves_turn_running_for_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = SimpleNamespace(finish_turn=mock.Mock())
+            runner = PoRunner(store, root)
+            files = runner.files("session", 1)
+            files.directory.mkdir(parents=True)
+            owner = ScopedHeadLifecycle("failed-cleanup", 96)
+            scope_dir = runner._scope_dir("session", 1)
+            scope_dir.mkdir()
+            owner.persist(scope_dir)
+            cgroup = root / "system.slice" / scope_unit(owner.run_id)
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+            with (
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                           return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not stop head scope"):
+                    runner._abandon("session", 1, None, "launch failed")
+            store.finish_turn.assert_not_called()
+            self.assertEqual(ScopedHeadLifecycle.from_run_dir(scope_dir).run_id, owner.run_id)
+
+    def test_po_stop_and_recovery_settle_only_after_scope_empty(self) -> None:
+        for action in ("stop", "recovery"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                turn = SimpleNamespace(
+                    session_id="session", seq=1, pid=None, process_identity=None,
+                    stdout_path=str(root / "stdout"), reason=None,
+                )
+                store = SimpleNamespace(
+                    session=lambda *_: SimpleNamespace(cli="claude"),
+                    running_turns=lambda *_: [turn], turn=lambda *_: turn,
+                    finish_turn=mock.Mock(return_value=True),
+                )
+                runner = PoRunner(store, root)
+                scope_dir = runner._scope_dir("session", 1)
+                scope_dir.mkdir(parents=True)
+                owner = ScopedHeadLifecycle(f"{action}-turn", 96)
+                owner.persist(scope_dir)
+                cgroup = root / "system.slice" / scope_unit(owner.run_id)
+                cgroup.mkdir(parents=True)
+                (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+
+                def stop(*_args, **_kwargs):
+                    (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+                    return SimpleNamespace(returncode=0, stderr=b"")
+
+                def finish(*_args, **_kwargs):
+                    self.assertEqual((cgroup / "cgroup.events").read_text(), "populated 0\n")
+                    return True
+
+                store.finish_turn.side_effect = finish
+                with (
+                    mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                    mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
+                ):
+                    if action == "stop":
+                        self.assertIs(runner.stop_turn("session", 1), turn)
+                    else:
+                        self.assertTrue(runner._recover_one(turn, rerun=False))
+                self.assertEqual(store.finish_turn.call_count, 1)
 
 
 if __name__ == "__main__":

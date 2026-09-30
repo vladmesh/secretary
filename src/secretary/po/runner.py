@@ -60,6 +60,7 @@ from secretary.po.store import (
 from secretary.po.workspace import workspace_dir
 from secretary.runtime.provider_models import codex_rollout_path, codex_session_models
 from secretary.runtime.head.local_pty.client import HeadHandle, spawn_head
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, read_events
 from secretary.runtime.head.spec import HeadSpec, load_head_specs
 from secretary.runtime.heads import Registry, load_registry
@@ -356,13 +357,32 @@ class PoRunner:
             f"{shlex.join(argv)} < {shlex.quote(str(files.prompt))} "
             f">> {shlex.quote(str(files.stdout))} 2>> {shlex.quote(str(files.stderr))}"
         )
+        scope_dir = self._scope_dir(session.session_id, seq)
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        previous = ScopedHeadLifecycle.from_run_dir(scope_dir)
+        if previous is not None:
+            previous.stop_and_prove_empty()
+        lifecycle = ScopedHeadLifecycle(uuid.uuid4().hex[:24], spec.memory_limit_mib,
+                                        "secretary-po.service")
+        lifecycle.persist(scope_dir)
         handle = spawn_head(
-            root=self.data_dir / "po-heads", run_id=uuid.uuid4().hex[:24], role="po",
+            root=self.data_dir / "po-heads", run_id=lifecycle.run_id, role="po",
             task=f"po:{spec.profile_id}:{session.session_id}:{seq}", command=command, cwd=session.cwd,
             env=environment, memory_limit_mib=spec.memory_limit_mib,
             owner_unit="secretary-po.service",
         )
         return ScopedPoProcess(handle)
+
+    def _cleanup_turn_scope(self, session_id: str, seq: int) -> bool:
+        """The persisted scope, rather than a head PID, owns all turn descendants."""
+        lifecycle = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
+        if lifecycle is None:
+            return False
+        lifecycle.stop_and_prove_empty()
+        return True
+
+    def _scope_dir(self, session_id: str, seq: int) -> Path:
+        return self.files(session_id, seq).directory / f"turn-{seq:04d}.scope"
 
     # --- sessions ---------------------------------------------------------------------------
 
@@ -658,6 +678,7 @@ class PoRunner:
         A turn it settled `failed` is told to `on_failed` once, here and nowhere else: every failure
         path of the runner (a launch, a waiter, a re-run, a recovery) ends in this call.
         """
+        self._cleanup_turn_scope(session_id, seq)
         extra = {"resolved_model": resolved_model} if resolved_model is not None else {}
         settled = self.store.finish_turn(session_id, seq, state, reason, **extra)
         if settled and state == FAILED and self.on_failed is not None:
@@ -698,11 +719,14 @@ class PoRunner:
         it (or re-runs it once) at the next start; there is nothing left alive for it to kill.
         """
         if process is not None:
-            _kill_group(process.pid)
+            if not self._cleanup_turn_scope(session_id, seq):
+                _kill_group(process.pid)
             try:
                 process.wait(STOP_JOIN_SECONDS)
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, RunnerError):
                 pass
+        else:
+            self._cleanup_turn_scope(session_id, seq)
         try:
             self._finish(session_id, seq, FAILED, reason)
         except Exception as exc:  # noqa: BLE001 - the unsettled row is recover()'s to settle
@@ -730,13 +754,13 @@ class PoRunner:
             if not running or (seq is not None and running[0].seq != seq):
                 return None
             turn = running[0]
-            # Mark first, so the waiter sees a settled turn and does not call the kill a failure.
-            self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
             live = self._live.get((session_id, turn.seq))
-            if live is not None:
+            scoped = self._cleanup_turn_scope(session_id, turn.seq)
+            if not scoped and live is not None:
                 _kill_group(live.process.pid)
-            elif turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity:
+            elif not scoped and turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity:
                 _kill_group(turn.pid)
+            self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
         if live is not None:
             live.thread.join(STOP_JOIN_SECONDS)
         else:
@@ -787,6 +811,7 @@ class PoRunner:
         """Settle or re-run one turn this runner does not own; False when nothing changed. Holds `_lock`."""
         key = (turn.session_id, turn.seq)
         alive = still_running(turn.pid, turn.process_identity)
+        scoped = self._cleanup_turn_scope(turn.session_id, turn.seq)
         if not rerun or turn.reason is not None:
             failed = self._rerun_failures.get(key)
             if failed is not None:
@@ -800,7 +825,7 @@ class PoRunner:
                 state, reason = INTERRUPTED, RECOVERED_REASON
             reason += "; its process was killed" if alive else ""
             settled = self._finish(turn.session_id, turn.seq, state, reason)
-            if alive and settled:
+            if alive and settled and not scoped:
                 _kill_group(int(turn.pid))
             if settled:
                 self._rerun_failures.pop(key, None)
@@ -813,7 +838,7 @@ class PoRunner:
         except PoStoreError:
             raise
         except Exception as exc:  # noqa: BLE001 - not a passing store failure: the row can never re-run
-            if alive:
+            if alive and not scoped:
                 _kill_group(int(turn.pid))
             return self._finish(
                 turn.session_id,
@@ -821,7 +846,7 @@ class PoRunner:
                 FAILED,
                 f"{RERUN_REASON}, but its re-run could not be prepared: {type(exc).__name__}: {exc}",
             )
-        if alive:
+        if alive and not scoped:
             _kill_group(int(turn.pid))
         why = RERUN_REASON + ("; its process was killed first" if alive else "")
         if not self.store.mark_rerun(turn.session_id, turn.seq, why):
@@ -954,6 +979,7 @@ class PoRunner:
                 session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
             )
         else:
+            self._cleanup_turn_scope(session.session_id, seq)
             self.store.complete_turn(session.session_id, seq, answer, resolved_model=resolved)
 
     def codex_home(self) -> Path:

@@ -21,18 +21,6 @@ class MemoryScopeError(RuntimeError):
 class ScopeEvidence:
     cgroup: Path
     before: dict[str, int]
-    # pids.peak counts tasks, including threads. A peak of one before the fork and two
-    # afterwards proves no other task could have been the group OOM victim.
-    tasks_before: int | None = None
-
-
-def peak_tasks(cgroup: Path | None) -> int | None:
-    if cgroup is None:
-        return None
-    try:
-        return int((cgroup / "pids.peak").read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
-        return None
 
 
 def memory_limit_mib(value: object, profile_id: str) -> int:
@@ -102,11 +90,11 @@ def supervisor_oom_protected() -> bool:
 
 def head_loss_reason(
     *, signal_number: int | None, before: dict[str, int] | None, after: dict[str, int] | None,
-    sole_victim: bool = False,
+    group_kill_at_head_exit: bool = False,
 ) -> str | None:
-    """Attribute group OOM only when the head was its only possible victim."""
+    """Attribute OOM only when the group kill was observed at the head's exit."""
     if (
-        signal_number == 9 and sole_victim and before is not None and after is not None
+        signal_number == 9 and group_kill_at_head_exit and before is not None and after is not None
         and after.get("max", 0) > before.get("max", 0)
         and after.get("oom_kill", 0) > before.get("oom_kill", 0)
         and after.get("oom_group_kill", 0) > before.get("oom_group_kill", 0)

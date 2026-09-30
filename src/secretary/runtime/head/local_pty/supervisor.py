@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
-from ..memory import MemoryScopeError, ScopeEvidence
+from ..memory import MemoryScopeError, ScopeEvidence, memory_events
 from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import (
@@ -224,6 +224,7 @@ class Supervisor:
         self._head_status: int | None = None
         self._memory_lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
         self._memory_evidence: ScopeEvidence | None = None
+        self._events_at_head_exit: dict[str, int] | None = None
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -604,6 +605,9 @@ class Supervisor:
             self._head_status = 0
             return
         if pid == self._head_pid:
+            if self._memory_evidence is not None:
+                # Snapshot at reap, before descendants can later change the scope counters.
+                self._events_at_head_exit = memory_events(self._memory_evidence.cgroup)
             self._head_status = status
 
     # -- the head's pty --------------------------------------------------------------------
@@ -1200,7 +1204,10 @@ class Supervisor:
             "stopping": self._stopping,
         }
         if self._memory_lifecycle is not None and self._memory_evidence is not None:
-            exited.update(self._memory_lifecycle.exit_fields(status, self._memory_evidence, stopping=self._stopping))
+            exited.update(self._memory_lifecycle.exit_fields(
+                status, self._memory_evidence, stopping=self._stopping,
+                events_at_head_exit=self._events_at_head_exit,
+            ))
         else:
             exited["signal"] = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
             exited["exit_code"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
