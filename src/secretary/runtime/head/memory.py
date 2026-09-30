@@ -30,7 +30,8 @@ def scope_argv(run_id: str, limit_mib: int, command: list[str], *, pythonpath: s
     return [
         "sudo", "-n", "-E", "systemd-run", "--system", "--scope", "--quiet",
         "--unit", scope_unit(run_id),
-        f"--property=MemoryMax={limit_mib * 1024 * 1024}", "--",
+        f"--property=MemoryMax={limit_mib * 1024 * 1024}",
+        "--property=MemorySwapMax=0", "--",
         "setpriv", f"--reuid={os.getuid()}", f"--regid={os.getgid()}", group_option,
         *(["env", f"PYTHONPATH={pythonpath}"] if pythonpath else []),
         *command,

@@ -152,12 +152,25 @@ class LocalPtySubstrateTests(unittest.TestCase):
     def test_tiny_scope_records_a_real_memory_limit_kill(self) -> None:
         # Touch each page: a zero-filled bytearray may stay lazily backed and never count
         # against the scope's MemoryMax.
-        pressure = "data = bytearray(192 * 1024 * 1024); data[::4096] = b'x' * (len(data) // 4096); time.sleep(5)"
+        pressure = (
+            "import sys, time; sys.stdin.readline(); "
+            "data = bytearray(192 * 1024 * 1024); "
+            "data[::4096] = b'x' * (len(data) // 4096); time.sleep(5)"
+        )
         command = (
             f"{shlex.quote(sys.executable)} -u -c "
-            + shlex.quote(f"import time; {pressure}")
+            + shlex.quote(pressure)
         )
         handle = self._start(run_id="tiny-memory-limit", command=command, memory_limit_mib=96)
+        unified = next(
+            line[3:] for line in Path(f"/proc/{handle.head_pid}/cgroup").read_text().splitlines()
+            if line.startswith("0::")
+        )
+        cgroup = Path("/sys/fs/cgroup") / unified.lstrip("/")
+        self.assertEqual(cgroup.name, scope_unit(handle.run_id))
+        self.assertEqual((cgroup / "memory.max").read_text().strip(), str(96 * 1024 * 1024))
+        self.assertEqual((cgroup / "memory.swap.max").read_text().strip(), "0")
+        self.assertTrue(self._client(handle).send_input("go\n")["ok"])
         self._await(
             lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=20.0,
             message="the over-limit head did not exit",

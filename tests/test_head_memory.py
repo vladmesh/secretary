@@ -41,6 +41,7 @@ class HeadMemoryTests(unittest.TestCase):
                 argv = scope_argv(run_id, explicit.memory_limit_mib, ["/bin/true"])
                 self.assertEqual(argv[:6], ["sudo", "-n", "-E", "systemd-run", "--system", "--scope"])
                 self.assertIn(f"--property=MemoryMax={12288 * 1024 * 1024}", argv)
+                self.assertIn("--property=MemorySwapMax=0", argv)
                 self.assertIn(scope_unit(run_id), argv)
                 self.assertNotEqual(scope_unit(run_id), scope_unit(f"{role}-other"))
 
@@ -55,6 +56,7 @@ class HeadMemoryTests(unittest.TestCase):
             cgroup = Path(temp) / scope_unit(run_id)
             cgroup.mkdir()
             (cgroup / "memory.max").write_text("1048576\n", encoding="ascii")
+            (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
             (cgroup / "memory.events.local").write_text("max 0\noom_kill 0\n", encoding="ascii")
             supervisor = Supervisor(run_dir=Path(temp), run_id=run_id, role="worker",
                                     task="card:1", command="true", memory_limit_mib=1)
@@ -64,6 +66,10 @@ class HeadMemoryTests(unittest.TestCase):
                 (cgroup / "memory.max").write_text("2097152\n", encoding="ascii")
                 with self.assertRaisesRegex(SupervisorStartupError, "MemoryMax=1048576"):
                     supervisor._prepare_memory_scope()
+                (cgroup / "memory.max").write_text("1048576\n", encoding="ascii")
+                (cgroup / "memory.swap.max").write_text("max\n", encoding="ascii")
+                with self.assertRaisesRegex(SupervisorStartupError, "MemorySwapMax=0"):
+                    supervisor._prepare_memory_scope()
 
     def test_synthetic_tiny_limit_kill_persists_typed_reason_for_every_role(self) -> None:
         # A 1 MiB scope's synthetic memory.events.local transition and SIGKILL are the
@@ -72,6 +78,7 @@ class HeadMemoryTests(unittest.TestCase):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as temp:
                 run_id = f"tiny-{role}"
                 self.assertIn("--property=MemoryMax=1048576", scope_argv(run_id, 1, ["/bin/true"]))
+                self.assertIn("--property=MemorySwapMax=0", scope_argv(run_id, 1, ["/bin/true"]))
                 run_dir = protocol.run_dir_for(temp, run_id)
                 run_dir.mkdir(parents=True)
                 supervisor = Supervisor(
@@ -132,6 +139,7 @@ class HeadMemoryTests(unittest.TestCase):
             argv = popen.call_args.args[0]
             self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
             self.assertIn("--property=MemoryMax=1048576", argv)
+            self.assertIn("--property=MemorySwapMax=0", argv)
             self.assertEqual(argv[argv.index("--memory-limit-mib") + 1], "1")
             self.assertIn("--reuid=", " ".join(argv))
             self.assertNotIn("--daemonize", argv)

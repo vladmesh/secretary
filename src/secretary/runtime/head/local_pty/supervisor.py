@@ -492,13 +492,19 @@ class Supervisor:
         expected = str(self.memory_limit_mib * 1024 * 1024)
         try:
             actual = (cgroup / "memory.max").read_text(encoding="ascii").strip() if cgroup else ""
+            swap_max = (cgroup / "memory.swap.max").read_text(encoding="ascii").strip() if cgroup else ""
         except OSError:
             actual = ""
+            swap_max = ""
         events = memory_events(cgroup)
-        if cgroup is None or cgroup.name != scope_unit(self.run_id) or actual != expected or events is None:
+        if (
+            cgroup is None or cgroup.name != scope_unit(self.run_id)
+            or actual != expected or swap_max != "0" or events is None
+        ):
             raise SupervisorStartupError(
                 "memory_scope_unavailable",
-                f"head scope {scope_unit(self.run_id)} did not materialize MemoryMax={expected}",
+                f"head scope {scope_unit(self.run_id)} did not materialize "
+                f"MemoryMax={expected} and MemorySwapMax=0",
             )
         self._memory_cgroup = cgroup
         self._memory_events_before = events
