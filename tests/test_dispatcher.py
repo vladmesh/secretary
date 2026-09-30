@@ -12951,18 +12951,30 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
     def test_unrelated_base_commit_refresh_merges_and_release_audits_reconciliation(self) -> None:
         from types import SimpleNamespace
 
-        from secretary.dispatch import release_lifecycle
+        from secretary.board.audit_contract import require_claim
+        from secretary.dispatch import gate_attestation, release_lifecycle
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace, base_writer, _, host, record, task = self._setup(Path(tmp))
             _commit_file(base_writer, "state/checkpoint.txt", "checkpoint\n", "checkpoint")
             git(base_writer, "push", "--quiet", "origin", "main")
-            writer = mock.Mock()
-            runtime = SimpleNamespace(host=host, writer=writer, owner="dispatcher", save_records=mock.Mock())
+            seed = dispatcher_seed()
+            seed.tasks[0]["reference"] = task["ref"]
+            board = card_store(self, seed, instance_dir=Path(tmp) / "instance")
+            writer = TaskWriter(board, data_dir=Path(tmp) / "data")
+            reader = TaskReader(board)
+            self.assertEqual(writer.audit.events(task["ref"]), [])
+            runtime = SimpleNamespace(
+                host=host, writer=writer, reader=reader, audit=writer.audit,
+                owner="dispatcher", save_records=mock.Mock(),
+            )
             with (
                 mock.patch.object(host, "complete_green", return_value=None) as merge,
                 mock.patch.object(host, "teardown"),
                 mock.patch.object(attempt_accounting, "terminal_effect"),
+                mock.patch.object(writer, "comment", wraps=writer.comment) as comment,
+                mock.patch.object(writer.audit, "committed_event", wraps=writer.audit.committed_event) as committed,
+                mock.patch.object(writer.audit, "pending_event", wraps=writer.audit.pending_event) as pending,
             ):
                 outcome = release_lifecycle.release_parked(
                     runtime, task, record, {task["ref"]: record}, {}, "attempt-1", reason="approved"
@@ -12979,10 +12991,51 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
                 "base_sha": base,
                 "reviewed_paths": 1,
             })
-            audit = writer.comment.call_args.kwargs["body"]
+            comment.assert_called_once()
+            audit = comment.call_args.kwargs["body"]
             self.assertIn("release audit", audit)
             for evidence in (record.review_commit, head, base, "1 reviewed paths", "reviewed paths unchanged"):
                 self.assertIn(evidence, audit)
+            receipt = record.gate_attestation.receipt
+            assert receipt is not None
+            context = gate_attestation.delivery_context(
+                record, ref=task["ref"], owner=runtime.owner, attempt_id="attempt-1",
+                stage="release", e2e_reconciliation=None,
+            )
+            legacy_request = gate_attestation.legacy_request(receipt, context)
+            committed.assert_any_call(legacy_request)
+            pending.assert_any_call(legacy_request)
+            self.assertIsNone(writer.audit.committed_event(legacy_request))
+            self.assertIsNone(writer.audit.pending_event(legacy_request))
+            identity = gate_attestation.semantic_identity(receipt, context)
+            request_id = gate_attestation.effect_request(context, identity)
+            self.assertEqual(comment.call_args.kwargs["request_id"], request_id)
+            effect = record.gate_attestation_effects[identity]
+            self.assertEqual(effect["context"]["review_reconciliation"], record.review_reconciliation)
+            self.assertEqual(effect["body"], audit)
+            events = writer.audit.events(task["ref"])
+            self.assertEqual(len(events), 1)
+            event = events[0]
+            self.assertEqual(writer.audit.committed_event(request_id), event)
+            self.assertIsNone(writer.audit.pending_event(request_id))
+            self.assertEqual(event["request_id"], request_id)
+            self.assertTrue(event["event_id"])
+            self.assertEqual(event["outcome"], "success")
+            self.assertEqual(event["actor"], {"role": "dispatcher", "id": runtime.owner})
+            require_claim(event, kind="commented", reference=task["ref"], identity={
+                "marker": "dispatcher", "body_sha256": gate_attestation.digest(audit),
+            })
+            comments = reader.show(task["ref"])["comments"]
+            self.assertEqual(len(comments), 1)
+            self.assertEqual(comments[0]["marker"], "dispatcher")
+            self.assertEqual(comments[0]["body"], "[dispatcher]\n" + audit)
+            with self.assertRaisesRegex(TaskError, "request id belongs to another operation or payload"):
+                writer.comment(
+                    role="dispatcher", actor=runtime.owner, reference=task["ref"],
+                    body=audit + "\nchanged", request_id=request_id,
+                )
+            self.assertEqual(writer.audit.events(task["ref"]), events)
+            self.assertEqual(reader.show(task["ref"])["comments"], comments)
 
     def test_base_change_to_reviewed_path_keeps_drift(self) -> None:
         from types import SimpleNamespace
