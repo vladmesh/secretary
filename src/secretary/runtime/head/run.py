@@ -257,7 +257,7 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     whole — so a field is added here only when it really identifies the head. `spec.runtime` does
     not; `HeadRun.to_json` records it beside this block and says why.
     """
-    result = {
+    result: dict[str, Any] = {
         "profile_id": spec.profile_id,
         "adapter": spec.adapter,
         "model": spec.model or "",

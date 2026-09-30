@@ -150,9 +150,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "transient system scope proof runs in CI")
     def test_tiny_scope_records_a_real_memory_limit_kill(self) -> None:
+        # Touch each page: a zero-filled bytearray may stay lazily backed and never count
+        # against the scope's MemoryMax.
+        pressure = "data = bytearray(192 * 1024 * 1024); data[::4096] = b'x' * (len(data) // 4096); time.sleep(5)"
         command = (
             f"{shlex.quote(sys.executable)} -u -c "
-            + shlex.quote("import time; data = bytearray(192 * 1024 * 1024); time.sleep(5)")
+            + shlex.quote(f"import time; {pressure}")
         )
         handle = self._start(run_id="tiny-memory-limit", command=command, memory_limit_mib=96)
         self._await(
